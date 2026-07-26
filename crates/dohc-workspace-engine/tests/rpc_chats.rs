@@ -1239,7 +1239,9 @@ async fn review_round_7_normalizes_persisted_chat_identities() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn second_service_open_does_not_reclaim_a_live_dispatch() {
+async fn second_service_cannot_attach_to_a_live_workspace_actor() {
+    // MUTATION: accept `created_actor == false` in workspace.open -> the
+    // second service receives a handle to the first service's actor.
     let scratch = ScratchDir::new().expect("scratch");
     let first_transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let second_transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -1292,16 +1294,24 @@ async fn second_service_open_does_not_reclaim_a_live_dispatch() {
     .await;
     assert_eq!(running["dispatch"]["state"], json!("running"));
 
-    let second_handle = open_workspace(&second_transport, &scratch, 100, "rpc-chat-round-8").await;
-    let competing = call(
-        &second_transport,
-        &second_handle,
-        &mut id,
-        "chats.dispatch.claimNextPending",
-        json!({ "runId": "competing-round-8", "nowMs": 23 }),
-    )
-    .await;
-    assert!(competing.is_null(), "the original live claim must survive");
+    let refused = second_transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                100,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "rpc-chat-round-8",
+                }),
+            ),
+        )
+        .await;
+    let refused = refused.expect_err("a second service must not attach to the shared actor");
+    assert_eq!(refused.code, ErrorCode::WorkspaceUnavailable);
+    assert_eq!(refused.message, "workspace database is already attached");
+
     let retried = call(
         &first_transport,
         &first_handle,
@@ -1318,14 +1328,6 @@ async fn second_service_open_does_not_reclaim_a_live_dispatch() {
         &mut id,
         "chats.dispatch.complete",
         json!({ "runId": "run-round-8", "exitCode": 0, "nowMs": 25 }),
-    )
-    .await;
-    call(
-        &second_transport,
-        &second_handle,
-        &mut id,
-        "workspace.close",
-        json!({}),
     )
     .await;
     call(

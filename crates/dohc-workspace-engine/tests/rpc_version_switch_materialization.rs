@@ -235,6 +235,84 @@ async fn switching_versions_rewrites_different_secret() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn version_fork_replays_pending_secret_write_before_capture_scan() {
+    // MUTATION: remove the fence-time pending-materialization replay and the
+    // forced scan captures MODE=old back over the committed MODE=new API tip.
+    let (scratch, transport, handle, workspace_id) = fixture("pending-secret-before-fork").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "path": ".env",
+            "text": "MODE=old\n",
+            "origin": "api",
+            "momentId": "pending-before-fork-old",
+        }),
+    )
+    .await;
+    std::fs::write(scratch.path().join(".env"), "MODE=old\n").expect("seed old disk secret");
+    call(&transport, &handle, 4, "capture.flush", json!({})).await;
+
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "path": ".env",
+            "text": "MODE=new\n",
+            "origin": "api",
+            "momentId": "pending-before-fork-new",
+        }),
+    )
+    .await;
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            ["secret-mat_pending-before-fork-new"],
+            |row| row.get(0),
+        )
+        .expect("pending secret job");
+    assert_eq!(status, "pending", "the regression requires stale disk");
+    drop(connection);
+
+    create_feature(&transport, &handle, 6, &workspace_id).await;
+
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("replayed disk secret"),
+        "MODE=new\n"
+    );
+    let materialized = call(
+        &transport,
+        &handle,
+        7,
+        "secrets.materialize",
+        json!({ "versionId": "main", "path": ".env" }),
+    )
+    .await;
+    assert_eq!(
+        materialized["text"], "MODE=new\n",
+        "the stale scan must not roll back the committed API head"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capture_suppresses_a_secret_write_materialized_by_version_switch() {
     let (scratch, transport, handle, workspace_id) = fixture("secret-suppression").await;
     call(

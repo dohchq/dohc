@@ -7,6 +7,8 @@ pub mod capture_sink;
 pub mod cutover_rehearse;
 pub mod shadow_fence;
 
+#[cfg(feature = "harness")]
+pub use capture_driver::CaptureApplyProbe;
 pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 
 use base64::Engine as _;
@@ -266,6 +268,15 @@ struct OpenWorkspace {
     /// loop), spawned only after the shadow binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
+    /// Held by every capture reconcile+apply and by versions.setActive across
+    /// its forced full scan plus switch transaction. This drains an in-flight
+    /// apply and prevents a new one from resolving the destination version
+    /// across the active-version boundary.
+    capture_apply_gate: capture_driver::ApplyGate,
+    /// Serializes Y.Doc admission and versioned mutations for this workspace.
+    /// Version fences retain this gate through their destructive continuation,
+    /// without stalling editor traffic in unrelated open workspaces.
+    session_ops: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct YdocSession {
@@ -291,6 +302,7 @@ struct YdocSessionView {
     regime: Regime,
     lineage_absent: bool,
     first_update_pending: bool,
+    last_settled_sha: Option<String>,
     open_head_sha: Option<String>,
 }
 
@@ -314,15 +326,39 @@ impl OpenWorkspace {
     }
 }
 
+struct WorkspaceBarriers {
+    _capture: tokio::sync::OwnedMutexGuard<()>,
+    _sessions: tokio::sync::OwnedMutexGuard<()>,
+}
+
+enum VersionFenceIntent {
+    Fork {
+        input: CreateNamedVersion,
+    },
+    Switch {
+        target_version_id: String,
+        now_ms: i64,
+    },
+}
+
+enum VersionFenceOutcome {
+    AlreadyActive,
+    CreateReplay(VersionRecord),
+    Committed(VersionRecord),
+}
+
 /// Protocol service composing domain operations on the runtime actor's sole
 /// writable `EngineStore` connection.
+///
+/// INVARIANT: exactly one `EngineService` owns each live physical `engine.db`.
+/// Repeated opens on that service reuse its handle; cross-service or aliased
+/// attachments are rejected so capture/session/version barriers cannot split.
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
     open_lock: tokio::sync::Mutex<()>,
     next_handle: std::sync::atomic::AtomicU64,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
-    session_ops: Arc<tokio::sync::Mutex<()>>,
     leases: LeaseRegistry,
     next_session: std::sync::atomic::AtomicU64,
     /// Unique per service INSTANCE (process id + construction time):
@@ -332,6 +368,8 @@ pub struct EngineService {
     /// lifetime's ledger rows (hash-mismatch refusals or false dedupes).
     session_epoch: String,
     self_writes: SelfWriteSuppression,
+    #[cfg(feature = "harness")]
+    capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
     /// PER-EngineService by design. Production runs exactly ONE EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
@@ -340,6 +378,89 @@ pub struct EngineService {
     /// EngineServices in one process, back this with a shared/global semaphore to
     /// keep the ceiling aggregate.
     blob_egress_budget: BlobEgressBudget,
+}
+
+impl Drop for EngineService {
+    fn drop(&mut self) {
+        let open: Vec<(WorkspaceHandle, OpenWorkspace)> = match self.handles.get_mut() {
+            Ok(handles) => handles.drain().collect(),
+            Err(poisoned) => poisoned.into_inner().drain().collect(),
+        };
+        if open.is_empty() {
+            return;
+        }
+
+        let sessions = Arc::clone(&self.sessions);
+        let self_writes = self.self_writes.clone();
+        let supervisor = self.supervisor;
+        let cleanup = EngineServiceCleanup {
+            open,
+            sessions,
+            self_writes,
+            supervisor,
+        };
+        // The entered runtime may be in its final `block_on`; a task spawned
+        // onto it can be discarded immediately after this Drop returns.
+        // Teardown therefore always owns both its thread and runtime.
+        let cleanup = Arc::new(Mutex::new(Some(cleanup)));
+        let thread_cleanup = Arc::clone(&cleanup);
+        if std::thread::Builder::new()
+            .name("dohc-service-drop".to_owned())
+            .spawn(move || {
+                let Some(cleanup) = lock(&thread_cleanup).take() else {
+                    return;
+                };
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(cleanup.run()),
+                    Err(_) => cleanup.close_synchronously(),
+                }
+            })
+            .is_err()
+            && let Some(cleanup) = lock(&cleanup).take()
+        {
+            cleanup.close_synchronously();
+        }
+    }
+}
+
+struct EngineServiceCleanup {
+    open: Vec<(WorkspaceHandle, OpenWorkspace)>,
+    sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
+    self_writes: SelfWriteSuppression,
+    supervisor: &'static WorkspaceSupervisor,
+}
+
+impl EngineServiceCleanup {
+    async fn run(self) {
+        for (handle, workspace) in self.open {
+            let _capture = Arc::clone(&workspace.capture_apply_gate).lock_owned().await;
+            let _sessions = Arc::clone(&workspace.session_ops).lock_owned().await;
+            lock(&self.sessions).retain(|_, session| session.workspace != handle);
+            workspace.shutdown_capture().await;
+            let db_path = workspace.db_path.clone();
+            let root = workspace.root.clone();
+            let workspace_id = workspace.workspace_id.clone();
+            let supervisor = self.supervisor;
+            let _ = tokio::task::spawn_blocking(move || supervisor.close(&db_path)).await;
+            self.self_writes
+                .scoped(&root)
+                .clear_workspace(&workspace_id);
+        }
+    }
+
+    fn close_synchronously(self) {
+        for (handle, workspace) in self.open {
+            lock(&self.sessions).retain(|_, session| session.workspace != handle);
+            let _ = workspace.begin_capture_shutdown();
+            let _ = self.supervisor.close(&workspace.db_path);
+            self.self_writes
+                .scoped(&workspace.root)
+                .clear_workspace(&workspace.workspace_id);
+        }
+    }
 }
 
 impl Default for EngineService {
@@ -360,13 +481,11 @@ impl EngineService {
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            session_ops: Arc::new(tokio::sync::Mutex::new(())),
             leases: {
-                // ONE process-wide registry: the supervisor lets multiple
-                // EngineServices open the same workspace root, and per-service
-                // registries would hand two transports concurrent live
-                // sessions on one DocKey with no mutual exclusion. DocKeys are
-                // workspace-scoped, so a global set is collision-safe.
+                // ONE process-wide registry remains a defense in depth for
+                // non-service actor users. EngineService itself rejects a
+                // second attachment to an already-live physical engine.db, so
+                // one service owns all session admission for that actor.
                 static GLOBAL_LEASES: std::sync::LazyLock<LeaseRegistry> =
                     std::sync::LazyLock::new(LeaseRegistry::new);
                 GLOBAL_LEASES.clone()
@@ -387,17 +506,24 @@ impl EngineService {
                 format!("{:x}-{boot_ms:x}-{instance:x}", std::process::id())
             },
             self_writes: {
-                // Process-wide for the same reason as the lease registry: a
-                // settle through service A must suppress the capture ingest
-                // observed by service B's driver on the same root, or B
-                // claims the ydoc head as an external capture edit. Keys are
-                // (workspace, path), so a global map is collision-safe.
+                // Process-wide so suppression survives service replacement
+                // during close/reopen and remains collision-safe across
+                // distinct workspaces (keys include the scoped root).
                 static GLOBAL_SELF_WRITES: std::sync::LazyLock<SelfWriteSuppression> =
                     std::sync::LazyLock::new(SelfWriteSuppression::default);
                 GLOBAL_SELF_WRITES.clone()
             },
+            #[cfg(feature = "harness")]
+            capture_apply_probe: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
+    }
+
+    #[cfg(feature = "harness")]
+    pub fn with_capture_apply_probe_for_harness(probe: CaptureApplyProbe) -> Self {
+        let mut service = Self::new();
+        service.capture_apply_probe = Some(probe);
+        service
     }
 
     async fn dispatch(
@@ -961,6 +1087,19 @@ impl EngineService {
             .await
             .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
             .map_err(map_runtime)?;
+        // The supervisor deduplicates by physical engine.db identity, including
+        // root aliases and hard links. EngineService state (capture driver,
+        // session registry, and version barriers) deliberately has one owner:
+        // attaching a second service to the shared actor would split those
+        // barriers and make version switches unsafe. Production constructs one
+        // service, and repeated opens on that service returned above; reject
+        // every remaining cross-service/aliased attachment explicitly.
+        if !actor_open.created_actor {
+            return Err(wire(
+                ErrorCode::WorkspaceUnavailable,
+                "workspace database is already attached",
+            ));
+        }
         let actor = actor_open.actor;
         let binding = actor.bind_shadow_clone(validated.token).await;
         let binding_error = match binding {
@@ -1007,11 +1146,15 @@ impl EngineService {
         // The files layer spawns ONLY here — after the shadow binding
         // succeeded — so an unmarked or mismatched root can never grow a
         // watcher or files actor (the shadow-scope dormancy invariant).
+        let capture_apply_gate = Arc::new(tokio::sync::Mutex::new(()));
         let capture = capture_driver::CaptureDriver::spawn(
             root.clone(),
             actor.clone(),
             params.workspace_id.clone(),
             self.self_writes.scoped(&root),
+            Arc::clone(&capture_apply_gate),
+            #[cfg(feature = "harness")]
+            self.capture_apply_probe.clone(),
         );
         // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
         // disk state) must apply before the handle is handed out, or a
@@ -1023,22 +1166,20 @@ impl EngineService {
         // armed above the startup replay closes the actor on an early drop
         // and is disarmed once the handle is inserted; `CaptureDriver`'s own
         // Drop cancels the files layer.
-        if actor_open.created_actor {
-            // Cancellation-aware like every other actor wait in this flow:
-            // a caller abort stops WAITING promptly (the actor still finishes
-            // the reclaim it already accepted — it is idempotent on the next
-            // open) and the open_guard above closes the actor on early drop.
-            Self::read_under_ctx(
-                &cancellation,
-                "workspace.open (dispatch reclaim)",
-                actor.chat_dispatch_reclaim_running(
-                    params.workspace_id.clone(),
-                    CHAT_DISPATCH_MAX_ATTEMPTS,
-                    now_ms,
-                ),
-            )
-            .await?;
-        }
+        // Cancellation-aware like every other actor wait in this flow: a
+        // caller abort stops WAITING promptly (the actor still finishes the
+        // reclaim it already accepted — it is idempotent on the next open)
+        // and the open_guard above closes the actor on early drop.
+        Self::read_under_ctx(
+            &cancellation,
+            "workspace.open (dispatch reclaim)",
+            actor.chat_dispatch_reclaim_running(
+                params.workspace_id.clone(),
+                CHAT_DISPATCH_MAX_ATTEMPTS,
+                now_ms,
+            ),
+        )
+        .await?;
         capture.wait_for_baseline().await;
         open_guard.disarm();
         lock(&self.handles).insert(
@@ -1049,14 +1190,78 @@ impl EngineService {
                 workspace_id: params.workspace_id,
                 actor,
                 capture: Arc::new(Mutex::new(Some(capture))),
+                capture_apply_gate,
+                session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
         );
         Ok(json!({ "workspace": handle }))
     }
 
+    /// Acquire the capture and session barriers in the one per-workspace order
+    /// used by version fencing and workspace teardown.
+    async fn acquire_workspace_barriers(
+        &self,
+        open: &OpenWorkspace,
+        cancellation: Option<&OperationCancellation>,
+        operation: &str,
+        pause_after_capture: bool,
+    ) -> Result<WorkspaceBarriers, WireError> {
+        #[cfg(feature = "harness")]
+        if pause_after_capture && let Some(probe) = &self.capture_apply_probe {
+            probe.observe_version_fence_wait_if_armed();
+        }
+        let capture = match cancellation {
+            Some(cancellation) => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.token.cancelled() => {
+                        return Err(cancellation.interruption(
+                            &format!("{operation} (capture barrier)")
+                        ));
+                    }
+                    barrier = Arc::clone(&open.capture_apply_gate).lock_owned() => barrier,
+                }
+            }
+            None => Arc::clone(&open.capture_apply_gate).lock_owned().await,
+        };
+
+        #[cfg(feature = "harness")]
+        if pause_after_capture && let Some(probe) = &self.capture_apply_probe {
+            probe.pause_version_fence_if_armed().await;
+        }
+        #[cfg(not(feature = "harness"))]
+        let _ = pause_after_capture;
+
+        let sessions = match cancellation {
+            Some(cancellation) => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.token.cancelled() => {
+                        return Err(cancellation.interruption(
+                            &format!("{operation} (ydoc barrier)")
+                        ));
+                    }
+                    serial = Arc::clone(&open.session_ops).lock_owned() => serial,
+                }
+            }
+            None => Arc::clone(&open.session_ops).lock_owned().await,
+        };
+        Ok(WorkspaceBarriers {
+            _capture: capture,
+            _sessions: sessions,
+        })
+    }
+
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
-        let _session_serial = self.session_ops.lock().await;
+        let open = self.open(Some(&handle))?;
+        // The same capture→sessions order as `fence_version_snapshot`.
+        // Holding the capture gate through driver cancellation/drain means no
+        // apply can be queued behind a session-first close and form the
+        // close→driver→switch deadlock triangle.
+        let _barriers = self
+            .acquire_workspace_barriers(&open, None, "workspace.close", false)
+            .await?;
         let supervisor = self.supervisor;
         // Hold open_lock only across the handle removal and the synchronous
         // begin_close, so a workspace_open already waiting on `handles` cannot
@@ -1159,6 +1364,7 @@ impl EngineService {
     /// probe -> lease -> authoritative re-read are mutually exclusive orders.
     async fn mutation_session_guard(
         &self,
+        open: &OpenWorkspace,
         cancellation: &OperationCancellation,
         operation: &str,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, WireError> {
@@ -1167,7 +1373,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 Err(cancellation.interruption(operation))
             }
-            serial = Arc::clone(&self.session_ops).lock_owned() => Ok(serial),
+            serial = Arc::clone(&open.session_ops).lock_owned() => Ok(serial),
         }
     }
 
@@ -1227,7 +1433,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedText.write (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedText.write (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
@@ -1294,7 +1500,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedBinary.write (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedBinary.write (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
@@ -1366,7 +1572,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedText.rename (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedText.rename (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &from_path)
             .await?;
@@ -1432,7 +1638,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedText.delete (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedText.delete (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
@@ -1489,7 +1695,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedText.rollback (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedText.rollback (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
@@ -1586,7 +1792,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versions.merge (queued)")
+            .mutation_session_guard(&open, &cancellation, "versions.merge (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.target_version_id, &path)
             .await?;
@@ -1670,7 +1876,11 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionsCreateNamedParams = parse(params)?;
-        let open = self.open(request.workspace.as_ref())?;
+        let handle = request
+            .workspace
+            .as_ref()
+            .ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(handle))?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let new_version_id = self.generated_rpc_id(
             "version",
@@ -1679,23 +1889,290 @@ impl EngineService {
             &params.name,
         );
         let cancellation = OperationCancellation::new(ctx);
-        let version = open
-            .actor
-            .create_named_version(
-                CreateNamedVersion {
-                    workspace_id: open.workspace_id,
-                    new_version_id,
-                    name: params.name,
-                    from_version_id: params.from_version_id,
-                    now_ms: now_ms()?,
-                    request_id: request.idempotency_key.clone(),
+        let input = CreateNamedVersion {
+            workspace_id: open.workspace_id.clone(),
+            new_version_id,
+            name: params.name,
+            from_version_id: params.from_version_id,
+            now_ms: now_ms()?,
+            request_id: request.idempotency_key.clone(),
+        };
+        // Reject missing sources, bad/taken names, duplicate ids, and
+        // idempotency mismatches before the destructive session sweep and full
+        // scan. An exact replay returns its original version without fencing.
+        if let Some(version) = Self::read_under_ctx(
+            &cancellation,
+            "versions.createNamed (preflight)",
+            open.actor
+                .preflight_create_named_version(input.clone(), cancellation.token()),
+        )
+        .await?
+        {
+            return Ok(version_record_json(&version));
+        }
+        let fence = self
+            .fence_version_snapshot(
+                &cancellation,
+                &open,
+                handle,
+                "versions.createNamed",
+                "Saved latest edits before creating a version",
+                VersionFenceIntent::Fork {
+                    input: input.clone(),
                 },
-                Arc::new(NoFaults),
-                cancellation.token(),
             )
-            .await
+            .await?;
+        match fence {
+            VersionFenceOutcome::CreateReplay(version) => Ok(version_record_json(&version)),
+            VersionFenceOutcome::AlreadyActive => {
+                unreachable!("fork fences never return AlreadyActive");
+            }
+            VersionFenceOutcome::Committed(version) => Ok(version_record_json(&version)),
+        }
+    }
+
+    /// Freeze the active workspace snapshot before a version fork or switch.
+    ///
+    /// Lock order is per-workspace capture gate FIRST, then that workspace's
+    /// Y.Doc/session mutation gate — the same helper used by workspace.close.
+    /// Once both are held, no capture apply or session admission can straddle
+    /// the session sweep, forced reconcile, and version transaction. After the
+    /// fenced preflight, the destructive continuation moves into an owned task:
+    /// dropping the request future detaches it instead of releasing either
+    /// guard over a partially completed switch.
+    async fn fence_version_snapshot(
+        &self,
+        cancellation: &OperationCancellation,
+        open: &OpenWorkspace,
+        handle: &WorkspaceHandle,
+        operation: &str,
+        settle_summary: &str,
+        intent: VersionFenceIntent,
+    ) -> Result<VersionFenceOutcome, WireError> {
+        let barriers = self
+            .acquire_workspace_barriers(open, Some(cancellation), operation, true)
+            .await?;
+
+        let (reconcile_version_id, fork_source_version_id) = match &intent {
+            VersionFenceIntent::Fork { input } => {
+                // The preflight is intentionally repeated while the fence is
+                // held: a competing create may have won between the cheap
+                // outer check and acquisition. Reject or replay before any
+                // session is closed.
+                if let Some(version) = Self::read_under_ctx(
+                    cancellation,
+                    "versions.createNamed (fenced preflight)",
+                    open.actor
+                        .preflight_create_named_version(input.clone(), cancellation.token()),
+                )
+                .await?
+                {
+                    return Ok(VersionFenceOutcome::CreateReplay(version));
+                }
+                let active = Self::read_under_ctx(
+                    cancellation,
+                    "versions.createNamed (active version)",
+                    open.actor.active_version(open.workspace_id.clone()),
+                )
+                .await?;
+                (active.version_id, Some(input.from_version_id.clone()))
+            }
+            VersionFenceIntent::Switch {
+                target_version_id, ..
+            } => {
+                let active = Self::read_under_ctx(
+                    cancellation,
+                    "versions.setActive (fenced active recheck)",
+                    open.actor.active_version(open.workspace_id.clone()),
+                )
+                .await?;
+                if active.version_id == *target_version_id {
+                    return Ok(VersionFenceOutcome::AlreadyActive);
+                }
+                (active.version_id, None)
+            }
+        };
+
+        let session_views: Vec<(String, DocKey, ContentKind)> = lock(&self.sessions)
+            .iter()
+            .filter(|(_, session)| {
+                session.workspace == *handle && session.key.version_id == reconcile_version_id
+            })
+            .map(|(session_id, session)| {
+                (
+                    session_id.clone(),
+                    session.key.clone(),
+                    session.content_kind,
+                )
+            })
+            .collect();
+        let session_ids: Vec<String> = session_views
+            .iter()
+            .map(|(session_id, _, _)| session_id.clone())
+            .collect();
+        let has_live_richdoc = session_views
+            .iter()
+            .any(|(_, _, content_kind)| *content_kind == ContentKind::Richdoc);
+
+        if let Some(source_version_id) = fork_source_version_id.as_ref()
+            && let Some(content_kind) = Self::read_under_ctx(
+                cancellation,
+                "versions.createNamed (source ydoc preflight)",
+                open.actor.ydoc_version_unsettled_content_kind(
+                    open.workspace_id.clone(),
+                    source_version_id.clone(),
+                    if source_version_id == &reconcile_version_id {
+                        session_views
+                            .iter()
+                            .map(|(_, key, _)| key.object_id.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    cancellation.token(),
+                ),
+            )
+            .await?
+        {
+            return Err(unsettled_fork_error(content_kind));
+        }
+
+        if matches!(intent, VersionFenceIntent::Fork { .. }) && has_live_richdoc {
+            // The lower projection layer is full-fidelity, but the daemon RPC
+            // still exposes richdoc-settle-unsupported. A fork does not clone
+            // version-keyed CRDT rows (including normally-closed persisted
+            // lineages), so forking would silently snapshot stale markdown.
+            // Refuse before touching any session or scanning the filesystem.
+            return Err(wire(ErrorCode::InvalidParams, "richdoc-settle-unsupported"));
+        }
+
+        let capture_status = lock(&open.capture)
+            .as_ref()
+            .map(|driver| Arc::clone(driver.status()))
+            .ok_or_else(|| {
+                wire(
+                    ErrorCode::WorkspaceUnavailable,
+                    "capture driver unavailable",
+                )
+            })?;
+        let open = open.clone();
+        let handle = handle.clone();
+        let sessions = Arc::clone(&self.sessions);
+        let self_writes = self.self_writes.clone();
+        let detached_operation = operation.to_owned();
+        let settle_summary = settle_summary.to_owned();
+        #[cfg(feature = "harness")]
+        let probe = self.capture_apply_probe.clone();
+        let mut fence = tokio::spawn(async move {
+            let _barriers = barriers;
+            let token = CancellationToken::new();
+            for session_id in session_ids {
+                close_ydoc_session_for_version_fence(
+                    &sessions,
+                    &self_writes,
+                    &open,
+                    &handle,
+                    &session_id,
+                    &settle_summary,
+                    &token,
+                )
+                .await?;
+            }
+
+            if let VersionFenceIntent::Fork { input } = &intent
+                && let Some(content_kind) = open
+                    .actor
+                    .ydoc_version_unsettled_content_kind(
+                        open.workspace_id.clone(),
+                        input.from_version_id.clone(),
+                        Vec::new(),
+                        token.clone(),
+                    )
+                    .await
+                    .map_err(map_runtime)?
+            {
+                return Err(unsettled_fork_error(content_kind));
+            }
+
+            open.actor
+                .materialize_replay_pending_for_fence(
+                    open.root.clone(),
+                    open.workspace_id.clone(),
+                    Arc::new(self_writes.scoped(&open.root)),
+                    now_ms()?,
+                )
+                .await
+                .map_err(map_runtime)?;
+
+            #[cfg(feature = "harness")]
+            if let Some(probe) = &probe {
+                probe.record_version_scan();
+            }
+            let reconcile = capture_driver::reconcile_full_for_switch(
+                &open.root,
+                &open.actor,
+                &open.workspace_id,
+                &capture_status,
+                &self_writes.scoped(&open.root),
+                token.clone(),
+            )
+            .await;
+
+            if !matches!(reconcile, Ok(false)) {
+                let capture = lock(&open.capture);
+                let driver = capture.as_ref().ok_or_else(|| {
+                    wire(
+                        ErrorCode::WorkspaceUnavailable,
+                        "capture driver unavailable",
+                    )
+                })?;
+                driver.request_manifest_refresh();
+            }
+            let _manifest_changed = reconcile
+                .map_err(|error| map_switch_reconcile_error(error, &detached_operation))?;
+
+            #[cfg(feature = "harness")]
+            if let Some(probe) = &probe {
+                probe.pause_version_commit_if_armed().await;
+            }
+
+            let version = match intent {
+                VersionFenceIntent::Fork { input } => {
+                    open.actor
+                        .create_named_version(input, Arc::new(NoFaults), token)
+                        .await
+                }
+                VersionFenceIntent::Switch {
+                    target_version_id,
+                    now_ms,
+                } => {
+                    open.actor
+                        .set_active_version(
+                            dohc_engine_runtime::ActiveVersionSwitch {
+                                workspace_id: open.workspace_id.clone(),
+                                version_id: target_version_id,
+                                root_dir: open.root.clone(),
+                                self_writes: Arc::new(self_writes.scoped(&open.root)),
+                                now_ms,
+                            },
+                            Arc::new(NoFaults),
+                            token,
+                        )
+                        .await
+                }
+            }
             .map_err(map_runtime)?;
-        Ok(version_record_json(&version))
+            Ok(VersionFenceOutcome::Committed(version))
+        });
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                Err(cancellation.interruption(operation))
+            }
+            outcome = &mut fence => {
+                outcome.map_err(|_| wire(ErrorCode::Internal, "version fence task failed"))?
+            }
+        }
     }
 
     async fn versions_compare_files(
@@ -1965,25 +2442,52 @@ impl EngineService {
         if params.version_id.is_empty() || params.version_id.trim() != params.version_id {
             return Err(wire(ErrorCode::InvalidParams, "invalid-version"));
         }
-        let open = self.open(handle.as_ref())?;
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        let version = open
-            .actor
-            .set_active_version(
-                dohc_engine_runtime::ActiveVersionSwitch {
-                    workspace_id: open.workspace_id.clone(),
-                    version_id: params.version_id,
-                    root_dir: open.root.clone(),
-                    self_writes: Arc::new(self.self_writes.scoped(&open.root)),
+        // Oracle ordering: reject an unknown target, and return a true no-op
+        // for the already-active version, before disturbing live sessions.
+        let versions = Self::read_under_ctx(
+            &cancellation,
+            "versions.setActive (target validation)",
+            open.actor.list_versions(open.workspace_id.clone()),
+        )
+        .await?;
+        let target = versions
+            .into_iter()
+            .find(|version| version.version_id == params.version_id)
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "version-not-found"))?;
+        let active = Self::read_under_ctx(
+            &cancellation,
+            "versions.setActive (active version)",
+            open.actor.active_version(open.workspace_id.clone()),
+        )
+        .await?;
+        if active.version_id == target.version_id {
+            return Ok(version_record_json(&target));
+        }
+
+        let fence = self
+            .fence_version_snapshot(
+                &cancellation,
+                &open,
+                &handle,
+                "versions.setActive",
+                "Saved latest edits before switching versions",
+                VersionFenceIntent::Switch {
+                    target_version_id: target.version_id.clone(),
                     now_ms: now_ms()?,
                 },
-                Arc::new(NoFaults),
-                cancellation.token(),
             )
-            .await
-            .map_err(map_runtime)?;
-        Ok(version_record_json(&version))
+            .await?;
+        match fence {
+            VersionFenceOutcome::AlreadyActive => Ok(version_record_json(&target)),
+            VersionFenceOutcome::CreateReplay(_) => {
+                unreachable!("switch fences never return CreateReplay");
+            }
+            VersionFenceOutcome::Committed(version) => Ok(version_record_json(&version)),
+        }
     }
 
     async fn versions_list(
@@ -5102,7 +5606,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.apply (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         let update = base64::engine::general_purpose::STANDARD
             .decode(params.update_base64)
@@ -5161,7 +5665,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.open (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         // The first read only DERIVES the key (head resolution can't happen
         // without it). The lease is then taken on that key and the state is
@@ -5269,6 +5773,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocRecordUpdateParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         // An OWNED guard: it moves INTO the spawned task below, so a dropped
         // RPC future cannot release the session serial while the record (and
         // its first_update_pending transition) is still running — a second
@@ -5279,7 +5784,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.recordUpdate (queued)"));
             }
-            serial = Arc::clone(&self.session_ops).lock_owned() => serial,
+            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let update = base64::engine::general_purpose::STANDARD
@@ -5352,12 +5857,13 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocSettleParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.settle (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         self.ydoc_settle_inner(
             &cancellation,
@@ -5436,12 +5942,13 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocApplyExternalMarkdownEditParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.applyExternalMarkdownEdit (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         let _ = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let _ = params.markdown;
@@ -5459,19 +5966,35 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocCloseParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.close (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
+        self.ydoc_close_inner(&cancellation, handle.as_ref(), params)
+            .await
+    }
+
+    /// Close one session while the caller already owns the workspace's
+    /// `session_ops`.
+    /// `versions.setActive` uses the same primitive for its all-session sweep,
+    /// so manual close and switch-time close have identical settle/retry/prune
+    /// behavior.
+    async fn ydoc_close_inner(
+        &self,
+        cancellation: &OperationCancellation,
+        handle: Option<&WorkspaceHandle>,
+        params: YdocCloseParams,
+    ) -> Result<Value, WireError> {
         // Missing `settle` means SETTLE — the TS driver treats close() as
         // settle-unless-explicitly-false, and defaulting to false here would
         // fail dirty local-only closes (UnsettledClose) and let a replicated
         // close compact while the markdown projection is stale.
         let default_settle = {
-            let (_open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+            let (_open, session) = self.ydoc_session(handle, &params.session_id)?;
             // Richdoc settle is a C1 refusal on the EXPLICIT ydoc.settle RPC;
             // a default close must not inherit that error — it skips the
             // markdown settle and the close below persists the closed CRDT
@@ -5485,8 +6008,8 @@ impl EngineService {
         if params.settle.unwrap_or(default_settle) {
             let settled = self
                 .ydoc_settle_inner(
-                    &cancellation,
-                    handle.as_ref(),
+                    cancellation,
+                    handle,
                     &params.session_id,
                     params.summary.as_deref(),
                 )
@@ -5503,8 +6026,8 @@ impl EngineService {
                 // caller manually resyncs or closes the workspace.
                 Err(error) if error.message == "ydoc-remote-updates-pending" => {
                     self.ydoc_settle_inner(
-                        &cancellation,
-                        handle.as_ref(),
+                        cancellation,
+                        handle,
                         &params.session_id,
                         params.summary.as_deref(),
                     )
@@ -5513,7 +6036,7 @@ impl EngineService {
                 Err(error) => return Err(error),
             }
         }
-        let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        let (open, session) = self.ydoc_session(handle, &params.session_id)?;
         // The close command carries a FRESH token: once the settle above has
         // materialized, honoring a caller cancel here would leave the
         // session/lease held, and the retried close would re-settle over the
@@ -5585,12 +6108,13 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocResyncParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.resync (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let full_state = open
@@ -5625,6 +6149,7 @@ impl EngineService {
                 regime: session.regime,
                 lineage_absent: session.lineage_absent,
                 first_update_pending: session.first_update_pending,
+                last_settled_sha: session.last_settled_sha.clone(),
                 open_head_sha: session.open_head_sha.clone(),
             },
         ))
@@ -5825,6 +6350,196 @@ impl EngineService {
             .get(handle)
             .cloned()
             .ok_or_else(workspace_unavailable)
+    }
+}
+
+async fn close_ydoc_session_for_version_fence(
+    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
+    self_writes: &SelfWriteSuppression,
+    open: &OpenWorkspace,
+    handle: &WorkspaceHandle,
+    session_id: &str,
+    _summary: &str,
+    token: &CancellationToken,
+) -> Result<(), WireError> {
+    let session = version_fence_session_view(sessions, handle, session_id)?;
+    let settle = session.content_kind != ContentKind::Richdoc
+        && !(session.lineage_absent && session.first_update_pending);
+    if settle {
+        let first = settle_ydoc_session_for_version_fence(
+            sessions,
+            self_writes,
+            open,
+            session_id,
+            &session,
+            token,
+        )
+        .await;
+        match first {
+            Ok(()) => {}
+            Err(error) if error.message == "ydoc-remote-updates-pending" => {
+                let refreshed = version_fence_session_view(sessions, handle, session_id)?;
+                settle_ydoc_session_for_version_fence(
+                    sessions,
+                    self_writes,
+                    open,
+                    session_id,
+                    &refreshed,
+                    token,
+                )
+                .await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let session = version_fence_session_view(sessions, handle, session_id)?;
+    let now = now_ms()?;
+    let taken = lock(sessions).remove(session_id);
+    let close = open
+        .actor
+        .ydoc_close_session(
+            session.key,
+            now,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await;
+    if matches!(
+        close,
+        Err(RuntimeError::Collab(_)) | Err(RuntimeError::Domain(_))
+    ) && let Some(entry) = taken
+    {
+        lock(sessions).insert(session_id.to_owned(), entry);
+    }
+    close.map_err(map_runtime)?;
+    Ok(())
+}
+
+fn version_fence_session_view(
+    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
+    handle: &WorkspaceHandle,
+    session_id: &str,
+) -> Result<YdocSessionView, WireError> {
+    let sessions = lock(sessions);
+    let session = sessions
+        .get(session_id)
+        .filter(|session| session.workspace == *handle)
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
+    Ok(YdocSessionView {
+        key: session.key.clone(),
+        path: session.path.clone(),
+        content_kind: session.content_kind,
+        regime: session.regime,
+        lineage_absent: session.lineage_absent,
+        first_update_pending: session.first_update_pending,
+        last_settled_sha: session.last_settled_sha.clone(),
+        open_head_sha: session.open_head_sha.clone(),
+    })
+}
+
+async fn settle_ydoc_session_for_version_fence(
+    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
+    self_writes: &SelfWriteSuppression,
+    open: &OpenWorkspace,
+    session_id: &str,
+    session: &YdocSessionView,
+    token: &CancellationToken,
+) -> Result<(), WireError> {
+    let settled = open
+        .actor
+        .ydoc_settle(
+            open.root.clone(),
+            session.key.clone(),
+            session.path.clone(),
+            session.content_kind,
+            settle_preimage(&session.last_settled_sha, &session.open_head_sha),
+            session_id.to_owned(),
+            Arc::new(self_writes.scoped(&open.root)),
+            now_ms()?,
+            Arc::new(NoFaults),
+            token.clone(),
+        )
+        .await
+        .map_err(|error| {
+            if matches!(
+                &error,
+                RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-remote-updates-pending",
+                })
+            ) {
+                wire(ErrorCode::InvalidParams, "ydoc-remote-updates-pending")
+            } else {
+                map_runtime(error)
+            }
+        })?;
+    if let Some(session) = lock(sessions).get_mut(session_id) {
+        session.last_settled_sha = Some(settled.sha256);
+    }
+    Ok(())
+}
+
+fn unsettled_fork_error(content_kind: ContentKind) -> WireError {
+    let message = match content_kind {
+        ContentKind::Plaintext => "ydoc-unsettled-close",
+        ContentKind::Richdoc => "richdoc-settle-unsupported",
+    };
+    wire(ErrorCode::InvalidParams, message)
+}
+
+fn settle_preimage(
+    last_settled_sha: &Option<String>,
+    open_head_sha: &Option<String>,
+) -> Option<String> {
+    last_settled_sha.clone().or_else(|| open_head_sha.clone())
+}
+
+#[cfg(test)]
+mod version_fence_preimage_tests {
+    use super::settle_preimage;
+
+    #[test]
+    fn latest_settlement_outranks_the_open_head() {
+        assert_eq!(
+            settle_preimage(
+                &Some("latest-settlement".to_owned()),
+                &Some("original-open-head".to_owned())
+            ),
+            Some("latest-settlement".to_owned())
+        );
+        assert_eq!(
+            settle_preimage(&None, &Some("original-open-head".to_owned())),
+            Some("original-open-head".to_owned())
+        );
+    }
+}
+
+fn map_switch_reconcile_error(
+    error: capture_driver::SwitchReconcileError,
+    operation: &str,
+) -> WireError {
+    match error {
+        capture_driver::SwitchReconcileError::Cancelled => WireError::new(
+            ErrorCode::Internal,
+            format!("{operation} detached full scan was interrupted"),
+        ),
+        capture_driver::SwitchReconcileError::Degraded(mut paths) => {
+            paths.sort();
+            paths.dedup();
+            let message = if paths.is_empty() {
+                "Could not scan workspace paths".to_owned()
+            } else {
+                format!("Could not scan workspace paths: {}", paths.join(", "))
+            };
+            WireError::new(ErrorCode::Internal, message)
+        }
+        capture_driver::SwitchReconcileError::Unavailable => wire(
+            ErrorCode::WorkspaceUnavailable,
+            "capture driver unavailable",
+        ),
+        capture_driver::SwitchReconcileError::ApplyFailed => {
+            wire(ErrorCode::Internal, "pre-version-reconcile-failed")
+        }
     }
 }
 
@@ -8426,7 +9141,8 @@ mod tests {
         let handle: WorkspaceHandle =
             serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
 
-        let held = Arc::clone(&service.session_ops).lock_owned().await;
+        let open = service.open(Some(&handle)).expect("open workspace");
+        let held = Arc::clone(&open.session_ops).lock_owned().await;
         let writing_service = Arc::clone(&service);
         let writing_handle = handle.clone();
         let mut writing = tokio::spawn(async move {

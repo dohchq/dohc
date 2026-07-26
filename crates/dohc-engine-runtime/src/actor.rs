@@ -556,6 +556,11 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
     },
+    PreflightCreateNamedVersion {
+        input: CreateNamedVersion,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Option<VersionRecord>, RuntimeError>>,
+    },
     CaptureManifestSeed {
         workspace_id: String,
         version_id: String,
@@ -580,6 +585,13 @@ enum Command {
         content_kind: Option<ContentKind>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<YdocOpenState, RuntimeError>>,
+    },
+    YdocVersionUnsettledContentKind {
+        workspace_id: String,
+        version_id: String,
+        ignored_object_ids: Vec<String>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Option<ContentKind>, RuntimeError>>,
     },
     YdocRecordUpdate {
         key: DocKey,
@@ -624,6 +636,13 @@ enum Command {
         root_dir: PathBuf,
         now_ms: i64,
         reply: oneshot::Sender<Result<usize, RuntimeError>>,
+    },
+    MaterializeReplayPendingForFence {
+        root_dir: PathBuf,
+        workspace_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
     ConflictList {
         workspace_id: String,
@@ -2351,6 +2370,23 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn preflight_create_named_version(
+        &self,
+        input: CreateNamedVersion,
+        token: CancellationToken,
+    ) -> Result<Option<VersionRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::PreflightCreateNamedVersion {
+                input,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Every captured path with its content identity, for seeding a fresh
     /// files-layer manifest on workspace (re)open (deleted-while-closed
     /// files must retire against the seed, never survive an empty baseline).
@@ -2530,6 +2566,29 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// Report the content kind of durable Y.Doc state whose current CRDT
+    /// projection is not the materialized version snapshot.
+    pub async fn ydoc_version_unsettled_content_kind(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        ignored_object_ids: Vec<String>,
+        token: CancellationToken,
+    ) -> Result<Option<ContentKind>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocVersionUnsettledContentKind {
+                workspace_id,
+                version_id,
+                ignored_object_ids,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn ydoc_record_update(
         &self,
@@ -2645,6 +2704,31 @@ impl ActorHandle {
         self.tx
             .send(Command::MaterializeReplayPending {
                 root_dir,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Replay pending writes before a version fence scans the filesystem.
+    /// Unlike startup replay, any attempted job failure is fatal: scanning
+    /// stale disk bytes after a committed write failed to materialize could
+    /// capture those bytes back over the committed head.
+    pub async fn materialize_replay_pending_for_fence(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+    ) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeReplayPendingForFence {
+                root_dir,
+                workspace_id,
+                self_writes,
                 now_ms,
                 reply,
             })
@@ -5650,6 +5734,20 @@ fn worker_main(
                 };
                 let _ = reply.send(outcome);
             }
+            Command::PreflightCreateNamedVersion {
+                input,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .preflight_create_named_version(&input)
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
             Command::CaptureManifestSeed {
                 workspace_id,
                 version_id,
@@ -5739,6 +5837,22 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
+            Command::YdocVersionUnsettledContentKind {
+                workspace_id,
+                version_id,
+                ignored_object_ids,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_version_unsettled_content_kind_on_store(
+                    &store,
+                    &workspace_id,
+                    &version_id,
+                    &ignored_object_ids,
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
             Command::YdocRecordUpdate {
                 key,
                 path,
@@ -5824,6 +5938,32 @@ fn worker_main(
                     &mut store, &root_dir, now_ms, &NoFaults, None, None,
                 )
                 .map(|summary| summary.completed);
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeReplayPendingForFence {
+                root_dir,
+                workspace_id,
+                self_writes,
+                now_ms,
+                reply,
+            } => {
+                let outcome = replay_pending_materializations(
+                    &mut store,
+                    &root_dir,
+                    now_ms,
+                    &NoFaults,
+                    None,
+                    Some((&workspace_id, self_writes.as_ref())),
+                )
+                .and_then(|summary| {
+                    if summary.failed == 0 {
+                        Ok(())
+                    } else {
+                        Err(RuntimeError::ActiveVersionMaterializationIncomplete {
+                            failed_jobs: summary.failed,
+                        })
+                    }
+                });
                 let _ = reply.send(outcome);
             }
             Command::ConflictList {
@@ -6947,6 +7087,91 @@ fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
     // the seq pair alone would misread a claimed base as absent (double-seed +
     // NoMarker settle refusals on a valid lineage).
     marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 || marker.base_claimed
+}
+
+fn ydoc_version_unsettled_content_kind_on_store(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    ignored_object_ids: &[String],
+    token: &CancellationToken,
+) -> Result<Option<ContentKind>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let lineages: Vec<(String, ContentKind, bool)> = store.read_with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT docs.object_id, docs.content_kind, EXISTS ( \
+                     SELECT 1 FROM ydoc_deferred_updates AS deferred \
+                     WHERE deferred.workspace_id = docs.workspace_id \
+                       AND deferred.version_id = docs.version_id \
+                       AND deferred.object_id = docs.object_id \
+                  ) \
+                  FROM ydoc_docs AS docs \
+                  WHERE docs.workspace_id = ?1 AND docs.version_id = ?2 \
+                    AND (docs.head_update_seq > 0 OR docs.head_snapshot_seq > 0 \
+                         OR docs.base_claimed = 1 OR EXISTS ( \
+                            SELECT 1 FROM ydoc_deferred_updates AS deferred \
+                            WHERE deferred.workspace_id = docs.workspace_id \
+                              AND deferred.version_id = docs.version_id \
+                              AND deferred.object_id = docs.object_id \
+                        ))",
+            )
+            .map_err(StorageError::corrupt_public)?;
+        let rows = statement
+            .query_map(params![workspace_id, version_id], |row| {
+                let content_kind = row.get::<_, String>(1)?;
+                Ok((row.get(0)?, ContentKind::parse(&content_kind), row.get(2)?))
+            })
+            .map_err(StorageError::corrupt_public)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt_public)
+    })?;
+
+    for (object_id, content_kind, has_deferred_updates) in lineages {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if ignored_object_ids
+            .iter()
+            .any(|ignored| ignored == &object_id)
+        {
+            continue;
+        }
+        // Deferred updates are source-version state too, and a fork clones
+        // neither them nor the Y.Doc lineage. Refuse even when the currently
+        // integrated projection still happens to match its snapshot.
+        if has_deferred_updates {
+            return Ok(Some(content_kind));
+        }
+        let key = DocKey::new(workspace_id, version_id, object_id)?;
+        let Some(persisted) = dohc_engine_collab::load_persisted(store, &key)? else {
+            // The row predicate above says durable state exists. A missing
+            // load is inconsistent and must fail closed for the fork.
+            return Ok(Some(content_kind));
+        };
+        if persisted.doc.has_pending_dependencies() {
+            return Ok(Some(content_kind));
+        }
+        let content_kind = persisted.marker.content_kind;
+        let projected = persisted.doc.project(content_kind)?;
+        let projected_sha = hex_sha256(projected.markdown.as_bytes());
+        let materialized_sha: Option<String> = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256 FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![workspace_id, version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)
+        })?;
+        if materialized_sha.as_deref() != Some(projected_sha.as_str()) {
+            return Ok(Some(content_kind));
+        }
+    }
+    Ok(None)
 }
 
 fn ensure_mutation_version_on_store(

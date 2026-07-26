@@ -24,14 +24,226 @@
 
 use crate::capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 use dohc_engine_files::{
-    CancellationToken, CaptureApplyResult, FilesActor, FilesError, ManifestEntry, NativeWatcher,
-    ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest, apply_reconcile_plan,
+    CancellationToken, CaptureApplyResult, FilesActor, FilesError, FilesHandle, ManifestEntry,
+    NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest,
+    apply_reconcile_plan,
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Serializes every capture reconcile+apply with an active-version switch.
+/// A switch owns this mutex from before its forced full scan until after the
+/// active-version transaction, so no apply can resolve its destination on the
+/// opposite side of that transaction.
+pub(crate) type ApplyGate = Arc<tokio::sync::Mutex<()>>;
+
+/// Deterministic integration-test seam for proving a switch drains an apply
+/// that has already prepared a reconcile plan. Production builds do not
+/// compile the seam.
+#[cfg(feature = "harness")]
+#[derive(Clone, Default)]
+pub struct CaptureApplyProbe {
+    inner: Arc<CaptureApplyProbeInner>,
+}
+
+#[cfg(feature = "harness")]
+struct CaptureApplyProbeInner {
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+    fence_armed: std::sync::atomic::AtomicBool,
+    fence_entered: tokio::sync::Semaphore,
+    fence_release: tokio::sync::Semaphore,
+    fence_wait_armed: std::sync::atomic::AtomicBool,
+    fence_wait_entered: tokio::sync::Semaphore,
+    commit_armed: std::sync::atomic::AtomicBool,
+    commit_entered: tokio::sync::Semaphore,
+    commit_release: tokio::sync::Semaphore,
+    gate_wait_armed: std::sync::atomic::AtomicBool,
+    gate_wait_entered: tokio::sync::Semaphore,
+    version_scan_count: std::sync::atomic::AtomicU64,
+    manifest_refresh_count: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "harness")]
+impl Default for CaptureApplyProbeInner {
+    fn default() -> Self {
+        Self {
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+            fence_armed: std::sync::atomic::AtomicBool::new(false),
+            fence_entered: tokio::sync::Semaphore::new(0),
+            fence_release: tokio::sync::Semaphore::new(0),
+            fence_wait_armed: std::sync::atomic::AtomicBool::new(false),
+            fence_wait_entered: tokio::sync::Semaphore::new(0),
+            commit_armed: std::sync::atomic::AtomicBool::new(false),
+            commit_entered: tokio::sync::Semaphore::new(0),
+            commit_release: tokio::sync::Semaphore::new(0),
+            gate_wait_armed: std::sync::atomic::AtomicBool::new(false),
+            gate_wait_entered: tokio::sync::Semaphore::new(0),
+            version_scan_count: std::sync::atomic::AtomicU64::new(0),
+            manifest_refresh_count: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "harness")]
+impl CaptureApplyProbe {
+    pub fn pause_next_apply(&self) {
+        self.inner.armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_paused(&self) {
+        self.inner
+            .entered
+            .acquire()
+            .await
+            .expect("capture apply probe remains open")
+            .forget();
+    }
+
+    pub fn release(&self) {
+        self.inner.release.add_permits(1);
+    }
+
+    pub fn pause_next_version_fence(&self) {
+        self.inner.fence_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_version_fence_paused(&self) {
+        self.inner
+            .fence_entered
+            .acquire()
+            .await
+            .expect("version fence probe remains open")
+            .forget();
+    }
+
+    pub fn release_version_fence(&self) {
+        self.inner.fence_release.add_permits(1);
+    }
+
+    pub fn observe_next_version_fence_wait(&self) {
+        self.inner.fence_wait_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_version_fence_waiting(&self) {
+        self.inner
+            .fence_wait_entered
+            .acquire()
+            .await
+            .expect("capture apply probe remains open")
+            .forget();
+    }
+
+    pub fn pause_next_version_commit(&self) {
+        self.inner.commit_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_version_commit_paused(&self) {
+        self.inner
+            .commit_entered
+            .acquire()
+            .await
+            .expect("version commit probe remains open")
+            .forget();
+    }
+
+    pub fn release_version_commit(&self) {
+        self.inner.commit_release.add_permits(1);
+    }
+
+    pub fn observe_next_apply_gate_wait(&self) {
+        self.inner.gate_wait_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_apply_gate_waiting(&self) {
+        self.inner
+            .gate_wait_entered
+            .acquire()
+            .await
+            .expect("capture apply probe remains open")
+            .forget();
+    }
+
+    pub fn version_scan_count(&self) -> u64 {
+        self.inner.version_scan_count.load(Ordering::Acquire)
+    }
+
+    pub fn manifest_refresh_count(&self) -> u64 {
+        self.inner.manifest_refresh_count.load(Ordering::Acquire)
+    }
+
+    async fn pause_if_armed(&self) {
+        if self.inner.armed.swap(false, Ordering::AcqRel) {
+            self.inner.entered.add_permits(1);
+            self.inner
+                .release
+                .acquire()
+                .await
+                .expect("capture apply probe remains open")
+                .forget();
+        }
+    }
+
+    pub(crate) async fn pause_version_fence_if_armed(&self) {
+        if self.inner.fence_armed.swap(false, Ordering::AcqRel) {
+            self.inner.fence_entered.add_permits(1);
+            self.inner
+                .fence_release
+                .acquire()
+                .await
+                .expect("version fence probe remains open")
+                .forget();
+        }
+    }
+
+    pub(crate) fn observe_version_fence_wait_if_armed(&self) {
+        if self.inner.fence_wait_armed.swap(false, Ordering::AcqRel) {
+            self.inner.fence_wait_entered.add_permits(1);
+        }
+    }
+
+    pub(crate) async fn pause_version_commit_if_armed(&self) {
+        if self.inner.commit_armed.swap(false, Ordering::AcqRel) {
+            self.inner.commit_entered.add_permits(1);
+            self.inner
+                .commit_release
+                .acquire()
+                .await
+                .expect("version commit probe remains open")
+                .forget();
+        }
+    }
+
+    fn observe_gate_wait_if_armed(&self) {
+        if self.inner.gate_wait_armed.swap(false, Ordering::AcqRel) {
+            self.inner.gate_wait_entered.add_permits(1);
+        }
+    }
+
+    pub(crate) fn record_version_scan(&self) {
+        self.inner.version_scan_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn record_manifest_refresh(&self) {
+        self.inner
+            .manifest_refresh_count
+            .fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SwitchReconcileError {
+    Cancelled,
+    Unavailable,
+    Degraded(Vec<String>),
+    ApplyFailed,
+}
 
 /// How often the driver polls the dirty flag. Cheap when converged (one
 /// actor round-trip returning `Converged` without touching the filesystem);
@@ -1300,6 +1512,12 @@ pub(crate) struct CaptureDriver {
     /// caller's first RPC write can never be overwritten by a later capture
     /// of stale closed-period disk bytes.
     baseline: tokio::sync::watch::Receiver<bool>,
+    /// Invalidates the live files layer after an out-of-band forced reconcile.
+    /// The epoch is sampled into each layer; a mismatch makes the old layer
+    /// restart before it may apply again.
+    refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(feature = "harness")]
+    apply_probe: Option<CaptureApplyProbe>,
 }
 
 /// A dropped-but-untaken driver must never keep running: cancel on Drop (the
@@ -1320,11 +1538,16 @@ impl CaptureDriver {
         actor: ActorHandle,
         workspace_id: String,
         self_writes: SelfWriteSuppression,
+        apply_gate: ApplyGate,
+        #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
     ) -> CaptureDriver {
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
         let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
+        let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        #[cfg(feature = "harness")]
+        let driver_probe = apply_probe.clone();
         let task = tokio::spawn(drive(
             root,
             actor,
@@ -1334,6 +1557,10 @@ impl CaptureDriver {
             Arc::clone(&status),
             baseline_tx,
             flush_rx,
+            apply_gate,
+            Arc::clone(&refresh_epoch),
+            #[cfg(feature = "harness")]
+            apply_probe,
         ));
         CaptureDriver {
             cancel,
@@ -1341,6 +1568,9 @@ impl CaptureDriver {
             status,
             flush_tx,
             baseline,
+            refresh_epoch,
+            #[cfg(feature = "harness")]
+            apply_probe: driver_probe,
         }
     }
 
@@ -1368,6 +1598,17 @@ impl CaptureDriver {
         &self.status
     }
 
+    /// Force the live driver to discard its manifest and rehydrate from the
+    /// domain before its next apply. Called while the workspace apply gate is
+    /// held, so the epoch change is ordered before that next apply.
+    pub(crate) fn request_manifest_refresh(&self) {
+        self.refresh_epoch.fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.apply_probe {
+            probe.record_manifest_refresh();
+        }
+    }
+
     /// Cancel the loop SYNCHRONOUSLY and hand back the join handle; the
     /// driver winds itself down (watcher joined, files actor closed) whether
     /// or not the caller awaits. Callers that need ordered teardown await
@@ -1383,6 +1624,7 @@ struct FilesLayer {
     files: FilesActor,
     watcher: NativeWatcher,
     policy_fingerprint: Option<u64>,
+    refresh_epoch: u64,
 }
 
 impl FilesLayer {
@@ -1399,6 +1641,7 @@ impl FilesLayer {
         cancel: &CancellationToken,
         seed: Option<(ScanManifest, ScanGeneration)>,
         policy_fingerprint: Option<u64>,
+        refresh_epoch: u64,
     ) -> Result<(FilesLayer, ReconcileRun), FilesError> {
         let files =
             FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
@@ -1410,6 +1653,7 @@ impl FilesLayer {
                     files,
                     watcher: start.watcher,
                     policy_fingerprint,
+                    refresh_epoch,
                 },
                 start.initial_reconcile,
             )),
@@ -1493,20 +1737,19 @@ async fn manifest_seed(
     root: &Path,
     actor: &ActorHandle,
     workspace_id: &str,
-) -> Option<(ScanManifest, ScanGeneration)> {
+) -> Result<Option<(ScanManifest, ScanGeneration)>, RuntimeError> {
     let version_id = match actor.active_version_id(workspace_id.to_owned()).await {
         Ok(version_id) => version_id,
         Err(RuntimeError::Domain(dohc_engine_domain::DomainError::WorkspaceNotFound)) => {
-            return None;
+            return Ok(None);
         }
-        Err(_) => return None,
+        Err(error) => return Err(error),
     };
     let entries = actor
         .capture_manifest_seed(workspace_id.to_owned(), version_id)
-        .await
-        .ok()?;
+        .await?;
     if entries.is_empty() {
-        return None;
+        return Ok(None);
     }
     // EVERY capture-owned entry is seeded — including paths the CURRENT
     // policy narrows out, but with a SENTINEL hash. That single choice
@@ -1545,7 +1788,7 @@ async fn manifest_seed(
             },
         )
     }));
-    Some((manifest, ScanGeneration(1)))
+    Ok(Some((manifest, ScanGeneration(1))))
 }
 
 /// Never a valid hex digest, so a seeded entry carrying it always re-offers.
@@ -1625,6 +1868,10 @@ trait DriverEnv {
     /// would be silently swallowed. The loop re-reports whenever the count
     /// moves.
     fn watch_disruptions(&self, layer: &Self::Layer) -> u64;
+    /// An out-of-band reconcile invalidated this layer's manifest.
+    fn refresh_due(&self, _layer: &Self::Layer) -> bool {
+        false
+    }
 
     /// Build a fresh layer and drive its startup baseline to settle.
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<Self::Layer, ()>;
@@ -1646,6 +1893,8 @@ enum TickIo {
     /// racing teardown must answer `settled: false`, never read a cancelled
     /// scan as quiescence.
     Cancelled,
+    /// The layer was invalidated while this tick waited on the apply gate.
+    RefreshRequired,
     /// Reconciled and applied one plan; `clean` is false when the apply
     /// reported failures or the scan itself was degraded.
     Applied { clean: bool },
@@ -1843,7 +2092,9 @@ async fn drive_loop<E: DriverEnv>(
         // An unknown fingerprint carries the state forward by itself; a
         // consumed hold under a still-unknown fingerprint needs no re-arm.
         policy_was_unknown = fingerprint.is_none();
-        let observation = if env.watch_lost(current) {
+        let observation = if env.refresh_due(current) {
+            TickObservation::PolicyChanged
+        } else if env.watch_lost(current) {
             // A permanently lost watch tears the layer down; the rebuild
             // re-seeds via its own baseline reconcile, so no change is lost
             // across the gap.
@@ -1911,6 +2162,10 @@ async fn drive_loop<E: DriverEnv>(
                         // next loop iteration exits on the cancel token. No
                         // supervision observation either — a cancelled tick
                         // proves nothing about the layer's health.
+                        break;
+                    }
+                    TickIo::RefreshRequired => {
+                        outcome = Some(TickObservation::PolicyChanged);
                         break;
                     }
                     TickIo::Applied { clean } => {
@@ -2003,6 +2258,10 @@ struct RealEnv {
     workspace_id: String,
     status: Arc<DriverStatus>,
     self_writes: SelfWriteSuppression,
+    apply_gate: ApplyGate,
+    refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(feature = "harness")]
+    apply_probe: Option<CaptureApplyProbe>,
 }
 
 impl RealEnv {}
@@ -2022,8 +2281,16 @@ impl DriverEnv for RealEnv {
     fn watch_disruptions(&self, layer: &FilesLayer) -> u64 {
         layer.watcher.disruption_count()
     }
+    fn refresh_due(&self, layer: &FilesLayer) -> bool {
+        layer.refresh_epoch != self.refresh_epoch.load(Ordering::Acquire)
+    }
 
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<FilesLayer, ()> {
+        let _apply_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(()),
+            guard = self.apply_gate.lock() => guard,
+        };
         // REHYDRATE the scan manifest from the domain's captured state:
         // against an EMPTY baseline a file deleted while the daemon was down
         // could never emit a Retire and its stale head would stay readable
@@ -2038,11 +2305,20 @@ impl DriverEnv for RealEnv {
         // would swallow the edit (the seed reflects old policy while the
         // layer claims to be current).
         let fingerprint_before_seed = policy_fingerprint(&self.root);
-        let seed = manifest_seed(&self.root, &self.actor, &self.workspace_id).await;
-        let (fresh, initial) =
-            FilesLayer::start_with_fingerprint(&self.root, cancel, seed, fingerprint_before_seed)
-                .await
-                .map_err(|_| ())?;
+        let seed = manifest_seed(&self.root, &self.actor, &self.workspace_id)
+            .await
+            .ok()
+            .flatten();
+        let refresh_epoch = self.refresh_epoch.load(Ordering::Acquire);
+        let (fresh, initial) = FilesLayer::start_with_fingerprint(
+            &self.root,
+            cancel,
+            seed,
+            fingerprint_before_seed,
+            refresh_epoch,
+        )
+        .await
+        .map_err(|_| ())?;
 
         let mut settled = apply_run(
             &self.root,
@@ -2092,12 +2368,30 @@ impl DriverEnv for RealEnv {
     }
 
     async fn tick(&mut self, layer: &FilesLayer, cancel: &CancellationToken) -> TickIo {
-        match layer
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.apply_probe {
+            probe.observe_gate_wait_if_armed();
+        }
+        let _apply_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return TickIo::Cancelled,
+            guard = self.apply_gate.lock() => guard,
+        };
+        if self.refresh_due(layer) {
+            return TickIo::RefreshRequired;
+        }
+        let run = layer
             .files
             .handle()
             .reconcile_if_dirty(cancel.child_token())
-            .await
+            .await;
+        #[cfg(feature = "harness")]
+        if matches!(run, Ok(ReconcileRun::Completed(_)))
+            && let Some(probe) = &self.apply_probe
         {
+            probe.pause_if_armed().await;
+        }
+        match run {
             // Converged means at quiescence — EXCEPT with a NON-EMPTY
             // quarantine: the controller
             // parks persistently failing paths on its own degraded-rescan
@@ -2178,6 +2472,9 @@ async fn drive(
     status: Arc<DriverStatus>,
     baseline_tx: tokio::sync::watch::Sender<bool>,
     flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
+    apply_gate: ApplyGate,
+    refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
 ) {
     let mut env = RealEnv {
         root,
@@ -2185,8 +2482,122 @@ async fn drive(
         workspace_id,
         status: Arc::clone(&status),
         self_writes,
+        apply_gate,
+        refresh_epoch,
+        #[cfg(feature = "harness")]
+        apply_probe,
     };
     drive_loop(&mut env, cancel, status, baseline_tx, flush_rx).await;
+}
+
+/// Force the oracle-equivalent pre-switch full scan while the caller owns the
+/// workspace's [`ApplyGate`]. A fresh files actor is seeded from the active
+/// version so deletions are visible, but no watcher is attached: the normal
+/// driver remains alive and simply waits at the gate. Degraded listings fail
+/// before any safe-subset apply, matching the TypeScript switch path.
+pub(crate) async fn reconcile_full_for_switch(
+    root: &Path,
+    actor: &ActorHandle,
+    workspace_id: &str,
+    status: &Arc<DriverStatus>,
+    self_writes: &SelfWriteSuppression,
+    token: CancellationToken,
+) -> Result<bool, SwitchReconcileError> {
+    if token.is_cancelled() {
+        return Err(SwitchReconcileError::Cancelled);
+    }
+    let seed = manifest_seed(root, actor, workspace_id)
+        .await
+        .map_err(|_| SwitchReconcileError::Unavailable)?;
+    let files =
+        FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
+            .await
+            .map_err(|_| SwitchReconcileError::Unavailable)?;
+    let files = FilesActorCloseGuard::new(files);
+    let handle = files.handle();
+    let run = handle
+        .reconcile(token.clone())
+        .await
+        .map_err(|_| SwitchReconcileError::Unavailable);
+    let result = match run {
+        Err(error) => Err(error),
+        Ok(ReconcileRun::Cancelled) => Err(SwitchReconcileError::Cancelled),
+        // `reconcile` is unconditional; only `reconcile_if_dirty` can report
+        // Converged. Treat an impossible future contract drift as unavailable
+        // rather than silently skipping the mandatory scan.
+        Ok(ReconcileRun::Converged) => Err(SwitchReconcileError::Unavailable),
+        Ok(ReconcileRun::Completed(plan)) if plan.degraded => {
+            status.mark_degraded();
+            let mut degraded_paths = plan.degraded_paths;
+            degraded_paths.sort();
+            degraded_paths.dedup();
+            degraded_paths.truncate(8);
+            Err(SwitchReconcileError::Degraded(degraded_paths))
+        }
+        Ok(run) => {
+            let manifest_changed = matches!(
+                &run,
+                ReconcileRun::Completed(plan)
+                    if !plan.ops.is_empty() || !plan.retained_over_cap.is_empty()
+            );
+            if apply_run_with_handle(root, actor, workspace_id, &handle, run, status, self_writes)
+                .await
+            {
+                Ok(manifest_changed)
+            } else {
+                Err(SwitchReconcileError::ApplyFailed)
+            }
+        }
+    };
+    files.close().await;
+    result
+}
+
+/// Cancellation-safe owner for a temporary [`FilesActor`].
+///
+/// Its `Drop` path must never run `FilesActor::drop` on a Tokio worker because
+/// that synchronously joins the actor thread. Ownership is first wrapped in
+/// `ManuallyDrop`, then handed to a dedicated plain thread. If thread creation
+/// itself fails, the actor is intentionally leaked rather than blocking the
+/// runtime during cancellation.
+struct FilesActorCloseGuard {
+    actor: Option<FilesActor>,
+}
+
+impl FilesActorCloseGuard {
+    fn new(actor: FilesActor) -> Self {
+        Self { actor: Some(actor) }
+    }
+
+    fn handle(&self) -> FilesHandle {
+        self.actor
+            .as_ref()
+            .expect("files actor is present")
+            .handle()
+    }
+
+    fn hand_off_close(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        let actor = std::mem::ManuallyDrop::new(self.actor.take()?);
+        std::thread::Builder::new()
+            .name("dohc-switch-files-close".to_owned())
+            .spawn(move || {
+                let mut actor = std::mem::ManuallyDrop::into_inner(actor);
+                let _ = actor.close();
+            })
+            .ok()
+    }
+
+    async fn close(mut self) {
+        if let Some(joiner) = self.hand_off_close() {
+            let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
+        }
+    }
+}
+
+impl Drop for FilesActorCloseGuard {
+    fn drop(&mut self) {
+        let _ = self.hand_off_close();
+    }
 }
 
 /// Apply one reconcile run through the capture sink and acknowledge it.
@@ -2202,6 +2613,27 @@ async fn apply_run(
     actor: &ActorHandle,
     workspace_id: &str,
     layer: &FilesLayer,
+    run: ReconcileRun,
+    status: &Arc<DriverStatus>,
+    self_writes: &SelfWriteSuppression,
+) -> bool {
+    apply_run_with_handle(
+        root,
+        actor,
+        workspace_id,
+        &layer.files.handle(),
+        run,
+        status,
+        self_writes,
+    )
+    .await
+}
+
+async fn apply_run_with_handle(
+    root: &Path,
+    actor: &ActorHandle,
+    workspace_id: &str,
+    files: &FilesHandle,
     run: ReconcileRun,
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
@@ -2222,7 +2654,7 @@ async fn apply_run(
         )) => "main".to_owned(),
         Err(_) => {
             status.mark_degraded();
-            ack_all_failed(layer, plan, status).await;
+            ack_all_failed(files, plan, status).await;
             return false;
         }
     };
@@ -2268,7 +2700,7 @@ async fn apply_run(
     let Some((plan, mut result, sink_policy_held)) = applied else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
         status.mark_degraded();
-        ack_all_failed(layer, plan, status).await;
+        ack_all_failed(files, plan, status).await;
         return false;
     };
     // OVER-CAP + NARROWED: a path in the scanner's retained-over-cap set
@@ -2356,14 +2788,7 @@ async fn apply_run(
         status.arm_policy_hold();
     }
     let clean = result.failed_applies.is_empty() && !result.degraded;
-    if result.completed()
-        && layer
-            .files
-            .handle()
-            .acknowledge_capture(plan, result)
-            .await
-            .is_err()
-    {
+    if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();
         return false;
     }
@@ -2373,7 +2798,7 @@ async fn apply_run(
 /// Resolve a prepared plan whose apply never ran: acknowledge with EVERY op
 /// marked failed, clearing the controller's `outstanding` latch while keeping
 /// the paths dirty for the next cycle's retry.
-async fn ack_all_failed(layer: &FilesLayer, plan: ReconcilePlan, status: &Arc<DriverStatus>) {
+async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<DriverStatus>) {
     let failed: Vec<String> = plan.ops.iter().map(|op| op.path().to_owned()).collect();
     let receipt = CaptureApplyResult {
         applied_paths: Vec::new(),
@@ -2383,13 +2808,7 @@ async fn ack_all_failed(layer: &FilesLayer, plan: ReconcilePlan, status: &Arc<Dr
         crashed_after_apply: None,
         degraded: true,
     };
-    if layer
-        .files
-        .handle()
-        .acknowledge_capture(plan, receipt)
-        .await
-        .is_err()
-    {
+    if files.acknowledge_capture(plan, receipt).await.is_err() {
         status.mark_degraded();
     }
 }

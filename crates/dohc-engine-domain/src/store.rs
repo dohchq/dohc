@@ -1476,6 +1476,55 @@ impl<'a> VersionedTextStore<'a> {
 
     // -------------------------------------------------------------- named version
 
+    /// Validate a named-version request without mutating the store.
+    ///
+    /// Returns the existing version for an exact idempotent replay. Callers
+    /// that perform expensive or destructive preparation before the fork use
+    /// this as a preflight, then call [`Self::create_named_version`] afterward
+    /// so the same checks run again at the mutation boundary.
+    pub fn preflight_create_named_version(
+        &self,
+        input: &CreateNamedVersion,
+    ) -> Result<Option<VersionRecord>, DomainError> {
+        non_empty(&input.workspace_id, "workspace_id")?;
+        non_empty(&input.new_version_id, "version_id")?;
+        non_empty(&input.from_version_id, "version_id")?;
+        if input.name.is_empty() || input.name.trim() != input.name {
+            return Err(DomainError::InvalidVersionName);
+        }
+
+        let payload_hash = hash_fields(&[
+            input.new_version_id.as_bytes(),
+            input.name.as_bytes(),
+            input.from_version_id.as_bytes(),
+        ]);
+        let ws = &input.workspace_id;
+        self.store.read_with(|conn| {
+            if !version_exists(conn, ws, &input.from_version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            if let Some(request_id) = &input.request_id
+                && let Some(recorded) = lookup_request(conn, request_id)?
+            {
+                if recorded.payload_hash != payload_hash {
+                    return Err(DomainError::IdempotencyKeyReuseMismatch);
+                }
+                return get_version(conn, ws, &input.new_version_id)?
+                    .map(Some)
+                    .ok_or(DomainError::StateCorrupt {
+                        reason: "version request ledger resolves to no version",
+                    });
+            }
+            if name_taken(conn, ws, &input.name)? {
+                return Err(DomainError::VersionNameConflict);
+            }
+            if version_exists(conn, ws, &input.new_version_id)? {
+                return Err(DomainError::DuplicateId);
+            }
+            Ok(None)
+        })
+    }
+
     /// Fork a new named version from `from_version_id`, copying its snapshots
     /// and path aliases and recording durable `fork_base_snapshots`
     /// (`versions-create-named-version`). Journals a `version.create` op. The
