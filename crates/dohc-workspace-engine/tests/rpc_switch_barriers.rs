@@ -456,7 +456,7 @@ async fn set_active_fails_closed_when_the_forced_scan_is_degraded() {
         path: unreadable.clone(),
         mode: original_mode,
     };
-    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0))
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))
         .expect("remove directory permissions");
     if std::fs::read_dir(&unreadable).is_ok() {
         // Root and some sandboxed CI identities bypass mode bits, so this

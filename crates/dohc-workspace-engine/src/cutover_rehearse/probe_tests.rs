@@ -1019,6 +1019,78 @@ fn directory_backup_reuse_requires_matching_live_source() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn backup_accepts_symlinked_ancestor_directories() {
+    use super::backup::{create_restore_tested_backup, recorded_backup_engine_uuid};
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let aliases = ScratchDir::new().expect("alias scratch");
+    let workspace_alias = aliases.join("workspace");
+    let recovery_alias = aliases.join("recovery");
+    symlink(fixture.root.path(), &workspace_alias).expect("workspace ancestor alias");
+    symlink(fixture.recovery.path(), &recovery_alias).expect("recovery ancestor alias");
+    let aliased_paths = Paths::new(workspace_alias);
+
+    create_restore_tested_backup(
+        &aliased_paths,
+        &recovery_alias,
+        SHADOW_TOKEN,
+        NOW_MS + 1,
+        &NoFaults,
+    )
+    .expect("backup through symlinked ancestors");
+    create_restore_tested_backup(
+        &aliased_paths,
+        &recovery_alias,
+        SHADOW_TOKEN,
+        NOW_MS + 2,
+        &NoFaults,
+    )
+    .expect("backup reuse through symlinked ancestors");
+    recorded_backup_engine_uuid(&recovery_alias)
+        .expect("backup identity through symlinked ancestor");
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_refuses_symlinked_engine_db_final_component() {
+    use super::backup::create_restore_tested_backup;
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let paths = fixture.paths();
+    let external = fixture.recovery.join("external-engine.db");
+    std::fs::copy(&paths.db, &external).expect("external database copy");
+    let external_before = std::fs::read(&external).expect("external database bytes");
+    std::fs::remove_file(&paths.db).expect("remove real database");
+    symlink(&external, &paths.db).expect("symlink final engine.db");
+
+    let error = create_restore_tested_backup(
+        &paths,
+        fixture.recovery.path(),
+        SHADOW_TOKEN,
+        NOW_MS + 1,
+        &NoFaults,
+    )
+    .expect_err("a symlinked final engine.db must be refused");
+    assert!(
+        matches!(
+            error,
+            RehearsalError::Io {
+                code: "backup-source-open-read-only-failed"
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&external).expect("external database bytes after refusal"),
+        external_before,
+        "the symlink target must not be modified"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Alias escapes and reset-freshness proofs.
 // ---------------------------------------------------------------------------

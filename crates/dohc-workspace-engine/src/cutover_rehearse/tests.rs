@@ -215,15 +215,25 @@ fn windows_move_aside_interloper_refuses_swap_and_preserves_triplet() {
 fn unix_move_aside_interloper_hash_mismatch_restores_triplet() {
     let (root, recovery, paths, original) = plain_triplet_fixture();
     let verified = acquire_copy_hash_close(&paths, recovery.path()).expect("phase A proof");
-    std::fs::write(&paths.db, b"interloper changed the close-to-rename window")
-        .expect("interloper write");
+    let interloper = b"tampered data";
+    assert_eq!(
+        interloper.len(),
+        std::fs::metadata(&paths.db)
+            .expect("original metadata")
+            .len() as usize,
+        "the interloper must preserve size so verification reaches the hash gate"
+    );
+    std::fs::write(&paths.db, interloper).expect("interloper write");
     let error = swap_and_verify(&paths, &verified).expect_err("hash mismatch must fail");
-    assert!(matches!(
-        error,
-        RehearsalError::Io {
-            code: "moved-aside-hash-mismatch"
-        }
-    ));
+    assert!(
+        matches!(
+            error,
+            RehearsalError::Io {
+                code: "moved-aside-hash-mismatch"
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
     assert_triplet_matches(&paths.engine, &original, "restored live triplet");
     assert!(moved_aside_path(&paths).join("engine.db").is_file());
     drop(root);

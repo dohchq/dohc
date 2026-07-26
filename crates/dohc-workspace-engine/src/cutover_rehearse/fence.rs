@@ -2,7 +2,7 @@ use super::RehearsalError;
 use super::handles::DB_TRIPLET;
 use crate::shadow_fence::{ShadowFenceError, ValidatedShadowRoot, validate_shadow_root};
 use dohc_engine_storage::ENGINE_SCHEMA_VERSION;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::OptionalExtension;
 use std::path::{Path, PathBuf};
 
 pub const REHEARSAL_TOKEN_RELATIVE_PATH: &str = ".dohc/engine/CUTOVER_REHEARSAL_TOKEN";
@@ -76,13 +76,7 @@ pub(crate) fn verify_live_clone_binding(
             super::require_real_file(&engine_dir.join(name), "live-db-sidecar-alias-refused")?;
         }
     }
-    let conn = Connection::open_with_flags(
-        db,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| RehearsalError::Io {
-        code: "live-db-open-read-only-failed",
-    })?;
+    let conn = super::open_sqlite_read_only_nofollow(db, "live-db-open-read-only-failed")?;
     let fingerprint: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|_| RehearsalError::Io {
@@ -119,13 +113,7 @@ pub(crate) fn verify_live_reset_identity(
     db: &Path,
     expected_uuid: &str,
 ) -> Result<(), RehearsalError> {
-    let conn = Connection::open_with_flags(
-        db,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| RehearsalError::Io {
-        code: "live-db-open-read-only-failed",
-    })?;
+    let conn = super::open_sqlite_read_only_nofollow(db, "live-db-open-read-only-failed")?;
     let uuid: Option<String> = conn
         .query_row(
             "SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1",

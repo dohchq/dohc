@@ -1,5 +1,5 @@
 use super::{Paths, RehearsalError};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -398,9 +398,9 @@ pub(crate) fn moved_aside_store_retained(
     // The retained file must BE the preserved ORIGINAL store, not junk (or a
     // fresh/stale sibling) with the right name: opened read-only, its own
     // shadow_clone binding AND its engine identity must both match.
-    let Ok(conn) = Connection::open_with_flags(
-        moved.join("engine.db"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    let Ok(conn) = super::open_sqlite_read_only_nofollow(
+        &moved.join("engine.db"),
+        "moved-aside-db-open-failed",
     ) else {
         return Ok(false);
     };
