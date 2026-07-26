@@ -6,8 +6,9 @@
 //! `cutoverBlocking` tier — open/close cycling, sidecar crash/restart loops,
 //! two-workspace switches with in-flight requests, watcher storms,
 //! cancellation storms, and editor (Y.Doc) cycles — while sampling the
-//! daemon process's RSS / handle count / thread count, then fits a linear
-//! trend to RSS and checks return-to-baseline for handles and threads.
+//! daemon process's RSS / handle count / thread count, then stops work for an
+//! unaided idle drain before combining the workload RSS trend, drain
+//! reclamation, and return-to-baseline handle/thread checks.
 //!
 //! Harness-only by construction (`required-features = ["harness"]`): the
 //! runner writes shadow markers, so production builds never compile it.
@@ -43,6 +44,15 @@ use tokio::sync::oneshot;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const SAMPLE_EVERY: Duration = Duration::from_secs(5);
+/// Once the workload stops, keep the same daemon alive and observe what its
+/// allocator returns to the OS without pressure-relief or purge calls.
+const DRAIN_WINDOW: Duration = Duration::from_secs(120);
+/// A start, an end, and enough interior observations to reject a one-sample
+/// blip. The normal 120s / 5s cadence produces 25 samples.
+const MIN_DRAIN_SAMPLES: usize = 5;
+/// "Near the pre-run plateau" means no more than one quarter of the run's RSS
+/// growth remains at the end of the unaided drain.
+const DRAIN_RECLAIMED_MIN_FRACTION: f64 = 0.75;
 /// Windows handle counts are noisy (thread pools, timers); the assertion is
 /// "returns to baseline plus a documented constant", and this is the
 /// documented constant.
@@ -481,6 +491,36 @@ fn rss_slope(samples: &[Sample]) -> f64 {
         var += dt * dt;
     }
     if var == 0.0 { 0.0 } else { cov / var }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING-KEBAB-CASE")]
+enum DrainDisposition {
+    Reclaimed,
+    Retained,
+    NotEvaluated,
+}
+
+fn classify_drain(baseline_rss: u64, samples: &[Sample]) -> DrainDisposition {
+    if samples.len() < MIN_DRAIN_SAMPLES {
+        return DrainDisposition::NotEvaluated;
+    }
+    let start_rss = samples.first().expect("drain start").rss_bytes;
+    let end_rss = samples.last().expect("drain end").rss_bytes;
+    let run_growth = start_rss.saturating_sub(baseline_rss);
+    if run_growth == 0 {
+        return if end_rss <= baseline_rss {
+            DrainDisposition::Reclaimed
+        } else {
+            DrainDisposition::Retained
+        };
+    }
+    let drop = start_rss.saturating_sub(end_rss);
+    if drop as f64 / run_growth as f64 >= DRAIN_RECLAIMED_MIN_FRACTION {
+        DrainDisposition::Reclaimed
+    } else {
+        DrainDisposition::Retained
+    }
 }
 
 // ----------------------------------------------------------------- scenarios
@@ -943,39 +983,83 @@ async fn main() {
         cycle += 1;
     }
 
-    // Everything closed; settle, then the final sample — all against the
-    // phase-2 subject and ITS baseline.
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let (rss_end, handles_end, threads_end) =
-        sample_process(daemon.pid()).expect("final process sample");
-    // The final sample joins the trend series: an RSS jump in the last
-    // scenario after the most recent periodic sample must not escape the
-    // fit that rssDisposition is computed from.
-    samples.push(Sample {
+    // Everything is closed and no more work will be issued. Capture the
+    // workload endpoint in the trend series, then keep THIS process alive for
+    // an unaided idle drain. The drain samples are deliberately separate:
+    // folding them into the workload fit would hide the slope under test.
+    let workload_duration_secs = started.elapsed().as_secs_f64();
+    let (rss_drain_start, handles_drain_start, threads_drain_start) =
+        sample_process(daemon.pid()).expect("drain start process sample");
+    let drain_start_sample = Sample {
         at_secs: started.elapsed().as_secs_f64(),
-        rss_bytes: rss_end,
-        handles: handles_end,
-        threads: threads_end,
-    });
+        rss_bytes: rss_drain_start,
+        handles: handles_drain_start,
+        threads: threads_drain_start,
+    };
+    samples.push(drain_start_sample.clone());
     let slope = rss_slope(&samples);
+    eprintln!(
+        "soak: phase 3 — {}s unaided idle drain (no allocator release request)",
+        DRAIN_WINDOW.as_secs()
+    );
+    let drain_started = Instant::now();
+    let mut drain_samples = vec![drain_start_sample];
+    while let Some(remaining) = DRAIN_WINDOW.checked_sub(drain_started.elapsed()) {
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(remaining.min(SAMPLE_EVERY)).await;
+        let (rss, handles, threads) =
+            sample_process(daemon.pid()).expect("idle-drain process sample");
+        drain_samples.push(Sample {
+            at_secs: started.elapsed().as_secs_f64(),
+            rss_bytes: rss,
+            handles,
+            threads,
+        });
+    }
+    let drain_end_sample = drain_samples.last().expect("drain end sample");
+    let (rss_end, handles_end, threads_end) = (
+        drain_end_sample.rss_bytes,
+        drain_end_sample.handles,
+        drain_end_sample.threads,
+    );
+    let rss_drain_min = drain_samples
+        .iter()
+        .map(|sample| sample.rss_bytes)
+        .min()
+        .expect("drain minimum");
+    let run_growth_bytes = rss_drain_start.saturating_sub(rss_base);
+    let rss_drop_bytes = rss_drain_start.saturating_sub(rss_end);
+    let rss_drop_percent_of_run_growth =
+        (run_growth_bytes > 0).then(|| 100.0 * rss_drop_bytes as f64 / run_growth_bytes as f64);
+    let drain_disposition = classify_drain(rss_base, &drain_samples);
     let (handle_base, thread_base) = (handles_base, threads_base);
     let handles_ok = handles_end as i64 <= handle_base as i64 + HANDLE_SLACK;
     let threads_ok = threads_end as i64 <= thread_base as i64 + THREAD_SLACK;
-    // The trend verdict is TRI-STATE: evaluated-and-ok, evaluated-and-FAIL,
-    // or NOT EVALUATED (too few samples / too short a span — quick runs).
-    // Not-evaluated never reads as leak evidence: the run can still PASS on
-    // scenario correctness, but the evidence records trendEvaluated:false
-    // and a GATE6 citation requires trendEvaluated:true.
+    // The workload fit is evaluated-and-ok, evaluated-and-over-bound, or NOT
+    // EVALUATED (too few samples / too short a span — quick runs). The
+    // combined RSS disposition below further separates an over-bound fit
+    // whose idle drain reclaims most growth from one that retains it.
     let fit_span = match (samples.first(), samples.last()) {
         (Some(first), Some(last)) => last.at_secs - first.at_secs,
         _ => 0.0,
     };
     let trend_evaluated = samples.len() >= MIN_TREND_SAMPLES && fit_span >= MIN_TREND_SPAN_SECS;
-    let slope_ok = !trend_evaluated || slope <= MAX_RSS_SLOPE_BYTES_PER_SEC;
+    let rss_disposition = if !trend_evaluated {
+        "NOT-EVALUATED"
+    } else if slope <= MAX_RSS_SLOPE_BYTES_PER_SEC {
+        "PASS"
+    } else if drain_disposition == DrainDisposition::Reclaimed {
+        "RETAINED-RECLAIMED"
+    } else {
+        "FAIL"
+    };
+    let rss_ok = rss_disposition != "FAIL";
 
     let clean_shutdown = daemon.shutdown().await;
 
-    let verdict = if !(handles_ok && threads_ok && slope_ok && clean_shutdown) {
+    let verdict = if !(handles_ok && threads_ok && rss_ok && clean_shutdown) {
         "FAIL"
     } else if hard_capped {
         // The requested targets were NOT met — evidence, but not the tier's.
@@ -984,6 +1068,8 @@ async fn main() {
         "PASS-INCOMPLETE(crash-prelude)"
     } else if !trend_evaluated {
         "PASS-SCENARIOS-ONLY(trend-not-evaluated)"
+    } else if rss_disposition == "RETAINED-RECLAIMED" {
+        "PASS-RETENTION-SIGNAL(rss-drain-reclaimed)"
     } else {
         "PASS"
     };
@@ -1003,12 +1089,34 @@ async fn main() {
         "crashRestarts": crashes,
         "crashCyclesPlanned": crash_cycles,
         "durationSecs": started.elapsed().as_secs(),
+        "workloadDurationSecs": workload_duration_secs,
         // Platform-specific provenance for every numeric process metric. In
         // particular, a within-slack macOS/Linux result must travel with the
         // fact that the Windows-derived handle/thread bounds are uncalibrated
         // for those different counter populations.
         "processSampling": process_sampling,
         "baseline": { "rss": rss_base, "handles": handles_base, "threads": threads_base },
+        "drain": {
+            "windowSecs": DRAIN_WINDOW.as_secs(),
+            "sampleIntervalSecs": SAMPLE_EVERY.as_secs(),
+            "minSamples": MIN_DRAIN_SAMPLES,
+            "samplesCollected": drain_samples.len(),
+            "reclaimedMinFractionOfRunGrowth": DRAIN_RECLAIMED_MIN_FRACTION,
+            "allocatorReleaseRequested": false,
+            "allocatorReleasePolicy": "No malloc_zone_pressure_relief, madvise-style purge, or other allocator release request is made; the drain measures the live process unaided.",
+            "rssAtStartBytes": rss_drain_start,
+            "rssAtEndBytes": rss_end,
+            "rssMinBytes": rss_drain_min,
+            "runGrowthBytes": run_growth_bytes,
+            "rssDropBytes": rss_drop_bytes,
+            "rssDropPercentOfRunGrowth": rss_drop_percent_of_run_growth,
+            "handlesAtStart": handles_drain_start,
+            "handlesAtEnd": handles_end,
+            "threadsAtStart": threads_drain_start,
+            "threadsAtEnd": threads_end,
+            "drainDisposition": drain_disposition,
+            "samples": drain_samples,
+        },
         "trendSamples": samples.len(),
         "minTrendSamples": MIN_TREND_SAMPLES,
         "trendFitSpanSecs": fit_span,
@@ -1022,16 +1130,13 @@ async fn main() {
             "maxRssSlopeBytesPerSec": MAX_RSS_SLOPE_BYTES_PER_SEC,
             "minTrendSamples": MIN_TREND_SAMPLES,
             "minTrendSpanSecs": MIN_TREND_SPAN_SECS,
+            "drainWindowSecs": DRAIN_WINDOW.as_secs(),
+            "minDrainSamples": MIN_DRAIN_SAMPLES,
+            "drainReclaimedMinFractionOfRunGrowth": DRAIN_RECLAIMED_MIN_FRACTION,
         },
-        // Explicit tri-state memory disposition (phase 2 is a SINGLE process
-        // by design — no restart epochs in the series).
-        "rssDisposition": if !trend_evaluated {
-            "NOT-EVALUATED"
-        } else if slope <= MAX_RSS_SLOPE_BYTES_PER_SEC {
-            "PASS"
-        } else {
-            "FAIL"
-        },
+        // An over-bound fit whose unaided drain returns most growth is a
+        // retention signal, distinct from both PASS and leak-shaped FAIL.
+        "rssDisposition": rss_disposition,
         "final": { "rss": rss_end, "handles": handles_end, "threads": threads_end },
         "rssSlopeBytesPerSec": slope,
         "assertions": {
@@ -1047,6 +1152,11 @@ async fn main() {
             // scenarios-only artifact can never read as leak evidence.
             "rssSlopeWithinThreshold": if trend_evaluated {
                 json!(slope <= MAX_RSS_SLOPE_BYTES_PER_SEC)
+            } else {
+                json!(null)
+            },
+            "rssAcceptedBySlopeOrDrainReclamation": if trend_evaluated {
+                json!(rss_ok)
             } else {
                 json!(null)
             },
@@ -1074,7 +1184,8 @@ async fn main() {
 
     println!(
         "- {} | soak-{tier} | {}/{} | {} | cycles={} crashes={} durationSecs={} \
-         rssSlopeB/s={:.1} handles {}->{} threads {}->{} handleThreadSlackCalibration={}",
+         rssDisposition={} rssSlopeB/s={:.1} drain={} rssDrain {}->{} min={} \
+         drop={} ({}) handles {}->{} threads {}->{} handleThreadSlackCalibration={}",
         chrono_like_now(),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -1085,7 +1196,20 @@ async fn main() {
         cycle,
         crashes,
         started.elapsed().as_secs(),
+        rss_disposition,
         slope,
+        match drain_disposition {
+            DrainDisposition::Reclaimed => "RECLAIMED",
+            DrainDisposition::Retained => "RETAINED",
+            DrainDisposition::NotEvaluated => "NOT-EVALUATED",
+        },
+        rss_drain_start,
+        rss_end,
+        rss_drain_min,
+        rss_drop_bytes,
+        rss_drop_percent_of_run_growth
+            .map(|percent| format!("{percent:.1}% of run growth"))
+            .unwrap_or_else(|| "no positive run growth".to_owned()),
         handle_base,
         handles_end,
         thread_base,
@@ -1096,13 +1220,13 @@ async fn main() {
             "UNCALIBRATED"
         },
     );
-    // PASS exits 0. A REQUESTED smoke (--quick) legitimately reports
-    // PASS-SCENARIOS-ONLY and also exits 0 — the caller asked for a run
-    // that cannot evaluate a trend. Everything else (FAIL, a FULL run that
-    // degraded to trend-not-evaluated, a hard-capped run) did not meet its
-    // tier's targets: non-zero, so a CI gate checking only the process
-    // status can never accept incomplete cutover evidence.
+    // PASS and the explicitly named retention signal exit 0. The latter is
+    // not silently collapsed into PASS: it says the slope remained over the
+    // bound during work but most growth returned during unaided idle. A
+    // REQUESTED smoke (--quick) legitimately reports PASS-SCENARIOS-ONLY and
+    // also exits 0. Everything else did not meet its tier's targets.
     let acceptable = verdict == "PASS"
+        || verdict == "PASS-RETENTION-SIGNAL(rss-drain-reclaimed)"
         || (options.quick && verdict == "PASS-SCENARIOS-ONLY(trend-not-evaluated)");
     if !acceptable {
         std::process::exit(1);
@@ -1159,4 +1283,53 @@ fn chrono_like_now() -> String {
         (secs / 60) % 60,
         secs % 60
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rss_samples(values: &[u64]) -> Vec<Sample> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, rss_bytes)| Sample {
+                at_secs: index as f64 * SAMPLE_EVERY.as_secs_f64(),
+                rss_bytes: *rss_bytes,
+                handles: 10,
+                threads: 10,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn drain_classifier_reclaimed_when_most_run_growth_returns() {
+        let samples = rss_samples(&[500, 420, 320, 230, 190]);
+
+        assert_eq!(classify_drain(100, &samples), DrainDisposition::Reclaimed);
+    }
+
+    #[test]
+    fn drain_classifier_retained_when_most_run_growth_holds() {
+        let samples = rss_samples(&[500, 470, 430, 390, 350]);
+
+        assert_eq!(classify_drain(100, &samples), DrainDisposition::Retained);
+    }
+
+    #[test]
+    fn drain_classifier_not_evaluated_with_too_few_samples() {
+        let samples = rss_samples(&[500, 350, 250, 100]);
+
+        assert_eq!(
+            classify_drain(100, &samples),
+            DrainDisposition::NotEvaluated
+        );
+    }
+
+    #[test]
+    fn drain_classifier_uses_end_not_one_transient_minimum() {
+        let samples = rss_samples(&[500, 100, 480, 490, 500]);
+
+        assert_eq!(classify_drain(100, &samples), DrainDisposition::Retained);
+    }
 }
