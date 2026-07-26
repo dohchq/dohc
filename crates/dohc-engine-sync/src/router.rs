@@ -15,6 +15,7 @@ use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
+    pub conflicts_opened: i64,
 }
 
 impl RoutedApply {
@@ -83,6 +84,7 @@ pub fn apply_replication_envelope(
             crate::apply_conflict_envelope(store, envelope, faults),
             |conflict| RoutedApply {
                 conflict: Some(conflict),
+                ..RoutedApply::default()
             },
         ),
         OwnedRoute::Workspace => plain(crate::version_apply::apply_workspace_envelope(
@@ -93,7 +95,10 @@ pub fn apply_replication_envelope(
         )),
         OwnedRoute::Moment => map_applied(
             crate::apply_moment_envelope(store, envelope, faults),
-            |_moment| RoutedApply::default(),
+            |conflicts_opened| RoutedApply {
+                conflicts_opened,
+                ..RoutedApply::default()
+            },
         ),
     }
 }

@@ -1036,6 +1036,30 @@ fn moment_append_rejects_non_tracked_or_noncanonical_paths_before_mutation() {
     secret_before["payloadBeforePath"] = json!("app/.env");
     secret_before["payloadBeforeBlobSha256"] = json!(text_sha("content"));
 
+    let mut secret_before_snapshot = present_text_payload(
+        "secret-before-snapshot",
+        "secret-before-snapshot-object",
+        "write",
+        "docs/safe.md",
+        "docs/safe.md",
+        "content",
+        "remote-base",
+        "content",
+    );
+    secret_before_snapshot["beforePath"] = json!("app/.env");
+
+    let mut noncanonical_before_snapshot = present_text_payload(
+        "noncanonical-before-snapshot",
+        "noncanonical-before-snapshot-object",
+        "write",
+        "docs/safe.md",
+        "docs/safe.md",
+        "content",
+        "remote-base",
+        "content",
+    );
+    noncanonical_before_snapshot["beforePath"] = json!("a//b.md");
+
     for (case, payload, object_id) in [
         (
             "secret payloadAfterPath",
@@ -1056,6 +1080,16 @@ fn moment_append_rejects_non_tracked_or_noncanonical_paths_before_mutation() {
             "secret payloadBeforePath",
             secret_before,
             "secret-before-object",
+        ),
+        (
+            "secret beforePath",
+            secret_before_snapshot,
+            "secret-before-snapshot-object",
+        ),
+        (
+            "noncanonical beforePath",
+            noncanonical_before_snapshot,
+            "noncanonical-before-snapshot-object",
         ),
     ] {
         let (_scratch, mut store) = test_store();
@@ -1122,6 +1156,27 @@ fn moment_append_rejects_non_tracked_or_noncanonical_paths_before_mutation() {
     assert_eq!(
         aliases(&store, "canonical-object"),
         ["docs/canonical.md".to_owned()]
+    );
+
+    let canonical_before = envelope(
+        "canonical-before-peer",
+        0,
+        "ws",
+        present_text_payload(
+            "canonical-before",
+            "canonical-before-object",
+            "write",
+            "docs/canonical-before.md",
+            "docs/canonical-after.md",
+            "content",
+            "remote-base",
+            "content",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &canonical_before, &NoFaults)
+            .expect("canonical tracked beforePath"),
+        ApplyOutcome::Applied(1)
     );
 }
 
@@ -1299,6 +1354,69 @@ fn moment_append_require_blob_text_rejects_a_poisoned_address_before_ack() {
         apply_moment_envelope(&mut store, &op, &NoFaults),
         Err(SyncError::BlobInvalid)
     ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn moment_append_rejects_a_corrupt_text_blob_length_before_mutation_and_ack() {
+    let (_scratch, mut store) = test_store();
+    let claimed = text_sha("honest");
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,'honest')",
+                params![claimed, "honest".len() as i64 + 1],
+            )
+        })
+        .expect("poison blob length");
+    let op = envelope(
+        "peer",
+        0,
+        "ws",
+        absent_text_payload(
+            "corrupt-length-moment",
+            "corrupt-length-object",
+            "doc.md",
+            "honest",
+        ),
+    );
+    let error = apply_moment_envelope(&mut store, &op, &NoFaults)
+        .expect_err("corrupt text blob length must fail closed");
+    assert!(
+        matches!(
+            error,
+            SyncError::Storage(dohc_engine_storage::StorageError::StateCorrupt { .. })
+        ),
+        "local length corruption must remain a hard storage error, got {error:?}"
+    );
+    let persisted: (i64, i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments \
+                     WHERE workspace_id='ws' AND moment_id='corrupt-length-moment'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots \
+                     WHERE workspace_id='ws' AND object_id='corrupt-length-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM path_aliases \
+                     WHERE workspace_id='ws' AND object_id='corrupt-length-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("failed text apply leaves no rows");
+    assert_eq!(persisted, (0, 0, 0));
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
         -1

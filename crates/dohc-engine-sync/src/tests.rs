@@ -442,10 +442,7 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
     );
     let outcome = apply_replication_envelope(&mut engine, &op, &NoFaults, &AlwaysLive)
         .expect("live lineage defers");
-    assert_eq!(
-        outcome,
-        ApplyOutcome::Applied(RoutedApply { conflict: None })
-    );
+    assert_eq!(outcome, ApplyOutcome::Applied(RoutedApply::default()));
     let deferred_rows: i64 = engine
         .read_with(|conn| {
             conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
@@ -4772,13 +4769,13 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
     let seed = envelope("workspace-seed-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
     let operation = envelope("workspace-replay-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -4818,7 +4815,7 @@ fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
     let operation = envelope("partial-workspace-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -4923,7 +4920,7 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     type CopiedSnapshot = (String, String, String, Option<String>, Option<String>);
     let copied: Vec<CopiedSnapshot> = engine
@@ -4990,7 +4987,7 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
     applier_replay.origin_id = "version-applier-replay-peer".into();
     assert!(matches!(
         apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let replay_counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -5133,7 +5130,7 @@ fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
         assert!(
             matches!(
                 apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-                Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+                Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
             ),
             "{content_kind:?} must remain accepted"
         );
@@ -5294,7 +5291,7 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine, &honest, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
     assert_eq!(
@@ -5463,7 +5460,7 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -5642,7 +5639,7 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let rows: (Vec<String>, Vec<String>) = engine
         .read_with(|conn| {
@@ -5672,7 +5669,7 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
     applier_replay.origin_id = "secret-fork-applier-replay-peer".into();
     assert!(matches!(
         apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let replayed_rows: (i64, i64) = engine
         .read_with(|conn| {
@@ -5963,7 +5960,7 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine, &admitted, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 }
 
@@ -5998,7 +5995,7 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
     let shadow = envelope(
@@ -6020,7 +6017,7 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
         .expect("secret paths");
     if matches!(
         refusal,
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ) {
         assert_eq!(
             paths,
@@ -6053,7 +6050,7 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
     canonical.recorded_at_ms = 3_000;
     assert!(matches!(
         apply_replication_envelope(&mut engine, &canonical, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "canonical-secret-update").expect("ack"),
@@ -6120,7 +6117,7 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
         .expect("secret collision state");
     if matches!(
         refusal,
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ) {
         assert_eq!(
             state,
@@ -6172,7 +6169,7 @@ fn secret_put_redelivery_skips_its_own_synthesized_moment() {
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
@@ -6296,6 +6293,102 @@ fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "relay-conflict-peer").expect("conflict ack"),
         0
+    );
+}
+
+#[test]
+fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let local_sha = dohc_engine_storage::hex_sha256(b"local");
+    let base_sha = dohc_engine_storage::hex_sha256(b"base");
+    let incoming_sha = dohc_engine_storage::hex_sha256(b"incoming");
+    engine
+        .read_with(|conn| {
+            for (sha, text) in [
+                (&local_sha, "local"),
+                (&base_sha, "base"),
+                (&incoming_sha, "incoming"),
+            ] {
+                conn.execute(
+                    "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![sha, text.len() as i64, text],
+                )?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("hydrate moment blobs");
+    let local = envelope(
+        "local-moment-peer",
+        0,
+        "moment.append",
+        json!({
+            "momentId": "local-head",
+            "versionId": "main",
+            "objectId": "object",
+            "objectCreatedAtMs": 1,
+            "path": "doc.md",
+            "recordedAtMs": 1_000,
+            "operation": "write",
+            "payloadBeforeBlobSha256": null,
+            "payloadBeforePath": null,
+            "payloadAfterBlobSha256": local_sha,
+            "payloadAfterPath": "doc.md",
+            "metadata": {"origin": "sync"},
+            "beforePresent": "absent"
+        }),
+    );
+    let divergent = envelope(
+        "divergent-moment-peer",
+        0,
+        "moment.append",
+        json!({
+            "momentId": "incoming-head",
+            "versionId": "main",
+            "objectId": "object",
+            "objectCreatedAtMs": 1,
+            "path": "doc.md",
+            "recordedAtMs": 2_000,
+            "operation": "write",
+            "payloadBeforeBlobSha256": base_sha,
+            "payloadBeforePath": "doc.md",
+            "payloadAfterBlobSha256": incoming_sha,
+            "payloadAfterPath": "doc.md",
+            "metadata": {"origin": "sync"},
+            "beforePresent": "present",
+            "beforeObjectId": "object",
+            "beforeVersionId": "main",
+            "beforePath": "doc.md",
+            "beforeBlobSha256": base_sha,
+            "beforeUpdatedAtMs": 500,
+            "beforeLatestMomentId": "remote-base",
+            "beforeMetadata": {"origin": "sync"}
+        }),
+    );
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![local, divergent],
+            next_cursor: "moment-conflict-cursor".into(),
+        })),
+    });
+
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("pull");
+    let SyncPassOutcome::Complete {
+        applied,
+        conflicts_opened,
+        ..
+    } = outcome
+    else {
+        panic!("pull must complete: {outcome:?}");
+    };
+    assert_eq!(applied, 2);
+    assert_eq!(
+        conflicts_opened, 1,
+        "discarding the routed moment result hides the newly opened conflict"
     );
 }
 

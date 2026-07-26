@@ -39,7 +39,7 @@ impl SyncError {
         SyncError::Storage(StorageError::persist_public(err))
     }
 
-    pub(crate) fn corrupt(err: rusqlite::Error) -> Self {
+    pub(crate) fn corrupt(err: impl std::error::Error + Send + Sync + 'static) -> Self {
         SyncError::Storage(StorageError::corrupt_public(err))
     }
 }

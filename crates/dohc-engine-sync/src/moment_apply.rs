@@ -448,12 +448,50 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
             reason: "moment.append payload is invalid",
         });
     }
-    validate_canonical_tracked_path(&payload.path)?;
-    if let Some(path) = payload.payload_before_path.as_deref() {
-        validate_canonical_tracked_path(path)?;
-    }
-    validate_canonical_tracked_path(&payload.payload_after_path)?;
+    validate_every_path_field(payload)?;
     Ok(())
+}
+
+fn validate_every_path_field(payload: &MomentAppendPayload) -> Result<(), SyncError> {
+    let MomentAppendPayload {
+        moment_id: _,
+        version_id: _,
+        object_id: _,
+        object_created_at_ms: _,
+        path,
+        recorded_at_ms: _,
+        operation: _,
+        payload_before_blob_sha256: _,
+        payload_before_path,
+        payload_after_blob_sha256: _,
+        payload_after_path,
+        payload_before_content_kind: _,
+        payload_before_byte_length: _,
+        payload_after_content_kind: _,
+        payload_after_byte_length: _,
+        metadata: _,
+        author: _,
+        before_present: _,
+        before_object_id: _,
+        before_version_id: _,
+        before_path,
+        before_blob_sha256: _,
+        before_content_kind: _,
+        before_byte_length: _,
+        before_updated_at_ms: _,
+        before_latest_moment_id: _,
+        before_metadata: _,
+    } = payload;
+
+    [
+        Some(path.as_str()),
+        payload_before_path.as_deref(),
+        Some(payload_after_path.as_str()),
+        before_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .try_for_each(validate_canonical_tracked_path)
 }
 
 fn validate_canonical_tracked_path(path: &str) -> Result<(), SyncError> {
@@ -594,13 +632,20 @@ fn moment_before_from_payload(
 }
 
 fn require_blob_text(tx: &Transaction<'_>, sha: &str) -> Result<String, SyncError> {
-    let text: Option<String> = tx
-        .query_row("SELECT text FROM blobs WHERE sha256=?1", [sha], |row| {
-            row.get(0)
-        })
+    let row: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT byte_length,text FROM blobs WHERE sha256=?1",
+            [sha],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .optional()
         .map_err(SyncError::corrupt)?;
-    let text = text.ok_or(SyncError::BlobInvalid)?;
+    let (byte_length, text) = row.ok_or(SyncError::BlobInvalid)?;
+    if usize::try_from(byte_length).ok() != Some(text.len()) {
+        return Err(SyncError::corrupt(std::io::Error::other(
+            "text blob byte length mismatch",
+        )));
+    }
     if hex_sha256(text.as_bytes()) != sha {
         return Err(SyncError::BlobInvalid);
     }

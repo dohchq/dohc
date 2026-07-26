@@ -140,6 +140,7 @@ pub enum SyncPassOutcome {
         fetched: usize,
         applied: usize,
         skipped: usize,
+        conflicts_opened: i64,
         pending_cursor: Option<RelayCursor>,
         /// Replicated resolutions acked in this pass that the receiver
         /// deliberately did not apply. The cursor advances past them, so they
@@ -150,6 +151,7 @@ pub enum SyncPassOutcome {
     CrashedAfterApply {
         applied: usize,
         skipped: usize,
+        conflicts_opened: i64,
         pending_cursor: RelayCursor,
         pending_resolves: Vec<crate::PendingResolve>,
     },
@@ -243,6 +245,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             fetched: 0,
             applied: 0,
             skipped: 0,
+            conflicts_opened: 0,
             pending_cursor: None,
             pending_resolves: Vec::new(),
         })
@@ -283,6 +286,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let fetched = response.ops.len();
         let mut applied = 0_usize;
         let mut skipped = 0_usize;
+        let mut conflicts_opened = 0_i64;
         let mut pending_resolves = Vec::new();
         for op in &response.ops {
             // Workspace scoping: a buggy/compromised transport must never make a
@@ -297,6 +301,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     if let Some(pending) = routed.pending_resolve() {
                         pending_resolves.push(pending.clone());
                     }
+                    conflicts_opened = conflicts_opened
+                        .checked_add(routed.conflicts_opened)
+                        .ok_or(RelayError::InvalidResponse)?;
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
                 }
                 ApplyOutcome::Skipped => {
@@ -322,6 +329,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             return Ok(SyncPassOutcome::CrashedAfterApply {
                 applied,
                 skipped,
+                conflicts_opened,
                 pending_cursor,
                 pending_resolves,
             });
@@ -331,6 +339,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             fetched,
             applied,
             skipped,
+            conflicts_opened,
             pending_cursor: Some(pending_cursor),
             pending_resolves,
         })
