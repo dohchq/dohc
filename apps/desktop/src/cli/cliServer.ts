@@ -52,6 +52,8 @@ const MAX_FTS_CANDIDATES = 50_000;
 const MAX_SOCKET_CONNECTIONS = 64;
 const REQUEST_DEADLINE_MS = 15_000;
 const REGEX_SCAN_TIMEOUT_MS = 5_000;
+const RUN_MESSAGE_LINK_ATTEMPTS = 3;
+const RUN_MESSAGE_LINK_RETRY_MS = 25;
 const TOKEN_RE = /^[a-f0-9]{64}$/u;
 
 const authEnvelopeSchema = z.object({ token: z.string() }).passthrough();
@@ -125,6 +127,7 @@ export interface CliServerOptions {
   nowMs?: () => number;
   platform?: NodeJS.Platform;
   regexScanTimeoutMs?: number;
+  runMessageLinkRetryMs?: number;
 }
 
 export interface CliServerHandle {
@@ -755,27 +758,47 @@ async function linkRunMessage(
   context: CliWorkspaceContext,
   input: { actor: CliActor; runId?: string; messageId: string },
   options: CliServerOptions,
-): Promise<void> {
-  if (input.actor !== "agent" || !input.runId) return;
-  try {
-    const run = await context.dispatchStore.getRunRecord(input.runId);
-    if (!run || run.workspaceId !== context.workspaceId) return;
-    await context.dispatchStore.recordRunMessage({
-      workspaceId: context.workspaceId,
-      messageId: input.messageId,
-      runId: input.runId,
-    });
-  } catch (error) {
-    if (
-      error instanceof AgentDispatchStoreError &&
-      (error.code === "invalid-input" || error.code === "run-not-found")
-    ) {
-      return;
-    }
+): Promise<string | null> {
+  if (input.actor !== "agent" || !input.runId) return null;
+  const retryMs = options.runMessageLinkRetryMs ?? RUN_MESSAGE_LINK_RETRY_MS;
+  for (let attempt = 1; attempt <= RUN_MESSAGE_LINK_ATTEMPTS; attempt += 1) {
     try {
-      options.onError?.(error);
-    } catch {}
+      const run = await context.dispatchStore.getRunRecord(input.runId);
+      if (!run || run.workspaceId !== context.workspaceId) return null;
+      await context.dispatchStore.recordRunMessage({
+        workspaceId: context.workspaceId,
+        messageId: input.messageId,
+        runId: input.runId,
+      });
+      return null;
+    } catch (error) {
+      if (
+        error instanceof AgentDispatchStoreError &&
+        (error.code === "invalid-input" || error.code === "run-not-found")
+      ) {
+        return null;
+      }
+      if (attempt < RUN_MESSAGE_LINK_ATTEMPTS) {
+        await new Promise<void>((resolveDelay) => {
+          setTimeout(resolveDelay, retryMs * attempt);
+        });
+        continue;
+      }
+      const warning =
+        `Message posted, but agent-run provenance could not be recorded after ` +
+        `${RUN_MESSAGE_LINK_ATTEMPTS} attempts.`;
+      try {
+        options.onError?.(
+          new Error(
+            `${warning} runId=${input.runId} messageId=${input.messageId}`,
+            { cause: error },
+          ),
+        );
+      } catch {}
+      return warning;
+    }
   }
+  return null;
 }
 
 async function dispatch(
@@ -986,7 +1009,7 @@ async function dispatch(
         needsDecision: request.args.needsDecision,
         attachments,
       });
-      await linkRunMessage(context, {
+      const linkWarning = await linkRunMessage(context, {
         actor: request.args.actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: started.message.id,
@@ -997,6 +1020,7 @@ async function dispatch(
         threadId: cliThreadId(started.thread.id),
         messageId: cliMessageId(started.message.id),
         title: started.thread.title,
+        ...(linkWarning ? { warning: linkWarning } : {}),
       };
     }
 
@@ -1042,7 +1066,7 @@ async function dispatch(
         needsDecision: request.args.needsDecision,
         attachments,
       });
-      await linkRunMessage(context, {
+      const linkWarning = await linkRunMessage(context, {
         actor: request.args.actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: message.id,
@@ -1096,6 +1120,7 @@ async function dispatch(
         ...(decisionMessage && resolvedByReply
           ? { resolvedMessageId: cliMessageId(decisionMessage.id) }
           : {}),
+        ...(linkWarning ? { warning: linkWarning } : {}),
       };
     }
 

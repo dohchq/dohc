@@ -337,7 +337,11 @@ describe("live agent dispatch store", () => {
         .map(({ params }) => params),
     ).toEqual([
       { rootDir: WORKSPACE.rootPath, workspaceId: WORKSPACE.workspaceId },
-      { rootDir: WORKSPACE.rootPath, workspaceId: WORKSPACE.workspaceId },
+      {
+        rootDir: WORKSPACE.rootPath,
+        workspaceId: WORKSPACE.workspaceId,
+        recoverRunningDispatches: false,
+      },
     ]);
   });
 
@@ -425,5 +429,10 @@ describe("live agent dispatch store", () => {
       "chats.dispatch.recordRunMessage",
       "workspace.close",
     ]);
+    expect(second.requests[0]?.params).toEqual({
+      rootDir: WORKSPACE.rootPath,
+      workspaceId: WORKSPACE.workspaceId,
+      recoverRunningDispatches: false,
+    });
   });
 });

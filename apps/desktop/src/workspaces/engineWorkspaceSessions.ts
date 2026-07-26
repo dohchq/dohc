@@ -23,6 +23,8 @@ export interface EngineDaemonClientSource {
 
 interface SessionEntry {
   binding: EngineWorkspaceBinding | null;
+  // A fresh desktop boot recovers abandoned runs; a sidecar-only rebind does not.
+  hasOpened: boolean;
   opening: {
     client: EngineDaemonClient;
     promise: Promise<EngineWorkspaceBinding>;
@@ -100,7 +102,7 @@ export class EngineWorkspaceSessions {
   private entry(workspaceId: string): SessionEntry {
     let entry = this.entries.get(workspaceId);
     if (!entry) {
-      entry = { binding: null, opening: null };
+      entry = { binding: null, hasOpened: false, opening: null };
       this.entries.set(workspaceId, entry);
     }
     return entry;
@@ -116,11 +118,12 @@ export class EngineWorkspaceSessions {
       if (entry.binding?.client !== client) entry.binding = null;
       if (entry.opening?.client === client) return await entry.opening.promise;
 
-      const promise = this.openWithClient(client, workspace);
+      const promise = this.openWithClient(client, workspace, entry.hasOpened);
       entry.opening = { client, promise };
       let binding: EngineWorkspaceBinding;
       try {
         binding = await promise;
+        entry.hasOpened = true;
       } finally {
         if (entry.opening?.promise === promise) entry.opening = null;
       }
@@ -136,11 +139,13 @@ export class EngineWorkspaceSessions {
   private async openWithClient(
     client: EngineDaemonClient,
     workspace: EngineWorkspace,
+    isRebind: boolean,
   ): Promise<EngineWorkspaceBinding> {
     const requester = new WorkspaceDaemonRequester(client);
     const raw = await requester.request(WORKSPACE_METHOD.open, {
       rootDir: workspace.rootPath,
       workspaceId: workspace.workspaceId,
+      ...(isRebind ? { recoverRunningDispatches: false } : {}),
     });
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
     return { client, workspace: opened.workspace as WorkspaceHandle };

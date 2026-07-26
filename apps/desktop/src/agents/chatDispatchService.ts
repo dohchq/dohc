@@ -679,18 +679,23 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     live.killEscalation = null;
     const code = exitCode ?? signalExitCode(signal);
     const dispatch = options.dispatchStoreFor(live.workspace);
-    const linkedMessages = await dispatch.listRunMessages(
-      live.workspace.workspaceId,
-      live.claim.run.runId,
-    );
     try {
+      let linkedMessages: string[] | null = null;
+      try {
+        linkedMessages = await dispatch.listRunMessages(
+          live.workspace.workspaceId,
+          live.claim.run.runId,
+        );
+      } catch (error) {
+        reportError(error);
+      }
       if (code !== 0) {
         await postFailureNote(
           live.workspace,
           live.claim.run,
           `⚠ Agent run failed (exit ${code}). Open the run chip for details.`,
         ).catch(reportError);
-      } else if (linkedMessages.length === 0) {
+      } else if (linkedMessages?.length === 0) {
         await postFailureNote(
           live.workspace,
           live.claim.run,
@@ -702,15 +707,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         exitCode: code,
       });
       notifyRunUpdated(live.workspace.workspaceId);
-    } catch (error) {
-      liveRuns.delete(live.workspace.workspaceId);
+    } finally {
+      if (liveRuns.get(live.workspace.workspaceId) === live) {
+        liveRuns.delete(live.workspace.workspaceId);
+      }
       clearLiveAttribution(live);
       await releaseLiveWorkspace(live);
-      throw error;
     }
-    liveRuns.delete(live.workspace.workspaceId);
-    clearLiveAttribution(live);
-    await releaseLiveWorkspace(live);
     await scanAndDrain(live.workspace);
   }
 
@@ -1419,14 +1422,19 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       runWorkspacesToRelease.push(live);
       quitProcesses.push(live.child);
     }
-    for (const live of appQuitRuns) {
-      await options.dispatchStoreFor(live.workspace).failRun({
-        runId: live.claim.run.runId,
-        exitCode: APP_QUIT_EXIT_CODE,
-        reason: "app-quit",
-      });
-    }
     const quitTerminations = quitProcesses.map(terminateForAppQuit);
+    const persistedQuitRuns = await Promise.allSettled(
+      appQuitRuns.map(async (live) => {
+        await options.dispatchStoreFor(live.workspace).failRun({
+          runId: live.claim.run.runId,
+          exitCode: APP_QUIT_EXIT_CODE,
+          reason: "app-quit",
+        });
+      }),
+    );
+    for (const result of persistedQuitRuns) {
+      if (result.status === "rejected") reportError(result.reason);
+    }
     await Promise.all([
       ...[...workspaceChains.values()].map((chain) =>
         chain.catch(() => undefined),

@@ -133,6 +133,9 @@ interface Fixture {
   runActivity: { acquires: number; releases: number };
   now: { value: number };
   requeueRaw(input: { workspaceId: string; triggerMessageId: string; runId: string }): boolean;
+  restartDaemon?(): void;
+  rejectNextRunMessageLookup?(error: Error): void;
+  rejectNextFailRun?(error: Error): void;
   closeDispatch(): Promise<void>;
 }
 
@@ -252,18 +255,51 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   let liveRecoveries:
     | ReturnType<typeof createLiveAgentDispatchStore>["listAppQuitRecoveries"]
     | undefined;
+  let restartDaemon: (() => void) | undefined;
+  let rejectNextRunMessageLookup: ((error: Error) => void) | undefined;
+  let rejectNextFailRun: ((error: Error) => void) | undefined;
   if (options.dispatchBackend === "live") {
-    const daemon = {
-      close: () => undefined,
-      async sendRequest(request: Request): Promise<Response> {
+    let daemonGeneration = 1;
+    let nextRunMessageLookupError: Error | null = null;
+    let nextFailRunError: Error | null = null;
+    const sendRequest = async (request: Request): Promise<Response> => {
         const params = request.params as {
           [key: string]: JsonValue | undefined;
         };
         let result: unknown;
         switch (request.method) {
-          case "workspace.open":
-            result = { workspace: "service-live-handle" };
+          case "workspace.open": {
+            if (params.recoverRunningDispatches !== false) {
+              const running = dispatchDb
+                .prepare(
+                  `SELECT trigger_message_id, run_id
+                   FROM chat_dispatch_ledger
+                   WHERE workspace_id = ? AND state = 'running'`,
+                )
+                .all(WORKSPACE_ID);
+              for (const row of running) {
+                dispatchDb
+                  .prepare(
+                    `UPDATE agent_run_records
+                     SET ended_at_ms = ?, exit_code = -1,
+                         failure_reason = 'reclaimed-crashed'
+                     WHERE workspace_id = ? AND run_id = ? AND ended_at_ms IS NULL`,
+                  )
+                  .run(now.value, WORKSPACE_ID, row.run_id);
+                dispatchDb
+                  .prepare(
+                    `UPDATE chat_dispatch_ledger
+                     SET state = 'pending', run_id = NULL, failure_reason = NULL,
+                         updated_at_ms = ?
+                     WHERE workspace_id = ? AND trigger_message_id = ?
+                       AND state = 'running'`,
+                  )
+                  .run(now.value, WORKSPACE_ID, row.trigger_message_id);
+              }
+            }
+            result = { workspace: `service-live-handle-${daemonGeneration}` };
             break;
+          }
           case "workspace.close":
             result = { closed: true };
             break;
@@ -316,6 +352,11 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
             }
             break;
           case "chats.dispatch.listRunMessages":
+            if (nextRunMessageLookupError) {
+              const error = nextRunMessageLookupError;
+              nextRunMessageLookupError = null;
+              throw error;
+            }
             result = {
               messageIds: dispatch.listRunMessages(
                 WORKSPACE_ID,
@@ -332,6 +373,11 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
             result = { completed: true };
             break;
           case "chats.dispatch.fail":
+            if (nextFailRunError) {
+              const error = nextFailRunError;
+              nextFailRunError = null;
+              throw error;
+            }
             dispatch.failRun({
               runId: String(params.runId),
               ...(typeof params.exitCode === "number"
@@ -363,7 +409,23 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
             );
         }
         return { id: request.id, result: result as JsonValue };
-      },
+    };
+    let daemon = {
+      close: () => undefined,
+      sendRequest,
+    };
+    restartDaemon = () => {
+      daemonGeneration += 1;
+      daemon = {
+        close: () => undefined,
+        sendRequest,
+      };
+    };
+    rejectNextRunMessageLookup = (error) => {
+      nextRunMessageLookupError = error;
+    };
+    rejectNextFailRun = (error) => {
+      nextFailRunError = error;
     };
     const sessions = new EngineWorkspaceSessions({
       currentClient: () => daemon,
@@ -457,6 +519,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     runActivity,
     now,
     requeueRaw,
+    ...(restartDaemon ? { restartDaemon } : {}),
+    ...(rejectNextRunMessageLookup ? { rejectNextRunMessageLookup } : {}),
+    ...(rejectNextFailRun ? { rejectNextFailRun } : {}),
     closeDispatch,
   };
   fixtures.push(fixture);
@@ -829,6 +894,74 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
 
     expect(fixture.runActivity).toEqual({ acquires: 1, releases: 1 });
+  });
+
+  it("preserves a surviving runner claim across a daemon lifecycle swap", async () => {
+    const fixture = await createFixture({ dispatchBackend: "live" });
+    const trigger = await createAgentThread(fixture, {
+      body: "Keep this runner alive while the daemon restarts.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!claim || !fixture.restartDaemon) {
+      throw new Error("Expected a live runner and restartable daemon.");
+    }
+    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+
+    fixture.restartDaemon();
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
+      endedAtMs: fixture.now.value,
+      exitCode: 0,
+    });
+    expect(
+      fixture.dispatchDb
+        .prepare(
+          `SELECT state, attempt_count
+           FROM chat_dispatch_ledger
+           WHERE workspace_id = ? AND trigger_message_id = ?`,
+        )
+        .get(WORKSPACE_ID, trigger.messageId),
+    ).toMatchObject({ state: "done", attempt_count: 1 });
+    expect(fixture.spawnCalls).toHaveLength(1);
+  });
+
+  it("releases the live slot when the final run-message lookup rejects", async () => {
+    // MUTATION: await listRunMessages before terminal cleanup -> the second
+    // trigger remains wedged behind the leaked finalized live slot.
+    const fixture = await createFixture({
+      dispatchBackend: "live",
+      temporaryRunActivity: true,
+    });
+    await createAgentThread(fixture, {
+      body: "Finish while the daemon read is unavailable.",
+      authorUserId: "user_local",
+    });
+    const next = await createAgentThread(fixture, {
+      body: "Dispatch after the failed final lookup.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const firstClaim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    const lookupError = new Error("daemon restarted during listRunMessages");
+    if (!firstClaim || !fixture.rejectNextRunMessageLookup) {
+      throw new Error("Expected a live runner and injectable daemon failure.");
+    }
+
+    fixture.rejectNextRunMessageLookup(lookupError);
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.errors).toContain(lookupError);
+    expect(fixture.dispatch.getRunRecord(firstClaim.run.runId)).toMatchObject({
+      exitCode: 0,
+    });
+    expect(fixture.spawnCalls).toHaveLength(2);
+    expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(next.threadId);
+    expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
   });
 
   it("coalesces pending triggers in one thread and dispatches a later message as a follow-up", async () => {
@@ -1338,6 +1471,38 @@ describe("chatDispatchService", () => {
       threadId: trigger.threadId,
     });
     expect(messages.some((message) => message.body.includes("app quit during run"))).toBe(false);
+  });
+
+  it("terminates an app-quit runner when persisting its failure rejects", async () => {
+    // MUTATION: start quit termination after failRun -> this rejection leaves
+    // the detached runner alive and neither signal is observed.
+    vi.useFakeTimers();
+    const fixture = await createFixture({ dispatchBackend: "live" });
+    await createAgentThread(fixture, {
+      body: "Quit while persistence is unavailable.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const persistenceError = new Error("daemon unavailable during app quit");
+    if (!fixture.rejectNextFailRun) {
+      throw new Error("Expected injectable daemon failure.");
+    }
+    fixture.rejectNextFailRun(persistenceError);
+
+    const stopping = fixture.service.stop();
+    await flushMicrotasks();
+
+    expect(fixture.killCalls).toContainEqual({
+      pid: -fixture.spawnCalls[0]!.process.pid!,
+      signal: "SIGTERM",
+    });
+    await vi.advanceTimersByTimeAsync(APP_QUIT_KILL_GRACE_MS);
+    await stopping;
+    expect(fixture.killCalls).toContainEqual({
+      pid: -fixture.spawnCalls[0]!.process.pid!,
+      signal: "SIGKILL",
+    });
+    expect(fixture.errors).toContain(persistenceError);
   });
 
   it("times out a run, posts the timeout note, and escalates its process group", async () => {

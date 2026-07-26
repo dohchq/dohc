@@ -628,6 +628,96 @@ describe("CLI socket server", () => {
     expect(errors).toEqual([]);
   });
 
+  it("retries transient run-message provenance failures until the link persists", async () => {
+    // MUTATION: restore the single best-effort attempt -> no provenance row is
+    // stored after the first transient daemon failure.
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_retry_trigger",
+      threadId: "thread_retry",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for retry linkage.");
+    let attempts = 0;
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage(input) {
+          attempts += 1;
+          if (attempts < 3) throw new Error("transient daemon restart");
+          return originalDispatch.recordRunMessage(input);
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Retry provenance",
+      body: "The message itself persists once.",
+    });
+
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    expect(attempts).toBe(3);
+    expect(result.warning).toBeUndefined();
+    expect(
+      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
+    ).toBe(claim.run.runId);
+    expect(errors).toEqual([]);
+  });
+
+  it("returns a visible warning when run-message provenance retries are exhausted", async () => {
+    // MUTATION: swallow the final failure -> the successful CLI result has no
+    // warning and the desktop error channel remains empty.
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_permanent_trigger",
+      threadId: "thread_permanent",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for failed linkage.");
+    let attempts = 0;
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage() {
+          attempts += 1;
+          throw new Error("daemon remains unavailable");
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Visible provenance warning",
+      body: "Posting succeeds even though linkage is degraded.",
+    });
+
+    expect(attempts).toBe(3);
+    expect(result.warning).toContain(
+      "agent-run provenance could not be recorded after 3 attempts",
+    );
+    expect(errors).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining(`runId=${claim.run.runId}`),
+      }),
+    ]);
+    expect(
+      originalDispatch.listRunMessages(WORKSPACE_ID, claim.run.runId),
+    ).toEqual([]);
+  });
+
   it("shows a message branch and lists candidates for an ambiguous id prefix", async () => {
     const first = await post({
       actor: "human",
