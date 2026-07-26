@@ -2,29 +2,50 @@
 //!
 //! This module is compiled only by the `harness` feature. It never opens the
 //! source workspace for writing: all markers, stores, and rehearsal state are
-//! created beneath a byte clone, and a full source hash/mtime snapshot is
-//! compared before evidence can be banked.
+//! created beneath a byte clone. Evidence is banked only after a full source
+//! hash/mtime snapshot is unchanged and the production daemon capture path has
+//! recaptured every expected user file into a healthy, settled fresh store.
 
+use crate::EngineService;
+#[cfg(unix)]
+use crate::cutover_rehearse::metadata_is_hard_linked;
 use crate::cutover_rehearse::{
     BackupFingerprint, NoFaults, RehearsalConfig, RehearsalError, RehearsalOutcome, RehearsalState,
-    StateRecord, run_rehearsal, validate_rehearsal_root, write_rehearsal_token_for_harness,
+    StateRecord, fsync_dir, run_rehearsal, validate_rehearsal_root,
+    write_rehearsal_token_for_harness,
 };
 use crate::shadow_fence::{ShadowFenceError, write_shadow_marker_for_harness};
+use dohc_engine_domain::{SECRET_SEED_SENTINEL_SHA, SecretFileStore, capture_manifest_seed};
 use dohc_engine_files::floor::{
-    ENGINE_STORAGE_SEGMENT, IGNORED_FILE_PREFIXES, RESERVED_SEGMENTS, normalize_segment,
+    ENGINE_STORAGE_SEGMENT, IGNORED_FILE_PREFIXES, RESERVED_SEGMENTS, is_excluded_file,
+    normalize_segment,
+};
+use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
+use dohc_engine_protocol::{
+    transport::{EngineTransport, InProcessTransport, RequestContext},
+    wire::{Request, WorkspaceHandle},
+};
+use dohc_engine_runtime::search::{
+    DiagnosticReason, read_engine_search_policy, resolve_effective_policy,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use filetime::FileTime;
 use serde::Serialize;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const EVIDENCE_FILE: &str = "REHEARSAL_EVIDENCE.json";
 const TYPESCRIPT_STORE_DIR: &str = "typescript-engine-byte-clone";
+const RECAPTURE_WORKSPACE_ID: &str = "gate6-recapture";
+const RECAPTURE_VERSION_ID: &str = "main";
+const RECAPTURE_TIMEOUT: Duration = Duration::from_secs(60);
 const SQLITE_SOURCE_FILES: [&str; 4] = [
     "engine.db",
     "engine.db-wal",
@@ -62,6 +83,10 @@ pub enum HarnessError {
     RandomToken,
     #[error("rehearsal returned a non-complete outcome: {0}")]
     IncompleteOutcome(String),
+    #[error("production recapture failed during {stage}: {detail}")]
+    RecapturePipeline { stage: &'static str, detail: String },
+    #[error("recapture comparison was not total:\n{diff}")]
+    RecaptureIncomplete { diff: String },
     #[error("filesystem operation failed during {operation}")]
     Io {
         operation: &'static str,
@@ -118,6 +143,7 @@ pub struct PreservedSourceStoreEntry {
 pub enum FloorSkippedRootKind {
     Directory,
     Alias,
+    File,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -126,6 +152,9 @@ pub struct FloorSkippedRoot {
     pub kind: FloorSkippedRootKind,
     pub source_root_modified_seconds: i64,
     pub source_root_modified_nanoseconds: u32,
+    pub source_content_sha256: String,
+    pub source_file_count: usize,
+    pub source_total_file_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -133,7 +162,45 @@ pub struct FloorSkipEvidence {
     pub root_count: usize,
     pub directory_root_count: usize,
     pub alias_root_count: usize,
+    pub file_root_count: usize,
     pub roots: Vec<FloorSkippedRoot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecaptureEvidence {
+    pub paths_expected: usize,
+    pub paths_recaptured: usize,
+    pub records_expected: usize,
+    pub records_recaptured: usize,
+    pub content_identities_verified: usize,
+    pub flush_attempts: usize,
+    pub mismatches: Vec<RecaptureMismatch>,
+    pub projections_settled: bool,
+    pub verdict: RecaptureVerdict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecaptureVerdict {
+    Complete,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecaptureMismatch {
+    pub path: String,
+    pub reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<RecaptureInventoryState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recaptured: Option<RecaptureInventoryState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecaptureInventoryState {
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub storage_kind: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -142,6 +209,7 @@ pub struct Timings {
     pub byte_clone_ms: u64,
     pub clone_preparation_ms: u64,
     pub rehearsal_ms: u64,
+    pub recapture_ms: u64,
     pub source_verification_ms: u64,
     pub total_ms: u64,
 }
@@ -167,6 +235,7 @@ pub struct RehearsalEvidence {
     pub initial_byte_clone_counts: TreeSummary,
     pub final_clone_counts: TreeSummary,
     pub floor_skips: FloorSkipEvidence,
+    pub recapture: RecaptureEvidence,
     pub ui_state_tmp_orphans: Vec<ArtifactEntry>,
     pub preserved_typescript_store: Vec<PreservedSourceStoreEntry>,
     pub recovery_artifacts: Vec<ArtifactEntry>,
@@ -178,6 +247,7 @@ struct TreeEntry {
     relative_path: String,
     kind: EntryKind,
     size_bytes: u64,
+    contained_file_count: usize,
     modified_seconds: i64,
     modified_nanoseconds: u32,
     sha256: String,
@@ -189,6 +259,7 @@ enum EntryKind {
     File,
     FloorSkippedDirectory,
     FloorSkippedAlias,
+    FloorSkippedFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,12 +272,35 @@ struct PreparedClone {
     preserved_store: Vec<PreservedSourceStoreEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InventoryState {
+    size_bytes: u64,
+    sha256: String,
+    storage_kind: &'static str,
+    secret: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecaptureRun {
+    flush_attempts: usize,
+}
+
+type PostCaptureHook<'a> = Option<&'a dyn Fn(&Path) -> Result<(), HarnessError>>;
+
 /// Run one clone/reset rehearsal and bank its evidence.
 ///
-/// The source is read only. Evidence is published only after a second complete
+/// The source is read only. Evidence is published only after the production
+/// daemon capture path has recaptured the reset clone completely and a second
 /// source snapshot proves every relative path, file hash, size, and mtime is
 /// unchanged.
 pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError> {
+    run_with_post_capture_hook(config, None)
+}
+
+fn run_with_post_capture_hook(
+    config: HarnessConfig<'_>,
+    post_capture_hook: PostCaptureHook<'_>,
+) -> Result<RehearsalEvidence, HarnessError> {
     let total_started = Instant::now();
     let started_at_unix_ms = unix_now_ms()?;
     let (source, scratch, recovery) = validate_paths(config)?;
@@ -221,6 +315,7 @@ pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError>
         &recovery,
         &source_before,
         started_at_unix_ms,
+        post_capture_hook,
     );
 
     // This assertion runs even when cloning, preparation, or rehearsal failed.
@@ -252,11 +347,11 @@ pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError>
             HarnessError::IncompleteOutcome("complete record lacks fresh engine UUID".to_owned())
         })?;
     let evidence = RehearsalEvidence {
-        schema_version: 2,
+        schema_version: 3,
         criterion: "GATE6 end-to-end clone-reset rehearsal on real dogfood workspace byte-clones"
             .to_owned(),
         recorded_interpretation: "The live dogfood engine.db is TypeScript-authored and the Rust fence correctly refuses its foreign fingerprint. The authorized cutover is a reset: retain the source SQLite files inside the byte clone, initialize and bind a fresh Rust store in the clone, write the two harness-only markers, then exercise run_rehearsal(NoFaults). Ice accepted the data wipe; this interpretation remains flagged for Ice's post-hoc review.".to_owned(),
-        floor_clone_design_decision: "The byte clone omits directory roots whose names are excluded by the capture floor, except .dohc, which the rehearsal machinery requires. Reset never touches floor-excluded directories because they are outside the engine's world; cloning regenerable package trees adds alias noise the real reset cannot encounter and does not strengthen the user-data inventory proof. Every omitted root and its source-root mtime are recorded, while alias refusal remains fail-closed for every entry actually cloned.".to_owned(),
+        floor_clone_design_decision: "The byte clone applies the canonical capture floor to both directory roots and files, except the .dohc subtree required by the rehearsal machinery. Reset never touches capture-excluded content because it is outside the engine's world. Every omitted root or file is recorded, and the complete contents of omitted directory trees are independently hashed into the before/after source proof. Alias and special-file refusal remains fail-closed for every entry actually cloned.".to_owned(),
         started_at_unix_ms,
         finished_at_unix_ms,
         source_path: display_path(&source),
@@ -272,6 +367,7 @@ pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError>
         initial_byte_clone_counts: completed.initial_clone.summary,
         final_clone_counts: completed.final_clone.summary,
         floor_skips: completed.floor_skips,
+        recapture: completed.recapture,
         ui_state_tmp_orphans: completed.ui_state_tmp_orphans,
         preserved_typescript_store: completed.prepared.preserved_store,
         recovery_artifacts: std::mem::take(&mut completed.recovery_artifacts),
@@ -280,6 +376,7 @@ pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError>
             byte_clone_ms: completed.byte_clone_ms,
             clone_preparation_ms: completed.clone_preparation_ms,
             rehearsal_ms: completed.rehearsal_ms,
+            recapture_ms: completed.recapture_ms,
             source_verification_ms,
             total_ms: elapsed_ms(total_started),
         },
@@ -296,11 +393,13 @@ struct CompletedClone {
     floor_skips: FloorSkipEvidence,
     prepared: PreparedClone,
     state_record: StateRecord,
+    recapture: RecaptureEvidence,
     ui_state_tmp_orphans: Vec<ArtifactEntry>,
     recovery_artifacts: Vec<ArtifactEntry>,
     byte_clone_ms: u64,
     clone_preparation_ms: u64,
     rehearsal_ms: u64,
+    recapture_ms: u64,
 }
 
 fn run_on_clone(
@@ -309,9 +408,10 @@ fn run_on_clone(
     recovery: &Path,
     source_before: &TreeSnapshot,
     started_at_unix_ms: i64,
+    post_capture_hook: PostCaptureHook<'_>,
 ) -> Result<CompletedClone, HarnessError> {
-    create_dir_all(scratch, "create scratch directory")?;
-    create_dir_all(recovery, "create recovery directory")?;
+    create_private_dir_all(scratch, "create private scratch directory")?;
+    create_private_dir_all(recovery, "create private recovery directory")?;
     let scratch = canonicalize(scratch, "canonicalize scratch directory")?;
     let recovery = canonicalize(recovery, "canonicalize recovery directory")?;
     ensure_outside(source, &scratch, "scratch")?;
@@ -332,6 +432,7 @@ fn run_on_clone(
         return Err(HarnessError::CloneMismatch);
     }
     let ui_state_tmp_orphans = debris_entries(&initial_clone);
+    let expected_inventory = expected_recapture_inventory(&initial_clone, &clone_path)?;
 
     let preparation_started = Instant::now();
     let prepared = prepare_clone(&clone_path, started_at_unix_ms)?;
@@ -367,6 +468,22 @@ fn run_on_clone(
         }
     };
 
+    let recapture_started = Instant::now();
+    let recapture_run = drive_production_recapture(&clone_path)?;
+    if let Some(hook) = post_capture_hook {
+        hook(&clone_path)?;
+    }
+    let recapture = compare_recapture(
+        &clone_path,
+        &expected_inventory,
+        recapture_run.flush_attempts,
+    )?;
+    let recapture_ms = elapsed_ms(recapture_started);
+    if recapture.verdict != RecaptureVerdict::Complete {
+        let diff = serde_json::to_string_pretty(&recapture)?;
+        return Err(HarnessError::RecaptureIncomplete { diff });
+    }
+
     let final_clone = snapshot_tree(&clone_path)?;
     let recovery_artifacts = artifact_manifest(&recovery, Some(EVIDENCE_FILE))?;
     Ok(CompletedClone {
@@ -377,12 +494,393 @@ fn run_on_clone(
         floor_skips,
         prepared,
         state_record,
+        recapture,
         ui_state_tmp_orphans,
         recovery_artifacts,
         byte_clone_ms,
         clone_preparation_ms,
         rehearsal_ms,
+        recapture_ms,
     })
+}
+
+fn expected_recapture_inventory(
+    pre_reset: &TreeSnapshot,
+    clone_root: &Path,
+) -> Result<BTreeMap<String, InventoryState>, HarnessError> {
+    let policy = read_engine_search_policy(clone_root);
+    if policy.diagnostics.iter().any(|diagnostic| {
+        diagnostic.file == "files.toml" && diagnostic.reason == DiagnosticReason::Unreadable
+    }) {
+        return Err(recapture_failure(
+            "read capture policy",
+            "the cloned .dohc/files.toml exists but is unreadable",
+        ));
+    }
+
+    let mut expected = BTreeMap::new();
+    for entry in &pre_reset.entries {
+        if entry.kind != EntryKind::File
+            || entry.relative_path == ENGINE_STORAGE_SEGMENT
+            || entry
+                .relative_path
+                .starts_with(&format!("{ENGINE_STORAGE_SEGMENT}/"))
+        {
+            continue;
+        }
+        let (classification, normalized) =
+            classify_engine_file_path_normalized(&entry.relative_path);
+        let secret = classification == PathClassification::Secret;
+        if classification == PathClassification::Tracked
+            && policy.files_policy.as_ref().is_some_and(|rules| {
+                !resolve_effective_policy(&entry.relative_path, Some(rules.as_slice()), None)
+                    .tracked
+            })
+        {
+            continue;
+        }
+        let storage_kind = match classification {
+            PathClassification::Secret => "secret",
+            PathClassification::Tracked
+                if normalized.as_deref() == Some(entry.relative_path.as_str()) =>
+            {
+                "content"
+            }
+            PathClassification::Tracked | PathClassification::Ignored => "capture_refused",
+        };
+        expected.insert(
+            entry.relative_path.clone(),
+            InventoryState {
+                size_bytes: entry.size_bytes,
+                sha256: entry.sha256.clone(),
+                storage_kind,
+                secret,
+            },
+        );
+    }
+    Ok(expected)
+}
+
+fn drive_production_recapture(clone_root: &Path) -> Result<RecaptureRun, HarnessError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .map_err(|error| recapture_failure("create daemon runtime", error))?;
+    runtime.block_on(async {
+        let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+        let opened = transport
+            .call(
+                RequestContext::unbounded(),
+                recapture_request(
+                    1,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": clone_root.to_string_lossy(),
+                        "workspaceId": RECAPTURE_WORKSPACE_ID,
+                    }),
+                ),
+            )
+            .await
+            .map_err(|error| recapture_failure("workspace.open", format!("{error:?}")))?;
+        let handle: WorkspaceHandle = serde_json::from_value(opened.result["workspace"].clone())
+            .map_err(|error| recapture_failure("decode workspace handle", error))?;
+
+        let mut request_id = 1_u64;
+        let mut flush_attempts = 0_usize;
+        let deadline = tokio::time::Instant::now() + RECAPTURE_TIMEOUT;
+        let flush_result = loop {
+            request_id = request_id.saturating_add(1);
+            flush_attempts = flush_attempts.saturating_add(1);
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break Err(recapture_failure(
+                    "capture.flush",
+                    "production capture did not reach healthy quiescence before the timeout",
+                ));
+            }
+            let response = tokio::time::timeout(
+                remaining,
+                transport.call(
+                    RequestContext::unbounded(),
+                    recapture_request(request_id, "capture.flush", Some(handle.clone()), json!({})),
+                ),
+            )
+            .await
+            .map_err(|_| {
+                recapture_failure(
+                    "capture.flush",
+                    "production capture did not answer before the timeout",
+                )
+            })
+            .and_then(|response| {
+                response.map_err(|error| recapture_failure("capture.flush", format!("{error:?}")))
+            });
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => break Err(error),
+            };
+            let settled = response.result["settled"] == json!(true);
+            let running = response.result["running"] == json!(true);
+            let degraded = response.result["degraded"] == json!(true);
+            if settled && running && !degraded {
+                break Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        request_id = request_id.saturating_add(1);
+        let close_result = transport
+            .call(
+                RequestContext::unbounded(),
+                recapture_request(request_id, "workspace.close", Some(handle), json!({})),
+            )
+            .await
+            .map_err(|error| recapture_failure("workspace.close", format!("{error:?}")));
+        flush_result?;
+        close_result?;
+        Ok(RecaptureRun { flush_attempts })
+    })
+}
+
+fn recapture_request(
+    id: u64,
+    method: &str,
+    workspace: Option<WorkspaceHandle>,
+    params: Value,
+) -> Request {
+    Request {
+        id,
+        method: method.to_owned(),
+        workspace,
+        deadline_ms: None,
+        idempotency_key: None,
+        params,
+    }
+}
+
+fn compare_recapture(
+    clone_root: &Path,
+    expected: &BTreeMap<String, InventoryState>,
+    flush_attempts: usize,
+) -> Result<RecaptureEvidence, HarnessError> {
+    let db = clone_root
+        .join(ENGINE_STORAGE_SEGMENT)
+        .join("engine")
+        .join("engine.db");
+    let mut store = EngineStore::open(&db, unix_now_ms()?)?;
+    let seeds = capture_manifest_seed(&store, RECAPTURE_WORKSPACE_ID, RECAPTURE_VERSION_ID)
+        .map_err(|error| {
+            recapture_failure("read capture-owned projection", format!("{error:?}"))
+        })?;
+
+    let needs_secret_key = seeds
+        .iter()
+        .any(|entry| entry.sha256 == SECRET_SEED_SENTINEL_SHA);
+    let secret_key = if needs_secret_key {
+        Some(
+            dohc_engine_crypto::load_key_file(clone_root)
+                .map_err(|error| recapture_failure("load recapture secret key", error))?
+                .ok_or_else(|| {
+                    recapture_failure(
+                        "load recapture secret key",
+                        "captured secret rows exist without a key file",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
+    let mut actual = BTreeMap::new();
+    for seed in seeds {
+        let secret = seed.sha256 == SECRET_SEED_SENTINEL_SHA;
+        let sha256 = if secret {
+            let plaintext = SecretFileStore::new(
+                &mut store,
+                secret_key
+                    .as_ref()
+                    .expect("secret seed requires a loaded key"),
+            )
+            .materialize_secret_file(RECAPTURE_WORKSPACE_ID, RECAPTURE_VERSION_ID, &seed.path)
+            .map_err(|error| recapture_failure("decrypt recaptured secret", format!("{error:?}")))?
+            .ok_or_else(|| {
+                recapture_failure(
+                    "decrypt recaptured secret",
+                    format!("capture manifest named a missing secret path {}", seed.path),
+                )
+            })?;
+            sha256_bytes(plaintext.as_bytes())
+        } else {
+            seed.sha256
+        };
+        let previous = actual.insert(
+            seed.path.clone(),
+            InventoryState {
+                size_bytes: seed.size,
+                sha256,
+                storage_kind: if secret { "secret" } else { "content" },
+                secret,
+            },
+        );
+        if previous.is_some() {
+            return Err(recapture_failure(
+                "read capture-owned projection",
+                format!("duplicate recaptured path {}", seed.path),
+            ));
+        }
+    }
+
+    let (records_recaptured, unsettled_projections): (i64, i64) = store
+        .read_with(|connection| {
+            let ordinary: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM moments \
+                 WHERE workspace_id = ?1 AND version_id = ?2 \
+                   AND metadata_origin = 'capture'",
+                [RECAPTURE_WORKSPACE_ID, RECAPTURE_VERSION_ID],
+                |row| row.get(0),
+            )?;
+            let secrets: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM secret_moments \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND capture_owned = 1",
+                [RECAPTURE_WORKSPACE_ID, RECAPTURE_VERSION_ID],
+                |row| row.get(0),
+            )?;
+            let unsettled: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status <> 'complete'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((ordinary.saturating_add(secrets), unsettled))
+        })
+        .map_err(|error| recapture_failure("count recapture records", error))?;
+    drop(store);
+
+    let mut mismatches = Vec::new();
+    let mut content_identities_verified = 0_usize;
+    for (path, expected_state) in expected {
+        match actual.get(path) {
+            None => mismatches.push(recapture_mismatch(
+                path,
+                vec!["missing from fresh store".to_owned()],
+                Some(expected_state),
+                None,
+            )),
+            Some(actual_state) => {
+                let mut reasons = Vec::new();
+                if expected_state.size_bytes != actual_state.size_bytes {
+                    reasons.push("byte count differs".to_owned());
+                }
+                if expected_state.sha256 != actual_state.sha256 {
+                    reasons.push("sha256 differs".to_owned());
+                }
+                if expected_state.secret != actual_state.secret {
+                    reasons.push("storage kind differs".to_owned());
+                }
+                if reasons.is_empty() {
+                    content_identities_verified = content_identities_verified.saturating_add(1);
+                } else {
+                    mismatches.push(recapture_mismatch(
+                        path,
+                        reasons,
+                        Some(expected_state),
+                        Some(actual_state),
+                    ));
+                }
+            }
+        }
+    }
+    for (path, actual_state) in &actual {
+        if !expected.contains_key(path) {
+            mismatches.push(recapture_mismatch(
+                path,
+                vec!["unexpected capture-owned path".to_owned()],
+                None,
+                Some(actual_state),
+            ));
+        }
+    }
+
+    let records_recaptured = usize::try_from(records_recaptured).unwrap_or(usize::MAX);
+    let projections_settled = unsettled_projections == 0;
+    if records_recaptured != expected.len() {
+        mismatches.push(RecaptureMismatch {
+            path: "<record-count>".to_owned(),
+            reasons: vec![format!(
+                "expected {} capture records, found {records_recaptured}",
+                expected.len()
+            )],
+            expected: None,
+            recaptured: None,
+        });
+    }
+    if !projections_settled {
+        mismatches.push(RecaptureMismatch {
+            path: "<projection-state>".to_owned(),
+            reasons: vec![format!(
+                "{unsettled_projections} materialization projection(s) are not complete"
+            )],
+            expected: None,
+            recaptured: None,
+        });
+    }
+    let verdict = if mismatches.is_empty()
+        && actual.len() == expected.len()
+        && records_recaptured == expected.len()
+        && content_identities_verified == expected.len()
+        && projections_settled
+    {
+        RecaptureVerdict::Complete
+    } else {
+        RecaptureVerdict::Incomplete
+    };
+    Ok(RecaptureEvidence {
+        paths_expected: expected.len(),
+        paths_recaptured: actual.len(),
+        records_expected: expected.len(),
+        records_recaptured,
+        content_identities_verified,
+        flush_attempts,
+        mismatches,
+        projections_settled,
+        verdict,
+    })
+}
+
+fn recapture_mismatch(
+    path: &str,
+    reasons: Vec<String>,
+    expected: Option<&InventoryState>,
+    actual: Option<&InventoryState>,
+) -> RecaptureMismatch {
+    let secret =
+        expected.is_some_and(|state| state.secret) || actual.is_some_and(|state| state.secret);
+    RecaptureMismatch {
+        path: path.to_owned(),
+        reasons,
+        expected: expected.map(|state| recapture_inventory_state(state, secret)),
+        recaptured: actual.map(|state| recapture_inventory_state(state, secret)),
+    }
+}
+
+fn recapture_inventory_state(state: &InventoryState, redact_sha: bool) -> RecaptureInventoryState {
+    RecaptureInventoryState {
+        size_bytes: state.size_bytes,
+        sha256: if redact_sha {
+            "<redacted-secret-sha256; compared in memory>".to_owned()
+        } else {
+            state.sha256.clone()
+        },
+        storage_kind: state.storage_kind.to_owned(),
+    }
+}
+
+fn recapture_failure(stage: &'static str, detail: impl ToString) -> HarnessError {
+    HarnessError::RecapturePipeline {
+        stage,
+        detail: detail.to_string(),
+    }
 }
 
 fn validate_paths(config: HarnessConfig<'_>) -> Result<(PathBuf, PathBuf, PathBuf), HarnessError> {
@@ -508,7 +1006,7 @@ fn issue_token() -> Result<String, HarnessError> {
 }
 
 fn clone_tree(source: &Path, destination: &Path) -> Result<FloorSkipEvidence, HarnessError> {
-    create_dir(destination, "create clone root")?;
+    create_private_dir(destination, "create private clone root")?;
     let mut skipped_roots = Vec::new();
     clone_directory(source, source, destination, &mut skipped_roots)?;
     Ok(summarize_floor_skips(skipped_roots))
@@ -531,6 +1029,10 @@ fn clone_directory(
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let metadata = symlink_metadata(&source_path, "inspect source entry during clone")?;
+        let relative_path =
+            portable_relative(source_path.strip_prefix(source_root).map_err(|_| {
+                HarnessError::IncompleteOutcome("clone path escaped source root".to_owned())
+            })?)?;
         if is_floor_excluded_directory_name(&entry.file_name(), &metadata) {
             skipped_roots.push(floor_skipped_root(source_root, &source_path, &metadata)?);
             continue;
@@ -544,6 +1046,15 @@ fn clone_directory(
             create_dir(&destination_path, "create cloned directory")?;
             clone_directory(source_root, &source_path, &destination_path, skipped_roots)?;
         } else if metadata.is_file() {
+            if is_floor_excluded_file(&relative_path) {
+                skipped_roots.push(floor_skipped_root(source_root, &source_path, &metadata)?);
+                continue;
+            }
+            if source_file_is_hard_linked(&source_path, &metadata)? {
+                return Err(HarnessError::UnsupportedEntry {
+                    path: display_path(&source_path),
+                });
+            }
             std::fs::copy(&source_path, &destination_path).map_err(|source| HarnessError::Io {
                 operation: "copy source file into clone",
                 source,
@@ -556,6 +1067,48 @@ fn clone_directory(
         }
     }
     preserve_times(&metadata, destination)
+}
+
+fn is_floor_excluded_file(relative_path: &str) -> bool {
+    !is_internal_dohc_path(relative_path) && is_excluded_file(relative_path)
+}
+
+fn is_internal_dohc_path(relative_path: &str) -> bool {
+    relative_path == ENGINE_STORAGE_SEGMENT
+        || relative_path.starts_with(&format!("{ENGINE_STORAGE_SEGMENT}/"))
+}
+
+#[cfg(unix)]
+fn source_file_is_hard_linked(_path: &Path, metadata: &Metadata) -> Result<bool, HarnessError> {
+    Ok(metadata_is_hard_linked(metadata))
+}
+
+#[cfg(windows)]
+fn source_file_is_hard_linked(path: &Path, _metadata: &Metadata) -> Result<bool, HarnessError> {
+    let output = std::process::Command::new("fsutil")
+        .args(["hardlink", "list"])
+        .arg(path)
+        .output()
+        .map_err(|source| HarnessError::Io {
+            operation: "inspect source hard-link topology",
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(HarnessError::Io {
+            operation: "inspect source hard-link topology",
+            source: std::io::Error::other(format!(
+                "fsutil returned status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(2)
+        .count()
+        > 1)
 }
 
 fn is_floor_excluded_directory_name(name: &OsStr, metadata: &Metadata) -> bool {
@@ -625,6 +1178,17 @@ fn snapshot_source_directory(
             snapshot_floor_skipped_root(root, &path, &metadata, output)?;
             continue;
         }
+        if metadata.is_file() {
+            let relative_path = portable_relative(path.strip_prefix(root).map_err(|_| {
+                HarnessError::IncompleteOutcome(
+                    "source snapshot path escaped source root".to_owned(),
+                )
+            })?)?;
+            if is_floor_excluded_file(&relative_path) {
+                snapshot_floor_skipped_root(root, &path, &metadata, output)?;
+                continue;
+            }
+        }
         snapshot_entry(root, &path, &metadata, output)?;
         if metadata.is_dir() {
             snapshot_source_directory(root, &path, output)?;
@@ -673,6 +1237,7 @@ fn snapshot_entry(
             relative_path,
             kind: EntryKind::Directory,
             size_bytes: 0,
+            contained_file_count: 0,
             modified_seconds: modified.unix_seconds(),
             modified_nanoseconds: modified.nanoseconds(),
             sha256: String::new(),
@@ -683,6 +1248,7 @@ fn snapshot_entry(
             relative_path,
             kind: EntryKind::File,
             size_bytes,
+            contained_file_count: 1,
             modified_seconds: modified.unix_seconds(),
             modified_nanoseconds: modified.nanoseconds(),
             sha256,
@@ -705,19 +1271,126 @@ fn snapshot_floor_skipped_root(
     let relative_path = portable_relative(path.strip_prefix(root).map_err(|_| {
         HarnessError::IncompleteOutcome("source snapshot path escaped root".to_owned())
     })?)?;
+    let proof = skipped_content_proof(path, metadata)?;
     output.push(TreeEntry {
         relative_path,
         kind: if metadata.file_type().is_symlink() {
             EntryKind::FloorSkippedAlias
+        } else if metadata.is_file() {
+            EntryKind::FloorSkippedFile
         } else {
             EntryKind::FloorSkippedDirectory
         },
-        size_bytes: 0,
+        size_bytes: proof.total_file_bytes,
+        contained_file_count: proof.file_count,
         modified_seconds: modified.unix_seconds(),
         modified_nanoseconds: modified.nanoseconds(),
-        sha256: String::new(),
+        sha256: proof.sha256,
     });
     Ok(())
+}
+
+struct SkippedContentProof {
+    sha256: String,
+    file_count: usize,
+    total_file_bytes: u64,
+}
+
+fn skipped_content_proof(
+    path: &Path,
+    metadata: &Metadata,
+) -> Result<SkippedContentProof, HarnessError> {
+    let mut hasher = Sha256::new();
+    let mut file_count = 0_usize;
+    let mut total_file_bytes = 0_u64;
+    hash_skipped_content(
+        path,
+        path,
+        metadata,
+        &mut hasher,
+        &mut file_count,
+        &mut total_file_bytes,
+    )?;
+    Ok(SkippedContentProof {
+        sha256: to_hex(&hasher.finalize()),
+        file_count,
+        total_file_bytes,
+    })
+}
+
+fn hash_skipped_content(
+    root: &Path,
+    path: &Path,
+    metadata: &Metadata,
+    hasher: &mut Sha256,
+    file_count: &mut usize,
+    total_file_bytes: &mut u64,
+) -> Result<(), HarnessError> {
+    let relative = if path == root {
+        ".".to_owned()
+    } else {
+        portable_relative(path.strip_prefix(root).map_err(|_| {
+            HarnessError::IncompleteOutcome("floor-skipped proof path escaped its root".to_owned())
+        })?)?
+    };
+    let modified = FileTime::from_last_modification_time(metadata);
+    hash_field(hasher, relative.as_bytes());
+    hasher.update(modified.unix_seconds().to_le_bytes());
+    hasher.update(modified.nanoseconds().to_le_bytes());
+
+    if metadata.file_type().is_symlink() {
+        hasher.update(b"a");
+        let target = std::fs::read_link(path).map_err(|source| HarnessError::Io {
+            operation: "read floor-skipped alias target",
+            source,
+        })?;
+        hash_os_str(hasher, target.as_os_str());
+        return Ok(());
+    }
+    if metadata.is_file() {
+        hasher.update(b"f");
+        let (sha256, size_bytes) = hash_file(path)?;
+        hasher.update(size_bytes.to_le_bytes());
+        hash_field(hasher, sha256.as_bytes());
+        *file_count = file_count.saturating_add(1);
+        *total_file_bytes = total_file_bytes.saturating_add(size_bytes);
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        hasher.update(b"d");
+        for entry in read_dir_sorted(path)? {
+            let child = entry.path();
+            let child_metadata = symlink_metadata(&child, "inspect floor-skipped proof entry")?;
+            hash_skipped_content(
+                root,
+                &child,
+                &child_metadata,
+                hasher,
+                file_count,
+                total_file_bytes,
+            )?;
+        }
+        return Ok(());
+    }
+    Err(HarnessError::UnsupportedEntry {
+        path: display_path(path),
+    })
+}
+
+#[cfg(unix)]
+fn hash_os_str(hasher: &mut Sha256, value: &OsStr) {
+    use std::os::unix::ffi::OsStrExt as _;
+    hash_field(hasher, value.as_bytes());
+}
+
+#[cfg(windows)]
+fn hash_os_str(hasher: &mut Sha256, value: &OsStr) {
+    use std::os::windows::ffi::OsStrExt as _;
+    let mut bytes = Vec::new();
+    for unit in value.encode_wide() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    hash_field(hasher, &bytes);
 }
 
 fn summarize(entries: &[TreeEntry]) -> TreeSummary {
@@ -744,9 +1417,15 @@ fn summarize(entries: &[TreeEntry]) -> TreeSummary {
                 directory_count += 1;
                 hasher.update(b"a");
             }
+            EntryKind::FloorSkippedFile => {
+                file_count += 1;
+                total_file_bytes = total_file_bytes.saturating_add(entry.size_bytes);
+                hasher.update(b"z");
+            }
         }
         hash_field(&mut hasher, entry.relative_path.as_bytes());
         hasher.update(entry.size_bytes.to_le_bytes());
+        hasher.update((entry.contained_file_count as u64).to_le_bytes());
         hasher.update(entry.modified_seconds.to_le_bytes());
         hasher.update(entry.modified_nanoseconds.to_le_bytes());
         hash_field(&mut hasher, entry.sha256.as_bytes());
@@ -766,7 +1445,9 @@ fn clone_input_snapshot(source: &TreeSnapshot) -> TreeSnapshot {
         .filter(|entry| {
             !matches!(
                 entry.kind,
-                EntryKind::FloorSkippedDirectory | EntryKind::FloorSkippedAlias
+                EntryKind::FloorSkippedDirectory
+                    | EntryKind::FloorSkippedAlias
+                    | EntryKind::FloorSkippedFile
             )
         })
         .cloned()
@@ -781,17 +1462,23 @@ fn floor_skipped_root(
     metadata: &Metadata,
 ) -> Result<FloorSkippedRoot, HarnessError> {
     let modified = FileTime::from_last_modification_time(metadata);
+    let proof = skipped_content_proof(path, metadata)?;
     Ok(FloorSkippedRoot {
         relative_path: portable_relative(path.strip_prefix(root).map_err(|_| {
             HarnessError::IncompleteOutcome("floor-skipped path escaped source root".to_owned())
         })?)?,
         kind: if metadata.file_type().is_symlink() {
             FloorSkippedRootKind::Alias
+        } else if metadata.is_file() {
+            FloorSkippedRootKind::File
         } else {
             FloorSkippedRootKind::Directory
         },
         source_root_modified_seconds: modified.unix_seconds(),
         source_root_modified_nanoseconds: modified.nanoseconds(),
+        source_content_sha256: proof.sha256,
+        source_file_count: proof.file_count,
+        source_total_file_bytes: proof.total_file_bytes,
     })
 }
 
@@ -803,6 +1490,7 @@ fn floor_skip_evidence(snapshot: &TreeSnapshot) -> FloorSkipEvidence {
             let kind = match entry.kind {
                 EntryKind::FloorSkippedDirectory => FloorSkippedRootKind::Directory,
                 EntryKind::FloorSkippedAlias => FloorSkippedRootKind::Alias,
+                EntryKind::FloorSkippedFile => FloorSkippedRootKind::File,
                 EntryKind::Directory | EntryKind::File => return None,
             };
             Some(FloorSkippedRoot {
@@ -810,6 +1498,9 @@ fn floor_skip_evidence(snapshot: &TreeSnapshot) -> FloorSkipEvidence {
                 kind,
                 source_root_modified_seconds: entry.modified_seconds,
                 source_root_modified_nanoseconds: entry.modified_nanoseconds,
+                source_content_sha256: entry.sha256.clone(),
+                source_file_count: entry.contained_file_count,
+                source_total_file_bytes: entry.size_bytes,
             })
         })
         .collect();
@@ -821,11 +1512,19 @@ fn summarize_floor_skips(roots: Vec<FloorSkippedRoot>) -> FloorSkipEvidence {
         .iter()
         .filter(|root| root.kind == FloorSkippedRootKind::Directory)
         .count();
-    let alias_root_count = roots.len().saturating_sub(directory_root_count);
+    let alias_root_count = roots
+        .iter()
+        .filter(|root| root.kind == FloorSkippedRootKind::Alias)
+        .count();
+    let file_root_count = roots
+        .iter()
+        .filter(|root| root.kind == FloorSkippedRootKind::File)
+        .count();
     FloorSkipEvidence {
         root_count: roots.len(),
         directory_root_count,
         alias_root_count,
+        file_root_count,
         roots,
     }
 }
@@ -912,7 +1611,9 @@ fn write_evidence(root: &Path, evidence: &RehearsalEvidence) -> Result<(), Harne
     std::fs::rename(&temp, &destination).map_err(|source| HarnessError::Io {
         operation: "publish rehearsal evidence",
         source,
-    })
+    })?;
+    fsync_dir(root)?;
+    Ok(())
 }
 
 fn hash_file(path: &Path) -> Result<(String, u64), HarnessError> {
@@ -935,6 +1636,12 @@ fn hash_file(path: &Path) -> Result<(String, u64), HarnessError> {
         bytes = bytes.saturating_add(read as u64);
     }
     Ok((to_hex(&hasher.finalize()), bytes))
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    to_hex(&hasher.finalize())
 }
 
 fn read_dir_sorted(path: &Path) -> Result<Vec<std::fs::DirEntry>, HarnessError> {
@@ -1090,6 +1797,118 @@ fn create_dir_all(path: &Path, operation: &'static str) -> Result<(), HarnessErr
     std::fs::create_dir_all(path).map_err(|source| HarnessError::Io { operation, source })
 }
 
+fn create_private_dir(path: &Path, operation: &'static str) -> Result<(), HarnessError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(path)
+            .map_err(|source| HarnessError::Io { operation, source })?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|source| {
+            HarnessError::Io {
+                operation: "tighten private directory permissions",
+                source,
+            }
+        })
+    }
+    #[cfg(windows)]
+    {
+        std::fs::create_dir(path).map_err(|source| HarnessError::Io { operation, source })?;
+        restrict_windows_directory_acl(path)
+    }
+}
+
+fn create_private_dir_all(path: &Path, operation: &'static str) -> Result<(), HarnessError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .map_err(|source| HarnessError::Io { operation, source })?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|source| {
+            HarnessError::Io {
+                operation: "tighten private directory permissions",
+                source,
+            }
+        })
+    }
+    #[cfg(windows)]
+    {
+        std::fs::create_dir_all(path).map_err(|source| HarnessError::Io { operation, source })?;
+        restrict_windows_directory_acl(path)
+    }
+}
+
+#[cfg(windows)]
+fn restrict_windows_directory_acl(path: &Path) -> Result<(), HarnessError> {
+    let identity = std::process::Command::new("whoami")
+        .output()
+        .map_err(|source| HarnessError::Io {
+            operation: "resolve current Windows identity",
+            source,
+        })?;
+    if !identity.status.success() {
+        return Err(HarnessError::Io {
+            operation: "resolve current Windows identity",
+            source: std::io::Error::other("whoami returned a non-zero status"),
+        });
+    }
+    let principal = String::from_utf8(identity.stdout)
+        .map_err(|source| HarnessError::Io {
+            operation: "decode current Windows identity",
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })?
+        .trim()
+        .to_owned();
+    if principal.is_empty() {
+        return Err(HarnessError::Io {
+            operation: "resolve current Windows identity",
+            source: std::io::Error::other("whoami returned an empty identity"),
+        });
+    }
+    let reset = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/reset")
+        .output()
+        .map_err(|source| HarnessError::Io {
+            operation: "reset private Windows directory ACL",
+            source,
+        })?;
+    if !reset.status.success() {
+        return Err(HarnessError::Io {
+            operation: "reset private Windows directory ACL",
+            source: std::io::Error::other(format!(
+                "icacls returned status {}: {}",
+                reset.status,
+                String::from_utf8_lossy(&reset.stderr).trim()
+            )),
+        });
+    }
+    let grant = format!("{principal}:(OI)(CI)F");
+    let restricted = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r", &grant])
+        .output()
+        .map_err(|source| HarnessError::Io {
+            operation: "tighten private Windows directory ACL",
+            source,
+        })?;
+    if !restricted.status.success() {
+        return Err(HarnessError::Io {
+            operation: "tighten private Windows directory ACL",
+            source: std::io::Error::other(format!(
+                "icacls returned status {}: {}",
+                restricted.status,
+                String::from_utf8_lossy(&restricted.stderr).trim()
+            )),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1205,6 +2024,13 @@ mod tests {
         assert_eq!(evidence.outcome, "complete");
         assert_eq!(evidence.state_record.current, RehearsalState::Complete);
         assert!(evidence.source_unchanged.verified);
+        assert_eq!(evidence.recapture.verdict, RecaptureVerdict::Complete);
+        assert_eq!(evidence.recapture.paths_expected, 1);
+        assert_eq!(evidence.recapture.paths_recaptured, 1);
+        assert_eq!(evidence.recapture.records_recaptured, 1);
+        assert_eq!(evidence.recapture.content_identities_verified, 1);
+        assert!(evidence.recapture.projections_settled);
+        assert!(evidence.recapture.mismatches.is_empty());
         assert_eq!(evidence.ui_state_tmp_orphans.len(), 17);
         assert_eq!(evidence.floor_skips.root_count, 0);
         assert_eq!(
@@ -1222,6 +2048,191 @@ mod tests {
                 .iter()
                 .any(|entry| entry.original_relative_path == ".dohc/engine/engine.db")
         );
+        let banked: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(recovery.join(EVIDENCE_FILE)).expect("read evidence"),
+        )
+        .expect("parse evidence");
+        assert_eq!(banked["schema_version"], 3);
+        assert_eq!(banked["recapture"]["verdict"], "complete");
+        assert_eq!(banked["recapture"]["paths_recaptured"], 1);
+    }
+
+    #[test]
+    fn incomplete_real_recapture_fails_without_banking_complete_evidence() {
+        let source = fixture_source();
+        let scratch_parent = ScratchDir::new().expect("scratch parent");
+        let recovery_parent = ScratchDir::new().expect("recovery parent");
+        let scratch = scratch_parent.join("clones");
+        let recovery = recovery_parent.join("artifacts");
+        let remove_one_projection = |clone_root: &Path| {
+            let db = clone_root.join(".dohc").join("engine").join("engine.db");
+            let connection = rusqlite::Connection::open(db).map_err(|source| HarnessError::Io {
+                operation: "open mutation fixture store",
+                source: std::io::Error::other(source),
+            })?;
+            let removed = connection
+                .execute(
+                    "DELETE FROM path_aliases \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND path = 'note.md'",
+                    [RECAPTURE_WORKSPACE_ID, RECAPTURE_VERSION_ID],
+                )
+                .map_err(|source| HarnessError::Io {
+                    operation: "mutate recapture fixture",
+                    source: std::io::Error::other(source),
+                })?;
+            assert_eq!(removed, 1, "fixture must remove one recaptured path");
+            Ok(())
+        };
+
+        let error = run_with_post_capture_hook(
+            HarnessConfig {
+                source: source.path(),
+                scratch: &scratch,
+                recovery: &recovery,
+            },
+            Some(&remove_one_projection),
+        )
+        .expect_err("an incomplete recapture must fail the harness");
+
+        match error {
+            HarnessError::RecaptureIncomplete { diff } => {
+                assert!(diff.contains("note.md"));
+                assert!(diff.contains("missing from fresh store"));
+            }
+            other => panic!("wanted recapture-incomplete, got {other:?}"),
+        }
+        assert!(
+            !recovery.join(EVIDENCE_FILE).exists(),
+            "incomplete recapture must not bank complete evidence"
+        );
+    }
+
+    #[test]
+    fn recapture_compares_text_binary_and_secret_content_identity() {
+        let source = fixture_source();
+        std::fs::write(source.join(".env"), b"TOKEN=fixture-secret\n").expect("secret");
+        std::fs::write(source.join("image.png"), [0_u8, 1, 2, 0xff]).expect("binary");
+        let scratch_parent = ScratchDir::new().expect("scratch parent");
+        let recovery_parent = ScratchDir::new().expect("recovery parent");
+        let scratch = scratch_parent.join("clones");
+        let recovery = recovery_parent.join("artifacts");
+
+        let evidence = run(HarnessConfig {
+            source: source.path(),
+            scratch: &scratch,
+            recovery: &recovery,
+        })
+        .expect("text, binary, and secret recapture");
+
+        assert_eq!(evidence.recapture.paths_expected, 3);
+        assert_eq!(evidence.recapture.paths_recaptured, 3);
+        assert_eq!(evidence.recapture.records_recaptured, 3);
+        assert_eq!(evidence.recapture.content_identities_verified, 3);
+        assert_eq!(evidence.recapture.verdict, RecaptureVerdict::Complete);
+        let banked = std::fs::read_to_string(recovery.join(EVIDENCE_FILE)).expect("evidence");
+        assert!(
+            !banked.contains(&sha256_bytes(b"TOKEN=fixture-secret\n")),
+            "secret sha256 must not be serialized"
+        );
+    }
+
+    #[test]
+    fn complete_capture_floor_excludes_file_artifacts_from_the_clone() {
+        let source = fixture_source();
+        for (path, bytes) in [
+            (".dohc-write-123.tmp", b"temporary".as_slice()),
+            ("notes.db-wal", b"sidecar".as_slice()),
+            ("note.md.job-7.conflict", b"preserve both".as_slice()),
+        ] {
+            std::fs::write(source.join(path), bytes).expect("write excluded fixture");
+        }
+        let scratch_parent = ScratchDir::new().expect("scratch parent");
+        let recovery_parent = ScratchDir::new().expect("recovery parent");
+        let scratch = scratch_parent.join("clones");
+        let recovery = recovery_parent.join("artifacts");
+
+        let evidence = run(HarnessConfig {
+            source: source.path(),
+            scratch: &scratch,
+            recovery: &recovery,
+        })
+        .expect("floor-aware rehearsal");
+
+        assert_eq!(evidence.floor_skips.file_root_count, 3);
+        for path in [
+            ".dohc-write-123.tmp",
+            "notes.db-wal",
+            "note.md.job-7.conflict",
+        ] {
+            assert!(
+                !Path::new(&evidence.clone_path).join(path).exists(),
+                "{path} must not enter the byte clone"
+            );
+            assert!(
+                evidence
+                    .floor_skips
+                    .roots
+                    .iter()
+                    .any(|root| root.relative_path == path
+                        && root.kind == FloorSkippedRootKind::File),
+                "{path} must be recorded as a floor skip"
+            );
+        }
+        assert_eq!(evidence.recapture.paths_expected, 1);
+        assert_eq!(evidence.recapture.verdict, RecaptureVerdict::Complete);
+    }
+
+    #[test]
+    fn skipped_tree_content_hash_detects_byte_changes_with_stable_root_metadata() {
+        let source = fixture_source();
+        let skipped = source.join("node_modules");
+        std::fs::create_dir(&skipped).expect("skipped directory");
+        let package = skipped.join("package.js");
+        std::fs::write(&package, b"aaaa").expect("package contents");
+        let file_metadata = std::fs::metadata(&package).expect("file metadata");
+        let accessed = FileTime::from_last_access_time(&file_metadata);
+        let modified = FileTime::from_last_modification_time(&file_metadata);
+        let before = snapshot_source_tree(source.path()).expect("before");
+        let before_skipped = before
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "node_modules")
+            .expect("skipped root");
+
+        std::fs::write(&package, b"bbbb").expect("mutate package contents");
+        filetime::set_file_times(&package, accessed, modified).expect("restore file times");
+        let after = snapshot_source_tree(source.path()).expect("after");
+        let after_skipped = after
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "node_modules")
+            .expect("skipped root");
+
+        assert_ne!(before_skipped.sha256, after_skipped.sha256);
+        assert_ne!(
+            before.summary.snapshot_sha256,
+            after.summary.snapshot_sha256
+        );
+    }
+
+    #[test]
+    fn hard_linked_source_files_are_rejected_before_copying() {
+        let source = fixture_source();
+        std::fs::hard_link(source.join("note.md"), source.join("note-alias.md"))
+            .expect("hard-link fixture");
+        let scratch_parent = ScratchDir::new().expect("scratch parent");
+        let recovery_parent = ScratchDir::new().expect("recovery parent");
+        let scratch = scratch_parent.join("clones");
+        let recovery = recovery_parent.join("artifacts");
+
+        let error = run(HarnessConfig {
+            source: source.path(),
+            scratch: &scratch,
+            recovery: &recovery,
+        })
+        .expect_err("hard links must fail closed");
+
+        assert!(matches!(error, HarnessError::UnsupportedEntry { .. }));
     }
 
     #[cfg(windows)]

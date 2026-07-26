@@ -177,12 +177,8 @@ pub(crate) fn fsync_file(path: &std::path::Path, code: &'static str) -> Result<(
 }
 
 /// Hard links alias content reachable outside the tree being walked. The link
-/// count is only exposed by stable std on Unix; on Windows the file-identity
-/// query needs Win32 calls that require `unsafe` (forbidden by this crate),
-/// and failing closed would reject EVERY Windows file and break the shard —
-/// so Windows hard links pass undetected: acceptable for a trusted local
-/// fixture rehearsal, with real identity checks deferred to the `--cutover`
-/// tier.
+/// count is only exposed by stable std on Unix. Windows callers that need the
+/// same guarantee must use a path-based platform query before copying.
 pub(crate) fn metadata_is_hard_linked(metadata: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
