@@ -360,7 +360,6 @@ describe("VersionedLiveAdapter", () => {
     ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
   });
 
-<<<<<<< HEAD
   it("correlates concurrent blob reads across adapters sharing a transport", async () => {
     const blobHandlers = new Set<
       Parameters<NonNullable<MinimalDaemonClient["onBlob"]>>[0]
