@@ -175,7 +175,10 @@ fn arbitrary_secret_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    // `ProptestConfig::default()` is 256 cases and honors the standard
+    // `PROPTEST_CASES` env var; `with_cases(256)` pinned it and silently
+    // ignored the env var, so evidence runs asking for a large corpus got 256.
+    #![proptest_config(ProptestConfig::default())]
 
     /// Arbitrary bytes as purported wire JSON: deserialization never panics,
     /// and any successfully-decoded envelope is a COMPLETE value that
