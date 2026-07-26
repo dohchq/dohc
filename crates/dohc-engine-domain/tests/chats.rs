@@ -8,9 +8,9 @@
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
     FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore,
-    NoFaults, SaveBookmark, SendMessage, SetFollow, StartChannelThread,
-    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
-    encode_feed_cursor, linked_chat_projection_path,
+    NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, SaveBookmark, SendMessage, SetFollow,
+    StartChannelThread, base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name,
+    decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -115,12 +115,9 @@ fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
     let mut store = open(&db, 1);
     let plan = store
         .read_with(|conn| {
+            let explain_sql = format!("EXPLAIN QUERY PLAN {PENDING_CHAT_WORKSPACE_EXISTS_SQL}");
             let mut stmt = conn
-                .prepare(
-                    "EXPLAIN QUERY PLAN SELECT EXISTS( \
-                       SELECT 1 FROM chat_pending_replication \
-                       WHERE workspace_id=?1 LIMIT 1)",
-                )
+                .prepare(&explain_sql)
                 .map_err(StorageError::corrupt_public)?;
             let rows = stmt
                 .query_map([WS], |row| row.get::<_, String>(3))

@@ -629,7 +629,7 @@ data or classification difference.
 
 ## 13. RPC-E / #244 (chat replicated-path validation) — deliberate slug-allocation divergence
 
-### 13.1 DELIBERATE DIVERGENCE: replicated channel slug allocation is convergent, not arrival-ordered
+### 13.1 DELIBERATE DIVERGENCE: replicated channel slug collisions use bounded identity hashes
 
 **TS behavior.** `linkedChatStore` allocates replicated channel slugs by LOCAL
 occupancy: the current slug owner keeps its slug and an incoming collider gets
@@ -639,14 +639,20 @@ expectation. Slug ownership therefore never converges across peers; the store
 papers over it with a local lookup alias. `createdAtMs` is replicated but unused
 for allocation.
 
-**Rust behavior.** Slug allocation is a pure convergent projection of replicated
-state: precedence is replicated `createdAtMs`, then stable wire identity, then
-channel id as the final internal tie-break. Earlier-created channels keep the
-base slug on every peer; later colliders receive bounded hashed variants; peers
-converge on identical slugs regardless of delivery order, and an incumbent's
-settled slug is never mutated by a newcomer whose id merely sorts lower.
-Regressions:
-`replicated_creation_order_determines_channel_slug_precedence`,
-`authoritative_placeholder_slug_collision_converges_across_peers`,
-`preoccupied_channel_fallback_converges_across_peers`,
+**Rust behavior.** Rust matches the oracle's local-occupancy semantics: an
+incumbent keeps its slug, a colliding newcomer receives a variant, and no later
+arrival rewrites existing local-only, DM, well-known, placeholder, or replicated
+channel rows. Slugs therefore do not converge across peers and carry no
+cross-peer identity meaning; wire ids bind the same replicated channel across
+stores. The deliberate improvement over TS is only the collision variant:
+instead of arrival-ordered `-2`, `-3`, … counters, Rust uses a deterministic,
+bounded SHA-256 suffix derived from the newcomer's own replicated wire identity
+(or its deterministic placeholder identity when no wire id exists). Both base
+and collision variants satisfy the replicated 200-unit slug grammar.
+`createdAtMs` is validated as a timestamp but does not participate in allocation.
+Regressions include
+`incoming_placeholder_never_displaces_bootstrapped_general_regardless_of_clock`,
+`colliding_newcomer_hash_is_stable_across_local_occupancy_histories`,
+`overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal`,
+`collision_slug_truncation_is_bounded_and_does_not_leave_a_dash_boundary`, and
 `noncolliding_channel_apply_does_not_rewrite_unchanged_slugs`.

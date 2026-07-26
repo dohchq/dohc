@@ -57,6 +57,11 @@ pub const GENERAL_CHANNEL_WIRE_ID: &str = "channel_wire_general_v1";
 pub const AGENT_CHANNEL_NAME: &str = "My agent";
 /// Deterministic cross-machine wire id for the reserved `My agent` channel.
 pub const AGENT_CHANNEL_WIRE_ID: &str = "channel_wire_agent_v1";
+/// Workspace-only emptiness probe used to skip the full pending replay scan.
+pub const PENDING_CHAT_WORKSPACE_EXISTS_SQL: &str = "\
+SELECT EXISTS( \
+  SELECT 1 FROM chat_pending_replication \
+  WHERE workspace_id=?1 LIMIT 1)";
 /// The default linked-chat projection kind (`linkedChatStore.ts:90`).
 pub const LINKED_CHAT_PROJECTION_KIND: &str = "thread";
 
@@ -4133,6 +4138,8 @@ impl<'a> LinkedChatStore<'a> {
         input.owner_user_id = owner_user_id;
         input.replication_owner_user_id = replication_owner_user_id;
         input.target_id = target_id;
+        // This boundary wrapper is set_follow's only pending-replay cover:
+        // insert_local_replication_op and journal persist logs but do not replay.
         let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             validate_follow_target(tx, &input.workspace_id, input.target_kind, &input.target_id)?;
             let prior_at_ms: Option<i64> = tx
@@ -4183,7 +4190,16 @@ impl<'a> LinkedChatStore<'a> {
                 &input.target_id,
             )
         })?;
-        committed(outcome)
+        committed(outcome)?;
+        self.store.read_with(|conn| {
+            require_follow(
+                conn,
+                &input.workspace_id,
+                &input.owner_user_id,
+                input.target_kind,
+                &input.target_id,
+            )
+        })
     }
 
     /// List a follow owner's ACTIVE (following) registers, ordered by
@@ -6883,13 +6899,9 @@ pub fn replay_ready_pending_chat_coordinates(
     workspace_id: &str,
 ) -> Result<(), DomainError> {
     let has_pending: bool = tx
-        .query_row(
-            "SELECT EXISTS( \
-               SELECT 1 FROM chat_pending_replication \
-               WHERE workspace_id=?1 LIMIT 1)",
-            [workspace_id],
-            |row| row.get(0),
-        )
+        .query_row(PENDING_CHAT_WORKSPACE_EXISTS_SQL, [workspace_id], |row| {
+            row.get(0)
+        })
         .map_err(DomainError::sql_corrupt)?;
     if !has_pending {
         return Ok(());

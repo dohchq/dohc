@@ -642,42 +642,45 @@ fn imported_opening_message_uses_zero_based_order() {
 }
 
 #[test]
-fn imported_channel_refuses_unsafe_created_at_ms_without_row_or_ack() {
-    let (_scratch, _path, mut engine) = store();
-    let operation = envelope(
-        "unsafe-channel-time",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "unsafe-channel",
-            "name": "Unsafe",
-            "slug": "unsafe",
-            "kind": "channel",
-            "createdAtMs": i64::MAX
-        }),
-    );
+fn imported_channel_refuses_non_timestamp_created_at_ms_without_row_or_ack() {
+    for (suffix, created_at_ms) in [("negative", -1), ("unsafe", i64::MAX)] {
+        let (_scratch, _path, mut engine) = store();
+        let origin = format!("{suffix}-channel-time");
+        let operation = envelope(
+            &origin,
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": format!("{suffix}-channel"),
+                "name": "Invalid timestamp",
+                "slug": "invalid-timestamp",
+                "kind": "channel",
+                "createdAtMs": created_at_ms
+            }),
+        );
 
-    // MUTATION: dropping the persisted-safe createdAtMs bound journals a
-    // channel that the typed client cannot decode.
-    assert!(matches!(
-        apply_chat_envelope(&mut engine, &operation, &NoFaults),
-        Err(SyncError::InvalidInput { .. })
-    ));
-    let row_count: i64 = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM chat_channels WHERE workspace_id='ws'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("channel row count");
-    assert_eq!(row_count, 0);
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "unsafe-channel-time").expect("ack"),
-        -1
-    );
+        // MUTATION: using the signed persisted-safe bound accepts -1 even
+        // though ChannelCreate.createdAtMs is a replicated timestamp.
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+        let row_count: i64 = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_channels WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("channel row count");
+        assert_eq!(row_count, 0);
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", &origin).expect("ack"),
+            -1
+        );
+    }
 }
 
 #[test]
@@ -1399,151 +1402,192 @@ fn imported_person_follow_waits_for_a_non_dm_message() {
 }
 
 #[test]
-fn authoritative_placeholder_slug_collision_converges_across_peers() {
-    let mut peers = Vec::new();
-    for reverse_prefix in [false, true] {
-        let (scratch, _path, mut engine) = store();
-        let occupied = envelope(
-            "slug-owner",
-            0,
-            "chat.channel.create",
-            json!({
-                "channelId": "slug-owner-channel",
-                "name": "Shared name",
-                "slug": "shared-name",
-                "kind": "channel",
-                "createdAtMs": 1
-            }),
-        );
-        let placeholder = envelope(
-            "slug-placeholder",
+fn incoming_placeholder_never_displaces_bootstrapped_general_regardless_of_clock() {
+    let newcomer_wire = "stranger-general-wire";
+    let expected_newcomer_slug = collision_slug_for_test("general", newcomer_wire, 0);
+
+    for (local_created_at_ms, label) in [(1_000, "local-earlier"), (9_000, "local-later")] {
+        let (_scratch, _path, mut engine) = store();
+        let local_channel_id = format!("general-{label}");
+        LinkedChatStore::new(&mut engine)
+            .ensure_general_channel("ws", &local_channel_id, local_created_at_ms, &NoFaults)
+            .expect("bootstrap local general");
+
+        let incoming = envelope(
+            &format!("incoming-{label}"),
             0,
             "chat.thread.create",
             json!({
-                "threadId": "slug-placeholder-thread",
-                "title": "Placeholder",
-                "createdAtMs": 2,
-                "channelSlug": "wire-alias",
-                "channelWireId": "slug-placeholder-wire"
+                "threadId": format!("stranger-thread-{label}"),
+                "title": "Stranger",
+                "createdAtMs": 5_000,
+                "channelSlug": "general",
+                "channelWireId": newcomer_wire
             }),
         );
-        if reverse_prefix {
-            apply_chat_envelope(&mut engine, &placeholder, &NoFaults).expect("placeholder first");
-            apply_chat_envelope(&mut engine, &occupied, &NoFaults).expect("slug owner second");
-        } else {
-            apply_chat_envelope(&mut engine, &occupied, &NoFaults).expect("slug owner first");
-            apply_chat_envelope(&mut engine, &placeholder, &NoFaults).expect("placeholder second");
-        }
-        let authoritative = envelope(
-            "slug-authoritative",
-            0,
-            "chat.channel.create",
-            json!({
-                "channelId": "slug-authoritative-channel",
-                "name": "Shared name",
-                "slug": "wire-alias",
-                "kind": "channel",
-                "createdAtMs": 3,
-                "wireId": "slug-placeholder-wire"
-            }),
-        );
-        apply_chat_envelope(&mut engine, &authoritative, &NoFaults)
-            .expect("collision-safe authoritative channel");
-        let (slug, owner_slug): (String, String) = engine
+        apply_chat_envelope(&mut engine, &incoming, &NoFaults).expect("incoming placeholder");
+
+        let (local_slug, newcomer_slug): (String, String) = engine
             .read_with(|conn| {
-                let slug = conn
-                    .query_row(
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT slug FROM chat_channels \
+                         WHERE workspace_id='ws' AND channel_id=?1",
+                        [&local_channel_id],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
                         "SELECT c.slug FROM chat_channel_wire_ids w \
                          JOIN chat_channels c \
                            ON c.workspace_id=w.workspace_id AND c.channel_id=w.channel_id \
-                         WHERE w.workspace_id='ws' AND w.wire_id='slug-placeholder-wire'",
-                        [],
+                         WHERE w.workspace_id='ws' AND w.wire_id=?1",
+                        [newcomer_wire],
                         |row| row.get(0),
-                    )
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                let owner_slug = conn
-                    .query_row(
-                        "SELECT slug FROM chat_channels \
-                         WHERE workspace_id='ws' AND channel_id='slug-owner-channel'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                Ok::<_, dohc_engine_storage::StorageError>((slug, owner_slug))
+                    )?,
+                ))
             })
-            .expect("authoritative slug");
-        assert_ne!(slug, owner_slug);
+            .expect("channel slugs");
         assert_eq!(
-            owner_slug, "shared-name",
-            "the earlier-created channel must retain the base slug"
+            local_slug, "general",
+            "an incoming row must never rename the locally bootstrapped General channel"
         );
-        peers.push((scratch, slug));
+        assert_eq!(newcomer_slug, expected_newcomer_slug);
     }
-    assert_eq!(peers[0].1, peers[1].1);
 }
 
 #[test]
-fn replicated_creation_order_determines_channel_slug_precedence() {
-    let earlier = envelope(
-        "creation-order-earlier",
+fn colliding_newcomer_hash_is_stable_across_local_occupancy_histories() {
+    let newcomer_wire = "replicated-newcomer-wire";
+    let newcomer = envelope(
+        "replicated-newcomer",
         0,
         "chat.channel.create",
         json!({
-            "channelId": "channel-z",
-            "name": "Same name",
-            "slug": "same-name",
+            "channelId": "replicated-newcomer-channel",
+            "name": "Contested",
+            "slug": "contested",
             "kind": "channel",
-            "createdAtMs": 10,
-            "wireId": "wire-z"
+            "createdAtMs": 50,
+            "wireId": newcomer_wire
         }),
     );
-    let later = envelope(
-        "creation-order-later",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "channel-a",
-            "name": "Same_name",
-            "slug": "same-name",
-            "kind": "channel",
-            "createdAtMs": 20,
-            "wireId": "wire-a"
-        }),
-    );
+    let expected = collision_slug_for_test("contested", newcomer_wire, 0);
+    let mut newcomer_slugs = Vec::new();
 
-    let mut peers = Vec::new();
-    for operations in [[&earlier, &later], [&later, &earlier]] {
+    for (peer, incumbent_created_at_ms) in [("alpha", 10), ("omega", 90)] {
         let (scratch, _path, mut engine) = store();
-        for operation in operations {
-            apply_chat_envelope(&mut engine, operation, &NoFaults)
-                .expect("collision-safe channel apply");
-        }
-        let slugs: Vec<(String, String)> = engine
+        LinkedChatStore::new(&mut engine)
+            .create_channel(
+                "ws",
+                &format!("{peer}-incumbent"),
+                "Contested",
+                ChatChannelKind::Channel,
+                incumbent_created_at_ms,
+                &NoFaults,
+            )
+            .expect("local incumbent");
+        LinkedChatStore::new(&mut engine)
+            .create_channel(
+                "ws",
+                &format!("{peer}-bystander"),
+                &format!("{peer} bystander"),
+                ChatChannelKind::Channel,
+                incumbent_created_at_ms.saturating_add(1),
+                &NoFaults,
+            )
+            .expect("different local occupancy history");
+
+        apply_chat_envelope(&mut engine, &newcomer, &NoFaults).expect("replicated newcomer");
+        let slug: String = engine
             .read_with(|conn| {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT channel_id,slug FROM chat_channels \
-                         WHERE workspace_id='ws' ORDER BY channel_id",
-                    )
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                let rows = stmt
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
+                conn.query_row(
+                    "SELECT slug FROM chat_channels \
+                     WHERE workspace_id='ws' AND channel_id='replicated-newcomer-channel'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
             })
-            .expect("peer channel slugs");
+            .expect("newcomer slug");
         assert_eq!(
-            slugs
-                .iter()
-                .find(|(channel_id, _)| channel_id == "channel-z")
-                .map(|(_, slug)| slug.as_str()),
-            Some("same-name"),
-            "the earlier-created channel keeps the base even when its id sorts later"
+            slug, expected,
+            "the collision hash must depend only on the newcomer's replicated wire identity"
         );
-        peers.push((scratch, slugs));
+        newcomer_slugs.push((scratch, slug));
     }
-    assert_eq!(peers[0].1, peers[1].1);
+
+    assert_eq!(newcomer_slugs[0].1, newcomer_slugs[1].1);
+}
+
+#[test]
+fn authoritative_channel_materialization_only_reallocates_its_own_placeholder() {
+    let (_scratch, _path, mut engine) = store();
+    let occupied = envelope(
+        "materialization-owner",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "materialization-owner-channel",
+            "name": "Shared name",
+            "slug": "shared-name",
+            "kind": "channel",
+            "createdAtMs": 1
+        }),
+    );
+    let placeholder = envelope(
+        "materialization-placeholder",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "materialization-placeholder-thread",
+            "title": "Placeholder",
+            "createdAtMs": 2,
+            "channelSlug": "wire-alias",
+            "channelWireId": "materialization-placeholder-wire"
+        }),
+    );
+    let authoritative = envelope(
+        "materialization-authoritative",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "materialization-authoritative-channel",
+            "name": "Shared name",
+            "slug": "wire-alias",
+            "kind": "channel",
+            "createdAtMs": 3,
+            "wireId": "materialization-placeholder-wire"
+        }),
+    );
+    for operation in [&occupied, &placeholder, &authoritative] {
+        apply_chat_envelope(&mut engine, operation, &NoFaults).expect("channel operation");
+    }
+
+    let (owner_slug, materialized_slug): (String, String) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT slug FROM chat_channels \
+                     WHERE workspace_id='ws' AND channel_id='materialization-owner-channel'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT c.slug FROM chat_channel_wire_ids w \
+                     JOIN chat_channels c \
+                       ON c.workspace_id=w.workspace_id AND c.channel_id=w.channel_id \
+                     WHERE w.workspace_id='ws' AND w.wire_id='materialization-placeholder-wire'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("materialized channel slugs");
+    assert_eq!(owner_slug, "shared-name");
+    assert_eq!(
+        materialized_slug,
+        collision_slug_for_test("shared-name", "materialization-placeholder-wire", 0)
+    );
 }
 
 #[test]
@@ -1587,15 +1631,40 @@ fn noncolliding_channel_apply_does_not_rewrite_unchanged_slugs() {
         }),
     );
     apply_chat_envelope(&mut engine, &second, &NoFaults).expect("second channel");
-    let updates: i64 = engine
+    let collider = envelope(
+        "no-op-slug-collider",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "no-op-channel-collider",
+            "name": "First",
+            "slug": "first",
+            "kind": "channel",
+            "createdAtMs": 1,
+            "wireId": "no-op-collider-wire"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &collider, &NoFaults).expect("colliding channel");
+    let (updates, incumbent_slug): (i64, String) = engine
         .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM channel_slug_update_log", [], |row| {
-                row.get(0)
-            })
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM channel_slug_update_log", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row(
+                    "SELECT slug FROM chat_channels \
+                     WHERE workspace_id='ws' AND channel_id='no-op-channel-first'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
         })
-        .expect("slug update count");
-    assert_eq!(updates, 0, "unchanged channel rows must not be updated");
+        .expect("slug update evidence");
+    assert_eq!(
+        updates, 0,
+        "channel arrival must never update an existing row, even on collision"
+    );
+    assert_eq!(incumbent_slug, "first");
 }
 
 #[test]
@@ -1811,104 +1880,244 @@ fn local_follow_write_replays_a_parked_remote_feed_read_at_the_domain_boundary()
     assert_eq!(pending_chat_coordinate_count(&engine), 0);
 }
 
-fn collision_slug_for_test(requested: &str, channel_id: &str) -> String {
+#[test]
+fn set_follow_returns_the_post_boundary_replay_winner() {
+    let (_scratch, _path, mut engine) = store();
+    LinkedChatStore::new(&mut engine)
+        .create_channel(
+            "ws",
+            "follow-return-channel",
+            "Follow return",
+            ChatChannelKind::Channel,
+            10,
+            &NoFaults,
+        )
+        .expect("target channel");
+    let remote = envelope(
+        "follow-return-remote",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "thread",
+            "targetId": "follow-return-thread",
+            "state": "unfollowed",
+            "atMs": 100
+        }),
+    );
+    apply_chat_envelope(&mut engine, &remote, &NoFaults).expect("park remote winner");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                 VALUES ('ws','follow-return-thread','Target',20,20,'follow-return-channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("materialize dependency without a domain replay boundary");
+
+    let returned = LinkedChatStore::new(&mut engine)
+        .set_follow(
+            &SetFollow {
+                workspace_id: "ws".to_owned(),
+                owner_user_id: "owner".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Thread,
+                target_id: "follow-return-thread".to_owned(),
+                state: FollowState::Following,
+                now_ms: 50,
+            },
+            &NoFaults,
+        )
+        .expect("local follow and boundary replay");
+    assert_eq!(
+        returned.state,
+        FollowState::Unfollowed,
+        "set_follow must return the committed remote LWW winner applied by its boundary replay"
+    );
+    assert_eq!(returned.updated_at_ms, 100);
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+fn collision_slug_for_test(requested: &str, allocation_identity: &str, attempt: u64) -> String {
     let mut hasher = Sha256::new();
     hasher.update(requested.as_bytes());
     hasher.update([0]);
-    hasher.update(channel_id.as_bytes());
-    format!("{requested}-{:x}", hasher.finalize())
+    hasher.update(allocation_identity.as_bytes());
+    if attempt > 0 {
+        hasher.update([0]);
+        hasher.update(attempt.to_be_bytes());
+    }
+    let mut utf16_units = 0;
+    let mut end = 0;
+    for (index, ch) in requested.char_indices() {
+        if utf16_units + ch.len_utf16() > 135 {
+            break;
+        }
+        utf16_units += ch.len_utf16();
+        end = index + ch.len_utf8();
+    }
+    let bounded = requested[..end].trim_end_matches('-');
+    format!("{bounded}-{:x}", hasher.finalize())
 }
 
 #[test]
-fn preoccupied_channel_fallback_converges_across_peers() {
-    let requested = "x";
-    let occupied_fallback = collision_slug_for_test(requested, "channel-b");
-    let operations = [
-        envelope(
-            "fallback-preoccupier",
-            0,
-            "chat.channel.create",
-            json!({
-                "channelId": "channel-z",
-                "name": occupied_fallback,
-                "slug": occupied_fallback,
-                "kind": "channel",
-                "createdAtMs": 1
-            }),
-        ),
-        envelope(
-            "fallback-owner",
-            0,
-            "chat.channel.create",
-            json!({
-                "channelId": "channel-a",
-                "name": requested,
-                "slug": requested,
-                "kind": "channel",
-                "createdAtMs": 2
-            }),
-        ),
-        envelope(
-            "fallback-winner",
-            0,
-            "chat.channel.create",
-            json!({
-                "channelId": "channel-b",
-                "name": requested,
-                "slug": requested,
-                "kind": "channel",
-                "createdAtMs": 3
-            }),
-        ),
-    ];
+fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal() {
+    let (_scratch, _path, mut first_peer) = store();
+    let long_wire_id = "a".repeat(240);
+    let seed = envelope(
+        "long-wire-seed",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "long-wire-seed-thread",
+            "title": "Seed",
+            "createdAtMs": 10,
+            "channelWireId": long_wire_id
+        }),
+    );
+    apply_chat_envelope(&mut first_peer, &seed, &NoFaults).expect("wire-only placeholder");
 
-    let mut peer_slugs = Vec::new();
-    for order in [[0, 1, 2], [1, 2, 0]] {
-        let (scratch, _path, mut engine) = store();
-        for index in order {
-            apply_chat_envelope(&mut engine, &operations[index], &NoFaults)
-                .expect("collision-safe channel apply");
-        }
-        let slugs: Vec<(String, String)> = engine
-            .read_with(|conn| {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT channel_id,slug FROM chat_channels \
-                         WHERE workspace_id='ws' ORDER BY channel_id",
-                    )
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                let rows = stmt
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
-            })
-            .expect("peer channel slugs");
-        assert_eq!(slugs.len(), 3);
-        assert_eq!(slugs[0], ("channel-a".to_owned(), requested.to_owned()));
-        assert_eq!(
-            slugs[2],
-            ("channel-z".to_owned(), occupied_fallback.clone()),
-            "the pre-existing collision candidate must remain occupied"
+    let (placeholder_channel_id, stored_slug): (String, String) = first_peer
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT channel_id,slug FROM chat_channels WHERE workspace_id='ws'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("placeholder channel");
+    assert!(
+        crate::apply::is_replicated_channel_slug(&stored_slug),
+        "the synthesized base must already satisfy the outbound channelSlug grammar"
+    );
+    assert_eq!(stored_slug.encode_utf16().count(), 200);
+
+    LinkedChatStore::new(&mut first_peer)
+        .start_channel_thread(
+            &StartChannelThread {
+                workspace_id: "ws".to_owned(),
+                channel_id: placeholder_channel_id,
+                thread_id: "long-wire-local-thread".to_owned(),
+                message_id: "long-wire-local-message".to_owned(),
+                title: Some("Local follow-up".to_owned()),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_user_id: Some("ada".to_owned()),
+                origin: None,
+                body: "Replicate this".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 20,
+                request_id: Some("long-wire-local-request".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("local thread in placeholder");
+
+    let outbound: ReplicationEnvelope = first_peer
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT origin_id,origin_seq,payload_json,recorded_at_ms \
+                 FROM replication_log \
+                 WHERE workspace_id='ws' AND op_kind='chat.thread.create' \
+                   AND json_extract(payload_json,'$.threadId')='long-wire-local-thread'",
+                [],
+                |row| {
+                    let payload_json: String = row.get(2)?;
+                    Ok(ReplicationEnvelope {
+                        workspace_id: "ws".to_owned(),
+                        origin_id: row.get(0)?,
+                        origin_seq: row.get(1)?,
+                        op_kind: "chat.thread.create".to_owned(),
+                        payload: serde_json::from_str(&payload_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                payload_json.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        recorded_at_ms: row.get(3)?,
+                    })
+                },
+            )
+        })
+        .expect("outbound local thread envelope");
+    assert_eq!(
+        outbound.payload["channelSlug"],
+        json!(stored_slug),
+        "the local thread must journal the bounded persisted slug"
+    );
+
+    let (_second_scratch, _second_path, mut second_peer) = store();
+    assert_eq!(
+        apply_chat_envelope(&mut second_peer, &outbound, &NoFaults)
+            .expect("second peer accepts bounded outbound channelSlug"),
+        ApplyOutcome::Applied(())
+    );
+}
+
+#[test]
+fn collision_slug_truncation_is_bounded_and_does_not_leave_a_dash_boundary() {
+    let (_scratch, _path, mut engine) = store();
+    let long_base = format!("{}-{}", "a".repeat(134), "b".repeat(20));
+    assert!(long_base.len() > 135);
+    for (origin, thread_id, wire_id, created_at_ms) in [
+        (
+            "long-base-owner",
+            "long-base-owner-thread",
+            "long-base-wire-1",
+            1,
+        ),
+        (
+            "long-base-newcomer",
+            "long-base-newcomer-thread",
+            "long-base-wire-2",
+            2,
+        ),
+    ] {
+        let operation = envelope(
+            origin,
+            0,
+            "chat.thread.create",
+            json!({
+                "threadId": thread_id,
+                "title": "Long base",
+                "createdAtMs": created_at_ms,
+                "channelSlug": long_base,
+                "channelWireId": wire_id
+            }),
         );
-        assert_ne!(slugs[1].1, occupied_fallback);
-        assert!(
-            slugs
-                .iter()
-                .all(|(_, slug)| slug.encode_utf16().count() <= 200),
-            "retry-generated slugs must remain inside the replicated slug bound"
-        );
-        assert_eq!(
-            slugs
-                .iter()
-                .map(|(_, slug)| slug)
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            3
-        );
-        peer_slugs.push((scratch, slugs));
+        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("long-base placeholder");
     }
-    assert_eq!(peer_slugs[0].1, peer_slugs[1].1);
+
+    let newcomer_slug: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT c.slug FROM chat_channel_wire_ids w \
+                 JOIN chat_channels c \
+                   ON c.workspace_id=w.workspace_id AND c.channel_id=w.channel_id \
+                 WHERE w.workspace_id='ws' AND w.wire_id='long-base-wire-2'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("long-base newcomer slug");
+    assert_eq!(
+        newcomer_slug,
+        collision_slug_for_test(&long_base, "long-base-wire-2", 0)
+    );
+    assert_eq!(newcomer_slug.encode_utf16().count(), 199);
+    assert!(crate::apply::is_replicated_channel_slug(&newcomer_slug));
+    assert!(
+        !newcomer_slug.contains("--"),
+        "truncating at the 135th unit must not leave an empty slug segment"
+    );
 }
 
 #[test]
