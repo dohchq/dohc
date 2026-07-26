@@ -5,7 +5,7 @@ use super::{Paths, RehearsalError};
 use dohc_engine_storage::{
     BackupOutcome, EngineStore, RealFreeSpace, create_verified_backup, load_valid_backup,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -460,13 +460,10 @@ pub(crate) fn recorded_backup_engine_uuid(recovery_dir: &Path) -> Result<String,
     // The identity comes from the BACKUP DB BYTES (covered by the recorded
     // checksum), never from the editable manifest JSON — an edited
     // `engine_uuid` field must not be able to evade the stale-store refusal.
-    let conn = Connection::open_with_flags(
-        db_backup_path(recovery_dir),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| RehearsalError::Io {
-        code: "backup-db-identity-unreadable",
-    })?;
+    let conn = super::open_sqlite_read_only_nofollow(
+        &db_backup_path(recovery_dir),
+        "backup-db-identity-unreadable",
+    )?;
     let uuid: Option<String> = conn
         .query_row(
             "SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1",
@@ -512,13 +509,7 @@ fn verify_reused_backup_binding(
     backup_db: &Path,
     shadow_token: &str,
 ) -> Result<(), RehearsalError> {
-    let conn = Connection::open_with_flags(
-        backup_db,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| RehearsalError::Io {
-        code: "backup-reuse-open-failed",
-    })?;
+    let conn = super::open_sqlite_read_only_nofollow(backup_db, "backup-reuse-open-failed")?;
     let token: Option<String> = conn
         .query_row(
             "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
@@ -548,13 +539,8 @@ fn ensure_no_pending_migrations(
     now_ms: i64,
 ) -> Result<(), RehearsalError> {
     let (applied, incomplete) = {
-        let conn = Connection::open_with_flags(
-            db,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .map_err(|_| RehearsalError::Io {
-            code: "backup-source-open-read-only-failed",
-        })?;
+        let conn =
+            super::open_sqlite_read_only_nofollow(db, "backup-source-open-read-only-failed")?;
         migration_ledger_rows(&conn).map_err(|_| RehearsalError::Io {
             code: "backup-source-migrations-unreadable",
         })?

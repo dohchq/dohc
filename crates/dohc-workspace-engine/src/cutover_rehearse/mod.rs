@@ -20,7 +20,8 @@ pub use fence::{REHEARSAL_TOKEN_RELATIVE_PATH, ValidatedRehearsalRoot, validate_
 pub use inventory::{Inventory, InventoryEntry, load_inventory};
 pub use state::{BackupFingerprint, RehearsalState, StableState, StateRecord, load_state};
 
-use std::path::PathBuf;
+use rusqlite::{Connection, OpenFlags};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RehearsalError {
@@ -130,6 +131,35 @@ pub(crate) fn require_real_dir(
             }
         }
     }
+}
+
+/// Open a SQLite database read-only without letting `SQLITE_OPEN_NOFOLLOW`
+/// reject an otherwise-safe path merely because an ANCESTOR is a symlink.
+///
+/// SQLite defines NOFOLLOW against the whole supplied pathname. Resolve only
+/// the parent first, lstat-gate the untouched final component as a real file,
+/// then retain NOFOLLOW on the canonical-parent path so a final-component
+/// symlink swap is still rejected atomically by SQLite.
+pub(crate) fn open_sqlite_read_only_nofollow(
+    path: &Path,
+    code: &'static str,
+) -> Result<Connection, RehearsalError> {
+    let parent = path
+        .parent()
+        .ok_or(RehearsalError::Io { code })
+        .and_then(|parent| {
+            std::fs::canonicalize(parent).map_err(|error| RehearsalError::io(code, error))
+        })?;
+    let file_name = path.file_name().ok_or(RehearsalError::Io { code })?;
+    let canonical_path = parent.join(file_name);
+    if require_real_file(&canonical_path, code)?.is_none() {
+        return Err(RehearsalError::Io { code });
+    }
+    Connection::open_with_flags(
+        canonical_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| RehearsalError::Io { code })
 }
 
 /// Flush a just-published file's CONTENTS (rename durability alone is not
