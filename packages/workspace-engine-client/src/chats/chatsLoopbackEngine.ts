@@ -14,7 +14,9 @@ import {
   type ChatDecision,
   type ChatDispatch,
   type ChatDispatchClaim,
+  type ChatFeedReadState,
   type ChatFeedItem,
+  type ChatFollow,
   type ChatLocalAttachmentParams,
   type ChatMention,
   type ChatMessage,
@@ -24,6 +26,7 @@ import {
   type ChatsJsonObject,
   type ChatThread,
   type ChatThreadPause,
+  type ChatThreadReadState,
 } from "./chatsWireContract";
 
 const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
@@ -42,7 +45,9 @@ interface WorkspaceState {
   mentions: ChatMention[];
   agentReads: Map<string, ChatAgentReadState>;
   humanReads: Map<string, number>;
-  follows: Map<string, Set<string>>;
+  humanReadStates: Map<string, ChatThreadReadState>;
+  followRecords: Map<string, ChatFollow>;
+  feedReads: Map<string, ChatFeedReadState>;
   bookmarks: Map<string, ChatBookmark>;
   dispatches: Map<string, ChatDispatch>;
   runs: Map<string, ChatRun>;
@@ -171,6 +176,22 @@ function requiredSafeInteger(
   return value as number;
 }
 
+function optionalInteger(
+  object: ChatsJsonObject,
+  key: string,
+): number | undefined {
+  const value = object[key];
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value)) throw new Error("invalid-parameters");
+  return value as number;
+}
+
+function requiredInteger(object: ChatsJsonObject, key: string): number {
+  const value = object[key];
+  if (!Number.isSafeInteger(value)) throw new Error("invalid-input");
+  return value as number;
+}
+
 function requiredBoolean(object: ChatsJsonObject, key: string): boolean {
   const value = object[key];
   if (typeof value !== "boolean") throw new Error("invalid-input");
@@ -238,6 +259,111 @@ function normalizePath(path: string): string {
     throw new Error("invalid-path");
   }
   return normalized;
+}
+
+function isAbsolutePathLike(path: string): boolean {
+  return (
+    path.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/u.test(path) ||
+    path.startsWith("\\\\")
+  );
+}
+
+function decodeTrackedPathEscapes(path: string): string {
+  let decoded = path;
+  for (;;) {
+    const next = decoded
+      .replace(/%25/giu, "%")
+      .replace(/%2e/giu, ".")
+      .replace(/%2f/giu, "/")
+      .replace(/%5c/giu, "\\");
+    if (next === decoded) return decoded;
+    decoded = next;
+  }
+}
+
+function stripWindowsAliasSuffix(segment: string): string {
+  return segment.replace(/[. ]+$/u, "");
+}
+
+function isReserved83Alias(segment: string, stem: string): boolean {
+  const match = /^([A-Za-z0-9]{1,8})~(\d+)$/u.exec(segment);
+  if (!match) return false;
+  const digits = match[2] ?? "";
+  const baseLength = Math.min(stem.length, 7 - digits.length);
+  return (
+    baseLength >= 1 &&
+    (match[1] ?? "").toUpperCase() === stem.slice(0, baseLength)
+  );
+}
+
+function policySegments(path: string): string[] {
+  return path
+    .replaceAll("\\", "/")
+    .split("/")
+    .map((segment) => stripWindowsAliasSuffix(segment).toLowerCase());
+}
+
+// Mirrors dohc-engine-files policy::classify_engine_file_path_normalized.
+// Bookmark projections are plaintext, so only a canonical Tracked path may
+// enter the projection queue.
+function normalizeTrackedPath(path: string): string {
+  if (path.includes("\0") || isAbsolutePathLike(path)) {
+    throw new Error("invalid-path");
+  }
+  const decoded = decodeTrackedPathEscapes(path);
+  if (isAbsolutePathLike(decoded)) throw new Error("invalid-path");
+  const segments = decoded.replaceAll("\\", "/").split("/");
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === ".." || /^[. ]+$/u.test(segment)) {
+      throw new Error("invalid-path");
+    }
+  }
+  const normalized = segments
+    .filter((segment) => segment !== "" && segment !== ".")
+    .join("/");
+  if (normalized.length === 0) throw new Error("invalid-path");
+
+  const classifiedSegments = policySegments(normalized);
+  const first = classifiedSegments[0] ?? "";
+  const reserved =
+    classifiedSegments.some(
+      (segment) =>
+        segment === ".dohc" || isReserved83Alias(segment, "DOHC"),
+    ) ||
+    first === "shared-with-me" ||
+    isReserved83Alias(first, "SHARED");
+  const ignored = classifiedSegments.some(
+    (segment) =>
+      segment === ".dohc" ||
+      segment === ".git" ||
+      segment === "node_modules" ||
+      segment.startsWith(".dohc-write-"),
+  );
+  const basename = classifiedSegments.at(-1) ?? "";
+  const secret =
+    classifiedSegments.some((segment) => segment === ".env") ||
+    basename.endsWith(".env") ||
+    basename.startsWith(".env.");
+  if (reserved || ignored || secret) throw new Error("invalid-path");
+  return normalized;
+}
+
+function validateProjectionPath(path: string): string {
+  if (
+    path.length === 0 ||
+    path.includes("\0") ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path[1] === ":" ||
+    path.includes("..") ||
+    path === ".dohc" ||
+    path.startsWith(".dohc/")
+  ) {
+    throw new Error("invalid-bookmark-target");
+  }
+  return path;
 }
 
 function base32LowercaseNoPadding(bytes: Uint8Array): string {
@@ -311,6 +437,22 @@ function bookmarkKey(ownerUserId: string, bookmarkId: string): string {
   return `${ownerUserId}\0${bookmarkId}`;
 }
 
+function bookmarkId(
+  ownerUserId: string,
+  targetKind: "message" | "thread",
+  targetId: string,
+): string {
+  const digest = createHash("sha256")
+    .update(ownerUserId)
+    .update("\0")
+    .update(targetKind)
+    .update("\0")
+    .update(targetId)
+    .digest()
+    .subarray(0, 16);
+  return `bookmark_${base32LowercaseNoPadding(digest)}`;
+}
+
 function runLinkKey(messageId: string): string {
   return messageId;
 }
@@ -327,6 +469,65 @@ function activeMessageReactions(state: WorkspaceState, messageId: string): ChatR
     .filter((reaction) => reaction.messageId === messageId && reaction.state === "added")
     .sort((left, right) => left.atMs - right.atMs || compareText(left.reactionId, right.reactionId))
     .map(jsonClone);
+}
+
+function activeFollowTargets(
+  state: WorkspaceState,
+  workspace: string,
+  ownerUserId: string,
+): Set<string> {
+  return new Set(
+    [...state.followRecords.values()]
+      .filter(
+        (follow) =>
+          follow.workspaceId === workspace &&
+          follow.ownerUserId === ownerUserId &&
+          follow.state === "following",
+      )
+      .map((follow) => `${follow.targetKind}\0${follow.targetId}`),
+  );
+}
+
+function personalFeedMessages(
+  state: WorkspaceState,
+  workspace: string,
+  ownerUserId: string,
+): ChatMessage[] {
+  const follows = activeFollowTargets(state, workspace, ownerUserId);
+  return [...state.messages.values()]
+    .filter((message) => {
+      const thread = state.threads.get(message.threadId);
+      const channel = thread?.channelId
+        ? state.channels.get(thread.channelId)
+        : undefined;
+      const openingMessageId = thread
+        ? threadMessages(state, thread.id)[0]?.id
+        : undefined;
+      return message.workspaceId === workspace && !!thread && (
+        follows.has(`thread\0${thread.id}`) ||
+        (
+          message.id === openingMessageId &&
+          channel?.wireId !== null &&
+          channel?.wireId !== undefined &&
+          follows.has(`channel\0${channel.wireId}`)
+        ) ||
+        (
+          message.author.kind === "human" &&
+          message.authorUserId !== undefined &&
+          follows.has(`person\0${message.authorUserId}`)
+        ) ||
+        (
+          message.author.kind === "agent" &&
+          message.authorUserId !== undefined &&
+          follows.has(`agent\0${message.authorUserId}`)
+        )
+      );
+    })
+    .sort(
+      (left, right) =>
+        right.createdAtMs - left.createdAtMs ||
+        compareText(right.id, left.id),
+    );
 }
 
 function codeRanges(body: string): Array<[number, number]> {
@@ -402,6 +603,50 @@ function encodeCursor(binding: string, index: number): string {
   return Buffer.from(JSON.stringify({ version: 1, binding, index }), "utf8").toString("base64url");
 }
 
+function encodeFeedCursor(message: ChatMessage): string {
+  return Buffer.from(
+    JSON.stringify([message.createdAtMs, message.id]),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeFeedCursor(cursor: string): {
+  createdAtMs: number;
+  messageId: string;
+} {
+  try {
+    if (
+      cursor.length === 0 ||
+      cursor.length > 512 ||
+      !/^[A-Za-z0-9_-]+$/u.test(cursor)
+    ) {
+      throw new Error();
+    }
+    const decoded = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as unknown;
+    if (
+      Buffer.from(JSON.stringify(decoded), "utf8").toString("base64url") !==
+      cursor
+    ) {
+      throw new Error();
+    }
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length !== 2 ||
+      !Number.isSafeInteger(decoded[0]) ||
+      typeof decoded[1] !== "string" ||
+      decoded[1].length === 0 ||
+      decoded[1].length > 256
+    ) {
+      throw new Error();
+    }
+    return { createdAtMs: decoded[0] as number, messageId: decoded[1] };
+  } catch {
+    throw new Error("invalid-follow-target");
+  }
+}
+
 function decodeCursor(params: ChatsJsonObject, binding: string): number {
   const raw = optionalString(params, "cursor");
   if (raw === undefined) return 0;
@@ -442,6 +687,14 @@ function page<T>(
 
 function allowedKeys(method: string): readonly string[] {
   switch (method) {
+    case CHATS_METHOD.channelCreate: return ["channelId", "name", "kind", "nowMs"];
+    case CHATS_METHOD.channelEnsureAgent:
+    case CHATS_METHOD.channelEnsureGeneral:
+      return ["channelId", "nowMs"];
+    case CHATS_METHOD.channelFindBySlug: return ["slug"];
+    case CHATS_METHOD.channelsList:
+    case CHATS_METHOD.threadsList:
+      return [];
     case CHATS_METHOD.channelGetWireId: return ["channelId"];
     case CHATS_METHOD.threadStart:
       return [
@@ -461,6 +714,12 @@ function allowedKeys(method: string): readonly string[] {
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorUserId",
         "parentMessageId", "origin", "body", "needsDecision", "attachments", "nowMs",
       ];
+    case CHATS_METHOD.messagesList:
+      return ["threadId", "limit", "afterMessageOrder"];
+    case CHATS_METHOD.readStateGet:
+      return ["threadId"];
+    case CHATS_METHOD.readStateMarkThreadRead:
+      return ["threadId", "upToSequence", "expectedRevision", "nowMs"];
     case CHATS_METHOD.decisionResolve:
       return ["threadId", "messageId", "resolvedByMessageId", "nowMs"];
     case CHATS_METHOD.reactionSet:
@@ -480,19 +739,38 @@ function allowedKeys(method: string): readonly string[] {
       return ["pageLimit", "cursor"];
     case CHATS_METHOD.agentReadMarkThreadRead:
       return ["threadId", "upTo", "expectedRevision"];
+    case CHATS_METHOD.followsSet:
+      return [
+        "ownerUserId", "replicationOwnerUserId", "targetKind", "targetId", "state", "nowMs",
+      ];
+    case CHATS_METHOD.followsList:
+      return ["ownerUserId", "state"];
     case CHATS_METHOD.followsEnsureDefaults: return ["ownerUserId"];
+    case CHATS_METHOD.feedMarkSeen:
+      return ["ownerUserId", "replicationOwnerUserId", "headCursor", "nowMs"];
     case CHATS_METHOD.feedListPersonal: return ["ownerUserId", "limit", "cursor"];
+    case CHATS_METHOD.bookmarkSave:
+      return ["ownerUserId", "targetKind", "targetId", "mode", "destinationPath", "nowMs"];
+    case CHATS_METHOD.bookmarksList:
+      return ["ownerUserId", "state"];
     case CHATS_METHOD.bookmarkFind:
     case CHATS_METHOD.bookmarkArchive:
     case CHATS_METHOD.bookmarkMarkPending:
       return ["ownerUserId", "bookmarkId"];
     case CHATS_METHOD.bookmarkListPending:
       return ["ownerUserId", "limit", "pageLimit", "cursor"];
+    case CHATS_METHOD.bookmarkMarkReady:
+      return [
+        "ownerUserId", "bookmarkId", "generation", "projectedAtMs",
+        "projectionObjectId", "projectionPath",
+      ];
     case CHATS_METHOD.bookmarkMarkFailed:
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
     case CHATS_METHOD.bookmarkMarkStale:
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
     case CHATS_METHOD.dispatchRecordEligibleTriggers: return ["verifiedUserId"];
+    case CHATS_METHOD.dispatchEnqueue:
+      return ["triggerMessageId", "threadId", "nowMs"];
     case CHATS_METHOD.dispatchClaimNextPending: return ["runId", "command", "logPath", "nowMs"];
     case CHATS_METHOD.dispatchListRunMessages: return ["runId", "pageLimit", "cursor"];
     case CHATS_METHOD.dispatchRunIdForMessage: return ["messageId"];
@@ -506,6 +784,8 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.dispatchRecordRunMessage: return ["messageId", "runId"];
     case CHATS_METHOD.dispatchSetThreadPaused: return ["threadId", "paused", "reason"];
     case CHATS_METHOD.dispatchRequeueFailedTrigger: return ["triggerMessageId", "runId"];
+    case CHATS_METHOD.dispatchComplete: return ["runId", "exitCode", "nowMs"];
+    case CHATS_METHOD.dispatchFail: return ["runId", "reason", "exitCode", "nowMs"];
     default: throw new Error(`Unsupported loopback method: ${method}`);
   }
 }
@@ -552,9 +832,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     targetId: string,
   ): void {
     const state = this.workspace(workspace);
-    const follows = state.follows.get(ownerUserId) ?? new Set<string>();
-    follows.add(`${targetKind}\0${targetId}`);
-    state.follows.set(ownerUserId, follows);
+    state.followRecords.set(`${ownerUserId}\0${targetKind}\0${targetId}`, {
+      workspaceId: workspace,
+      ownerUserId,
+      targetKind,
+      targetId,
+      state: "following",
+      updatedAtMs: 0,
+    });
   }
 
   seedThreadRead(workspace: string, threadId: string, lastReadSequence: number): void {
@@ -630,6 +915,16 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const state = this.workspace(workspace);
     const params = strictObject(request.params, `${request.method} params`, allowedKeys(request.method));
     switch (request.method) {
+      case CHATS_METHOD.channelCreate:
+        return this.channelCreate(state, workspace, params);
+      case CHATS_METHOD.channelEnsureGeneral:
+        return this.channelEnsure(state, workspace, params, "general", "channel");
+      case CHATS_METHOD.channelEnsureAgent:
+        return this.channelEnsure(state, workspace, params, "My agent", "agent");
+      case CHATS_METHOD.channelsList:
+        return this.channelsList(state, workspace);
+      case CHATS_METHOD.channelFindBySlug:
+        return this.channelFindBySlug(state, params);
       case CHATS_METHOD.channelGetWireId:
         return this.channelGetWireId(state, params);
       case CHATS_METHOD.threadStart:
@@ -638,6 +933,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
       case CHATS_METHOD.threadCreate:
         return this.replay(request, workspace, params, true, () =>
           this.threadCreate(state, workspace, params));
+      case CHATS_METHOD.threadsList:
+        return this.threadsList(state, workspace);
       case CHATS_METHOD.threadsListForFile:
         return this.threadsListForFile(state, workspace, params);
       case CHATS_METHOD.threadsListForChannel:
@@ -649,6 +946,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
       case CHATS_METHOD.messageSend:
         return this.replay(request, workspace, params, false, () =>
           this.messageSend(state, workspace, params));
+      case CHATS_METHOD.messagesList:
+        return this.messagesList(state, params);
+      case CHATS_METHOD.readStateGet:
+        return this.readStateGet(state, workspace, params);
+      case CHATS_METHOD.readStateMarkThreadRead:
+        return this.readStateMark(state, workspace, params);
       case CHATS_METHOD.decisionResolve:
         return this.replay(request, workspace, params, true, () =>
           this.decisionResolve(state, params));
@@ -669,14 +972,26 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.agentUnreadThreads(state, workspace, params);
       case CHATS_METHOD.agentReadMarkThreadRead:
         return this.agentMarkRead(state, workspace, params);
+      case CHATS_METHOD.followsSet:
+        return this.followSet(state, workspace, params);
+      case CHATS_METHOD.followsList:
+        return this.followsList(state, workspace, params);
       case CHATS_METHOD.followsEnsureDefaults:
-        return this.ensureDefaultFollows(state, params);
+        return this.ensureDefaultFollows(state, workspace, params);
+      case CHATS_METHOD.feedMarkSeen:
+        return this.feedMarkSeen(state, workspace, params);
       case CHATS_METHOD.feedListPersonal:
         return this.feedList(state, workspace, params);
+      case CHATS_METHOD.bookmarkSave:
+        return this.bookmarkSave(state, workspace, params);
+      case CHATS_METHOD.bookmarksList:
+        return this.bookmarksList(state, params);
       case CHATS_METHOD.bookmarkFind:
         return this.bookmarkFind(state, params);
       case CHATS_METHOD.bookmarkListPending:
         return this.bookmarkListPending(state, workspace, params);
+      case CHATS_METHOD.bookmarkMarkReady:
+        return this.bookmarkMarkReady(state, params);
       case CHATS_METHOD.bookmarkArchive:
         return this.bookmarkArchive(state, params);
       case CHATS_METHOD.bookmarkMarkPending:
@@ -686,6 +1001,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.bookmarkTransition(state, params, "failed");
       case CHATS_METHOD.bookmarkMarkStale:
         return this.bookmarkTransition(state, params, "stale");
+      case CHATS_METHOD.dispatchEnqueue:
+        return this.dispatchEnqueue(state, workspace, params);
       case CHATS_METHOD.dispatchRecordEligibleTriggers:
         return this.recordEligibleTriggers(state, workspace, params);
       case CHATS_METHOD.dispatchClaimNextPending:
@@ -720,6 +1037,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.requeueFailed(state, workspace, params);
       case CHATS_METHOD.dispatchListAppQuitRecoveries:
         return this.appQuitRecoveries(state, workspace, params);
+      case CHATS_METHOD.dispatchComplete:
+        return this.dispatchComplete(state, workspace, params);
+      case CHATS_METHOD.dispatchFail:
+        return this.dispatchFail(state, workspace, params);
       default:
         throw new Error(`Unsupported loopback method: ${request.method}`);
     }
@@ -915,6 +1236,113 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return normalized;
   }
 
+  private channelJson(
+    channel: ChatChannel & { wireId?: string | null },
+  ): ChatChannel {
+    return {
+      workspaceId: channel.workspaceId,
+      channelId: channel.channelId,
+      name: channel.name,
+      slug: channel.slug,
+      kind: channel.kind,
+      createdAtMs: channel.createdAtMs,
+      updatedAtMs: channel.updatedAtMs,
+    };
+  }
+
+  private channelCreate(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const channelId = requiredString(params, "channelId");
+    const name = normalizeNonempty(
+      requiredString(params, "name", "invalid-channel-name"),
+      "invalid-channel-name",
+    );
+    const kind = requiredString(params, "kind");
+    if (kind !== "channel" && kind !== "dm" && kind !== "agent") {
+      throw new Error("invalid-channel-kind");
+    }
+    if (state.channels.has(channelId)) throw new Error("target-exists");
+    const channelSlug = slug(name);
+    if (
+      [...state.channels.values()].some(
+        (channel) => channel.slug === channelSlug,
+      )
+    ) {
+      throw new Error("channel-exists");
+    }
+    const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    const channel: ChatChannel & { wireId: string | null } = {
+      workspaceId: workspace,
+      channelId,
+      name,
+      slug: channelSlug,
+      kind,
+      createdAtMs: atMs,
+      updatedAtMs: atMs,
+      wireId: channelId,
+    };
+    state.channels.set(channelId, channel);
+    return jsonResult(this.channelJson(channel));
+  }
+
+  private channelEnsure(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+    name: string,
+    kind: "channel" | "agent",
+  ): JsonValue {
+    const wantedSlug = slug(name);
+    const existing = [...state.channels.values()].find(
+      (channel) => channel.slug === wantedSlug,
+    );
+    if (existing) return jsonResult(this.channelJson(existing));
+    return this.channelCreate(state, workspace, {
+      channelId: requiredString(params, "channelId"),
+      name,
+      kind,
+      ...(params.nowMs !== undefined ? { nowMs: params.nowMs } : {}),
+    });
+  }
+
+  private channelsList(state: WorkspaceState, workspace: string): JsonValue {
+    const channels = [...state.channels.values()]
+      .filter((channel) => channel.workspaceId === workspace)
+      .sort(
+        (left, right) =>
+          left.createdAtMs - right.createdAtMs ||
+          compareText(left.channelId, right.channelId),
+      )
+      .map((channel) => {
+        const threads = [...state.threads.values()].filter(
+          (thread) => thread.channelId === channel.channelId,
+        );
+        return {
+          ...this.channelJson(channel),
+          threadCount: threads.length,
+          unreadCount: threads.reduce((count, thread) => {
+            const total = threadMessages(state, thread.id).length;
+            return count + Math.max(0, total - (state.humanReads.get(thread.id) ?? 0));
+          }, 0),
+        };
+      });
+    return jsonResult({ channels, truncated: false });
+  }
+
+  private channelFindBySlug(
+    state: WorkspaceState,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const wanted = requiredString(params, "slug");
+    const channel = [...state.channels.values()].find(
+      (candidate) => candidate.slug === wanted,
+    );
+    return jsonResult(channel ? this.channelJson(channel) : null);
+  }
+
   private channelGetWireId(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
     const channel = state.channels.get(requiredString(params, "channelId"));
     if (!channel) throw new Error("channel-not-found");
@@ -973,6 +1401,26 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(thread);
   }
 
+  private threadsList(state: WorkspaceState, workspace: string): JsonValue {
+    const threads = [...state.threads.values()]
+      .filter((thread) => thread.workspaceId === workspace)
+      .sort(
+        (left, right) =>
+          left.createdAtMs - right.createdAtMs ||
+          compareText(left.id, right.id),
+      )
+      .map((thread) => ({
+        workspaceId: thread.workspaceId,
+        threadId: thread.id,
+        title: thread.title,
+        createdAtMs: thread.createdAtMs,
+        updatedAtMs: thread.updatedAtMs,
+        channelId: thread.channelId ?? null,
+        linkedObjectId: thread.linkedFile?.objectId ?? null,
+      }));
+    return jsonResult({ threads, truncated: false });
+  }
+
   private messageSend(
     state: WorkspaceState,
     workspace: string,
@@ -989,6 +1437,71 @@ export class ChatsLoopbackEngine implements EngineTransport {
     );
     thread.updatedAtMs = Math.max(thread.updatedAtMs, message.createdAtMs);
     return jsonResult(message);
+  }
+
+  private messagesList(
+    state: WorkspaceState,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const threadId = requiredString(params, "threadId");
+    this.requireThread(state, threadId);
+    const messages = threadMessages(state, threadId);
+    const after = optionalSafeInteger(params, "afterMessageOrder") ?? 0;
+    const limit = Math.min(optionalSafeInteger(params, "limit", 1) ?? 100, 500);
+    const rows = messages.slice(after, after + limit);
+    const next =
+      after + rows.length < messages.length ? after + rows.length : null;
+    return jsonResult({ messages: rows, nextAfterMessageOrder: next });
+  }
+
+  private readStateGet(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const threadId = requiredString(params, "threadId");
+    this.requireThread(state, threadId);
+    return jsonResult(
+      state.humanReadStates.get(threadId) ?? {
+        workspaceId: workspace,
+        threadId,
+        lastReadSequence: 0,
+        revision: 0,
+        updatedAtMs: 0,
+      },
+    );
+  }
+
+  private readStateMark(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const threadId = requiredString(params, "threadId");
+    const messageCount = threadMessages(state, threadId).length;
+    this.requireThread(state, threadId);
+    const previous = state.humanReadStates.get(threadId);
+    const expected = optionalSafeInteger(params, "expectedRevision");
+    if (expected !== undefined && expected !== (previous?.revision ?? 0)) {
+      throw new Error("read-state-revision-mismatch");
+    }
+    const upTo = Math.min(
+      requiredSafeInteger(params, "upToSequence", "invalid-read-cursor"),
+      messageCount,
+    );
+    if (previous && upTo <= previous.lastReadSequence) {
+      return jsonResult(previous);
+    }
+    const result: ChatThreadReadState = {
+      workspaceId: workspace,
+      threadId,
+      lastReadSequence: upTo,
+      revision: (previous?.revision ?? 0) + 1,
+      updatedAtMs: this.tick(optionalSafeInteger(params, "nowMs")),
+    };
+    state.humanReads.set(threadId, upTo);
+    state.humanReadStates.set(threadId, result);
+    return jsonResult(result);
   }
 
   private insertMessage(
@@ -1477,14 +1990,166 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(result);
   }
 
-  private ensureDefaultFollows(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
-    const owner = requiredString(params, "ownerUserId", "invalid-follow-target");
-    const follows = state.follows.get(owner) ?? new Set<string>();
-    for (const channel of state.channels.values()) {
-      if (channel.kind !== "dm" && channel.wireId) follows.add(`channel\0${channel.wireId}`);
+  private followSet(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const ownerUserId = normalizeTrimmed(
+      requiredString(params, "ownerUserId", "invalid-follow-target"),
+      "invalid-follow-target",
+    );
+    const replicationOwner = optionalString(
+      params,
+      "replicationOwnerUserId",
+    );
+    const replicationOwnerUserId = replicationOwner === undefined
+      ? undefined
+      : normalizeTrimmed(replicationOwner, "invalid-follow-target");
+    if (
+      replicationOwnerUserId !== undefined &&
+      replicationOwnerUserId !== ownerUserId
+    ) {
+      throw new Error("invalid-follow-target");
     }
-    state.follows.set(owner, follows);
+    const targetKind = requiredString(params, "targetKind");
+    if (!["person", "agent", "channel", "thread"].includes(targetKind)) {
+      throw new Error("invalid-follow-target");
+    }
+    const targetId = requiredString(
+      params,
+      "targetId",
+      "invalid-follow-target",
+    );
+    const followState = requiredString(params, "state");
+    if (followState !== "following" && followState !== "unfollowed") {
+      throw new Error("invalid-follow-target");
+    }
+    const key = `${ownerUserId}\0${targetKind}\0${targetId}`;
+    const record: ChatFollow = {
+      workspaceId: workspace,
+      ownerUserId,
+      targetKind: targetKind as ChatFollow["targetKind"],
+      targetId,
+      state: followState,
+      updatedAtMs: this.tick(optionalSafeInteger(params, "nowMs")),
+    };
+    state.followRecords.set(key, record);
+    return jsonResult(record);
+  }
+
+  private followsList(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const ownerUserId = requiredString(
+      params,
+      "ownerUserId",
+      "invalid-follow-target",
+    );
+    const wantedState = optionalString(params, "state");
+    if (
+      wantedState !== undefined &&
+      wantedState !== "following" &&
+      wantedState !== "unfollowed"
+    ) {
+      throw new Error("invalid-follow-target");
+    }
+    const follows = [...state.followRecords.values()]
+      .filter(
+        (follow) =>
+          follow.workspaceId === workspace &&
+          follow.ownerUserId === ownerUserId &&
+          (wantedState === undefined || follow.state === wantedState),
+      )
+      .sort(
+        (left, right) =>
+          left.updatedAtMs - right.updatedAtMs ||
+          compareText(left.targetId, right.targetId),
+      );
+    return jsonResult({ follows, truncated: false });
+  }
+
+  private ensureDefaultFollows(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const owner = normalizeTrimmed(
+      requiredString(params, "ownerUserId", "invalid-follow-target"),
+      "invalid-follow-target",
+    );
+    for (const channel of state.channels.values()) {
+      if (channel.kind === "dm" || !channel.wireId) continue;
+      const key = `${owner}\0channel\0${channel.wireId}`;
+      if (state.followRecords.has(key)) continue;
+      state.followRecords.set(key, {
+        workspaceId: workspace,
+        ownerUserId: owner,
+        targetKind: "channel",
+        targetId: channel.wireId,
+        state: "following",
+        updatedAtMs: 0,
+      });
+    }
     return null;
+  }
+
+  private feedMarkSeen(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const ownerUserId = normalizeTrimmed(
+      requiredString(params, "ownerUserId", "invalid-follow-target"),
+      "invalid-follow-target",
+    );
+    const replicationOwner = optionalString(
+      params,
+      "replicationOwnerUserId",
+    );
+    const replicationOwnerUserId = replicationOwner === undefined
+      ? undefined
+      : normalizeTrimmed(replicationOwner, "invalid-follow-target");
+    if (
+      replicationOwnerUserId !== undefined &&
+      replicationOwnerUserId !== ownerUserId
+    ) {
+      throw new Error("invalid-follow-target");
+    }
+    const cursor = decodeFeedCursor(
+      requiredString(params, "headCursor", "invalid-follow-target"),
+    );
+    const visible = personalFeedMessages(state, workspace, ownerUserId).some(
+      (message) =>
+        message.createdAtMs === cursor.createdAtMs &&
+        message.id === cursor.messageId,
+    );
+    if (!visible) throw new Error("invalid-follow-target");
+
+    const prior = state.feedReads.get(ownerUserId);
+    const requestedAtMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    const candidate: ChatFeedReadState = {
+      workspaceId: workspace,
+      ownerUserId,
+      lastSeenCreatedAtMs: cursor.createdAtMs,
+      lastSeenMessageId: cursor.messageId,
+      updatedAtMs: Math.max(
+        requestedAtMs,
+        (prior?.updatedAtMs ?? -1) + 1,
+      ),
+    };
+    const advances =
+      prior === undefined ||
+      candidate.lastSeenCreatedAtMs > prior.lastSeenCreatedAtMs ||
+      (
+        candidate.lastSeenCreatedAtMs === prior.lastSeenCreatedAtMs &&
+        compareText(candidate.lastSeenMessageId, prior.lastSeenMessageId) >= 0
+      );
+    const result = advances ? candidate : prior;
+    state.feedReads.set(ownerUserId, result);
+    return jsonResult(result);
   }
 
   private feedList(
@@ -1493,37 +2158,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
     params: ChatsJsonObject,
   ): JsonValue {
     const owner = requiredString(params, "ownerUserId", "invalid-follow-target");
-    const follows = state.follows.get(owner) ?? new Set<string>();
-    const candidates: ChatFeedItem[] = [...state.messages.values()]
-      .filter((message) => {
-        const thread = state.threads.get(message.threadId);
-        const channel = thread?.channelId
-          ? state.channels.get(thread.channelId)
-          : undefined;
-        const openingMessageId = thread
-          ? threadMessages(state, thread.id)[0]?.id
-          : undefined;
-        return !!thread && (
-          follows.has(`thread\0${thread.id}`) ||
-          (
-            message.id === openingMessageId &&
-            channel?.wireId !== null &&
-            channel?.wireId !== undefined &&
-            follows.has(`channel\0${channel.wireId}`)
-          ) ||
-          (
-            message.author.kind === "human" &&
-            message.authorUserId !== undefined &&
-            follows.has(`person\0${message.authorUserId}`)
-          ) ||
-          (
-            message.author.kind === "agent" &&
-            message.authorUserId !== undefined &&
-            follows.has(`agent\0${message.authorUserId}`)
-          )
-        );
-      })
-      .sort((left, right) => right.createdAtMs - left.createdAtMs || compareText(right.id, left.id))
+    const follows = activeFollowTargets(state, workspace, owner);
+    const feedMessages = personalFeedMessages(state, workspace, owner);
+    const candidates: ChatFeedItem[] = feedMessages
       .map((message) => {
         const thread = state.threads.get(message.threadId)!;
         const channel = thread.channelId ? state.channels.get(thread.channelId) : undefined;
@@ -1586,9 +2223,118 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult({
       items: result.values,
       nextCursor: result.nextCursor,
-      headCursor: head ? encodeCursor(`${workspace}\0feedHead`, 0) : null,
-      readState: null,
+      headCursor: head ? encodeFeedCursor(head.message) : null,
+      readState: state.feedReads.get(owner) ?? null,
     });
+  }
+
+  private bookmarkSave(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const ownerUserId = requiredString(
+      params,
+      "ownerUserId",
+      "invalid-follow-target",
+    );
+    const targetKind = requiredString(params, "targetKind");
+    if (targetKind !== "message" && targetKind !== "thread") {
+      throw new Error("invalid-bookmark-target");
+    }
+    const targetId = requiredString(
+      params,
+      "targetId",
+      "invalid-bookmark-target",
+    );
+    const mode = requiredString(params, "mode");
+    if (mode !== "live" && mode !== "snapshot") {
+      throw new Error("invalid-bookmark-target");
+    }
+    const destinationPath = normalizeTrackedPath(
+      requiredString(params, "destinationPath", "invalid-path"),
+    );
+    const thread =
+      targetKind === "thread"
+        ? this.requireThread(state, targetId)
+        : this.requireThread(
+            state,
+            state.messages.get(targetId)?.threadId ?? "",
+          );
+    const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    const existing = [...state.bookmarks.values()].find(
+      (bookmark) =>
+        bookmark.ownerUserId === ownerUserId &&
+        bookmark.targetKind === targetKind &&
+        bookmark.targetId === targetId,
+    );
+    if (existing) {
+      const resetsProjection =
+        existing.destinationPath !== destinationPath ||
+        existing.state === "archived";
+      existing.threadId = thread.id;
+      if (targetKind === "message") existing.messageId = targetId;
+      else delete existing.messageId;
+      existing.mode = mode;
+      existing.destinationPath = destinationPath;
+      existing.state = "active";
+      existing.generation += 1;
+      existing.projectionState = "pending";
+      delete existing.failureReason;
+      if (resetsProjection) delete existing.projectionObjectId;
+      existing.updatedAtMs = atMs;
+      return jsonResult(existing);
+    }
+    const bookmark: ChatBookmark = {
+      bookmarkId: bookmarkId(ownerUserId, targetKind, targetId),
+      workspaceId: workspace,
+      ownerUserId,
+      targetKind,
+      targetId,
+      threadId: thread.id,
+      ...(targetKind === "message" ? { messageId: targetId } : {}),
+      mode,
+      destinationPath,
+      state: "active",
+      generation: 1,
+      projectedGeneration: 0,
+      projectionState: "pending",
+      createdAtMs: atMs,
+      updatedAtMs: atMs,
+    };
+    state.bookmarks.set(bookmarkKey(ownerUserId, bookmark.bookmarkId), bookmark);
+    return jsonResult(bookmark);
+  }
+
+  private bookmarksList(
+    state: WorkspaceState,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const ownerUserId = requiredString(
+      params,
+      "ownerUserId",
+      "invalid-follow-target",
+    );
+    const wantedState = optionalString(params, "state");
+    if (
+      wantedState !== undefined &&
+      wantedState !== "active" &&
+      wantedState !== "archived"
+    ) {
+      throw new Error("invalid-bookmark-target");
+    }
+    const bookmarks = [...state.bookmarks.values()]
+      .filter(
+        (bookmark) =>
+          bookmark.ownerUserId === ownerUserId &&
+          (wantedState === undefined || bookmark.state === wantedState),
+      )
+      .sort(
+        (left, right) =>
+          left.createdAtMs - right.createdAtMs ||
+          compareText(left.bookmarkId, right.bookmarkId),
+      );
+    return jsonResult({ bookmarks, truncated: false });
   }
 
   private bookmarkFind(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
@@ -1614,6 +2360,75 @@ export class ChatsLoopbackEngine implements EngineTransport {
       .slice(0, logicalLimit);
     const result = page(rows, params, `${workspace}\0pendingBookmarks\0${owner}\0${logicalLimit}`);
     return jsonResult({ bookmarks: result.values, nextCursor: result.nextCursor });
+  }
+
+  private bookmarkMarkReady(
+    state: WorkspaceState,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const bookmark = this.requireBookmark(state, params);
+    const generation = requiredSafeInteger(
+      params,
+      "generation",
+      "invalid-bookmark-target",
+    );
+    const applied =
+      bookmark.generation === generation &&
+      bookmark.state === "active" &&
+      bookmark.projectionState === "pending";
+    const projectionObjectId = optionalString(
+      params,
+      "projectionObjectId",
+    );
+    const projectionPath = optionalString(params, "projectionPath");
+    if (
+      (projectionObjectId === undefined) !== (projectionPath === undefined)
+    ) {
+      throw new Error("invalid-bookmark-target");
+    }
+    const projectionIdentity =
+      projectionObjectId === undefined || projectionPath === undefined
+        ? undefined
+        : {
+            objectId: normalizeTrimmed(
+              projectionObjectId,
+              "invalid-bookmark-target",
+            ),
+            path: validateProjectionPath(projectionPath),
+          };
+    if (
+      projectionIdentity !== undefined &&
+      (
+        projectionIdentity.objectId.length > 256 ||
+        /[\u0000-\u001f\u007f]/u.test(projectionIdentity.objectId)
+      )
+    ) {
+      throw new Error("invalid-bookmark-target");
+    }
+    if (applied) {
+      if (
+        projectionIdentity !== undefined &&
+        (
+          projectionIdentity.path !== bookmark.destinationPath ||
+          (
+            bookmark.projectionObjectId !== undefined &&
+            bookmark.projectionObjectId !== projectionIdentity.objectId
+          )
+        )
+      ) {
+        throw new Error("invalid-bookmark-target");
+      }
+      bookmark.projectionState = "ready";
+      bookmark.projectedGeneration = generation;
+      bookmark.lastProjectedAtMs =
+        optionalSafeInteger(params, "projectedAtMs") ?? this.tick();
+      if (projectionIdentity !== undefined) {
+        bookmark.projectionObjectId = projectionIdentity.objectId;
+      }
+      delete bookmark.failureReason;
+      bookmark.updatedAtMs = bookmark.lastProjectedAtMs;
+    }
+    return jsonResult({ bookmark, applied });
   }
 
   private requireBookmark(state: WorkspaceState, params: ChatsJsonObject): ChatBookmark {
@@ -1663,6 +2478,30 @@ export class ChatsLoopbackEngine implements EngineTransport {
       bookmark.updatedAtMs = this.tick();
     }
     return jsonResult({ bookmark, applied });
+  }
+
+  private dispatchEnqueue(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const triggerMessageId = requiredString(params, "triggerMessageId");
+    const threadId = requiredString(params, "threadId");
+    this.requireThread(state, threadId);
+    if (state.dispatches.has(triggerMessageId)) {
+      return jsonResult({ enqueued: false });
+    }
+    const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    state.dispatches.set(triggerMessageId, {
+      workspaceId: workspace,
+      triggerMessageId,
+      threadId,
+      state: "pending",
+      attemptCount: 0,
+      createdAtMs: atMs,
+      updatedAtMs: atMs,
+    });
+    return jsonResult({ enqueued: true });
   }
 
   private recordEligibleTriggers(
@@ -1878,6 +2717,54 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(changed);
   }
 
+  private dispatchComplete(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const runId = requiredString(params, "runId");
+    const run = state.runs.get(runId);
+    if (!run || run.workspaceId !== workspace) throw new Error("run-not-found");
+    const dispatch = state.dispatches.get(run.triggerMessageId);
+    if (!dispatch || dispatch.runId !== runId || dispatch.state !== "running") {
+      throw new Error("run-state-mismatch");
+    }
+    const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    const exitCode = requiredInteger(params, "exitCode");
+    run.endedAtMs = atMs;
+    run.exitCode = exitCode;
+    dispatch.state = "done";
+    dispatch.updatedAtMs = atMs;
+    return jsonResult({ completed: true });
+  }
+
+  private dispatchFail(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const runId = requiredString(params, "runId");
+    const run = state.runs.get(runId);
+    if (!run || run.workspaceId !== workspace) throw new Error("run-not-found");
+    const dispatch = state.dispatches.get(run.triggerMessageId);
+    if (!dispatch || dispatch.runId !== runId || dispatch.state !== "running") {
+      throw new Error("run-state-mismatch");
+    }
+    const reason = normalizeNonempty(
+      requiredString(params, "reason"),
+      "invalid-input",
+    );
+    const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    run.endedAtMs = atMs;
+    run.failureReason = reason;
+    const exitCode = optionalInteger(params, "exitCode");
+    if (exitCode !== undefined) run.exitCode = exitCode;
+    dispatch.state = "failed";
+    dispatch.failureReason = reason;
+    dispatch.updatedAtMs = atMs;
+    return jsonResult({ failed: true });
+  }
+
   private recordRunMessage(
     state: WorkspaceState,
     workspace: string,
@@ -2014,7 +2901,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
         mentions: [],
         agentReads: new Map(),
         humanReads: new Map(),
-        follows: new Map(),
+        humanReadStates: new Map(),
+        followRecords: new Map(),
+        feedReads: new Map(),
         bookmarks: new Map(),
         dispatches: new Map(),
         runs: new Map(),

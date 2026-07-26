@@ -1,14 +1,23 @@
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
 export const CHATS_METHOD = {
+  channelCreate: "chats.channels.create",
+  channelEnsureAgent: "chats.channels.ensureAgent",
+  channelEnsureGeneral: "chats.channels.ensureGeneral",
+  channelFindBySlug: "chats.channels.findBySlug",
+  channelsList: "chats.channels.list",
   channelGetWireId: "chats.channels.getWireId",
   threadStart: "chats.threads.start",
   threadCreate: "chats.threads.create",
+  threadsList: "chats.threads.list",
   threadsListForFile: "chats.threads.listForFile",
   threadsListForChannel: "chats.threads.listForChannel",
   threadFindChannelId: "chats.threads.findChannelId",
   threadGetProjection: "chats.threads.getProjection",
   messageSend: "chats.messages.send",
+  messagesList: "chats.messages.list",
+  readStateGet: "chats.readState.get",
+  readStateMarkThreadRead: "chats.readState.markThreadRead",
   decisionResolve: "chats.decisions.resolve",
   decisionsListForThread: "chats.decisions.listForThread",
   reactionSet: "chats.reactions.set",
@@ -18,14 +27,21 @@ export const CHATS_METHOD = {
   mentionsListForHandle: "chats.mentions.listForHandle",
   agentReadListUnreadThreads: "chats.agentReadState.listUnreadThreads",
   agentReadMarkThreadRead: "chats.agentReadState.markThreadRead",
+  followsSet: "chats.follows.set",
+  followsList: "chats.follows.list",
   followsEnsureDefaults: "chats.follows.ensureDefaults",
+  feedMarkSeen: "chats.feed.markSeen",
   feedListPersonal: "chats.feed.listPersonal",
+  bookmarkSave: "chats.bookmarks.save",
+  bookmarksList: "chats.bookmarks.list",
   bookmarkFind: "chats.bookmarks.find",
   bookmarkListPending: "chats.bookmarks.listPending",
+  bookmarkMarkReady: "chats.bookmarks.markReady",
   bookmarkArchive: "chats.bookmarks.archive",
   bookmarkMarkPending: "chats.bookmarks.markPending",
   bookmarkMarkFailed: "chats.bookmarks.markFailed",
   bookmarkMarkStale: "chats.bookmarks.markStale",
+  dispatchEnqueue: "chats.dispatch.enqueue",
   dispatchRecordEligibleTriggers: "chats.dispatch.recordEligibleTriggers",
   dispatchClaimNextPending: "chats.dispatch.claimNextPending",
   dispatchListPending: "chats.dispatch.listPending",
@@ -43,6 +59,8 @@ export const CHATS_METHOD = {
   dispatchMarkFailureNotePosted: "chats.dispatch.markFailureNotePosted",
   dispatchRequeueFailedTrigger: "chats.dispatch.requeueFailedTrigger",
   dispatchListAppQuitRecoveries: "chats.dispatch.listAppQuitRecoveries",
+  dispatchComplete: "chats.dispatch.complete",
+  dispatchFail: "chats.dispatch.fail",
 } as const;
 
 export type ChatsMethod = (typeof CHATS_METHOD)[keyof typeof CHATS_METHOD];
@@ -205,6 +223,34 @@ export type ChatChannel = ChatsJsonObject & {
   createdAtMs: number;
   updatedAtMs: number;
 };
+export type ChatChannelSummary = ChatChannel & {
+  threadCount: number;
+  unreadCount: number;
+};
+export type ChatThreadWireRecord = ChatsJsonObject & {
+  workspaceId: string;
+  threadId: string;
+  title: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  channelId: string | null;
+  linkedObjectId: string | null;
+};
+export type ChatThreadReadState = ChatsJsonObject & {
+  workspaceId: string;
+  threadId: string;
+  lastReadSequence: number;
+  revision: number;
+  updatedAtMs: number;
+};
+export type ChatFollow = ChatsJsonObject & {
+  workspaceId: string;
+  ownerUserId: string;
+  targetKind: "person" | "agent" | "channel" | "thread";
+  targetId: string;
+  state: "following" | "unfollowed";
+  updatedAtMs: number;
+};
 export type ChatFileMention = ChatsJsonObject & {
   attachment: ChatAttachment;
   message: ChatMessage;
@@ -254,6 +300,18 @@ export type ChatFeedItem = ChatsJsonObject & {
 };
 
 export type ChatChannelGetWireIdParams = ChatsJsonObject & { channelId: string };
+export type ChatChannelCreateParams = ChatsJsonObject & {
+  channelId: string;
+  name: string;
+  kind: "channel" | "dm" | "agent";
+  nowMs?: number;
+};
+export type ChatChannelEnsureParams = ChatsJsonObject & {
+  channelId: string;
+  nowMs?: number;
+};
+export type ChatChannelFindBySlugParams = ChatsJsonObject & { slug: string };
+export type ChatEmptyParams = ChatsJsonObject;
 export type ChatThreadStartParams = ChatsJsonObject & {
   channelId: string;
   threadId: string;
@@ -293,6 +351,17 @@ export type ChatMessageSendParams = ChatsJsonObject & {
   attachments?: ChatLocalAttachmentParams[];
   nowMs?: number;
 };
+export type ChatMessagesListParams = ChatsJsonObject & {
+  threadId: string;
+  limit?: number;
+  afterMessageOrder?: number;
+};
+export type ChatReadStateMarkParams = ChatsJsonObject & {
+  threadId: string;
+  upToSequence: number;
+  expectedRevision?: number;
+  nowMs?: number;
+};
 export type ChatDecisionResolveParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
@@ -322,6 +391,22 @@ export type ChatAgentReadMarkParams = ChatsJsonObject & {
   expectedRevision?: number;
 };
 export type ChatOwnerParams = ChatsJsonObject & { ownerUserId: string };
+export type ChatFollowSetParams = ChatsJsonObject & {
+  ownerUserId: string;
+  replicationOwnerUserId?: string;
+  targetKind: "person" | "agent" | "channel" | "thread";
+  targetId: string;
+  state: "following" | "unfollowed";
+  nowMs?: number;
+};
+export type ChatFollowListParams = ChatOwnerParams & {
+  state?: "following" | "unfollowed";
+};
+export type ChatFeedMarkSeenParams = ChatOwnerParams & {
+  replicationOwnerUserId?: string;
+  headCursor: string;
+  nowMs?: number;
+};
 export type ChatFeedListParams = ChatsJsonObject & {
   ownerUserId: string;
   limit?: number;
@@ -331,11 +416,26 @@ export type ChatBookmarkFindParams = ChatsJsonObject & {
   ownerUserId: string;
   bookmarkId: string;
 };
+export type ChatBookmarkSaveParams = ChatOwnerParams & {
+  targetKind: "message" | "thread";
+  targetId: string;
+  mode: "live" | "snapshot";
+  destinationPath: string;
+  nowMs?: number;
+};
+export type ChatBookmarksListParams = ChatOwnerParams & {
+  state?: "active" | "archived";
+};
 export type ChatBookmarkListPendingParams = ChatPageParams & {
   ownerUserId: string;
   limit?: number;
 };
 export type ChatBookmarkGenerationParams = ChatBookmarkFindParams & { generation: number };
+export type ChatBookmarkMarkReadyParams = ChatBookmarkGenerationParams & {
+  projectedAtMs?: number;
+  projectionObjectId?: string;
+  projectionPath?: string;
+};
 export type ChatBookmarkMarkFailedParams = ChatBookmarkGenerationParams & {
   failureReason: string;
 };
@@ -343,6 +443,11 @@ export type ChatBookmarkMarkStaleParams = ChatBookmarkGenerationParams & {
   failureReason?: string;
 };
 export type ChatDispatchRecordEligibleParams = ChatsJsonObject & { verifiedUserId?: string };
+export type ChatDispatchEnqueueParams = ChatsJsonObject & {
+  triggerMessageId: string;
+  threadId: string;
+  nowMs?: number;
+};
 export type ChatDispatchClaimParams = ChatsJsonObject & {
   runId: string;
   command?: string;
@@ -377,12 +482,46 @@ export type ChatDispatchRequeueParams = ChatsJsonObject & {
   triggerMessageId: string;
   runId: string;
 };
+export type ChatDispatchCompleteParams = ChatsJsonObject & {
+  runId: string;
+  exitCode: number;
+  nowMs?: number;
+};
+export type ChatDispatchFailParams = ChatsJsonObject & {
+  runId: string;
+  reason: string;
+  exitCode?: number;
+  nowMs?: number;
+};
 
 export type ChatThreadStartResult = ChatsJsonObject & {
   thread: ChatThread;
   message: ChatMessage;
 };
 export type ChatWireIdResult = ChatsJsonObject & { wireId: string | null };
+export type ChatChannelsListResult = ChatsJsonObject & {
+  channels: ChatChannelSummary[];
+  truncated: boolean;
+};
+export type ChatThreadsListResult = ChatsJsonObject & {
+  threads: ChatThreadWireRecord[];
+  truncated: boolean;
+};
+export type ChatMessagesListResult = ChatsJsonObject & {
+  messages: ChatMessage[];
+  nextAfterMessageOrder: number | null;
+};
+export type ChatFollowsListResult = ChatsJsonObject & {
+  follows: ChatFollow[];
+  truncated: boolean;
+};
+export type ChatBookmarksListResult = ChatsJsonObject & {
+  bookmarks: ChatBookmark[];
+  truncated: boolean;
+};
+export type ChatEnqueueResult = ChatsJsonObject & { enqueued: boolean };
+export type ChatCompleteResult = ChatsJsonObject & { completed: true };
+export type ChatFailResult = ChatsJsonObject & { failed: true };
 export type ChatThreadsPage = ChatsJsonObject & {
   threads: ChatThread[];
   nextCursor: string | null;
@@ -443,14 +582,23 @@ export type ChatFeedPage = ChatsJsonObject & {
 };
 
 export type ChatsMethodParamsMap = {
+  [CHATS_METHOD.channelCreate]: ChatChannelCreateParams;
+  [CHATS_METHOD.channelEnsureAgent]: ChatChannelEnsureParams;
+  [CHATS_METHOD.channelEnsureGeneral]: ChatChannelEnsureParams;
+  [CHATS_METHOD.channelFindBySlug]: ChatChannelFindBySlugParams;
+  [CHATS_METHOD.channelsList]: ChatEmptyParams;
   [CHATS_METHOD.channelGetWireId]: ChatChannelGetWireIdParams;
   [CHATS_METHOD.threadStart]: ChatThreadStartParams;
   [CHATS_METHOD.threadCreate]: ChatThreadCreateParams;
+  [CHATS_METHOD.threadsList]: ChatEmptyParams;
   [CHATS_METHOD.threadsListForFile]: ChatThreadsListForFileParams;
   [CHATS_METHOD.threadsListForChannel]: ChatThreadsListForChannelParams;
   [CHATS_METHOD.threadFindChannelId]: ChatThreadParams;
   [CHATS_METHOD.threadGetProjection]: ChatThreadProjectionParams;
   [CHATS_METHOD.messageSend]: ChatMessageSendParams;
+  [CHATS_METHOD.messagesList]: ChatMessagesListParams;
+  [CHATS_METHOD.readStateGet]: ChatThreadParams;
+  [CHATS_METHOD.readStateMarkThreadRead]: ChatReadStateMarkParams;
   [CHATS_METHOD.decisionResolve]: ChatDecisionResolveParams;
   [CHATS_METHOD.decisionsListForThread]: ChatThreadPageParams;
   [CHATS_METHOD.reactionSet]: ChatReactionSetParams;
@@ -460,14 +608,21 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.mentionsListForHandle]: ChatMentionsParams;
   [CHATS_METHOD.agentReadListUnreadThreads]: ChatPageParams;
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadMarkParams;
+  [CHATS_METHOD.followsSet]: ChatFollowSetParams;
+  [CHATS_METHOD.followsList]: ChatFollowListParams;
   [CHATS_METHOD.followsEnsureDefaults]: ChatOwnerParams;
+  [CHATS_METHOD.feedMarkSeen]: ChatFeedMarkSeenParams;
   [CHATS_METHOD.feedListPersonal]: ChatFeedListParams;
+  [CHATS_METHOD.bookmarkSave]: ChatBookmarkSaveParams;
+  [CHATS_METHOD.bookmarksList]: ChatBookmarksListParams;
   [CHATS_METHOD.bookmarkFind]: ChatBookmarkFindParams;
   [CHATS_METHOD.bookmarkListPending]: ChatBookmarkListPendingParams;
+  [CHATS_METHOD.bookmarkMarkReady]: ChatBookmarkMarkReadyParams;
   [CHATS_METHOD.bookmarkArchive]: ChatBookmarkFindParams;
   [CHATS_METHOD.bookmarkMarkPending]: ChatBookmarkFindParams;
   [CHATS_METHOD.bookmarkMarkFailed]: ChatBookmarkMarkFailedParams;
   [CHATS_METHOD.bookmarkMarkStale]: ChatBookmarkMarkStaleParams;
+  [CHATS_METHOD.dispatchEnqueue]: ChatDispatchEnqueueParams;
   [CHATS_METHOD.dispatchRecordEligibleTriggers]: ChatDispatchRecordEligibleParams;
   [CHATS_METHOD.dispatchClaimNextPending]: ChatDispatchClaimParams;
   [CHATS_METHOD.dispatchListPending]: ChatPageParams;
@@ -485,17 +640,28 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.dispatchMarkFailureNotePosted]: ChatDispatchRunParams;
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: ChatDispatchRequeueParams;
   [CHATS_METHOD.dispatchListAppQuitRecoveries]: ChatPageParams;
+  [CHATS_METHOD.dispatchComplete]: ChatDispatchCompleteParams;
+  [CHATS_METHOD.dispatchFail]: ChatDispatchFailParams;
 };
 
 export type ChatsMethodResultMap = {
+  [CHATS_METHOD.channelCreate]: ChatChannel;
+  [CHATS_METHOD.channelEnsureAgent]: ChatChannel;
+  [CHATS_METHOD.channelEnsureGeneral]: ChatChannel;
+  [CHATS_METHOD.channelFindBySlug]: ChatChannel | null;
+  [CHATS_METHOD.channelsList]: ChatChannelsListResult;
   [CHATS_METHOD.channelGetWireId]: ChatWireIdResult;
   [CHATS_METHOD.threadStart]: ChatThreadStartResult;
   [CHATS_METHOD.threadCreate]: ChatThread;
+  [CHATS_METHOD.threadsList]: ChatThreadsListResult;
   [CHATS_METHOD.threadsListForFile]: ChatThreadsPage;
   [CHATS_METHOD.threadsListForChannel]: ChatChannelThreadsPage;
   [CHATS_METHOD.threadFindChannelId]: string | null;
   [CHATS_METHOD.threadGetProjection]: ChatProjection;
   [CHATS_METHOD.messageSend]: ChatMessage;
+  [CHATS_METHOD.messagesList]: ChatMessagesListResult;
+  [CHATS_METHOD.readStateGet]: ChatThreadReadState;
+  [CHATS_METHOD.readStateMarkThreadRead]: ChatThreadReadState;
   [CHATS_METHOD.decisionResolve]: ChatDecision;
   [CHATS_METHOD.decisionsListForThread]: ChatDecisionsPage;
   [CHATS_METHOD.reactionSet]: ChatReaction;
@@ -505,14 +671,21 @@ export type ChatsMethodResultMap = {
   [CHATS_METHOD.mentionsListForHandle]: ChatMentionsPage;
   [CHATS_METHOD.agentReadListUnreadThreads]: ChatThreadsPage;
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadState;
+  [CHATS_METHOD.followsSet]: ChatFollow;
+  [CHATS_METHOD.followsList]: ChatFollowsListResult;
   [CHATS_METHOD.followsEnsureDefaults]: null;
+  [CHATS_METHOD.feedMarkSeen]: ChatFeedReadState;
   [CHATS_METHOD.feedListPersonal]: ChatFeedPage;
+  [CHATS_METHOD.bookmarkSave]: ChatBookmark;
+  [CHATS_METHOD.bookmarksList]: ChatBookmarksListResult;
   [CHATS_METHOD.bookmarkFind]: ChatBookmark | null;
   [CHATS_METHOD.bookmarkListPending]: ChatBookmarksPage;
+  [CHATS_METHOD.bookmarkMarkReady]: ChatBookmarkTransition;
   [CHATS_METHOD.bookmarkArchive]: ChatBookmark;
   [CHATS_METHOD.bookmarkMarkPending]: ChatBookmark;
   [CHATS_METHOD.bookmarkMarkFailed]: ChatBookmarkTransition;
   [CHATS_METHOD.bookmarkMarkStale]: ChatBookmarkTransition;
+  [CHATS_METHOD.dispatchEnqueue]: ChatEnqueueResult;
   [CHATS_METHOD.dispatchRecordEligibleTriggers]: number;
   [CHATS_METHOD.dispatchClaimNextPending]: ChatDispatchClaim | null;
   [CHATS_METHOD.dispatchListPending]: ChatDispatchesPage;
@@ -530,6 +703,8 @@ export type ChatsMethodResultMap = {
   [CHATS_METHOD.dispatchMarkFailureNotePosted]: ChatRun;
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: boolean;
   [CHATS_METHOD.dispatchListAppQuitRecoveries]: ChatRecoveriesPage;
+  [CHATS_METHOD.dispatchComplete]: ChatCompleteResult;
+  [CHATS_METHOD.dispatchFail]: ChatFailResult;
 };
 
 export class ChatsProtocolShapeError extends Error {
@@ -601,6 +776,15 @@ function optionalInteger(
 ): number | undefined {
   if (object[key] === undefined) return undefined;
   return safeInteger(object, key, label, nonnegative);
+}
+
+function nullableSafeInteger(
+  object: ChatsJsonObject,
+  key: string,
+  label: string,
+): number | null {
+  if (object[key] === null) return null;
+  return safeInteger(object, key, label);
 }
 
 function booleanValue(object: ChatsJsonObject, key: string, label: string): boolean {
@@ -891,6 +1075,124 @@ function decodeChannel(value: JsonValue, label: string): ChatChannel {
   };
 }
 
+function decodeChannelSummary(
+  value: JsonValue,
+  label: string,
+): ChatChannelSummary {
+  const object = objectValue(value, label, [
+    "workspaceId",
+    "channelId",
+    "name",
+    "slug",
+    "kind",
+    "createdAtMs",
+    "updatedAtMs",
+    "threadCount",
+    "unreadCount",
+  ]);
+  return {
+    workspaceId: stringValue(object, "workspaceId", label),
+    channelId: stringValue(object, "channelId", label),
+    name: stringValue(object, "name", label),
+    slug: stringValue(object, "slug", label),
+    kind: enumValue(object, "kind", label, ["channel", "dm", "agent"]),
+    createdAtMs: safeInteger(object, "createdAtMs", label, false),
+    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
+    threadCount: safeInteger(object, "threadCount", label),
+    unreadCount: safeInteger(object, "unreadCount", label),
+  };
+}
+
+function decodeThreadWireRecord(
+  value: JsonValue,
+  label: string,
+): ChatThreadWireRecord {
+  const object = objectValue(value, label, [
+    "workspaceId",
+    "threadId",
+    "title",
+    "createdAtMs",
+    "updatedAtMs",
+    "channelId",
+    "linkedObjectId",
+  ]);
+  return {
+    workspaceId: stringValue(object, "workspaceId", label),
+    threadId: stringValue(object, "threadId", label),
+    title: stringValue(object, "title", label),
+    createdAtMs: safeInteger(object, "createdAtMs", label, false),
+    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
+    channelId: nullableString(object, "channelId", label),
+    linkedObjectId: nullableString(object, "linkedObjectId", label),
+  };
+}
+
+function decodeReadState(value: JsonValue, label: string): ChatThreadReadState {
+  const object = objectValue(value, label, [
+    "workspaceId",
+    "threadId",
+    "lastReadSequence",
+    "revision",
+    "updatedAtMs",
+  ]);
+  return {
+    workspaceId: stringValue(object, "workspaceId", label),
+    threadId: stringValue(object, "threadId", label),
+    lastReadSequence: safeInteger(object, "lastReadSequence", label),
+    revision: safeInteger(object, "revision", label),
+    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
+  };
+}
+
+function decodeFollow(value: JsonValue, label: string): ChatFollow {
+  const object = objectValue(value, label, [
+    "workspaceId",
+    "ownerUserId",
+    "targetKind",
+    "targetId",
+    "state",
+    "updatedAtMs",
+  ]);
+  return {
+    workspaceId: stringValue(object, "workspaceId", label),
+    ownerUserId: stringValue(object, "ownerUserId", label),
+    targetKind: enumValue(object, "targetKind", label, [
+      "person",
+      "agent",
+      "channel",
+      "thread",
+    ]),
+    targetId: stringValue(object, "targetId", label),
+    state: enumValue(object, "state", label, ["following", "unfollowed"]),
+    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
+  };
+}
+
+function decodeFeedReadState(
+  value: JsonValue,
+  label: string,
+): ChatFeedReadState {
+  const object = objectValue(value, label, [
+    "workspaceId",
+    "ownerUserId",
+    "lastSeenCreatedAtMs",
+    "lastSeenMessageId",
+    "updatedAtMs",
+  ]);
+  return {
+    workspaceId: stringValue(object, "workspaceId", label),
+    ownerUserId: stringValue(object, "ownerUserId", label),
+    lastSeenCreatedAtMs: safeInteger(
+      object,
+      "lastSeenCreatedAtMs",
+      label,
+      false,
+    ),
+    lastSeenMessageId: stringValue(object, "lastSeenMessageId", label),
+    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
+  };
+}
+
 function decodeFileMention(value: JsonValue, label: string): ChatFileMention {
   const object = objectValue(value, label, ["attachment", "message", "thread", "channel"]);
   const result: ChatFileMention = {
@@ -1005,17 +1307,10 @@ function decodeFeed(value: JsonValue, label: string): ChatFeedPage {
   });
   let readState: ChatFeedReadState | null = null;
   if (object.readState !== null) {
-    const stateLabel = `${label}.readState`;
-    const state = objectValue(object.readState ?? null, stateLabel, [
-      "workspaceId", "ownerUserId", "lastSeenCreatedAtMs", "lastSeenMessageId", "updatedAtMs",
-    ]);
-    readState = {
-      workspaceId: stringValue(state, "workspaceId", stateLabel),
-      ownerUserId: stringValue(state, "ownerUserId", stateLabel),
-      lastSeenCreatedAtMs: safeInteger(state, "lastSeenCreatedAtMs", stateLabel, false),
-      lastSeenMessageId: stringValue(state, "lastSeenMessageId", stateLabel),
-      updatedAtMs: safeInteger(state, "updatedAtMs", stateLabel, false),
-    };
+    readState = decodeFeedReadState(
+      object.readState ?? null,
+      `${label}.readState`,
+    );
   }
   return {
     items,
@@ -1032,6 +1327,24 @@ export function decodeChatsResult<M extends ChatsMethod>(
   const label = `${method} result`;
   let result: unknown;
   switch (method) {
+    case CHATS_METHOD.channelCreate:
+    case CHATS_METHOD.channelEnsureAgent:
+    case CHATS_METHOD.channelEnsureGeneral:
+      result = decodeChannel(value, label);
+      break;
+    case CHATS_METHOD.channelFindBySlug:
+      result = value === null ? null : decodeChannel(value, label);
+      break;
+    case CHATS_METHOD.channelsList: {
+      const object = objectValue(value, label, ["channels", "truncated"]);
+      result = {
+        channels: arrayValue(object, "channels", label).map((entry, index) =>
+          decodeChannelSummary(entry, `${label}.channels[${index}]`),
+        ),
+        truncated: booleanValue(object, "truncated", label),
+      };
+      break;
+    }
     case CHATS_METHOD.channelGetWireId: {
       const object = objectValue(value, label, ["wireId"]);
       result = { wireId: nullableString(object, "wireId", label) };
@@ -1048,6 +1361,16 @@ export function decodeChatsResult<M extends ChatsMethod>(
     case CHATS_METHOD.threadCreate:
       result = decodeChatThread(value, label);
       break;
+    case CHATS_METHOD.threadsList: {
+      const object = objectValue(value, label, ["threads", "truncated"]);
+      result = {
+        threads: arrayValue(object, "threads", label).map((entry, index) =>
+          decodeThreadWireRecord(entry, `${label}.threads[${index}]`),
+        ),
+        truncated: booleanValue(object, "truncated", label),
+      };
+      break;
+    }
     case CHATS_METHOD.threadsListForFile:
     case CHATS_METHOD.agentReadListUnreadThreads: {
       const page = decodePage(value, label, "threads", decodeChatThread);
@@ -1081,6 +1404,27 @@ export function decodeChatsResult<M extends ChatsMethod>(
     }
     case CHATS_METHOD.messageSend:
       result = decodeChatMessage(value, label);
+      break;
+    case CHATS_METHOD.messagesList: {
+      const object = objectValue(value, label, [
+        "messages",
+        "nextAfterMessageOrder",
+      ]);
+      result = {
+        messages: arrayValue(object, "messages", label).map((entry, index) =>
+          decodeChatMessage(entry, `${label}.messages[${index}]`),
+        ),
+        nextAfterMessageOrder: nullableSafeInteger(
+          object,
+          "nextAfterMessageOrder",
+          label,
+        ),
+      };
+      break;
+    }
+    case CHATS_METHOD.readStateGet:
+    case CHATS_METHOD.readStateMarkThreadRead:
+      result = decodeReadState(value, label);
       break;
     case CHATS_METHOD.decisionResolve:
       result = decodeChatDecision(value, label);
@@ -1116,13 +1460,42 @@ export function decodeChatsResult<M extends ChatsMethod>(
     case CHATS_METHOD.agentReadMarkThreadRead:
       result = decodeAgentRead(value, label);
       break;
+    case CHATS_METHOD.followsSet:
+      result = decodeFollow(value, label);
+      break;
+    case CHATS_METHOD.followsList: {
+      const object = objectValue(value, label, ["follows", "truncated"]);
+      result = {
+        follows: arrayValue(object, "follows", label).map((entry, index) =>
+          decodeFollow(entry, `${label}.follows[${index}]`),
+        ),
+        truncated: booleanValue(object, "truncated", label),
+      };
+      break;
+    }
     case CHATS_METHOD.followsEnsureDefaults:
       if (value !== null) throw new ChatsProtocolShapeError(`${label} must be null.`);
       result = null;
       break;
+    case CHATS_METHOD.feedMarkSeen:
+      result = decodeFeedReadState(value, label);
+      break;
     case CHATS_METHOD.feedListPersonal:
       result = decodeFeed(value, label);
       break;
+    case CHATS_METHOD.bookmarkSave:
+      result = decodeChatBookmark(value, label);
+      break;
+    case CHATS_METHOD.bookmarksList: {
+      const object = objectValue(value, label, ["bookmarks", "truncated"]);
+      result = {
+        bookmarks: arrayValue(object, "bookmarks", label).map((entry, index) =>
+          decodeChatBookmark(entry, `${label}.bookmarks[${index}]`),
+        ),
+        truncated: booleanValue(object, "truncated", label),
+      };
+      break;
+    }
     case CHATS_METHOD.bookmarkFind:
       result = value === null ? null : decodeChatBookmark(value, label);
       break;
@@ -1136,12 +1509,18 @@ export function decodeChatsResult<M extends ChatsMethod>(
       result = decodeChatBookmark(value, label);
       break;
     case CHATS_METHOD.bookmarkMarkFailed:
-    case CHATS_METHOD.bookmarkMarkStale: {
+    case CHATS_METHOD.bookmarkMarkStale:
+    case CHATS_METHOD.bookmarkMarkReady: {
       const object = objectValue(value, label, ["bookmark", "applied"]);
       result = {
         bookmark: decodeChatBookmark(object.bookmark ?? null, `${label}.bookmark`),
         applied: booleanValue(object, "applied", label),
       };
+      break;
+    }
+    case CHATS_METHOD.dispatchEnqueue: {
+      const object = objectValue(value, label, ["enqueued"]);
+      result = { enqueued: booleanValue(object, "enqueued", label) };
       break;
     }
     case CHATS_METHOD.dispatchRecordEligibleTriggers:
@@ -1216,6 +1595,22 @@ export function decodeChatsResult<M extends ChatsMethod>(
         };
       });
       result = { recoveries: page.rows, nextCursor: page.cursor };
+      break;
+    }
+    case CHATS_METHOD.dispatchComplete: {
+      const object = objectValue(value, label, ["completed"]);
+      if (object.completed !== true) {
+        throw new ChatsProtocolShapeError(`${label}.completed must be true.`);
+      }
+      result = { completed: true };
+      break;
+    }
+    case CHATS_METHOD.dispatchFail: {
+      const object = objectValue(value, label, ["failed"]);
+      if (object.failed !== true) {
+        throw new ChatsProtocolShapeError(`${label}.failed must be true.`);
+      }
+      result = { failed: true };
       break;
     }
     default: {

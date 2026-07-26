@@ -55,6 +55,30 @@ describe("B2 chats wire contract and loopback", () => {
       kind: "agent",
     });
     expect(
+      (await roundTrip(CHATS_METHOD.channelCreate, {
+        channelId: "created-channel",
+        name: "Created",
+        kind: "channel",
+      })).channelId,
+    ).toBe("created-channel");
+    expect(
+      (await roundTrip(CHATS_METHOD.channelEnsureGeneral, {
+        channelId: "general-channel",
+      })).slug,
+    ).toBe("general");
+    expect(
+      (await roundTrip(CHATS_METHOD.channelEnsureAgent, {
+        channelId: "my-agent-channel",
+      })).kind,
+    ).toBe("agent");
+    expect(
+      (await roundTrip(CHATS_METHOD.channelFindBySlug, { slug: "created" }))
+        ?.channelId,
+    ).toBe("created-channel");
+    expect(
+      (await roundTrip(CHATS_METHOD.channelsList, {})).channels.length,
+    ).toBeGreaterThanOrEqual(4);
+    expect(
       await roundTrip(CHATS_METHOD.channelGetWireId, { channelId: "agent-channel" }),
     ).toEqual({ wireId: "agent-channel" });
 
@@ -86,6 +110,11 @@ describe("B2 chats wire contract and loopback", () => {
       "create-file-thread",
     );
     expect(fileThread.linkedFile?.objectId).toBe("object-1");
+    expect(
+      (await roundTrip(CHATS_METHOD.threadsList, {})).threads.map(
+        (thread) => thread.threadId,
+      ),
+    ).toEqual(["channel-thread", "file-thread"]);
 
     const sent = await roundTrip(
       CHATS_METHOD.messageSend,
@@ -108,6 +137,22 @@ describe("B2 chats wire contract and loopback", () => {
       "send-file-message",
     );
     expect(sent.attachments).toHaveLength(1);
+    expect(
+      (await roundTrip(CHATS_METHOD.messagesList, {
+        threadId: "file-thread",
+      })).messages.map((entry) => entry.id),
+    ).toEqual(["file-message"]);
+    expect(
+      (await roundTrip(CHATS_METHOD.readStateGet, {
+        threadId: "file-thread",
+      })).lastReadSequence,
+    ).toBe(0);
+    expect(
+      (await roundTrip(CHATS_METHOD.readStateMarkThreadRead, {
+        threadId: "file-thread",
+        upToSequence: 1,
+      })).lastReadSequence,
+    ).toBe(1);
 
     expect(
       (await roundTrip(CHATS_METHOD.threadsListForFile, {
@@ -210,6 +255,25 @@ describe("B2 chats wire contract and loopback", () => {
       pathHint: "notes/original.md",
       linkedAtMs: 20,
     });
+    expect(
+      (await roundTrip(CHATS_METHOD.followsSet, {
+        ownerUserId: "viewer",
+        targetKind: "channel",
+        targetId: "created-channel",
+        state: "following",
+      })).state,
+    ).toBe("following");
+    expect(
+      (await roundTrip(CHATS_METHOD.followsList, {
+        ownerUserId: "viewer",
+      })).follows,
+    ).toHaveLength(5);
+    expect(
+      (await roundTrip(CHATS_METHOD.feedMarkSeen, {
+        ownerUserId: "viewer",
+        headCursor: feed.headCursor ?? "",
+      })).lastSeenMessageId,
+    ).toBe("file-message");
     // MUTATION: legacy slim Feed copies erase attachments and linked-file metadata.
 
     for (const bookmarkId of ["find", "archive", "pending", "failed", "stale"]) {
@@ -218,7 +282,7 @@ describe("B2 chats wire contract and loopback", () => {
         workspaceId: WORKSPACE,
         ownerUserId: "viewer",
         targetKind: "thread",
-        targetId: "file-thread",
+        targetId: `seed-target-${bookmarkId}`,
         threadId: "file-thread",
         mode: "live",
         destinationPath: `bookmarks/${bookmarkId}.md`,
@@ -226,6 +290,26 @@ describe("B2 chats wire contract and loopback", () => {
         createdAtMs: 40,
       });
     }
+    const savedBookmark = await roundTrip(CHATS_METHOD.bookmarkSave, {
+      ownerUserId: "viewer",
+      targetKind: "thread",
+      targetId: "file-thread",
+      mode: "live",
+      destinationPath: "bookmarks/saved.md",
+    });
+    expect(savedBookmark.targetId).toBe("file-thread");
+    expect(
+      (await roundTrip(CHATS_METHOD.bookmarksList, {
+        ownerUserId: "viewer",
+      })).bookmarks.length,
+    ).toBe(6);
+    expect(
+      (await roundTrip(CHATS_METHOD.bookmarkMarkReady, {
+        ownerUserId: "viewer",
+        bookmarkId: savedBookmark.bookmarkId,
+        generation: 1,
+      })).applied,
+    ).toBe(true);
     expect(
       (await roundTrip(CHATS_METHOD.bookmarkFind, {
         ownerUserId: "viewer",
@@ -271,8 +355,14 @@ describe("B2 chats wire contract and loopback", () => {
     });
     expect(inserted).toBe(2);
     expect(
+      (await roundTrip(CHATS_METHOD.dispatchEnqueue, {
+        triggerMessageId: "manual-trigger",
+        threadId: "file-thread",
+      })).enqueued,
+    ).toBe(true);
+    expect(
       (await roundTrip(CHATS_METHOD.dispatchListPending, {})).dispatches,
-    ).toHaveLength(2);
+    ).toHaveLength(3);
 
     const claim = await roundTrip(CHATS_METHOD.dispatchClaimNextPending, {
       runId: "run-live",
@@ -317,6 +407,23 @@ describe("B2 chats wire contract and loopback", () => {
         sinceMs: -1.5,
       }),
     ).toBe(1);
+    expect(
+      (await roundTrip(CHATS_METHOD.dispatchComplete, {
+        runId: "run-live",
+        exitCode: 0,
+      })).completed,
+    ).toBe(true);
+    const failedClaim = await roundTrip(CHATS_METHOD.dispatchClaimNextPending, {
+      runId: "run-failed",
+    });
+    expect(failedClaim?.run.runId).toBe("run-failed");
+    expect(
+      (await roundTrip(CHATS_METHOD.dispatchFail, {
+        runId: "run-failed",
+        reason: "runner failed",
+        exitCode: 1,
+      })).failed,
+    ).toBe(true);
 
     const paused = await roundTrip(CHATS_METHOD.dispatchSetThreadPaused, {
       threadId: "file-thread",

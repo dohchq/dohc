@@ -33,6 +33,8 @@ export const VERSIONED_METHOD = {
   searchEnsureIndex: "search.ensureIndex",
 } as const;
 
+export type VersionedMethod =
+  (typeof VERSIONED_METHOD)[keyof typeof VERSIONED_METHOD];
 type JsonObject = { [key: string]: JsonValue | undefined };
 export type VersionedContentKind = "text" | "binary";
 export type VersionKind = "main" | "named";
@@ -551,6 +553,72 @@ export type MomentsListResult = JsonObject & {
 export type MomentsGetResult = MomentRecord | null;
 export type SearchEnsureIndexResult = JsonObject;
 
+export type VersionedMethodParamsMap = {
+  [VERSIONED_METHOD.textWrite]: VersionedTextWriteParams;
+  [VERSIONED_METHOD.textRead]: VersionedTextReadParams;
+  [VERSIONED_METHOD.textRename]: VersionedTextRenameParams;
+  [VERSIONED_METHOD.textDelete]: VersionedTextDeleteParams;
+  [VERSIONED_METHOD.textRollback]: VersionedTextRollbackParams;
+  [VERSIONED_METHOD.textList]: VersionedTextListParams;
+  [VERSIONED_METHOD.binaryWrite]: VersionedBinaryWriteParams;
+  [VERSIONED_METHOD.binaryRead]: VersionedBinaryReadParams;
+  [VERSIONED_METHOD.binaryReadBlob]: VersionedBinaryReadBlobParams;
+  [VERSIONED_METHOD.versionsCreateNamed]: VersionsCreateNamedParams;
+  [VERSIONED_METHOD.versionsList]: VersionsListParams;
+  [VERSIONED_METHOD.versionsSetActive]: VersionsSetActiveParams;
+  [VERSIONED_METHOD.versionsEnsureMain]: WorkspaceOnlyParams;
+  [VERSIONED_METHOD.versionsActive]: WorkspaceOnlyParams;
+  [VERSIONED_METHOD.versionsMerge]: VersionsMergeParams;
+  [VERSIONED_METHOD.versionsCompare]: VersionsCompareParams;
+  [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesParams;
+  [VERSIONED_METHOD.secretsWrite]: SecretsWriteParams;
+  [VERSIONED_METHOD.secretsList]: SecretsListParams;
+  [VERSIONED_METHOD.secretsMaterialize]: SecretsMaterializeParams;
+  [VERSIONED_METHOD.secretsDelete]: SecretsDeleteParams;
+  [VERSIONED_METHOD.secretsFork]: SecretsForkParams;
+  [VERSIONED_METHOD.secretsCompare]: SecretsCompareParams;
+  [VERSIONED_METHOD.secretsApply]: SecretsApplyParams;
+  [VERSIONED_METHOD.secretsRestore]: SecretsRestoreParams;
+  [VERSIONED_METHOD.secretsMomentsList]: SecretsMomentsListParams;
+  [VERSIONED_METHOD.secretsMomentsGet]: SecretsMomentsGetParams;
+  [VERSIONED_METHOD.momentsList]: MomentsListParams;
+  [VERSIONED_METHOD.momentsGet]: MomentsGetParams;
+  [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexParams;
+};
+
+export type VersionedMethodResultMap = {
+  [VERSIONED_METHOD.textWrite]: VersionedTextWriteResult;
+  [VERSIONED_METHOD.textRead]: VersionedTextReadResult;
+  [VERSIONED_METHOD.textRename]: VersionedTextRenameResult;
+  [VERSIONED_METHOD.textDelete]: VersionedTextDeleteResult;
+  [VERSIONED_METHOD.textRollback]: VersionedTextRollbackResult;
+  [VERSIONED_METHOD.textList]: VersionedTextListResult;
+  [VERSIONED_METHOD.binaryWrite]: VersionedBinaryWriteResult;
+  [VERSIONED_METHOD.binaryRead]: VersionedBinaryReadResult;
+  [VERSIONED_METHOD.binaryReadBlob]: VersionedBinaryReadBlobResult;
+  [VERSIONED_METHOD.versionsCreateNamed]: VersionsCreateNamedResult;
+  [VERSIONED_METHOD.versionsList]: VersionsListResult;
+  [VERSIONED_METHOD.versionsSetActive]: VersionsSetActiveResult;
+  [VERSIONED_METHOD.versionsEnsureMain]: VersionsEnsureMainResult;
+  [VERSIONED_METHOD.versionsActive]: VersionsActiveResult;
+  [VERSIONED_METHOD.versionsMerge]: VersionsMergeResult;
+  [VERSIONED_METHOD.versionsCompare]: VersionsCompareResult;
+  [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesResult;
+  [VERSIONED_METHOD.secretsWrite]: SecretWriteResult;
+  [VERSIONED_METHOD.secretsList]: SecretsListResult;
+  [VERSIONED_METHOD.secretsMaterialize]: SecretsMaterializeResult;
+  [VERSIONED_METHOD.secretsDelete]: SecretDeleteResult;
+  [VERSIONED_METHOD.secretsFork]: SecretsForkResult;
+  [VERSIONED_METHOD.secretsCompare]: SecretCompareResult;
+  [VERSIONED_METHOD.secretsApply]: SecretApplyResult;
+  [VERSIONED_METHOD.secretsRestore]: SecretRestoreResult;
+  [VERSIONED_METHOD.secretsMomentsList]: SecretsMomentsListResult;
+  [VERSIONED_METHOD.secretsMomentsGet]: SecretsMomentsGetResult;
+  [VERSIONED_METHOD.momentsList]: MomentsListResult;
+  [VERSIONED_METHOD.momentsGet]: MomentsGetResult;
+  [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexResult;
+};
+
 export class VersionedProtocolShapeError extends Error {
   constructor(message: string) {
     super(message);
@@ -563,6 +631,20 @@ function objectValue(value: JsonValue, label: string): JsonObject {
     throw new VersionedProtocolShapeError(`${label} must be a JSON object.`);
   }
   return value;
+}
+
+function strictObjectValue(
+  value: JsonValue,
+  label: string,
+  keys: readonly string[],
+): JsonObject {
+  const object = objectValue(value, label);
+  for (const key of Object.keys(object)) {
+    if (!keys.includes(key)) {
+      throw new VersionedProtocolShapeError(`${label}.${key} is not allowed.`);
+    }
+  }
+  return object;
 }
 
 function stringValue(object: JsonObject, key: string, label: string): string {
@@ -642,7 +724,11 @@ function contentKindValue(
 }
 
 function fileObjectValue(value: JsonValue, label: string): FileObject {
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "id",
+    "workspaceId",
+    "createdAtMs",
+  ]);
   return {
     id: stringValue(object, "id", label),
     workspaceId: stringValue(object, "workspaceId", label),
@@ -650,8 +736,24 @@ function fileObjectValue(value: JsonValue, label: string): FileObject {
   };
 }
 
-function snapshotMetadataValue(value: JsonValue, label: string): SnapshotMetadata {
-  const object = objectValue(value, label);
+function snapshotMetadataValue(
+  value: JsonValue,
+  label: string,
+  extraKeys: readonly string[] = [],
+): SnapshotMetadata {
+  const object = strictObjectValue(value, label, [
+    "workspaceId",
+    "versionId",
+    "objectId",
+    "path",
+    "contentKind",
+    "sha256",
+    "byteLength",
+    "updatedAtMs",
+    "latestMomentId",
+    "metadataOrigin",
+    ...extraKeys,
+  ]);
   return {
     workspaceId: stringValue(object, "workspaceId", label),
     versionId: stringValue(object, "versionId", label),
@@ -669,7 +771,16 @@ function snapshotMetadataValue(value: JsonValue, label: string): SnapshotMetadat
 function momentAuthorValue(value: JsonValue, label: string): MomentAuthor {
   if (value === null) return null;
   const object = objectValue(value, label);
-  if (object.corrupt === true) return { corrupt: true };
+  if (object.corrupt === true) {
+    strictObjectValue(value, label, ["corrupt"]);
+    return { corrupt: true };
+  }
+  strictObjectValue(value, label, [
+    "kind",
+    "agentId",
+    "onBehalfOf",
+    "agentRunId",
+  ]);
   if (object.kind !== "agent") {
     throw new VersionedProtocolShapeError(`${label}.kind is invalid.`);
   }
@@ -685,7 +796,32 @@ function momentAuthorValue(value: JsonValue, label: string): MomentAuthor {
 }
 
 function momentValue(value: JsonValue, label: string): MomentRecord {
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "momentOrder",
+    "momentId",
+    "versionId",
+    "objectId",
+    "path",
+    "recordedAtMs",
+    "operation",
+    "afterContentKind",
+    "afterBlobSha256",
+    "afterBinarySha256",
+    "beforePresent",
+    "beforeContentKind",
+    "beforeBlobSha256",
+    "beforeBinarySha256",
+    "beforeLatestMomentId",
+    "metadataOrigin",
+    "author",
+    "syncRecordOnly",
+    "afterText",
+    "afterByteLength",
+    "afterInbandLimitBytes",
+    "beforeText",
+    "beforeByteLength",
+    "beforeInbandLimitBytes",
+  ]);
   const operation = object.operation;
   if (operation !== "write" && operation !== "delete" && operation !== "rename") {
     throw new VersionedProtocolShapeError(`${label}.operation is invalid.`);
@@ -719,12 +855,26 @@ function momentValue(value: JsonValue, label: string): MomentRecord {
 }
 
 function secretMomentValue(value: JsonValue, label: string): SecretMomentRecord {
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "id",
+    "workspaceId",
+    "versionId",
+    "path",
+    "recordedAtMs",
+    "operation",
+    "metadata",
+    "momentOrder",
+    "protected",
+  ]);
   const operation = object.operation;
   if (operation !== "write" && operation !== "delete") {
     throw new VersionedProtocolShapeError(`${label}.operation is invalid.`);
   }
-  const metadata = objectValue(object.metadata ?? null, `${label}.metadata`);
+  const metadata = strictObjectValue(
+    object.metadata ?? null,
+    `${label}.metadata`,
+    ["origin", "summary", "correlationId"],
+  );
   const summary = nullableStringValue(metadata, "summary", `${label}.metadata`);
   const correlationId = nullableStringValue(
     metadata,
@@ -753,8 +903,17 @@ function secretMomentValue(value: JsonValue, label: string): SecretMomentRecord 
 
 export function decodeVersionedTextWriteResult(value: JsonValue): VersionedTextWriteResult {
   const label = "versionedText.write result";
-  const object = objectValue(value, label);
-  const snapshot = snapshotMetadataValue(object.snapshot ?? null, `${label}.snapshot`);
+  const object = strictObjectValue(value, label, [
+    "object",
+    "snapshot",
+    "moment",
+    "deduped",
+  ]);
+  const snapshot = snapshotMetadataValue(
+    object.snapshot ?? null,
+    `${label}.snapshot`,
+    ["text", "blobSha256"],
+  );
   const snapshotObject = objectValue(object.snapshot ?? null, `${label}.snapshot`);
   if (snapshot.contentKind !== "text") {
     throw new VersionedProtocolShapeError(`${label}.snapshot.contentKind must be text.`);
@@ -775,8 +934,26 @@ export function decodeVersionedTextWriteResult(value: JsonValue): VersionedTextW
 export function decodeVersionedTextReadResult(value: JsonValue): VersionedTextReadResult {
   if (value === null) return null;
   const label = "versionedText.read result";
-  const object = objectValue(value, label);
-  const metadata = snapshotMetadataValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "workspaceId",
+    "versionId",
+    "objectId",
+    "path",
+    "contentKind",
+    "text",
+    "byteLength",
+    "blobSha256",
+    "sha256",
+    "updatedAtMs",
+    "latestMomentId",
+    "metadataOrigin",
+    "inbandLimitBytes",
+  ]);
+  const metadata = snapshotMetadataValue(value, label, [
+    "text",
+    "blobSha256",
+    "inbandLimitBytes",
+  ]);
   const blobSha256 = stringValue(object, "blobSha256", label);
   const text = nullableStringValue(object, "text", label);
 
@@ -811,8 +988,32 @@ export function decodeVersionedTextReadResult(value: JsonValue): VersionedTextRe
 
 export function decodeVersionedBinaryWriteResult(value: JsonValue): VersionedBinaryWriteResult {
   const label = "versionedBinary.write result";
-  const object = objectValue(value, label);
-  const snapshot = objectValue(object.snapshot ?? null, `${label}.snapshot`);
+  const object = strictObjectValue(value, label, [
+    "object",
+    "snapshot",
+    "moment",
+    "deduped",
+    "materializeEnqueued",
+    "materialized",
+    "materializeOutcome",
+  ]);
+  const snapshot = strictObjectValue(
+    object.snapshot ?? null,
+    `${label}.snapshot`,
+    [
+      "objectId",
+      "path",
+      "contentKind",
+      "text",
+      "sha256",
+      "byteLength",
+      "workspaceId",
+      "versionId",
+      "updatedAtMs",
+      "latestMomentId",
+      "metadataOrigin",
+    ],
+  );
   if (snapshot.contentKind !== "binary") {
     throw new VersionedProtocolShapeError(`${label}.snapshot.contentKind must be binary.`);
   }
@@ -841,7 +1042,13 @@ export function decodeVersionedBinaryWriteResult(value: JsonValue): VersionedBin
 
 export function decodeVersionedTextRenameResult(value: JsonValue): VersionedTextRenameResult {
   const label = "versionedText.rename result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "object",
+    "before",
+    "after",
+    "moment",
+    "deduped",
+  ]);
   return {
     object: fileObjectValue(object.object ?? null, `${label}.object`),
     before: snapshotMetadataValue(object.before ?? null, `${label}.before`),
@@ -853,7 +1060,12 @@ export function decodeVersionedTextRenameResult(value: JsonValue): VersionedText
 
 export function decodeVersionedTextDeleteResult(value: JsonValue): VersionedTextDeleteResult {
   const label = "versionedText.delete result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "object",
+    "before",
+    "moment",
+    "deduped",
+  ]);
   return {
     object: fileObjectValue(object.object ?? null, `${label}.object`),
     before: snapshotMetadataValue(object.before ?? null, `${label}.before`),
@@ -864,7 +1076,13 @@ export function decodeVersionedTextDeleteResult(value: JsonValue): VersionedText
 
 export function decodeVersionedTextRollbackResult(value: JsonValue): VersionedTextRollbackResult {
   const label = "versionedText.rollback result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "rolledBack",
+    "deduped",
+    "materializeEnqueued",
+    "materialized",
+    "materializeOutcome",
+  ]);
   if (object.rolledBack !== true) {
     throw new VersionedProtocolShapeError(`${label}.rolledBack must be true.`);
   }
@@ -893,7 +1111,14 @@ function materializeOutcomeValue(object: JsonObject, label: string): Materialize
 
 export function decodeVersionRecord(value: JsonValue): VersionRecord {
   const label = "version record";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "id",
+    "workspaceId",
+    "kind",
+    "name",
+    "forkPoint",
+    "createdAtMs",
+  ]);
   const kind = object.kind;
   if (kind !== "main" && kind !== "named") {
     throw new VersionedProtocolShapeError(`${label}.kind must be main or named.`);
@@ -906,7 +1131,11 @@ export function decodeVersionRecord(value: JsonValue): VersionRecord {
     createdAtMs: numberValue(object, "createdAtMs", label),
   };
   if (object.forkPoint !== undefined) {
-    const fork = objectValue(object.forkPoint, `${label}.forkPoint`);
+    const fork = strictObjectValue(
+      object.forkPoint,
+      `${label}.forkPoint`,
+      ["versionId", "momentId"],
+    );
     record.forkPoint = { versionId: stringValue(fork, "versionId", `${label}.forkPoint`) };
     if (fork.momentId !== undefined) {
       record.forkPoint.momentId = stringValue(fork, "momentId", `${label}.forkPoint`);
@@ -921,11 +1150,21 @@ export function decodeVersionsActiveResult(value: JsonValue): VersionsActiveResu
 
 export function decodeVersionsListResult(value: JsonValue): VersionsListResult {
   const label = "versions.list result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "versions",
+    "nextAfterVersionId",
+  ]);
   const versions = arrayValue(object, "versions", label).map(
     (entry, index): VersionsListEntry => {
       const entryLabel = `${label}.versions[${index}]`;
-      const row = objectValue(entry, entryLabel);
+      const row = strictObjectValue(entry, entryLabel, [
+        "versionId",
+        "kind",
+        "name",
+        "createdAtMs",
+        "forkVersionId",
+        "forkMomentId",
+      ]);
       const kind = row.kind;
       if (kind !== "main" && kind !== "named") {
         throw new VersionedProtocolShapeError(
@@ -950,7 +1189,17 @@ export function decodeVersionsListResult(value: JsonValue): VersionsListResult {
 
 export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult {
   const label = "versionedText.merge result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "status",
+    "writeKind",
+    "object",
+    "snapshot",
+    "moment",
+    "deduped",
+    "materializeEnqueued",
+    "materialized",
+    "materializeOutcome",
+  ]);
   const status = object.status;
   const materialization: MergeMaterializationResult = {
     materializeEnqueued: booleanValue(object, "materializeEnqueued", label),
@@ -994,10 +1243,14 @@ export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult
 
 export function decodeVersionsCompareFilesResult(value: JsonValue): VersionsCompareFilesResult {
   const label = "versions.compareFiles result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, ["entries", "nextCursor"]);
   const entries = arrayValue(object, "entries", label).map((entry, index) => {
     const entryLabel = `${label}.entries[${index}]`;
-    const row = objectValue(entry, entryLabel);
+    const row = strictObjectValue(entry, entryLabel, [
+      "path",
+      "status",
+      "binary",
+    ]);
     const status = row.status;
     if (status !== "added" && status !== "modified" && status !== "deleted") {
       throw new VersionedProtocolShapeError(`${entryLabel}.status is invalid.`);
@@ -1020,7 +1273,13 @@ export function decodeVersionsCompareFilesResult(value: JsonValue): VersionsComp
 export function decodeVersionedBinaryReadResult(value: JsonValue): VersionedBinaryReadResult {
   if (value === null) return null;
   const label = "versionedBinary.read result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "objectId",
+    "sha256",
+    "byteLength",
+    "bytesBase64",
+    "inbandLimitBytes",
+  ]);
   const bytesBase64 = nullableStringValue(object, "bytesBase64", label);
   const result: VersionedBinaryReadValue = {
     objectId: stringValue(object, "objectId", label),
@@ -1040,7 +1299,11 @@ export function decodeVersionedBinaryReadResult(value: JsonValue): VersionedBina
 
 export function decodeVersionedBinaryReadBlobResult(value: JsonValue): VersionedBinaryReadBlobResult {
   const label = "versionedBinary.readBlob result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "bytesBase64",
+    "byteLength",
+    "inbandLimitBytes",
+  ]);
   if (object.bytesBase64 === null) {
     return {
       bytesBase64: null,
@@ -1053,7 +1316,7 @@ export function decodeVersionedBinaryReadBlobResult(value: JsonValue): Versioned
 
 export function decodeSecretWriteResult(value: JsonValue): SecretWriteResult {
   const label = "secrets.write result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, ["changed", "moment"]);
   return {
     changed: booleanValue(object, "changed", label),
     moment: object.moment === null
@@ -1064,11 +1327,19 @@ export function decodeSecretWriteResult(value: JsonValue): SecretWriteResult {
 
 export function decodeSecretsListResult(value: JsonValue): SecretsListResult {
   const label = "secrets.list result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "secrets",
+    "nextAfterPath",
+  ]);
   return {
     secrets: arrayValue(object, "secrets", label).map((entry, index) => {
       const entryLabel = `${label}.secrets[${index}]`;
-      const row = objectValue(entry, entryLabel);
+      const row = strictObjectValue(entry, entryLabel, [
+        "path",
+        "byteLength",
+        "updatedAtMs",
+        "latestMomentId",
+      ]);
       return {
         path: stringValue(row, "path", entryLabel),
         byteLength: numberValue(row, "byteLength", entryLabel),
@@ -1085,7 +1356,11 @@ export function decodeSecretsMaterializeResult(
 ): SecretsMaterializeResult {
   if (value === null) return null;
   const label = "secrets.materialize result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "text",
+    "byteLength",
+    "inbandLimitBytes",
+  ]);
   const text = nullableStringValue(object, "text", label);
   if (text === null) {
     return {
@@ -1104,7 +1379,7 @@ export function decodeSecretsMaterializeResult(
 
 export function decodeSecretDeleteResult(value: JsonValue): SecretDeleteResult {
   const label = "secrets.delete result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, ["moment"]);
   return {
     moment: object.moment === null
       ? null
@@ -1114,10 +1389,13 @@ export function decodeSecretDeleteResult(value: JsonValue): SecretDeleteResult {
 
 export function decodeSecretCompareResult(value: JsonValue): SecretCompareResult {
   const label = "secrets.compare result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "entries",
+    "nextAfterPath",
+  ]);
   const entries = arrayValue(object, "entries", label).map((entry, index) => {
     const entryLabel = `${label}.entries[${index}]`;
-    const row = objectValue(entry, entryLabel);
+    const row = strictObjectValue(entry, entryLabel, ["path", "status"]);
     const status = row.status;
     if (status !== "added" && status !== "modified" && status !== "deleted") {
       throw new VersionedProtocolShapeError(`${entryLabel}.status is invalid.`);
@@ -1135,7 +1413,11 @@ export const decodeSecretApplyResult = decodeSecretWriteResult;
 
 export function decodeSecretRestoreResult(value: JsonValue): SecretRestoreResult {
   const label = "secrets.restore result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "restored",
+    "restoredMomentId",
+    "path",
+  ]);
   const restored = object.restored;
   if (restored !== "text" && restored !== "deleted") {
     throw new VersionedProtocolShapeError(`${label}.restored is invalid.`);
@@ -1149,7 +1431,10 @@ export function decodeSecretRestoreResult(value: JsonValue): SecretRestoreResult
 
 export function decodeSecretsMomentsListResult(value: JsonValue): SecretsMomentsListResult {
   const label = "secrets.moments.list result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "moments",
+    "nextBeforeMomentOrder",
+  ]);
   return {
     moments: arrayValue(object, "moments", label).map((moment, index) =>
       secretMomentValue(moment, `${label}.moments[${index}]`),
@@ -1164,7 +1449,11 @@ export function decodeSecretsMomentsGetResult(value: JsonValue): SecretsMomentsG
 
 export function decodeMomentsListResult(value: JsonValue): MomentsListResult {
   const label = "moments.list result";
-  const object = objectValue(value, label);
+  const object = strictObjectValue(value, label, [
+    "moments",
+    "nextBeforeMomentOrder",
+    "latestMomentOrder",
+  ]);
   return {
     moments: arrayValue(object, "moments", label).map((moment, index) =>
       momentValue(moment, `${label}.moments[${index}]`),
@@ -1176,4 +1465,161 @@ export function decodeMomentsListResult(value: JsonValue): MomentsListResult {
 
 export function decodeMomentsGetResult(value: JsonValue): MomentsGetResult {
   return value === null ? null : momentValue(value, "moments.get result");
+}
+
+export function decodeVersionedTextListResult(
+  value: JsonValue,
+): VersionedTextListResult {
+  const label = "versionedText.list result";
+  const object = strictObjectValue(value, label, ["files", "nextAfterPath"]);
+  const files = arrayValue(object, "files", label).map((entry, index) => {
+    const entryLabel = `${label}.files[${index}]`;
+    const row = strictObjectValue(entry, entryLabel, [
+      "path",
+      "objectId",
+      "contentKind",
+      "byteLength",
+      "binarySha256",
+      "updatedAtMs",
+      "latestMomentId",
+      "metadataOrigin",
+    ]);
+    return {
+      path: stringValue(row, "path", entryLabel),
+      objectId: stringValue(row, "objectId", entryLabel),
+      contentKind: contentKindValue(row, "contentKind", entryLabel),
+      byteLength: nullableNumberValue(row, "byteLength", entryLabel),
+      binarySha256: nullableStringValue(row, "binarySha256", entryLabel),
+      updatedAtMs: numberValue(row, "updatedAtMs", entryLabel),
+      latestMomentId: stringValue(row, "latestMomentId", entryLabel),
+      metadataOrigin: stringValue(row, "metadataOrigin", entryLabel),
+    };
+  });
+  return {
+    files,
+    nextAfterPath: nullableStringValue(object, "nextAfterPath", label),
+  };
+}
+
+export function decodeVersionsCompareResult(
+  value: JsonValue,
+): VersionsCompareResult {
+  const label = "versionedText.compare result";
+  const object = strictObjectValue(value, label, ["status"]);
+  const status = object.status;
+  if (
+    status !== "unchanged" &&
+    status !== "merged" &&
+    status !== "conflict"
+  ) {
+    throw new VersionedProtocolShapeError(`${label}.status is invalid.`);
+  }
+  return { status };
+}
+
+function decodeEmptyObject(value: JsonValue, label: string): JsonObject {
+  strictObjectValue(value, label, []);
+  return {};
+}
+
+export function decodeVersionedResult<M extends VersionedMethod>(
+  method: M,
+  value: JsonValue,
+): VersionedMethodResultMap[M] {
+  let result: unknown;
+  switch (method) {
+    case VERSIONED_METHOD.textWrite:
+      result = decodeVersionedTextWriteResult(value);
+      break;
+    case VERSIONED_METHOD.textRead:
+      result = decodeVersionedTextReadResult(value);
+      break;
+    case VERSIONED_METHOD.textRename:
+      result = decodeVersionedTextRenameResult(value);
+      break;
+    case VERSIONED_METHOD.textDelete:
+      result = decodeVersionedTextDeleteResult(value);
+      break;
+    case VERSIONED_METHOD.textRollback:
+      result = decodeVersionedTextRollbackResult(value);
+      break;
+    case VERSIONED_METHOD.textList:
+      result = decodeVersionedTextListResult(value);
+      break;
+    case VERSIONED_METHOD.binaryWrite:
+      result = decodeVersionedBinaryWriteResult(value);
+      break;
+    case VERSIONED_METHOD.binaryRead:
+      result = decodeVersionedBinaryReadResult(value);
+      break;
+    case VERSIONED_METHOD.binaryReadBlob:
+      result = decodeVersionedBinaryReadBlobResult(value);
+      break;
+    case VERSIONED_METHOD.versionsCreateNamed:
+    case VERSIONED_METHOD.versionsSetActive:
+    case VERSIONED_METHOD.versionsEnsureMain:
+      result = decodeVersionRecord(value);
+      break;
+    case VERSIONED_METHOD.versionsList:
+      result = decodeVersionsListResult(value);
+      break;
+    case VERSIONED_METHOD.versionsActive:
+      result = decodeVersionsActiveResult(value);
+      break;
+    case VERSIONED_METHOD.versionsMerge:
+      result = decodeVersionsMergeResult(value);
+      break;
+    case VERSIONED_METHOD.versionsCompare:
+      result = decodeVersionsCompareResult(value);
+      break;
+    case VERSIONED_METHOD.versionsCompareFiles:
+      result = decodeVersionsCompareFilesResult(value);
+      break;
+    case VERSIONED_METHOD.secretsWrite:
+      result = decodeSecretWriteResult(value);
+      break;
+    case VERSIONED_METHOD.secretsList:
+      result = decodeSecretsListResult(value);
+      break;
+    case VERSIONED_METHOD.secretsMaterialize:
+      result = decodeSecretsMaterializeResult(value);
+      break;
+    case VERSIONED_METHOD.secretsDelete:
+      result = decodeSecretDeleteResult(value);
+      break;
+    case VERSIONED_METHOD.secretsFork:
+      result = decodeEmptyObject(value, "secrets.fork result");
+      break;
+    case VERSIONED_METHOD.secretsCompare:
+      result = decodeSecretCompareResult(value);
+      break;
+    case VERSIONED_METHOD.secretsApply:
+      result = decodeSecretApplyResult(value);
+      break;
+    case VERSIONED_METHOD.secretsRestore:
+      result = decodeSecretRestoreResult(value);
+      break;
+    case VERSIONED_METHOD.secretsMomentsList:
+      result = decodeSecretsMomentsListResult(value);
+      break;
+    case VERSIONED_METHOD.secretsMomentsGet:
+      result = decodeSecretsMomentsGetResult(value);
+      break;
+    case VERSIONED_METHOD.momentsList:
+      result = decodeMomentsListResult(value);
+      break;
+    case VERSIONED_METHOD.momentsGet:
+      result = decodeMomentsGetResult(value);
+      break;
+    case VERSIONED_METHOD.searchEnsureIndex:
+      result = decodeEmptyObject(value, "search.ensureIndex result");
+      break;
+    default: {
+      const exhaustive: never = method;
+      throw new VersionedProtocolShapeError(
+        `Unsupported versioned method: ${exhaustive}`,
+      );
+    }
+  }
+  return result as VersionedMethodResultMap[M];
 }
