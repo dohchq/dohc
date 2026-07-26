@@ -1636,10 +1636,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: RelayWorkspaceParams = parse(params)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
-        let sequence = self
-            .next_session
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let new_origin_id = format!("origin-recovered-{}-{sequence:016x}", self.session_epoch);
+        let new_origin_id = recovered_origin_id()?;
         let outcome = self
             .relay_execute(
                 ctx,
@@ -9563,6 +9560,30 @@ fn workspace_unavailable() -> WireError {
     )
 }
 
+fn recovered_origin_id() -> Result<String, WireError> {
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy)
+        .map_err(|_| wire(ErrorCode::Internal, "origin-id-generation-failed"))?;
+    Ok(origin_id_from_entropy(entropy))
+}
+
+fn origin_id_from_entropy(mut entropy: [u8; 16]) -> String {
+    entropy[6] = (entropy[6] & 0x0f) | 0x40;
+    entropy[8] = (entropy[8] & 0x3f) | 0x80;
+    let hex = entropy
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "origin_{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
 fn wire(code: ErrorCode, message: &'static str) -> WireError {
     WireError::new(code, message)
 }
@@ -9581,6 +9602,18 @@ mod tests {
     use std::time::Duration;
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn recovered_origins_use_random_uuid_identity_coordinates() {
+        let first = origin_id_from_entropy([0; 16]);
+        let second = origin_id_from_entropy([1; 16]);
+        assert_eq!(first, "origin_00000000-0000-4000-8000-000000000000");
+        assert_eq!(second, "origin_01010101-0101-4101-8101-010101010101");
+        assert_ne!(
+            first, second,
+            "cross-device entropy must participate in the recovered coordinate"
+        );
+    }
 
     #[test]
     fn runtime_error_mapping_separates_corruption_from_bad_input() {

@@ -340,6 +340,74 @@ describe("sync relay handler", () => {
     ]);
   });
 
+  it("rejects fractional and out-of-range timestamps before admitting log rows", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+
+    for (const recordedAtMs of [42.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const response = await h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody({
+            originId: "origin-a",
+            ops: [
+              {
+                originSeq: 0,
+                opKind: "future.opaque",
+                payload: {},
+                recordedAtMs,
+              },
+            ],
+          }),
+        ),
+      );
+      expect(response.status).toBe(400);
+      expect(await json(response)).toMatchObject({
+        ok: false,
+        error: "recordedAtMs must be an integer in the safe wire range",
+      });
+    }
+
+    const fetched = await json(
+      await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
+    );
+    expect(fetched.ops).toEqual([]);
+    // MUTATION: Number.isFinite, Math.trunc, or rounding admits the fractional
+    // row and makes the Rust i64 decoder permanently stall behind it.
+  });
+
+  it("refuses a legacy relay database with a fractional timestamp at cutover", async () => {
+    const root = await tempRoot("fractional-cutover");
+    const dbPath = join(root, "relay.sqlite");
+    const storage = openSyncRelayStorage(dbPath);
+    storage.claimWorkspace({
+      workspaceId: "workspace-a",
+      ownerUserId: "a",
+      createdAtMs: 1,
+    });
+    storage.appendLogBatch({
+      workspaceId: "workspace-a",
+      originId: "legacy-origin",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "future.opaque",
+          payloadJson: "{}",
+          recordedAtMs: 1.5,
+        },
+      ],
+    });
+    storage.close();
+
+    expect(() => openSyncRelayStorage(dbPath)).toThrow(
+      "sync relay log contains a timestamp outside the integer wire contract",
+    );
+    // MUTATION: casting/truncating during cutover silently changes the signed
+    // wire value; omitting the scan re-exposes the poison row to Rust pulls.
+  });
+
   // Gate finding: a missing blob in an OWNED workspace must be
   // distinguishable from a missing/foreign workspace so clients can degrade
   // honestly instead of reporting the whole workspace unavailable. The

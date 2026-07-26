@@ -366,7 +366,9 @@ impl DeferredRelayTransport {
         {
             let release = matches!(
                 state.completed[index].0,
-                RelayIoRequest::UploadBlob(_)
+                RelayIoRequest::Push(_)
+                    | RelayIoRequest::SharedChannelPush(_)
+                    | RelayIoRequest::UploadBlob(_)
                     | RelayIoRequest::DownloadBlob(_)
                     | RelayIoRequest::ShareBlob(_)
             );
@@ -534,6 +536,57 @@ impl RelayTransport for DeferredRelayTransport {
 #[cfg(test)]
 mod deferred_relay_tests {
     use super::*;
+
+    #[test]
+    fn completed_push_batches_release_consumed_request_payloads() {
+        let transport = DeferredRelayTransport::default();
+        let request = PushRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            origin_id: "origin".to_owned(),
+            after_seq: -1,
+            ops: (0..dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH)
+                .map(|origin_seq| dohc_engine_sync::ReplicationEnvelope {
+                    workspace_id: "workspace".to_owned(),
+                    origin_id: "origin".to_owned(),
+                    origin_seq: i64::try_from(origin_seq).expect("sequence"),
+                    op_kind: "probe".to_owned(),
+                    payload: serde_json::json!({"body": "retained until consumed"}),
+                    recorded_at_ms: 1_000,
+                })
+                .collect(),
+        };
+        transport.complete(
+            RelayIoRequest::Push(request.clone()),
+            Ok(RelayIoResponse::Push(PushResponse {
+                accepted: request.ops.len(),
+                inserted: request.ops.len(),
+                skipped: 0,
+                current_max_origin_seq: i64::try_from(request.ops.len() - 1).expect("maximum"),
+            })),
+        );
+
+        assert_eq!(
+            transport.push(request).expect("consume completed push"),
+            PushResponse {
+                accepted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
+                inserted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
+                skipped: 0,
+                current_max_origin_seq:
+                    i64::try_from(dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH - 1,).expect("maximum"),
+            }
+        );
+        assert!(
+            transport
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .completed
+                .is_empty(),
+            "MUTATION: omitting Push from the release set retains every consumed batch"
+        );
+    }
 
     #[test]
     fn large_multi_blob_pull_does_not_retain_consumed_buffers() {

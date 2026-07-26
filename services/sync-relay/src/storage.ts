@@ -411,6 +411,19 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     if (!workspaceColumns.includes("epoch_log_floor")) {
       db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN epoch_log_floor INTEGER");
     }
+    const invalidTimestamp = db
+      .prepare(
+        `SELECT EXISTS(
+           SELECT 1 FROM sync_relay_log
+           WHERE recorded_at_ms != CAST(recorded_at_ms AS INTEGER)
+              OR recorded_at_ms < -9007199254740991
+              OR recorded_at_ms > 9007199254740991
+         ) AS invalid`,
+      )
+      .get();
+    if (Number(invalidTimestamp?.invalid ?? 0) !== 0) {
+      throw new Error("sync relay log contains a timestamp outside the integer wire contract");
+    }
     db.exec("COMMIT");
   } catch (error) {
     try {

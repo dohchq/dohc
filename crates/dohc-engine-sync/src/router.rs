@@ -28,6 +28,22 @@ impl RoutedApply {
     }
 }
 
+pub(crate) fn redelivered_materialization_changes(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    match envelope.op_kind.as_str() {
+        "moment.append" => {
+            crate::moment_apply::redelivered_materialization_changes(store, envelope)
+        }
+        "ydoc.update" => crate::ydoc_apply::redelivered_materialization_changes(store, envelope),
+        "conflict.resolve" => {
+            crate::conflict_apply::redelivered_materialization_changes(store, envelope)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum OwnedRoute {
     Chat,

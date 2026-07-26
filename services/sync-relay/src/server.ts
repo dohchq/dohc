@@ -1096,7 +1096,9 @@ function parseLogOp(value: unknown): SyncRelayLogInput {
     throw badRequest("payload must be a JSON object");
   }
   const recordedAtMs = Number(op.recordedAtMs);
-  if (!Number.isFinite(recordedAtMs)) throw badRequest("recordedAtMs must be finite");
+  if (!Number.isSafeInteger(recordedAtMs)) {
+    throw badRequest("recordedAtMs must be an integer in the safe wire range");
+  }
   const payloadJson = stableJsonStringify(op.payload);
   if (Buffer.byteLength(payloadJson, "utf8") > MAX_PAYLOAD_JSON_BYTES) {
     throw badRequest("payload is too large");

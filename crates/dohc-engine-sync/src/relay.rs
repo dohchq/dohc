@@ -513,6 +513,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     for change in routed.materialization_changes {
                         changed_paths.insert(change.path.clone(), change);
                     }
+                    for change in crate::router::redelivered_materialization_changes(store, op)
+                        .map_err(local)?
+                    {
+                        changed_paths.insert(change.path.clone(), change);
+                    }
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
                 }
                 ApplyOutcome::Skipped => {
@@ -522,9 +527,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     {
                         pending_resolves.push(pending);
                     }
-                    for change in
-                        crate::moment_apply::redelivered_materialization_changes(store, op)
-                            .map_err(local)?
+                    for change in crate::router::redelivered_materialization_changes(store, op)
+                        .map_err(local)?
                     {
                         changed_paths.insert(change.path.clone(), change);
                     }
@@ -690,27 +694,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
-        let mut local_ops = Vec::new();
-        let mut after = -1;
-        loop {
-            let page = list_replication_ops(
-                store,
-                workspace_id,
-                &identity.origin_id,
-                after,
-                crate::MAX_PULL_OPS,
-            )
-            .map_err(local)?;
-            let Some(last) = page.last() else {
-                break;
-            };
-            after = last.origin_seq;
-            local_ops.extend(page);
-        }
-
-        let mut relay_ops = BTreeMap::new();
+        let mut shared_prefix_length = 0_i64;
         let mut cursor = 0;
-        loop {
+        'pages: loop {
             let page = self.transport.pull(PullRequest {
                 workspace_id: workspace_id.to_owned(),
                 replication_epoch: identity.replication_epoch.clone(),
@@ -720,12 +706,36 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             })?;
             validate_pull_page(&page, workspace_id, cursor)?;
             for op in page.ops {
-                if op.origin_id == identity.origin_id {
-                    relay_ops.insert(op.origin_seq, op);
+                if op.origin_id != identity.origin_id || op.origin_seq < shared_prefix_length {
+                    continue;
                 }
-            }
-            if page.has_more && page.next_cursor <= cursor {
-                return Err(RelayError::NoProgress);
+                if op.origin_seq != shared_prefix_length {
+                    break 'pages;
+                }
+                let local_op = list_replication_ops(
+                    store,
+                    workspace_id,
+                    &identity.origin_id,
+                    shared_prefix_length - 1,
+                    1,
+                )
+                .map_err(local)?
+                .into_iter()
+                .next();
+                let Some(local_op) = local_op else {
+                    break 'pages;
+                };
+                if local_op.origin_seq != shared_prefix_length
+                    || local_op.op_kind != op.op_kind
+                    || local_op.recorded_at_ms != op.recorded_at_ms
+                    || canonical_json_bytes(&local_op.payload).map_err(local)?
+                        != canonical_json_bytes(&op.payload).map_err(local)?
+                {
+                    break 'pages;
+                }
+                shared_prefix_length = shared_prefix_length
+                    .checked_add(1)
+                    .ok_or(RelayError::InvalidResponse)?;
             }
             cursor = page.next_cursor;
             if !page.has_more {
@@ -733,28 +743,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         }
 
-        let mut shared_prefix_length = 0_i64;
-        for op in &local_ops {
-            if op.origin_seq != shared_prefix_length {
-                break;
-            }
-            let Some(remote) = relay_ops.get(&op.origin_seq) else {
-                break;
-            };
-            if remote.op_kind != op.op_kind
-                || remote.recorded_at_ms != op.recorded_at_ms
-                || canonical_json_bytes(&remote.payload).map_err(local)?
-                    != canonical_json_bytes(&op.payload).map_err(local)?
-            {
-                break;
-            }
-            shared_prefix_length += 1;
-        }
-        let orphan_ops = local_ops
-            .iter()
-            .filter(|op| op.origin_seq >= shared_prefix_length)
-            .cloned()
-            .collect::<Vec<_>>();
         let old_origin_id = identity.origin_id;
         let result = store
             .write_with(faults, |tx| {
@@ -769,28 +757,29 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 if collision {
                     return Err(SyncError::CoordinateDiverged);
                 }
-                for (dense_seq, op) in orphan_ops.iter().enumerate() {
-                    let dense_seq =
-                        i64::try_from(dense_seq).map_err(|_| SyncError::CoordinateDiverged)?;
-                    tx.execute(
-                        "INSERT INTO replication_log \
-                         (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
-                         VALUES (?1,?2,?3,?4,?5,?6,0)",
-                        params![
-                            workspace_id,
-                            new_origin_id,
-                            dense_seq,
-                            op.op_kind,
-                            serde_json::to_string(&op.payload).map_err(|_| {
-                                SyncError::InvalidInput {
-                                    reason: "payload is not valid JSON",
-                                }
-                            })?,
-                            op.recorded_at_ms
-                        ],
+                let preserved_ops: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM replication_log \
+                         WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>=?3",
+                        params![workspace_id, old_origin_id, shared_prefix_length],
+                        |row| row.get(0),
                     )
-                    .map_err(SyncError::persist)?;
-                }
+                    .map_err(SyncError::corrupt)?;
+                tx.execute(
+                    "INSERT INTO replication_log \
+                     (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                     SELECT workspace_id,?1,origin_seq-?2,op_kind,payload_json,recorded_at_ms,0 \
+                     FROM replication_log \
+                     WHERE workspace_id=?3 AND origin_id=?4 AND origin_seq>=?2 \
+                     ORDER BY origin_seq",
+                    params![
+                        new_origin_id,
+                        shared_prefix_length,
+                        workspace_id,
+                        old_origin_id
+                    ],
+                )
+                .map_err(SyncError::persist)?;
                 tx.execute(
                     "DELETE FROM replication_log \
                      WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>=?3",
@@ -825,17 +814,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     [workspace_id],
                 )
                 .map_err(SyncError::persist)?;
-                Ok::<(), SyncError>(())
+                usize::try_from(preserved_ops).map_err(|_| SyncError::CoordinateDiverged)
             })
             .map_err(local)?;
-        if matches!(result, TxnOutcome::Crashed { .. }) {
-            return Err(RelayError::Local("injected-crash".to_owned()));
-        }
+        let preserved_ops = match result {
+            TxnOutcome::Committed(preserved_ops) => preserved_ops,
+            TxnOutcome::Crashed { .. } => {
+                return Err(RelayError::Local("injected-crash".to_owned()));
+            }
+        };
         Ok(RecoverResponse {
             old_origin_id,
             new_origin_id: new_origin_id.to_owned(),
             shared_prefix_length,
-            preserved_ops: orphan_ops.len(),
+            preserved_ops,
         })
     }
 
@@ -858,28 +850,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             crate::CursorKind::SharedChannel,
         )
         .map_err(local)?;
-        let mut fetched = 0_usize;
-        let mut ops = Vec::new();
-        loop {
-            let page = self.transport.shared_channel_pull(SharedChannelRequest {
-                share_id: share_id.to_owned(),
-                channel_wire_id: channel_wire_id.to_owned(),
-                origin_id: identity
-                    .as_ref()
-                    .map_or_else(String::new, |value| value.origin_id.clone()),
-                cursor,
-                ops: Vec::new(),
-            })?;
-            validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
-            fetched = fetched
-                .checked_add(page.ops.len())
-                .ok_or(RelayError::InvalidResponse)?;
-            ops.extend(page.ops);
-            cursor = page.next_cursor;
-            if !page.has_more {
-                break;
-            }
-        }
+        let page = self.transport.shared_channel_pull(SharedChannelRequest {
+            share_id: share_id.to_owned(),
+            channel_wire_id: channel_wire_id.to_owned(),
+            origin_id: identity
+                .as_ref()
+                .map_or_else(String::new, |value| value.origin_id.clone()),
+            cursor,
+            ops: Vec::new(),
+        })?;
+        validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
+        let fetched = page.ops.len();
+        let ops = page.ops;
+        cursor = page.next_cursor;
 
         let boundary = crate::ShareBoundary {
             share_id: share_id.to_owned(),
@@ -958,36 +941,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
         let scanned = read_shared_push_state(store, workspace_id, share_id)?;
-        let all = list_all_origin_ops(store, workspace_id, &identity.origin_id)?;
         let mut dense_seq = -1_i64;
-        let mut pending = Vec::new();
+        let mut pending = Vec::with_capacity(crate::MAX_PUSH_OPS_PER_BATCH);
         let mut last_scanned = scanned;
-        for op in all {
-            let eligible = shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)?;
-            if eligible {
-                dense_seq = dense_seq
-                    .checked_add(1)
-                    .ok_or(RelayError::InvalidResponse)?;
-            }
-            if op.origin_seq <= scanned {
-                continue;
-            }
-            last_scanned = op.origin_seq;
-            if eligible {
-                pending.push((
-                    op.origin_seq,
-                    ShareReplicationEnvelope {
-                        origin_id: identity.origin_id.clone(),
-                        origin_seq: dense_seq,
-                        op_kind: op.op_kind,
-                        payload: op.payload,
-                        recorded_at_ms: op.recorded_at_ms,
-                    },
-                ));
-            }
-        }
         let mut pushed = 0_usize;
-        for batch in pending.chunks(500) {
+        let push_batch = |batch: &[(i64, ShareReplicationEnvelope)]| {
             let response = self.transport.shared_channel_push(SharedChannelRequest {
                 share_id: share_id.to_owned(),
                 channel_wire_id: channel_wire_id.to_owned(),
@@ -1001,14 +959,70 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             {
                 return Err(RelayError::InvalidResponse);
             }
+            Ok(push.inserted)
+        };
+        let mut after = -1_i64;
+        loop {
+            let page = list_replication_ops(
+                store,
+                workspace_id,
+                &identity.origin_id,
+                after,
+                crate::MAX_PULL_OPS,
+            )
+            .map_err(local)?;
+            let Some(page_last) = page.last().map(|op| op.origin_seq) else {
+                break;
+            };
+            for op in page {
+                let eligible =
+                    shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)?;
+                if eligible {
+                    dense_seq = dense_seq
+                        .checked_add(1)
+                        .ok_or(RelayError::InvalidResponse)?;
+                }
+                if op.origin_seq <= scanned {
+                    continue;
+                }
+                last_scanned = op.origin_seq;
+                if eligible {
+                    pending.push((
+                        op.origin_seq,
+                        ShareReplicationEnvelope {
+                            origin_id: identity.origin_id.clone(),
+                            origin_seq: dense_seq,
+                            op_kind: op.op_kind,
+                            payload: op.payload,
+                            recorded_at_ms: op.recorded_at_ms,
+                        },
+                    ));
+                }
+                if pending.len() == crate::MAX_PUSH_OPS_PER_BATCH {
+                    pushed = pushed
+                        .checked_add(push_batch(&pending)?)
+                        .ok_or(RelayError::InvalidResponse)?;
+                    write_shared_push_state(
+                        store,
+                        workspace_id,
+                        share_id,
+                        pending.last().ok_or(RelayError::InvalidResponse)?.0,
+                        faults,
+                    )?;
+                    pending.clear();
+                }
+            }
+            after = page_last;
+        }
+        if !pending.is_empty() {
             pushed = pushed
-                .checked_add(push.inserted)
+                .checked_add(push_batch(&pending)?)
                 .ok_or(RelayError::InvalidResponse)?;
             write_shared_push_state(
                 store,
                 workspace_id,
                 share_id,
-                batch.last().ok_or(RelayError::InvalidResponse)?.0,
+                pending.last().ok_or(RelayError::InvalidResponse)?.0,
                 faults,
             )?;
         }
@@ -1027,24 +1041,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut cursor =
             crate::read_share_cursor(store, workspace_id, share_id, crate::CursorKind::ShareView)
                 .map_err(local)?;
-        let mut fetched = 0_usize;
-        let mut ops = Vec::new();
-        loop {
-            let page = self.transport.share_view_pull(ShareViewRequest {
-                share_id: share_id.to_owned(),
-                cursor,
-                limit: 500,
-            })?;
-            validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
-            fetched = fetched
-                .checked_add(page.ops.len())
-                .ok_or(RelayError::InvalidResponse)?;
-            ops.extend(page.ops);
-            cursor = page.next_cursor;
-            if !page.has_more {
-                break;
-            }
-        }
+        let page = self.transport.share_view_pull(ShareViewRequest {
+            share_id: share_id.to_owned(),
+            cursor,
+            limit: crate::model::MAX_PULL_OPS_PER_PASS,
+        })?;
+        validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
+        let fetched = page.ops.len();
+        let ops = page.ops;
+        cursor = page.next_cursor;
         let boundary = crate::ShareBoundary {
             share_id: share_id.to_owned(),
             surface: crate::ShareSurface::ShareView,
@@ -1758,25 +1763,6 @@ fn write_shared_push_state(
         return Err(RelayError::Local("injected-crash".to_owned()));
     }
     Ok(())
-}
-
-fn list_all_origin_ops(
-    store: &EngineStore,
-    workspace_id: &str,
-    origin_id: &str,
-) -> Result<Vec<ReplicationEnvelope>, RelayError> {
-    let mut after = -1;
-    let mut all = Vec::new();
-    loop {
-        let page = list_replication_ops(store, workspace_id, origin_id, after, crate::MAX_PULL_OPS)
-            .map_err(local)?;
-        let Some(last) = page.last() else {
-            break;
-        };
-        after = last.origin_seq;
-        all.extend(page);
-    }
-    Ok(all)
 }
 
 fn shared_channel_op_allowed(

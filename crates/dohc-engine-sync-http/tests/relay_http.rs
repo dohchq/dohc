@@ -684,6 +684,26 @@ fn pull_deserializes_rows_without_the_discarded_relay_sequence() {
 }
 
 #[test]
+fn direct_transport_rejects_fractional_wire_timestamps_without_rounding() {
+    let mut row = remote_row("peer", 0, "workspace.init", json!({}));
+    row["recordedAtMs"] = json!(1.5);
+    let server = FakeServer::start(move |_| log_page(vec![row.clone()], 1, false));
+
+    let error = transport(&server)
+        .pull(PullRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            cursor: 0,
+            limit: 1,
+        })
+        .expect_err("fractional timestamps are outside the i64 wire contract");
+    assert_eq!(error, RelayError::InvalidResponse);
+    // MUTATION: accepting through f64 plus a cast/truncation makes this return
+    // recordedAtMs=1 and admits different bytes than the sender supplied.
+}
+
+#[test]
 fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
     // MUTATION: restoring the core's former 10 MiB allowance reaches the fake
     // network with a row the relay's 256 KiB contract can never accept.

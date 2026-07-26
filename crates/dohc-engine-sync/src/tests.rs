@@ -4099,6 +4099,111 @@ impl RelayTransport for PagedRelay {
     }
 }
 
+struct PagedShareRelay {
+    shared_pages: BTreeMap<i64, SharedChannelResponse>,
+    view_pages: BTreeMap<i64, ShareViewResponse>,
+    shared_pulls: Mutex<Vec<i64>>,
+    view_pulls: Mutex<Vec<(i64, usize)>>,
+}
+
+impl PagedShareRelay {
+    fn new(
+        shared_pages: impl IntoIterator<Item = (i64, SharedChannelResponse)>,
+        view_pages: impl IntoIterator<Item = (i64, ShareViewResponse)>,
+    ) -> Self {
+        Self {
+            shared_pages: shared_pages.into_iter().collect(),
+            view_pages: view_pages.into_iter().collect(),
+            shared_pulls: Mutex::new(Vec::new()),
+            view_pulls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl RelayTransport for PagedShareRelay {
+    fn push(&self, _req: PushRequest) -> Result<PushResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn pull(&self, _req: PullRequest) -> Result<PullResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn claim_workspace(&self, _req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn rotate_epoch(&self, _req: EpochRequest) -> Result<EpochResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn blobs_have(&self, _req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn upload_key_envelope(
+        &self,
+        _req: KeyEnvelopeRequest,
+    ) -> Result<KeyEnvelopeResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn download_key_envelope(
+        &self,
+        _req: KeyEnvelopeDownloadRequest,
+    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn shared_channel_pull(
+        &self,
+        req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        self.shared_pulls
+            .lock()
+            .expect("shared pull calls")
+            .push(req.cursor);
+        self.shared_pages
+            .get(&req.cursor)
+            .cloned()
+            .ok_or(RelayError::InvalidResponse)
+    }
+
+    fn shared_channel_push(
+        &self,
+        _req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
+        self.view_pulls
+            .lock()
+            .expect("view pull calls")
+            .push((req.cursor, req.limit));
+        self.view_pages
+            .get(&req.cursor)
+            .cloned()
+            .ok_or(RelayError::InvalidResponse)
+    }
+
+    fn share_blob(&self, _req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+}
+
 fn seed_identity(engine: &mut EngineStore) {
     let outcome = journal_local_replication_op(
         engine,
@@ -4819,6 +4924,79 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
         })
         .expect("updated head");
     assert_eq!(updated_text, "updated base seed");
+}
+
+#[test]
+fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    dohc_engine_domain::VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-relay-path',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "remote projection");
+    let bytes = doc.encode_full_state();
+    let sha256 = dohc_engine_storage::hex_sha256(&bytes);
+    let op = envelope(
+        "ydoc-path-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-relay-path",
+            "path": "notes/relay-path.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha256,
+            "isBaseState": true
+        }),
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![op],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256, bytes);
+    let client = RelaySyncClient::new(relay);
+
+    for (expected_applied, expected_skipped) in [(1, 0), (0, 1)] {
+        let outcome = client
+            .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+            .expect("pull ydoc projection");
+        let SyncPassOutcome::Complete {
+            applied,
+            skipped,
+            changed_paths,
+            ..
+        } = outcome
+        else {
+            panic!("ydoc pull must complete: {outcome:?}");
+        };
+        assert_eq!((applied, skipped), (expected_applied, expected_skipped));
+        assert_eq!(
+            changed_paths,
+            [MomentMaterializationChange {
+                path: "notes/relay-path.md".to_owned(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            "MUTATION: dropping non-moment durable-intent reconstruction loses the owed path"
+        );
+    }
 }
 
 #[test]
@@ -6849,6 +7027,110 @@ fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
         client.transport().pulls.lock().expect("pull calls").len(),
         crate::model::MAX_PULL_PAGES_PER_PASS
     );
+}
+
+#[test]
+fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor() {
+    let (_scratch, _path, mut engine) = store();
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [
+            (
+                0,
+                SharedChannelResponse {
+                    ops: Vec::new(),
+                    next_cursor: 1,
+                    has_more: true,
+                    push: None,
+                },
+            ),
+            (
+                1,
+                SharedChannelResponse {
+                    ops: Vec::new(),
+                    next_cursor: 2,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+        ],
+        [],
+    ));
+
+    let first = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("bounded shared-channel page");
+    assert_eq!((first.fetched, first.next_cursor), (0, 1));
+    assert_eq!(
+        *client
+            .transport()
+            .shared_pulls
+            .lock()
+            .expect("shared pull calls"),
+        [0],
+        "MUTATION: restoring the hasMore loop consumes the second page in one actor turn"
+    );
+    assert_eq!(
+        read_share_cursor(&engine, "ws", "share", CursorKind::SharedChannel)
+            .expect("committed shared cursor"),
+        1
+    );
+
+    let second = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("resumed shared-channel page");
+    assert_eq!(second.next_cursor, 2);
+}
+
+#[test]
+fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
+    let (_scratch, _path, mut engine) = store();
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [],
+        [
+            (
+                0,
+                ShareViewResponse {
+                    ops: Vec::new(),
+                    next_cursor: 1,
+                    has_more: true,
+                },
+            ),
+            (
+                1,
+                ShareViewResponse {
+                    ops: Vec::new(),
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            ),
+        ],
+    ));
+
+    let first = client
+        .pull_share_view(&mut engine, "ws", "share", "docs", &NoFaults)
+        .expect("bounded share-view page");
+    assert_eq!((first.fetched, first.pending_cursor.cursor), (0, 1));
+    assert_eq!(
+        *client
+            .transport()
+            .view_pulls
+            .lock()
+            .expect("view pull calls"),
+        [(0, crate::model::MAX_PULL_OPS_PER_PASS)],
+        "MUTATION: restoring the hasMore loop accumulates the second page"
+    );
+    assert_eq!(
+        read_share_cursor(&engine, "ws", "share", CursorKind::ShareView)
+            .expect("uncommitted view cursor"),
+        0
+    );
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+        .expect("commit first view page");
+    let second = client
+        .pull_share_view(&mut engine, "ws", "share", "docs", &NoFaults)
+        .expect("resume view page");
+    assert_eq!(second.pending_cursor.cursor, 2);
 }
 
 #[test]
