@@ -57,9 +57,14 @@ struct CaptureApplyProbeInner {
     fence_armed: std::sync::atomic::AtomicBool,
     fence_entered: tokio::sync::Semaphore,
     fence_release: tokio::sync::Semaphore,
+    fence_wait_armed: std::sync::atomic::AtomicBool,
+    fence_wait_entered: tokio::sync::Semaphore,
     commit_armed: std::sync::atomic::AtomicBool,
     commit_entered: tokio::sync::Semaphore,
     commit_release: tokio::sync::Semaphore,
+    gate_wait_armed: std::sync::atomic::AtomicBool,
+    gate_wait_entered: tokio::sync::Semaphore,
+    version_scan_count: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(feature = "harness")]
@@ -72,9 +77,14 @@ impl Default for CaptureApplyProbeInner {
             fence_armed: std::sync::atomic::AtomicBool::new(false),
             fence_entered: tokio::sync::Semaphore::new(0),
             fence_release: tokio::sync::Semaphore::new(0),
+            fence_wait_armed: std::sync::atomic::AtomicBool::new(false),
+            fence_wait_entered: tokio::sync::Semaphore::new(0),
             commit_armed: std::sync::atomic::AtomicBool::new(false),
             commit_entered: tokio::sync::Semaphore::new(0),
             commit_release: tokio::sync::Semaphore::new(0),
+            gate_wait_armed: std::sync::atomic::AtomicBool::new(false),
+            gate_wait_entered: tokio::sync::Semaphore::new(0),
+            version_scan_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -115,6 +125,19 @@ impl CaptureApplyProbe {
         self.inner.fence_release.add_permits(1);
     }
 
+    pub fn observe_next_version_fence_wait(&self) {
+        self.inner.fence_wait_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_version_fence_waiting(&self) {
+        self.inner
+            .fence_wait_entered
+            .acquire()
+            .await
+            .expect("capture apply probe remains open")
+            .forget();
+    }
+
     pub fn pause_next_version_commit(&self) {
         self.inner.commit_armed.store(true, Ordering::Release);
     }
@@ -130,6 +153,23 @@ impl CaptureApplyProbe {
 
     pub fn release_version_commit(&self) {
         self.inner.commit_release.add_permits(1);
+    }
+
+    pub fn observe_next_apply_gate_wait(&self) {
+        self.inner.gate_wait_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_apply_gate_waiting(&self) {
+        self.inner
+            .gate_wait_entered
+            .acquire()
+            .await
+            .expect("capture apply probe remains open")
+            .forget();
+    }
+
+    pub fn version_scan_count(&self) -> u64 {
+        self.inner.version_scan_count.load(Ordering::Acquire)
     }
 
     async fn pause_if_armed(&self) {
@@ -156,6 +196,12 @@ impl CaptureApplyProbe {
         }
     }
 
+    pub(crate) fn observe_version_fence_wait_if_armed(&self) {
+        if self.inner.fence_wait_armed.swap(false, Ordering::AcqRel) {
+            self.inner.fence_wait_entered.add_permits(1);
+        }
+    }
+
     pub(crate) async fn pause_version_commit_if_armed(&self) {
         if self.inner.commit_armed.swap(false, Ordering::AcqRel) {
             self.inner.commit_entered.add_permits(1);
@@ -166,6 +212,16 @@ impl CaptureApplyProbe {
                 .expect("version commit probe remains open")
                 .forget();
         }
+    }
+
+    fn observe_gate_wait_if_armed(&self) {
+        if self.inner.gate_wait_armed.swap(false, Ordering::AcqRel) {
+            self.inner.gate_wait_entered.add_permits(1);
+        }
+    }
+
+    pub(crate) fn record_version_scan(&self) {
+        self.inner.version_scan_count.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -2175,7 +2231,11 @@ impl DriverEnv for RealEnv {
     }
 
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<FilesLayer, ()> {
-        let _apply_guard = self.apply_gate.lock().await;
+        let _apply_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(()),
+            guard = self.apply_gate.lock() => guard,
+        };
         // REHYDRATE the scan manifest from the domain's captured state:
         // against an EMPTY baseline a file deleted while the daemon was down
         // could never emit a Retire and its stale head would stay readable
@@ -2247,7 +2307,15 @@ impl DriverEnv for RealEnv {
     }
 
     async fn tick(&mut self, layer: &FilesLayer, cancel: &CancellationToken) -> TickIo {
-        let _apply_guard = self.apply_gate.lock().await;
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.apply_probe {
+            probe.observe_gate_wait_if_armed();
+        }
+        let _apply_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return TickIo::Cancelled,
+            guard = self.apply_gate.lock() => guard,
+        };
         let run = layer
             .files
             .handle()

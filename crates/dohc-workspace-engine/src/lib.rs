@@ -321,8 +321,28 @@ impl OpenWorkspace {
     }
 }
 
+struct WorkspaceBarriers {
+    _capture: tokio::sync::OwnedMutexGuard<()>,
+    _sessions: tokio::sync::OwnedMutexGuard<()>,
+}
+
+enum VersionFenceIntent {
+    Fork { input: CreateNamedVersion },
+    Switch { target_version_id: String },
+}
+
+enum VersionFenceOutcome {
+    Ready(WorkspaceBarriers),
+    AlreadyActive,
+    CreateReplay(VersionRecord),
+}
+
 /// Protocol service composing domain operations on the runtime actor's sole
 /// writable `EngineStore` connection.
+///
+/// INVARIANT: exactly one `EngineService` owns each live physical `engine.db`.
+/// Repeated opens on that service reuse its handle; cross-service or aliased
+/// attachments are rejected so capture/session/version barriers cannot split.
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
@@ -371,11 +391,10 @@ impl EngineService {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             session_ops: Arc::new(tokio::sync::Mutex::new(())),
             leases: {
-                // ONE process-wide registry: the supervisor lets multiple
-                // EngineServices open the same workspace root, and per-service
-                // registries would hand two transports concurrent live
-                // sessions on one DocKey with no mutual exclusion. DocKeys are
-                // workspace-scoped, so a global set is collision-safe.
+                // ONE process-wide registry remains a defense in depth for
+                // non-service actor users. EngineService itself rejects a
+                // second attachment to an already-live physical engine.db, so
+                // one service owns all session admission for that actor.
                 static GLOBAL_LEASES: std::sync::LazyLock<LeaseRegistry> =
                     std::sync::LazyLock::new(LeaseRegistry::new);
                 GLOBAL_LEASES.clone()
@@ -396,11 +415,9 @@ impl EngineService {
                 format!("{:x}-{boot_ms:x}-{instance:x}", std::process::id())
             },
             self_writes: {
-                // Process-wide for the same reason as the lease registry: a
-                // settle through service A must suppress the capture ingest
-                // observed by service B's driver on the same root, or B
-                // claims the ydoc head as an external capture edit. Keys are
-                // (workspace, path), so a global map is collision-safe.
+                // Process-wide so suppression survives service replacement
+                // during close/reopen and remains collision-safe across
+                // distinct workspaces (keys include the scoped root).
                 static GLOBAL_SELF_WRITES: std::sync::LazyLock<SelfWriteSuppression> =
                     std::sync::LazyLock::new(SelfWriteSuppression::default);
                 GLOBAL_SELF_WRITES.clone()
@@ -979,6 +996,19 @@ impl EngineService {
             .await
             .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
             .map_err(map_runtime)?;
+        // The supervisor deduplicates by physical engine.db identity, including
+        // root aliases and hard links. EngineService state (capture driver,
+        // session registry, and version barriers) deliberately has one owner:
+        // attaching a second service to the shared actor would split those
+        // barriers and make version switches unsafe. Production constructs one
+        // service, and repeated opens on that service returned above; reject
+        // every remaining cross-service/aliased attachment explicitly.
+        if !actor_open.created_actor {
+            return Err(wire(
+                ErrorCode::WorkspaceUnavailable,
+                "workspace database is already attached",
+            ));
+        }
         let actor = actor_open.actor;
         let binding = actor.bind_shadow_clone(validated.token).await;
         let binding_error = match binding {
@@ -1045,22 +1075,20 @@ impl EngineService {
         // armed above the startup replay closes the actor on an early drop
         // and is disarmed once the handle is inserted; `CaptureDriver`'s own
         // Drop cancels the files layer.
-        if actor_open.created_actor {
-            // Cancellation-aware like every other actor wait in this flow:
-            // a caller abort stops WAITING promptly (the actor still finishes
-            // the reclaim it already accepted — it is idempotent on the next
-            // open) and the open_guard above closes the actor on early drop.
-            Self::read_under_ctx(
-                &cancellation,
-                "workspace.open (dispatch reclaim)",
-                actor.chat_dispatch_reclaim_running(
-                    params.workspace_id.clone(),
-                    CHAT_DISPATCH_MAX_ATTEMPTS,
-                    now_ms,
-                ),
-            )
-            .await?;
-        }
+        // Cancellation-aware like every other actor wait in this flow: a
+        // caller abort stops WAITING promptly (the actor still finishes the
+        // reclaim it already accepted — it is idempotent on the next open)
+        // and the open_guard above closes the actor on early drop.
+        Self::read_under_ctx(
+            &cancellation,
+            "workspace.open (dispatch reclaim)",
+            actor.chat_dispatch_reclaim_running(
+                params.workspace_id.clone(),
+                CHAT_DISPATCH_MAX_ATTEMPTS,
+                now_ms,
+            ),
+        )
+        .await?;
         capture.wait_for_baseline().await;
         open_guard.disarm();
         lock(&self.handles).insert(
@@ -1077,9 +1105,71 @@ impl EngineService {
         Ok(json!({ "workspace": handle }))
     }
 
+    /// Acquire the capture and session barriers in the one process-wide order
+    /// used by version fencing and workspace teardown.
+    async fn acquire_workspace_barriers(
+        &self,
+        open: &OpenWorkspace,
+        cancellation: Option<&OperationCancellation>,
+        operation: &str,
+        pause_after_capture: bool,
+    ) -> Result<WorkspaceBarriers, WireError> {
+        #[cfg(feature = "harness")]
+        if pause_after_capture && let Some(probe) = &self.capture_apply_probe {
+            probe.observe_version_fence_wait_if_armed();
+        }
+        let capture = match cancellation {
+            Some(cancellation) => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.token.cancelled() => {
+                        return Err(cancellation.interruption(
+                            &format!("{operation} (capture barrier)")
+                        ));
+                    }
+                    barrier = Arc::clone(&open.capture_apply_gate).lock_owned() => barrier,
+                }
+            }
+            None => Arc::clone(&open.capture_apply_gate).lock_owned().await,
+        };
+
+        #[cfg(feature = "harness")]
+        if pause_after_capture && let Some(probe) = &self.capture_apply_probe {
+            probe.pause_version_fence_if_armed().await;
+        }
+        #[cfg(not(feature = "harness"))]
+        let _ = pause_after_capture;
+
+        let sessions = match cancellation {
+            Some(cancellation) => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.token.cancelled() => {
+                        return Err(cancellation.interruption(
+                            &format!("{operation} (ydoc barrier)")
+                        ));
+                    }
+                    serial = Arc::clone(&self.session_ops).lock_owned() => serial,
+                }
+            }
+            None => Arc::clone(&self.session_ops).lock_owned().await,
+        };
+        Ok(WorkspaceBarriers {
+            _capture: capture,
+            _sessions: sessions,
+        })
+    }
+
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
-        let _session_serial = self.session_ops.lock().await;
+        let open = self.open(Some(&handle))?;
+        // The same capture→sessions order as `fence_version_snapshot`.
+        // Holding the capture gate through driver cancellation/drain means no
+        // apply can be queued behind a session-first close and form the
+        // close→driver→switch deadlock triangle.
+        let _barriers = self
+            .acquire_workspace_barriers(&open, None, "workspace.close", false)
+            .await?;
         let supervisor = self.supervisor;
         // Hold open_lock only across the handle removal and the synchronous
         // begin_close, so a workspace_open already waiting on `handles` cannot
@@ -1706,29 +1796,51 @@ impl EngineService {
             &params.name,
         );
         let cancellation = OperationCancellation::new(ctx);
-        let _fence = self
+        let input = CreateNamedVersion {
+            workspace_id: open.workspace_id.clone(),
+            new_version_id,
+            name: params.name,
+            from_version_id: params.from_version_id,
+            now_ms: now_ms()?,
+            request_id: request.idempotency_key.clone(),
+        };
+        // Reject missing sources, bad/taken names, duplicate ids, and
+        // idempotency mismatches before the destructive session sweep and full
+        // scan. An exact replay returns its original version without fencing.
+        if let Some(version) = Self::read_under_ctx(
+            &cancellation,
+            "versions.createNamed (preflight)",
+            open.actor
+                .preflight_create_named_version(input.clone(), cancellation.token()),
+        )
+        .await?
+        {
+            return Ok(version_record_json(&version));
+        }
+        let fence = self
             .fence_version_snapshot(
                 &cancellation,
                 &open,
                 handle,
                 "versions.createNamed",
                 "Saved latest edits before creating a version",
+                VersionFenceIntent::Fork {
+                    input: input.clone(),
+                },
             )
             .await?;
+        let _fence = match fence {
+            VersionFenceOutcome::Ready(fence) => fence,
+            VersionFenceOutcome::CreateReplay(version) => {
+                return Ok(version_record_json(&version));
+            }
+            VersionFenceOutcome::AlreadyActive => {
+                unreachable!("fork fences never return AlreadyActive");
+            }
+        };
         let version = open
             .actor
-            .create_named_version(
-                CreateNamedVersion {
-                    workspace_id: open.workspace_id,
-                    new_version_id,
-                    name: params.name,
-                    from_version_id: params.from_version_id,
-                    now_ms: now_ms()?,
-                    request_id: request.idempotency_key.clone(),
-                },
-                Arc::new(NoFaults),
-                cancellation.token(),
-            )
+            .create_named_version(input, Arc::new(NoFaults), cancellation.token())
             .await
             .map_err(map_runtime)?;
         Ok(version_record_json(&version))
@@ -1736,11 +1848,10 @@ impl EngineService {
 
     /// Freeze the active workspace snapshot before a version fork or switch.
     ///
-    /// Lock order is deliberately per-workspace capture gate FIRST, then the
-    /// service-global Y.Doc/session mutation gate. Waiting for a long capture
-    /// pass therefore cannot stop mutations in unrelated workspaces. Once both
-    /// are held, no capture apply or session admission can straddle the session
-    /// sweep, forced reconcile, and caller's version transaction.
+    /// Lock order is per-workspace capture gate FIRST, then the service-global
+    /// Y.Doc/session mutation gate — the same helper used by workspace.close.
+    /// Once both are held, no capture apply or session admission can straddle
+    /// the session sweep, forced reconcile, and caller's version transaction.
     async fn fence_version_snapshot(
         &self,
         cancellation: &OperationCancellation,
@@ -1748,35 +1859,40 @@ impl EngineService {
         handle: &WorkspaceHandle,
         operation: &str,
         settle_summary: &str,
-    ) -> Result<
-        (
-            tokio::sync::OwnedMutexGuard<()>,
-            tokio::sync::OwnedMutexGuard<()>,
-        ),
-        WireError,
-    > {
-        let capture_barrier = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption(
-                    &format!("{operation} (capture barrier)")
-                ));
-            }
-            barrier = Arc::clone(&open.capture_apply_gate).lock_owned() => barrier,
-        };
-        let session_barrier = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption(
-                    &format!("{operation} (ydoc barrier)")
-                ));
-            }
-            serial = Arc::clone(&self.session_ops).lock_owned() => serial,
-        };
+        intent: VersionFenceIntent,
+    ) -> Result<VersionFenceOutcome, WireError> {
+        let barriers = self
+            .acquire_workspace_barriers(open, Some(cancellation), operation, true)
+            .await?;
 
-        #[cfg(feature = "harness")]
-        if let Some(probe) = &self.capture_apply_probe {
-            probe.pause_version_fence_if_armed().await;
+        match &intent {
+            VersionFenceIntent::Fork { input } => {
+                // The preflight is intentionally repeated while the fence is
+                // held: a competing create may have won between the cheap
+                // outer check and acquisition. Reject or replay before any
+                // session is closed.
+                if let Some(version) = Self::read_under_ctx(
+                    cancellation,
+                    "versions.createNamed (fenced preflight)",
+                    open.actor
+                        .preflight_create_named_version(input.clone(), cancellation.token()),
+                )
+                .await?
+                {
+                    return Ok(VersionFenceOutcome::CreateReplay(version));
+                }
+            }
+            VersionFenceIntent::Switch { target_version_id } => {
+                let active = Self::read_under_ctx(
+                    cancellation,
+                    "versions.setActive (fenced active recheck)",
+                    open.actor.active_version(open.workspace_id.clone()),
+                )
+                .await?;
+                if active.version_id == *target_version_id {
+                    return Ok(VersionFenceOutcome::AlreadyActive);
+                }
+            }
         }
 
         let session_ids: Vec<String> = lock(&self.sessions)
@@ -1784,6 +1900,17 @@ impl EngineService {
             .filter(|(_, session)| session.workspace == *handle)
             .map(|(session_id, _)| session_id.clone())
             .collect();
+        if matches!(intent, VersionFenceIntent::Fork { .. })
+            && lock(&self.sessions).iter().any(|(_, session)| {
+                session.workspace == *handle && session.content_kind == ContentKind::Richdoc
+            })
+        {
+            // The lower projection layer is full-fidelity, but the daemon RPC
+            // still exposes richdoc-settle-unsupported. A fork does not clone
+            // version-keyed CRDT rows, so closing and forking would silently
+            // snapshot stale markdown. Refuse before touching any session.
+            return Err(wire(ErrorCode::InvalidParams, "richdoc-settle-unsupported"));
+        }
         for session_id in session_ids {
             self.ydoc_close_inner(
                 cancellation,
@@ -1806,6 +1933,10 @@ impl EngineService {
                     "capture driver unavailable",
                 )
             })?;
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.capture_apply_probe {
+            probe.record_version_scan();
+        }
         capture_driver::reconcile_full_for_switch(
             &open.root,
             &open.actor,
@@ -1844,7 +1975,7 @@ impl EngineService {
             probe.pause_version_commit_if_armed().await;
         }
 
-        Ok((capture_barrier, session_barrier))
+        Ok(VersionFenceOutcome::Ready(barriers))
     }
 
     async fn versions_compare_files(
@@ -2138,15 +2269,25 @@ impl EngineService {
             return Ok(version_record_json(&target));
         }
 
-        let _fence = self
+        let fence = self
             .fence_version_snapshot(
                 &cancellation,
                 &open,
                 &handle,
                 "versions.setActive",
                 "Saved latest edits before switching versions",
+                VersionFenceIntent::Switch {
+                    target_version_id: target.version_id.clone(),
+                },
             )
             .await?;
+        let _fence = match fence {
+            VersionFenceOutcome::Ready(fence) => fence,
+            VersionFenceOutcome::AlreadyActive => return Ok(version_record_json(&target)),
+            VersionFenceOutcome::CreateReplay(_) => {
+                unreachable!("switch fences never return CreateReplay");
+            }
+        };
         let version = open
             .actor
             .set_active_version(

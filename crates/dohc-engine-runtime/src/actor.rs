@@ -556,6 +556,11 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
     },
+    PreflightCreateNamedVersion {
+        input: CreateNamedVersion,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Option<VersionRecord>, RuntimeError>>,
+    },
     CaptureManifestSeed {
         workspace_id: String,
         version_id: String,
@@ -2343,6 +2348,23 @@ impl ActorHandle {
             .send(Command::CreateNamedVersion {
                 input,
                 faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn preflight_create_named_version(
+        &self,
+        input: CreateNamedVersion,
+        token: CancellationToken,
+    ) -> Result<Option<VersionRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::PreflightCreateNamedVersion {
+                input,
                 token,
                 reply,
             })
@@ -5646,6 +5668,20 @@ fn worker_main(
                 } else {
                     VersionedTextStore::new(&mut store)
                         .create_named_version(&input, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::PreflightCreateNamedVersion {
+                input,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .preflight_create_named_version(&input)
                         .map_err(RuntimeError::from)
                 };
                 let _ = reply.send(outcome);
