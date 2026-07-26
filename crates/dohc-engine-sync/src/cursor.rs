@@ -71,6 +71,17 @@ pub fn commit_relay_cursor(
                 params![workspace_id, cursor.cursor, cursor.replication_epoch, cursor.stream_identity],
             )
             .map_err(SyncError::persist)?;
+            // A committed cursor means the stream never replays coordinates
+            // at or before this pull, so the persisted pending-resolve
+            // decisions kept for retry reconstruction are dead. Workspace
+            // pulls serialize through the engine actor, so a per-workspace
+            // sweep is exact; without it every deferred resolve leaves a row
+            // forever.
+            tx.execute(
+                "DELETE FROM replication_pending_resolves WHERE workspace_id=?1",
+                params![workspace_id],
+            )
+            .map_err(SyncError::persist)?;
             Ok::<(), SyncError>(())
         })
 }

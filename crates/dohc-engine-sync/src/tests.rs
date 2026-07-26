@@ -4206,6 +4206,71 @@ fn relay_retry_surfaces_pending_resolve_acked_before_later_error() {
     );
 }
 
+/// Persisted pending-resolve decisions exist only so a failed pull's retry can
+/// re-surface them. Once the caller commits the pull cursor the stream never
+/// replays those coordinates, so the rows are dead — and without the sweep in
+/// `commit_relay_cursor` every deferred resolve leaves a row forever.
+#[test]
+fn committed_pull_cursor_clears_persisted_pending_resolves() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let resolve = envelope(
+        "cursor-clear-peer",
+        0,
+        "conflict.resolve",
+        json!({
+            "conflictId": "missing-on-receiver",
+            "status": "resolved",
+            "chosenFrom": "incoming",
+            "resolution": "applied-incoming",
+            "updatedAtMs": 10,
+            "path": "notes/cursor-clear.md"
+        }),
+    );
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![resolve],
+            next_cursor: "cursor-clear".into(),
+        })),
+    });
+
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("pull");
+    let SyncPassOutcome::Complete {
+        pending_cursor: Some(pending_cursor),
+        ..
+    } = outcome
+    else {
+        panic!("pull must complete with a cursor: {outcome:?}");
+    };
+
+    let persisted = |engine: &EngineStore| -> i64 {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_resolves WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)
+            })
+            .expect("count pending resolves")
+    };
+    assert_eq!(persisted(&engine), 1, "the deferred decision is persisted");
+
+    client
+        .commit_pull_cursor(&mut engine, "ws", &pending_cursor, &NoFaults)
+        .expect("commit cursor");
+    assert_eq!(
+        persisted(&engine),
+        0,
+        "a committed cursor makes retry reconstruction unreachable, so the rows must go"
+    );
+}
+
 /// The router must hand back the applier's STRUCTURED result. A deferred
 /// mirrored resolve is acked (the relay cursor advances past it), so a router
 /// that flattens it into a plain applied count destroys the only record that
