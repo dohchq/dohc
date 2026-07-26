@@ -815,6 +815,69 @@ async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_set_active_returns_while_the_owned_fence_finishes_detached() {
+    let probe = CaptureApplyProbe::default();
+    let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+    let (_scratch, transport, handle, workspace_id) =
+        fixture("cancel-detached-wait", service).await;
+    let feature = create_feature(&transport, &handle, &workspace_id, 2).await;
+
+    probe.pause_next_version_commit();
+    let ctx = RequestContext::unbounded();
+    let cancel = ctx.cancel.clone();
+    let switch_transport = Arc::clone(&transport);
+    let switch_handle = handle.clone();
+    let switch_workspace = workspace_id.clone();
+    let switch_feature = feature.clone();
+    let switching = tokio::spawn(async move {
+        switch_transport
+            .call(
+                ctx,
+                request(
+                    3,
+                    "versions.setActive",
+                    Some(switch_handle),
+                    json!({
+                        "workspaceId": switch_workspace,
+                        "versionId": switch_feature,
+                    }),
+                ),
+            )
+            .await
+    });
+    bounded(
+        "setActive detached commit pause",
+        probe.wait_until_version_commit_paused(),
+    )
+    .await;
+
+    cancel.cancel();
+    let interrupted = tokio::time::timeout(Duration::from_secs(1), switching)
+        .await
+        .expect("cancelled in-process caller must not await the detached fence")
+        .expect("switch task")
+        .expect_err("cancelled switch");
+    assert_eq!(interrupted.code, ErrorCode::Cancelled);
+
+    probe.release_version_commit();
+    for id in 4..24 {
+        let active = call(
+            &transport,
+            &handle,
+            id,
+            "versions.active",
+            json!({ "workspaceId": workspace_id }),
+        )
+        .await;
+        if active["id"] == json!(feature) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the detached setActive continuation did not commit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_named_fences_live_ydoc_and_unannounced_disk_edits_into_fork() {
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
@@ -1201,6 +1264,77 @@ fn dropping_engine_service_after_its_runtime_stops_releases_the_actor() {
         }
     }
     panic!("drop after runtime shutdown did not release its actor attachment");
+}
+
+#[test]
+fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
+    // MUTATION: spawn drop cleanup onto Handle::try_current() and immediately
+    // drop this current-thread runtime; the cleanup task is never polled.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    std::fs::write(scratch.path().join("notes.md"), "main base").expect("seed disk");
+    let workspace_id = "ws-switch-barrier-final-future-drop";
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("scoped runtime");
+    runtime.block_on(async {
+        let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
+        transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    1,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": workspace_id,
+                    }),
+                ),
+            )
+            .await
+            .expect("initial open");
+        drop(transport);
+    });
+    drop(runtime);
+
+    let replacement_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("replacement runtime");
+    for id in 2..42 {
+        let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
+        match replacement_runtime.block_on(replacement.call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            ),
+        )) {
+            Ok(opened) => {
+                let handle: WorkspaceHandle =
+                    serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+                replacement_runtime
+                    .block_on(replacement.call(
+                        RequestContext::unbounded(),
+                        request(id + 100, "workspace.close", Some(handle), json!({})),
+                    ))
+                    .expect("replacement close");
+                return;
+            }
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::WorkspaceUnavailable);
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+    panic!("drop in the final runtime future did not release its actor attachment");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1721,12 +1855,28 @@ async fn create_named_fails_closed_for_a_persisted_unsettled_plaintext_lineage()
         json!({ "sessionId": reopened_session, "settle": false }),
     )
     .await;
+    let healthy = call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "healthy.md",
+            "contentKind": "plaintext",
+        }),
+    )
+    .await;
+    let healthy_session = healthy["sessionId"]
+        .as_str()
+        .expect("healthy session id")
+        .to_owned();
     let scans_before = probe.version_scan_count();
 
     let refused = call_error(
         &transport,
         &handle,
-        7,
+        8,
         "versions.createNamed",
         json!({
             "workspaceId": workspace_id,
@@ -1741,6 +1891,16 @@ async fn create_named_fails_closed_for_a_persisted_unsettled_plaintext_lineage()
         scans_before,
         "persisted plaintext refusal must happen before the full scan"
     );
+    let update =
+        base64::engine::general_purpose::STANDARD.encode(Ydoc::wire().plaintext_insert(0, "live"));
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": healthy_session, "updateBase64": update }),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -589,6 +589,7 @@ enum Command {
     YdocVersionUnsettledContentKind {
         workspace_id: String,
         version_id: String,
+        ignored_object_ids: Vec<String>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<ContentKind>, RuntimeError>>,
     },
@@ -635,6 +636,13 @@ enum Command {
         root_dir: PathBuf,
         now_ms: i64,
         reply: oneshot::Sender<Result<usize, RuntimeError>>,
+    },
+    MaterializeReplayPendingForFence {
+        root_dir: PathBuf,
+        workspace_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
     ConflictList {
         workspace_id: String,
@@ -2564,6 +2572,7 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         version_id: String,
+        ignored_object_ids: Vec<String>,
         token: CancellationToken,
     ) -> Result<Option<ContentKind>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
@@ -2571,6 +2580,7 @@ impl ActorHandle {
             .send(Command::YdocVersionUnsettledContentKind {
                 workspace_id,
                 version_id,
+                ignored_object_ids,
                 token,
                 reply,
             })
@@ -2694,6 +2704,31 @@ impl ActorHandle {
         self.tx
             .send(Command::MaterializeReplayPending {
                 root_dir,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Replay pending writes before a version fence scans the filesystem.
+    /// Unlike startup replay, any attempted job failure is fatal: scanning
+    /// stale disk bytes after a committed write failed to materialize could
+    /// capture those bytes back over the committed head.
+    pub async fn materialize_replay_pending_for_fence(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+    ) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeReplayPendingForFence {
+                root_dir,
+                workspace_id,
+                self_writes,
                 now_ms,
                 reply,
             })
@@ -5805,6 +5840,7 @@ fn worker_main(
             Command::YdocVersionUnsettledContentKind {
                 workspace_id,
                 version_id,
+                ignored_object_ids,
                 token,
                 reply,
             } => {
@@ -5812,6 +5848,7 @@ fn worker_main(
                     &store,
                     &workspace_id,
                     &version_id,
+                    &ignored_object_ids,
                     &token,
                 );
                 let _ = reply.send(outcome);
@@ -5901,6 +5938,32 @@ fn worker_main(
                     &mut store, &root_dir, now_ms, &NoFaults, None, None,
                 )
                 .map(|summary| summary.completed);
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeReplayPendingForFence {
+                root_dir,
+                workspace_id,
+                self_writes,
+                now_ms,
+                reply,
+            } => {
+                let outcome = replay_pending_materializations(
+                    &mut store,
+                    &root_dir,
+                    now_ms,
+                    &NoFaults,
+                    None,
+                    Some((&workspace_id, self_writes.as_ref())),
+                )
+                .and_then(|summary| {
+                    if summary.failed == 0 {
+                        Ok(())
+                    } else {
+                        Err(RuntimeError::ActiveVersionMaterializationIncomplete {
+                            failed_jobs: summary.failed,
+                        })
+                    }
+                });
                 let _ = reply.send(outcome);
             }
             Command::ConflictList {
@@ -7030,6 +7093,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
     store: &EngineStore,
     workspace_id: &str,
     version_id: &str,
+    ignored_object_ids: &[String],
     token: &CancellationToken,
 ) -> Result<Option<ContentKind>, RuntimeError> {
     if token.is_cancelled() {
@@ -7068,6 +7132,12 @@ fn ydoc_version_unsettled_content_kind_on_store(
     for (object_id, content_kind, has_deferred_updates) in lineages {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
+        }
+        if ignored_object_ids
+            .iter()
+            .any(|ignored| ignored == &object_id)
+        {
+            continue;
         }
         // Deferred updates are source-version state too, and a fork clones
         // neither them nor the Y.Doc lineage. Refuse even when the currently

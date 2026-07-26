@@ -399,33 +399,29 @@ impl Drop for EngineService {
             self_writes,
             supervisor,
         };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(cleanup.run());
-        } else {
-            // A remembered Handle can outlive its runtime. Spawning through it
-            // silently discards this cleanup once that runtime has stopped, so
-            // no-current-runtime drops use an independently owned runtime.
-            let cleanup = Arc::new(Mutex::new(Some(cleanup)));
-            let thread_cleanup = Arc::clone(&cleanup);
-            if std::thread::Builder::new()
-                .name("dohc-service-drop".to_owned())
-                .spawn(move || {
-                    let Some(cleanup) = lock(&thread_cleanup).take() else {
-                        return;
-                    };
-                    match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(runtime) => runtime.block_on(cleanup.run()),
-                        Err(_) => cleanup.close_synchronously(),
-                    }
-                })
-                .is_err()
-                && let Some(cleanup) = lock(&cleanup).take()
-            {
-                cleanup.close_synchronously();
-            }
+        // The entered runtime may be in its final `block_on`; a task spawned
+        // onto it can be discarded immediately after this Drop returns.
+        // Teardown therefore always owns both its thread and runtime.
+        let cleanup = Arc::new(Mutex::new(Some(cleanup)));
+        let thread_cleanup = Arc::clone(&cleanup);
+        if std::thread::Builder::new()
+            .name("dohc-service-drop".to_owned())
+            .spawn(move || {
+                let Some(cleanup) = lock(&thread_cleanup).take() else {
+                    return;
+                };
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(cleanup.run()),
+                    Err(_) => cleanup.close_synchronously(),
+                }
+            })
+            .is_err()
+            && let Some(cleanup) = lock(&cleanup).take()
+        {
+            cleanup.close_synchronously();
         }
     }
 }
@@ -1997,15 +1993,42 @@ impl EngineService {
             }
         };
 
-        if let Some(source_version_id) = fork_source_version_id
-            .as_ref()
-            .filter(|source| *source != &reconcile_version_id)
+        let session_views: Vec<(String, DocKey, ContentKind)> = lock(&self.sessions)
+            .iter()
+            .filter(|(_, session)| {
+                session.workspace == *handle && session.key.version_id == reconcile_version_id
+            })
+            .map(|(session_id, session)| {
+                (
+                    session_id.clone(),
+                    session.key.clone(),
+                    session.content_kind,
+                )
+            })
+            .collect();
+        let session_ids: Vec<String> = session_views
+            .iter()
+            .map(|(session_id, _, _)| session_id.clone())
+            .collect();
+        let has_live_richdoc = session_views
+            .iter()
+            .any(|(_, _, content_kind)| *content_kind == ContentKind::Richdoc);
+
+        if let Some(source_version_id) = fork_source_version_id.as_ref()
             && let Some(content_kind) = Self::read_under_ctx(
                 cancellation,
                 "versions.createNamed (source ydoc preflight)",
                 open.actor.ydoc_version_unsettled_content_kind(
                     open.workspace_id.clone(),
                     source_version_id.clone(),
+                    if source_version_id == &reconcile_version_id {
+                        session_views
+                            .iter()
+                            .map(|(_, key, _)| key.object_id.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                     cancellation.token(),
                 ),
             )
@@ -2014,18 +2037,6 @@ impl EngineService {
             return Err(unsettled_fork_error(content_kind));
         }
 
-        let session_ids: Vec<String> = lock(&self.sessions)
-            .iter()
-            .filter(|(_, session)| {
-                session.workspace == *handle && session.key.version_id == reconcile_version_id
-            })
-            .map(|(session_id, _)| session_id.clone())
-            .collect();
-        let has_live_richdoc = lock(&self.sessions).iter().any(|(_, session)| {
-            session.workspace == *handle
-                && session.key.version_id == reconcile_version_id
-                && session.content_kind == ContentKind::Richdoc
-        });
         if matches!(intent, VersionFenceIntent::Fork { .. }) && has_live_richdoc {
             // The lower projection layer is full-fidelity, but the daemon RPC
             // still exposes richdoc-settle-unsupported. A fork does not clone
@@ -2048,11 +2059,11 @@ impl EngineService {
         let handle = handle.clone();
         let sessions = Arc::clone(&self.sessions);
         let self_writes = self.self_writes.clone();
-        let operation = operation.to_owned();
+        let detached_operation = operation.to_owned();
         let settle_summary = settle_summary.to_owned();
         #[cfg(feature = "harness")]
         let probe = self.capture_apply_probe.clone();
-        tokio::spawn(async move {
+        let mut fence = tokio::spawn(async move {
             let _barriers = barriers;
             let token = CancellationToken::new();
             for session_id in session_ids {
@@ -2074,6 +2085,7 @@ impl EngineService {
                     .ydoc_version_unsettled_content_kind(
                         open.workspace_id.clone(),
                         input.from_version_id.clone(),
+                        Vec::new(),
                         token.clone(),
                     )
                     .await
@@ -2081,6 +2093,16 @@ impl EngineService {
             {
                 return Err(unsettled_fork_error(content_kind));
             }
+
+            open.actor
+                .materialize_replay_pending_for_fence(
+                    open.root.clone(),
+                    open.workspace_id.clone(),
+                    Arc::new(self_writes.scoped(&open.root)),
+                    now_ms()?,
+                )
+                .await
+                .map_err(map_runtime)?;
 
             #[cfg(feature = "harness")]
             if let Some(probe) = &probe {
@@ -2106,8 +2128,8 @@ impl EngineService {
                 })?;
                 driver.request_manifest_refresh();
             }
-            let _manifest_changed =
-                reconcile.map_err(|error| map_switch_reconcile_error(error, &operation))?;
+            let _manifest_changed = reconcile
+                .map_err(|error| map_switch_reconcile_error(error, &detached_operation))?;
 
             #[cfg(feature = "harness")]
             if let Some(probe) = &probe {
@@ -2141,9 +2163,16 @@ impl EngineService {
             }
             .map_err(map_runtime)?;
             Ok(VersionFenceOutcome::Committed(version))
-        })
-        .await
-        .map_err(|_| wire(ErrorCode::Internal, "version fence task failed"))?
+        });
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                Err(cancellation.interruption(operation))
+            }
+            outcome = &mut fence => {
+                outcome.map_err(|_| wire(ErrorCode::Internal, "version fence task failed"))?
+            }
+        }
     }
 
     async fn versions_compare_files(
