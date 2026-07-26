@@ -2173,7 +2173,23 @@ mod tests {
 
         let scratch = Scratch::new("special-target-conflict");
         let socket_path = scratch.root.join("occupied.sock");
-        let _listener = UnixListener::bind(&socket_path).expect("bind target socket");
+        // AF_UNIX bind is limited to SUN_LEN (~104 bytes on macOS), and the
+        // scratch root can exceed it on CI runners. Bind at a short /tmp path
+        // and rename the socket inode into place — the listener holds an fd,
+        // so the moved entry stays a live socket at the deep target path.
+        let short_dir = std::path::PathBuf::from(format!(
+            "/tmp/dohc-sock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&short_dir).expect("short socket dir");
+        let short_sock = short_dir.join("s");
+        let _listener = UnixListener::bind(&short_sock).expect("bind target socket");
+        std::fs::rename(&short_sock, &socket_path).expect("move socket into scratch");
+        std::fs::remove_dir(&short_dir).expect("drop short socket dir");
         let mut store = EngineStore::open(&scratch.db(), 1).expect("open store");
         enqueue_write_job(
             &mut store,
