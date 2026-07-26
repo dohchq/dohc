@@ -192,6 +192,35 @@ jobs:
             exit 1
           fi
 
+      - name: Print the RSS trend shape (a linear fit alone cannot tell a leak from a plateau)
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -z "${SOAK_EVIDENCE_PATH:-}" ] || [ ! -s "$SOAK_EVIDENCE_PATH" ]; then
+            echo "no evidence json to summarize"
+            exit 0
+          fi
+          node -e '
+            const fs = require("fs");
+            const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const s = d.samples || [];
+            if (s.length < 8) { console.log("too few samples to shape-check: " + s.length); process.exit(0); }
+            const q = Math.floor(s.length / 4);
+            const slope = (a, b) => {
+              const lo = s[a];
+              const hi = s[b - 1];
+              const dt = hi.at_secs - lo.at_secs;
+              return dt ? (hi.rss_bytes - lo.rss_bytes) / dt : 0;
+            };
+            console.log("RSS TREND SHAPE (overall linear fit " + Math.round(d.rssSlopeBytesPerSec) + " B/s):");
+            for (let i = 0; i < 4; i += 1) {
+              console.log("  quarter " + (i + 1) + ": " + Math.round(slope(i * q, (i + 1) * q)) + " B/s");
+            }
+            const mb = (x) => (x / 1e6).toFixed(1);
+            console.log("  rss first=" + mb(s[0].rss_bytes) + "MB last=" + mb(s[s.length - 1].rss_bytes) + "MB peak=" + mb(Math.max.apply(null, s.map((x) => x.rss_bytes))) + "MB samples=" + s.length);
+            console.log("  handles " + s[0].handles + "->" + s[s.length - 1].handles + " threads " + s[0].threads + "->" + s[s.length - 1].threads);
+          ' "$SOAK_EVIDENCE_PATH"
+
       - name: Upload macOS evidence artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
