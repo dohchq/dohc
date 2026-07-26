@@ -1,16 +1,28 @@
 # GATE 6 — release-candidate evidence packet
 
-**Status: PACKET ASSEMBLED 2026-07-24 — EVIDENCE COMPLETE 2026-07-26.** GATE6 is
-the release-CANDIDATE gate. Ice explicitly authorized the cutover on 2026-07-25
-(`DECISIONS.md`, R15 go/no-go). The remaining criterion — an end-to-end
-**clone-reset rehearsal on REAL dogfood workspace byte-clones** — was RECORDED
-2026-07-26: the rehearsal ran `not-started → complete` against a byte-clone of
-`C:/Users/ice/dohc/personal`, source verified byte-identical before/after
-(evidence: `REHEARSAL_EVIDENCE-2026-07-26.json` in this directory). Two
-real-data findings were closed on the way (pnpm-junction floor exclusion in the
-byte-clone; the TS-authored live DB reset interpretation — the latter recorded
-and FLAGGED for Ice's post-hoc review). Subject to that review, both GATE6
-criteria are now met.
+**Status: PACKET ASSEMBLED 2026-07-24 — REHEARSAL PARTIALLY EVIDENCED
+2026-07-26. GATE NOT CLOSED.** GATE6 is the release-CANDIDATE gate. Ice
+explicitly authorized the cutover on 2026-07-25 (`DECISIONS.md`, R15 go/no-go).
+The remaining criterion — an end-to-end **clone-reset rehearsal on REAL dogfood
+workspace byte-clones** — is HALF recorded:
+
+- **EVIDENCED (2026-07-26):** the reset machinery itself. The rehearsal ran
+  `not-started → complete` against a byte-clone of `C:/Users/ice/dohc/personal`
+  (restore-tested backup, handle move-aside, fresh store init, filesystem
+  inventory preserved across the reset), with the source verified byte-identical
+  before and after. Evidence: `REHEARSAL_EVIDENCE-2026-07-26.json`. Two
+  real-data findings were closed on the way: pnpm-junction floor exclusion in
+  the byte-clone, and the TS-authored live-DB reset interpretation (recorded and
+  FLAGGED for Ice's post-hoc review).
+- **NOT YET EVIDENCED:** RECAPTURE. `run_rehearsal` compares the filesystem
+  inventory across the reset but never drives the production capture/projection
+  pipeline, so a `complete` outcome does NOT show that the workspace's files are
+  recaptured into the fresh Rust store with settled projections — the property
+  the cutover actually depends on. Caught by codex review on PR #259. The
+  harness must run the real capture flow post-reset and compare the resulting
+  store against the pre-reset inventory before this criterion is closed.
+
+Do NOT treat this criterion as met until the recapture half is banked.
 
 **WHAT GATE6 ASSERTS:** NO GATE6-BLOCKING IMPLEMENTATION SHARD REMAINS, and the
 engine is EVIDENCED (gate/soak/differential green, every claim below carrying its
