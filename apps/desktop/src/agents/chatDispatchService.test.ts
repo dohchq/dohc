@@ -8,8 +8,14 @@ import {
   type AgentDispatchStore,
   type LinkedChatStore,
 } from "@dohc/workspace-engine";
+import type {
+  JsonValue,
+  Request,
+  Response,
+} from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunnerSettings } from "../settings/userSettings";
+import { EngineWorkspaceSessions } from "../workspaces/engineWorkspaceSessions";
 import { nativeTmpdir } from "../workspaces/testTemp";
 import {
   APP_QUIT_EXIT_CODE,
@@ -30,6 +36,7 @@ import {
   type RunnerSpawnOptions,
   type SpawnRunner,
 } from "./chatDispatchService";
+import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 
 const WORKSPACE_ID = "workspace-chat-dispatch";
 const CHAT_START_MS = Date.parse("2026-07-10T04:05:06.000Z");
@@ -84,6 +91,7 @@ class FakeRunnerProcess implements RunnerProcess {
 }
 
 interface FixtureOptions {
+  dispatchBackend?: "sqlite" | "live";
   runner?: Partial<RunnerSettings>;
   identity?: ChatDispatchIdentity;
   serviceNotesWritable?: boolean;
@@ -125,6 +133,7 @@ interface Fixture {
   runActivity: { acquires: number; releases: number };
   now: { value: number };
   requeueRaw(input: { workspaceId: string; triggerMessageId: string; runId: string }): boolean;
+  closeDispatch(): Promise<void>;
 }
 
 const fixtures: Fixture[] = [];
@@ -152,10 +161,11 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const dispatchDb = new DatabaseSync(join(root, LINKED_CHAT_STORE_RELATIVE_PATH));
   const now = { value: 1_000_000 };
   let nextRunId = 0;
+  let preparedRunId: string | null = null;
   let nextSelfTestId = 0;
   const dispatch = createAgentDispatchStore(dispatchDb, {
     nowMs: () => now.value,
-    createRunId: () => `run_${(nextRunId += 1)}`,
+    createRunId: () => preparedRunId ?? `run_${(nextRunId += 1)}`,
   });
   const runner: RunnerSettings = {
     command: "claude -p",
@@ -203,13 +213,177 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     return updated.changes === 1;
   };
 
+  const listRecoveriesRaw = (workspaceId: string) =>
+    dispatchDb
+      .prepare(
+        `SELECT r.run_id, l.attempt_count
+         FROM agent_run_records r
+         JOIN chat_dispatch_ledger l
+           ON l.workspace_id = r.workspace_id
+          AND l.trigger_message_id = r.trigger_message_id
+          AND l.run_id = r.run_id
+         WHERE r.workspace_id = ?
+           AND r.exit_code = ?
+           AND r.failure_reason = 'app-quit'
+           AND r.failure_note_posted = 0
+           AND l.state = 'failed'`,
+      )
+      .all(workspaceId, APP_QUIT_EXIT_CODE)
+      .map((row) => {
+        const runId = row.run_id;
+        const attemptCount = row.attempt_count;
+        if (
+          typeof runId !== "string" ||
+          typeof attemptCount !== "number" ||
+          !Number.isSafeInteger(attemptCount)
+        ) {
+          throw new Error("Corrupt app-quit recovery fixture.");
+        }
+        const run = dispatch.getRunRecord(runId);
+        if (!run) throw new Error("Missing app-quit recovery run.");
+        return { run, attemptCount };
+      });
+
+  let closeDispatch: () => Promise<void> = async () => undefined;
+  let serviceDispatch = dispatch;
+  let liveRequeue:
+    | ReturnType<typeof createLiveAgentDispatchStore>["requeueFailedTrigger"]
+    | undefined;
+  let liveRecoveries:
+    | ReturnType<typeof createLiveAgentDispatchStore>["listAppQuitRecoveries"]
+    | undefined;
+  if (options.dispatchBackend === "live") {
+    const daemon = {
+      close: () => undefined,
+      async sendRequest(request: Request): Promise<Response> {
+        const params = request.params as {
+          [key: string]: JsonValue | undefined;
+        };
+        let result: unknown;
+        switch (request.method) {
+          case "workspace.open":
+            result = { workspace: "service-live-handle" };
+            break;
+          case "workspace.close":
+            result = { closed: true };
+            break;
+          case "chats.dispatch.recordEligibleTriggers":
+            result = dispatch.recordEligibleTriggers({
+              workspaceId: WORKSPACE_ID,
+              ...(typeof params.verifiedUserId === "string"
+                ? { verifiedUserId: params.verifiedUserId }
+                : {}),
+            });
+            break;
+          case "chats.dispatch.listPending":
+            result = {
+              dispatches: dispatch.listPending(WORKSPACE_ID),
+              nextCursor: null,
+            };
+            break;
+          case "chats.dispatch.openRuns":
+            result = {
+              claims: dispatch.openRuns(WORKSPACE_ID),
+              nextCursor: null,
+            };
+            break;
+          case "chats.dispatch.isThreadPaused":
+            result = dispatch.threadDispatchPaused(
+              WORKSPACE_ID,
+              String(params.threadId),
+            );
+            break;
+          case "chats.dispatch.recentCount":
+            result = dispatch.recentDispatchCount({
+              workspaceId: WORKSPACE_ID,
+              threadId: String(params.threadId),
+              sinceMs: Number(params.sinceMs),
+            });
+            break;
+          case "chats.dispatch.claimNextPending":
+            preparedRunId = String(params.runId);
+            try {
+              result = dispatch.claimNextPending(WORKSPACE_ID, {
+                ...(typeof params.command === "string"
+                  ? { command: params.command }
+                  : {}),
+                ...(typeof params.logPath === "string"
+                  ? { logPath: params.logPath }
+                  : {}),
+              });
+            } finally {
+              preparedRunId = null;
+            }
+            break;
+          case "chats.dispatch.listRunMessages":
+            result = {
+              messageIds: dispatch.listRunMessages(
+                WORKSPACE_ID,
+                String(params.runId),
+              ),
+              nextCursor: null,
+            };
+            break;
+          case "chats.dispatch.complete":
+            dispatch.completeRun({
+              runId: String(params.runId),
+              exitCode: Number(params.exitCode),
+            });
+            result = { completed: true };
+            break;
+          case "chats.dispatch.fail":
+            dispatch.failRun({
+              runId: String(params.runId),
+              ...(typeof params.exitCode === "number"
+                ? { exitCode: params.exitCode }
+                : {}),
+              reason: String(params.reason),
+            });
+            result = { failed: true };
+            break;
+          case "chats.dispatch.getRunRecord":
+            result = dispatch.getRunRecord(String(params.runId));
+            break;
+          case "chats.dispatch.requeueFailedTrigger":
+            result = requeueRaw({
+              workspaceId: WORKSPACE_ID,
+              triggerMessageId: String(params.triggerMessageId),
+              runId: String(params.runId),
+            });
+            break;
+          case "chats.dispatch.listAppQuitRecoveries":
+            result = {
+              recoveries: listRecoveriesRaw(WORKSPACE_ID),
+              nextCursor: null,
+            };
+            break;
+          default:
+            throw new Error(
+              `Unexpected live fixture request: ${request.method}`,
+            );
+        }
+        return { id: request.id, result: result as JsonValue };
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => daemon,
+    });
+    const live = createLiveAgentDispatchStore(workspace, sessions, {
+      createRunId: () => `run_${(nextRunId += 1)}`,
+    });
+    serviceDispatch = live.store as AgentDispatchStore;
+    liveRequeue = live.requeueFailedTrigger;
+    liveRecoveries = live.listAppQuitRecoveries;
+    closeDispatch = live.close;
+  }
+
   const service = createChatDispatchService({
     workspaceFor: (workspaceId) => (workspaceId === WORKSPACE_ID ? workspace : null),
     listOpenWorkspaces: () => [],
     listSyncWorkspaces: () =>
       options.pumpWorkspaces ?? (options.pumpWorkspace ? [workspace] : []),
     chatStoreFor: () => chat,
-    dispatchStoreFor: () => dispatch,
+    dispatchStoreFor: () => serviceDispatch,
     readRunnerSettings: async () => ({ ...runner }),
     identityFor: async () =>
       options.identity ?? {
@@ -247,38 +421,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     },
     requeueFailedTrigger: (input) => {
       requeues.push(input);
-      return requeueRaw(input);
+      return liveRequeue?.(input) ?? requeueRaw(input);
     },
     listAppQuitRecoveries: (workspaceId) =>
-      dispatchDb
-        .prepare(
-          `SELECT r.run_id, l.attempt_count
-           FROM agent_run_records r
-           JOIN chat_dispatch_ledger l
-             ON l.workspace_id = r.workspace_id
-            AND l.trigger_message_id = r.trigger_message_id
-            AND l.run_id = r.run_id
-           WHERE r.workspace_id = ?
-             AND r.exit_code = ?
-             AND r.failure_reason = 'app-quit'
-             AND r.failure_note_posted = 0
-             AND l.state = 'failed'`,
-        )
-        .all(workspaceId, APP_QUIT_EXIT_CODE)
-        .map((row) => {
-          const runId = row.run_id;
-          const attemptCount = row.attempt_count;
-          if (
-            typeof runId !== "string" ||
-            typeof attemptCount !== "number" ||
-            !Number.isSafeInteger(attemptCount)
-          ) {
-            throw new Error("Corrupt app-quit recovery fixture.");
-          }
-          const run = dispatch.getRunRecord(runId);
-          if (!run) throw new Error("Missing app-quit recovery run.");
-          return { run, attemptCount };
-        }),
+      liveRecoveries?.(workspaceId) ?? listRecoveriesRaw(workspaceId),
     spawnRunner,
     killProcessGroup: (pid, signal) => {
       killCalls.push({ pid, signal });
@@ -311,6 +457,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     runActivity,
     now,
     requeueRaw,
+    closeDispatch,
   };
   fixtures.push(fixture);
   return fixture;
@@ -381,6 +528,7 @@ afterEach(async () => {
   for (const fixture of fixtures.splice(0).reverse()) {
     for (const call of fixture.spawnCalls) call.process.markExitedSilently();
     await fixture.service.stop();
+    await fixture.closeDispatch();
     fixture.dispatchDb.close();
     await fixture.chat.close();
     await rm(fixture.root, { recursive: true, force: true });
@@ -583,7 +731,9 @@ describe("chatDispatchService", () => {
     ).toEqual([tied.messageId]);
   });
 
-  it("keeps workspace FIFO to one live run and builds the configured spawn contract", async () => {
+  it.each(["sqlite", "live"] as const)(
+    "keeps workspace FIFO and the spawn contract with the %s dispatch backend",
+    async (dispatchBackend) => {
     // Pin command resolution to a no-op: with an empty host PATH the resolver
     // can never find a claude binary or .cmd shim on the machine running the
     // tests, so the spawn contract below (bare command, unwrapped args) is
@@ -592,6 +742,7 @@ describe("chatDispatchService", () => {
     vi.stubEnv("PATH", "");
     vi.stubEnv("Path", "");
     const fixture = await createFixture({
+      dispatchBackend,
       runner: {
         command: 'claude -p --allowedTools "Bash(dohc chat:*)"',
       },
@@ -619,7 +770,7 @@ describe("chatDispatchService", () => {
     ]);
 
     const firstSpawn = fixture.spawnCalls[0]!;
-    expect(firstSpawn.command).toBe("claude");
+    expect(firstSpawn.command).toMatch(/(?:^|[\\/])claude(?:\.exe)?$/iu);
     expect(firstSpawn.args.slice(0, -1)).toEqual(["-p", "--allowedTools", "Bash(dohc chat:*)"]);
     const prompt = firstSpawn.args.at(-1);
     expect(prompt).toContain("# Launch review");
@@ -658,7 +809,8 @@ describe("chatDispatchService", () => {
       threadId: first.threadId,
     });
     expect(firstMessages.some((message) => message.body.startsWith("⚠"))).toBe(false);
-  });
+    },
+  );
 
   it("releases temporary tray-only run activity after the owned child exits", async () => {
     const fixture = await createFixture({ temporaryRunActivity: true });
@@ -708,7 +860,7 @@ describe("chatDispatchService", () => {
         .all(WORKSPACE_ID, trigger.threadId)
         .map((row) => row.state),
     ).toEqual(["running", "done", "done"]);
-    expect(fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toEqual({
+    expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toEqual({
       liveRun: true,
       pendingCount: 0,
       paused: false,
@@ -724,7 +876,7 @@ describe("chatDispatchService", () => {
     const updatesBeforeFollowUpScan = fixture.runUpdatedWorkspaces.length;
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.runUpdatedWorkspaces.length).toBeGreaterThan(updatesBeforeFollowUpScan);
-    expect(fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
+    expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
       liveRun: true,
       pendingCount: 1,
     });
@@ -882,7 +1034,7 @@ describe("chatDispatchService", () => {
       )
       .get(WORKSPACE_ID, pending.threadId);
     expect(pauseRow?.reason).toBe("re-dispatch budget exceeded");
-    expect(fixture.service.dispatchStateForThread(WORKSPACE_ID, pending.threadId)).toEqual({
+    expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, pending.threadId)).toEqual({
       liveRun: false,
       pendingCount: 1,
       paused: true,
@@ -901,7 +1053,7 @@ describe("chatDispatchService", () => {
     await fixture.service.resumeThreadDispatch(WORKSPACE_ID, pending.threadId);
     expect(fixture.dispatch.threadDispatchPaused(WORKSPACE_ID, pending.threadId)).toBe(false);
     expect(fixture.spawnCalls).toHaveLength(1);
-    expect(fixture.service.dispatchStateForThread(WORKSPACE_ID, pending.threadId)).toMatchObject({
+    expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, pending.threadId)).toMatchObject({
       liveRun: true,
       pendingCount: 0,
       paused: false,
@@ -1272,7 +1424,7 @@ describe("chatDispatchService", () => {
     expect(stoppedMessages.some((message) => message.body.includes("failed (exit 143)"))).toBe(
       false,
     );
-    expect(fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
+    expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
       liveRun: false,
     });
 

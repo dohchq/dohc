@@ -396,6 +396,11 @@ import {
   type DesktopAgentDispatchStoreHandle,
 } from "./agents/desktopAgentDispatchStore";
 import {
+  createLiveAgentDispatchStore,
+  type LiveAgentDispatchStoreHandle,
+} from "./agents/liveAgentDispatchStore";
+import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
+import {
   buildOutputSiteRoot,
   staticPreviewTargetForSite,
   getSitePackage,
@@ -1633,16 +1638,21 @@ function linkedChatStoreFor(workspace: { workspaceId: string; rootPath: string }
 
 const agentDispatchStoreHandles = new Map<
   string,
-  DesktopAgentDispatchStoreHandle
+  DesktopAgentDispatchStoreHandle | LiveAgentDispatchStoreHandle
 >();
 const dispatchAgentRunSlots = new Map<string, string>();
 function agentDispatchStoreHandleFor(workspace: {
   workspaceId: string;
   rootPath: string;
-}): DesktopAgentDispatchStoreHandle {
+}): DesktopAgentDispatchStoreHandle | LiveAgentDispatchStoreHandle {
   const existing = agentDispatchStoreHandles.get(workspace.workspaceId);
   if (existing) return existing;
-  const handle = createDesktopAgentDispatchStore(workspace.rootPath);
+  const handle =
+    isRustEngineAdapterEnabled() &&
+    rustEngineDaemon &&
+    rustEngineWorkspaceSessions
+      ? createLiveAgentDispatchStore(workspace, rustEngineWorkspaceSessions)
+      : createDesktopAgentDispatchStore(workspace.rootPath);
   agentDispatchStoreHandles.set(workspace.workspaceId, handle);
   return handle;
 }
@@ -2365,6 +2375,7 @@ async function refreshDispatchTray(): Promise<boolean> {
 // Bounded so a wedged disk can't make the app unquittable.
 let quitting = false;
 let rustEngineDaemon: EngineDaemonLifecycle | null = null;
+let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
 app.on("will-quit", (event) => {
   if (quitting) return;
   quitting = true;
@@ -2384,13 +2395,14 @@ app.on("will-quit", (event) => {
     Promise.all(
       [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
     ));
-  const dispatchStoreStop = chatDispatchStop.then(() => {
-    for (const handle of agentDispatchStoreHandles.values()) {
-      try {
-        handle.close();
-      } catch {}
-    }
+  const dispatchStoreStop = chatDispatchStop.then(async () => {
+    await Promise.allSettled(
+      [...agentDispatchStoreHandles.values()].map(
+        async (handle) => await handle.close(),
+      ),
+    );
     agentDispatchStoreHandles.clear();
+    await rustEngineWorkspaceSessions?.closeAll();
   });
   // Engine search stores hold the same kind of lazy SQLite handle; close them
   // with the chat stores so WAL locks never outlive the app.
@@ -2400,7 +2412,9 @@ app.on("will-quit", (event) => {
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
-  const rustEngineStop = rustEngineDaemon?.stop() ?? Promise.resolve();
+  const rustEngineStop = dispatchStoreStop.then(
+    async () => await rustEngineDaemon?.stop(),
+  );
   void Promise.race([
     Promise.all([
       agentSessionStop,
@@ -5336,7 +5350,7 @@ function registerIpcHandlers(
     // been migrated before the read-only dispatch adapter validates them.
     linkedChatStoreFor(workspace);
     const dispatchStore = agentDispatchStoreHandleFor(workspace).store;
-    const found = dispatchStore.runRecordsForThread(
+    const found = await dispatchStore.runRecordsForThread(
       workspace.workspaceId,
       input.threadId,
       { limit: 200 },
@@ -6438,7 +6452,7 @@ function registerIpcHandlers(
     const input = ChatDispatchStateForThreadPayload.parse(payload);
     requireWorkspace(input.workspaceId);
     return ChatDispatchStateForThreadResult.parse(
-      chatDispatchService.dispatchStateForThread(
+      await chatDispatchService.dispatchStateForThread(
         input.workspaceId,
         input.threadId,
       ),
@@ -6989,6 +7003,9 @@ async function startRustEngineDaemon(): Promise<boolean> {
   if (!rustEngineDaemon) return true;
   try {
     await rustEngineDaemon.start();
+    rustEngineWorkspaceSessions = new EngineWorkspaceSessions(
+      rustEngineDaemon,
+    );
     console.info("[desktop] Rust engine daemon startup smoke passed.");
     return true;
   } catch (error) {
@@ -7001,6 +7018,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
     );
     await rustEngineDaemon.stop();
     rustEngineDaemon = null;
+    rustEngineWorkspaceSessions = null;
     app.quit();
     return false;
   }

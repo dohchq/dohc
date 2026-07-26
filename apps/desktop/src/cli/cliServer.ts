@@ -18,13 +18,13 @@ import {
   AgentDispatchStoreError,
   LINKED_CHAT_STORE_RELATIVE_PATH,
   queryChatMessagesGranular,
-  type AgentDispatchStore,
   type ChannelThreadSummary,
   type ChatChannelSummary,
   type ChatMessage,
   type ChatThread,
   type LinkedChatStore,
 } from "@dohc/workspace-engine";
+import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
 import { createServer, type Server, type Socket } from "node:net";
@@ -103,7 +103,7 @@ export interface CliRegistryWorkspace {
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
-  dispatchStore: AgentDispatchStore;
+  dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
   fileObjectIdForPath(path: string): Promise<string | null>;
   assertWritable(target: { channelId: string } | { threadId: string }): Promise<void>;
@@ -751,16 +751,16 @@ async function notifyWrite(
   }
 }
 
-function linkRunMessage(
+async function linkRunMessage(
   context: CliWorkspaceContext,
   input: { actor: CliActor; runId?: string; messageId: string },
   options: CliServerOptions,
-): void {
+): Promise<void> {
   if (input.actor !== "agent" || !input.runId) return;
   try {
-    const run = context.dispatchStore.getRunRecord(input.runId);
+    const run = await context.dispatchStore.getRunRecord(input.runId);
     if (!run || run.workspaceId !== context.workspaceId) return;
-    context.dispatchStore.recordRunMessage({
+    await context.dispatchStore.recordRunMessage({
       workspaceId: context.workspaceId,
       messageId: input.messageId,
       runId: input.runId,
@@ -986,7 +986,7 @@ async function dispatch(
         needsDecision: request.args.needsDecision,
         attachments,
       });
-      linkRunMessage(context, {
+      await linkRunMessage(context, {
         actor: request.args.actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: started.message.id,
@@ -1042,7 +1042,7 @@ async function dispatch(
         needsDecision: request.args.needsDecision,
         attachments,
       });
-      linkRunMessage(context, {
+      await linkRunMessage(context, {
         actor: request.args.actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: message.id,

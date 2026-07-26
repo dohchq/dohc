@@ -10,7 +10,6 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import type {
   AgentDispatchClaim,
-  AgentDispatchStore,
   AgentRunRecord,
   ChatChannelKind,
   ChatMessage,
@@ -21,6 +20,7 @@ import {
   killChildTreeWin32,
   resolveSpawnCommand,
 } from "../process/windowsSpawn";
+import type { AwaitableAgentDispatchStore } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
@@ -96,7 +96,9 @@ export interface ChatDispatchServiceOptions {
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
   chatStoreFor(workspace: ChatDispatchWorkspace): LinkedChatStore;
-  dispatchStoreFor(workspace: ChatDispatchWorkspace): AgentDispatchStore;
+  dispatchStoreFor(
+    workspace: ChatDispatchWorkspace,
+  ): AwaitableAgentDispatchStore;
   readRunnerSettings(): Promise<RunnerSettings>;
   identityFor(workspaceId: string): Promise<ChatDispatchIdentity>;
   stateDir(): string;
@@ -123,8 +125,10 @@ export interface ChatDispatchServiceOptions {
     workspaceId: string;
     triggerMessageId: string;
     runId: string;
-  }): boolean;
-  listAppQuitRecoveries?(workspaceId: string): ChatDispatchRecovery[];
+  }): boolean | Promise<boolean>;
+  listAppQuitRecoveries?(
+    workspaceId: string,
+  ): ChatDispatchRecovery[] | Promise<ChatDispatchRecovery[]>;
   spawnRunner?: SpawnRunner;
   killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
   platform?: NodeJS.Platform;
@@ -513,7 +517,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     });
     if (runId) {
       try {
-        options.dispatchStoreFor(workspace).recordRunMessage({
+        await options.dispatchStoreFor(workspace).recordRunMessage({
           workspaceId: workspace.workspaceId,
           messageId: message.id,
           runId,
@@ -546,7 +550,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     body: string,
   ): Promise<void> {
     const dispatch = options.dispatchStoreFor(workspace);
-    const current = dispatch.getRunRecord(run.runId);
+    const current = await dispatch.getRunRecord(run.runId);
     if (current?.failureNotePosted) return;
     if (!(await agentNoteAlreadyExists(workspace, run.threadId, body))) {
       await sendAgentMessage(
@@ -556,7 +560,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         run.runId,
       );
     }
-    dispatch.markFailureNotePosted(run.runId);
+    await dispatch.markFailureNotePosted(run.runId);
   }
 
   async function mostRecentAgentNoteIs(
@@ -675,7 +679,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     live.killEscalation = null;
     const code = exitCode ?? signalExitCode(signal);
     const dispatch = options.dispatchStoreFor(live.workspace);
-    const linkedMessages = dispatch.listRunMessages(
+    const linkedMessages = await dispatch.listRunMessages(
       live.workspace.workspaceId,
       live.claim.run.runId,
     );
@@ -693,7 +697,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           "⚠ Agent run produced no reply. Open the run chip for details.",
         ).catch(reportError);
       }
-      dispatch.completeRun({ runId: live.claim.run.runId, exitCode: code });
+      await dispatch.completeRun({
+        runId: live.claim.run.runId,
+        exitCode: code,
+      });
       notifyRunUpdated(live.workspace.workspaceId);
     } catch (error) {
       liveRuns.delete(live.workspace.workspaceId);
@@ -720,7 +727,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       live.claim.run,
       `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Open the run chip for details.`,
     ).catch(reportError);
-    dispatch.failRun({
+    await dispatch.failRun({
       runId: live.claim.run.runId,
       exitCode: 124,
       reason: `timed out after ${live.timeoutMinutes}m`,
@@ -742,7 +749,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       claim.run,
       "⚠ Agent run failed to start. Open the run chip for details.",
     ).catch(reportError);
-    options.dispatchStoreFor(workspace).failRun({
+    await options.dispatchStoreFor(workspace).failRun({
       runId: claim.run.runId,
       reason: `runner failed to start: ${detail}`,
     });
@@ -830,7 +837,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       } finally {
         await releaseWorkspaceLease(releaseWorkspace);
       }
-      if (dispatch.openRuns(workspace.workspaceId).length === 0) {
+      if ((await dispatch.openRuns(workspace.workspaceId)).length === 0) {
         await scanAndDrain(workspace);
       }
     }
@@ -849,12 +856,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const dispatch = options.dispatchStoreFor(workspace);
     if (!runner.enabled || !command) {
       const threadIds = new Set(
-        dispatch
-          .listPending(workspace.workspaceId)
+        (await dispatch.listPending(workspace.workspaceId))
           .map((pending) => pending.threadId),
       );
       for (const threadId of threadIds) {
-        const failedCount = dispatch.failPendingForThread({
+        const failedCount = await dispatch.failPendingForThread({
           workspaceId: workspace.workspaceId,
           threadId,
           reason: "no-runner",
@@ -877,22 +883,27 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (stopped || paused || workspaceProcessReserved(workspace.workspaceId)) {
       return;
     }
-    const pending = dispatch.listPending(workspace.workspaceId);
+    const pending = await dispatch.listPending(workspace.workspaceId);
     for (const candidate of pending) {
-      if (dispatch.threadDispatchPaused(workspace.workspaceId, candidate.threadId)) {
+      if (
+        await dispatch.threadDispatchPaused(
+          workspace.workspaceId,
+          candidate.threadId,
+        )
+      ) {
         continue;
       }
       const bypassKey = threadKey(workspace.workspaceId, candidate.threadId);
       const bypassBudget = budgetBypassThreads.delete(bypassKey);
       if (
         !bypassBudget &&
-        dispatch.recentDispatchCount({
+        (await dispatch.recentDispatchCount({
           workspaceId: workspace.workspaceId,
           threadId: candidate.threadId,
           sinceMs: nowMs() - CHAT_DISPATCH_BUDGET_WINDOW_MS,
-        }) >= CHAT_DISPATCH_BUDGET_MAX
+        })) >= CHAT_DISPATCH_BUDGET_MAX
       ) {
-        dispatch.setThreadDispatchPaused({
+        await dispatch.setThreadDispatchPaused({
           workspaceId: workspace.workspaceId,
           threadId: candidate.threadId,
           paused: true,
@@ -906,7 +917,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             "⏸ Agent dispatch paused for this thread (budget exceeded). Use Resume in this thread to continue.",
           );
         } catch (error) {
-          dispatch.setThreadDispatchPaused({
+          await dispatch.setThreadDispatchPaused({
             workspaceId: workspace.workspaceId,
             threadId: candidate.threadId,
             paused: false,
@@ -923,7 +934,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
       let claim: AgentDispatchClaim | null;
       try {
-        claim = dispatch.claimNextPending(workspace.workspaceId, {
+        claim = await dispatch.claimNextPending(workspace.workspaceId, {
           command,
           logPath: logPathTemplate(),
         });
@@ -947,21 +958,23 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         workspaceId: workspace.workspaceId,
       }),
     ]);
-    const recordedCount = options.dispatchStoreFor(workspace).recordEligibleTriggers({
-      workspaceId: workspace.workspaceId,
-      ...(identity.verifiedUserId
-        ? { verifiedUserId: identity.verifiedUserId }
-        : {}),
-    });
+    const recordedCount = await options
+      .dispatchStoreFor(workspace)
+      .recordEligibleTriggers({
+        workspaceId: workspace.workspaceId,
+        ...(identity.verifiedUserId
+          ? { verifiedUserId: identity.verifiedUserId }
+          : {}),
+      });
     if (recordedCount > 0) notifyRunUpdated(workspace.workspaceId);
   }
 
   async function startupSweep(workspace: ChatDispatchWorkspace): Promise<void> {
     if (sweptWorkspaces.has(workspace.workspaceId)) return;
     const dispatch = options.dispatchStoreFor(workspace);
-    const open = dispatch.openRuns(workspace.workspaceId);
+    const open = await dispatch.openRuns(workspace.workspaceId);
     for (const claim of open) {
-      const linked = dispatch.listRunMessages(
+      const linked = await dispatch.listRunMessages(
         workspace.workspaceId,
         claim.run.runId,
       );
@@ -972,29 +985,29 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           "⚠ Agent run failed (app restarted during run). Open the run chip for details.",
         ).catch(reportError);
       }
-      dispatch.failRun({
+      await dispatch.failRun({
         runId: claim.run.runId,
         reason: "app restart during run",
       });
       notifyRunUpdated(workspace.workspaceId);
       if (claim.dispatch.attemptCount < 2) {
-        options.requeueFailedTrigger?.({
+        await options.requeueFailedTrigger?.({
           workspaceId: workspace.workspaceId,
           triggerMessageId: claim.run.triggerMessageId,
           runId: claim.run.runId,
         });
       }
     }
-    for (const recovery of options.listAppQuitRecoveries?.(
-      workspace.workspaceId,
-    ) ?? []) {
-      const linked = dispatch.listRunMessages(
+    const recoveries =
+      (await options.listAppQuitRecoveries?.(workspace.workspaceId)) ?? [];
+    for (const recovery of recoveries) {
+      const linked = await dispatch.listRunMessages(
         workspace.workspaceId,
         recovery.run.runId,
       );
       if (linked.length > 0) {
         if (!recovery.run.failureNotePosted) {
-          dispatch.markFailureNotePosted(recovery.run.runId);
+          await dispatch.markFailureNotePosted(recovery.run.runId);
         }
         continue;
       }
@@ -1006,7 +1019,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         ).catch(reportError);
       }
       if (recovery.attemptCount < 2) {
-        options.requeueFailedTrigger?.({
+        await options.requeueFailedTrigger?.({
           workspaceId: workspace.workspaceId,
           triggerMessageId: recovery.run.triggerMessageId,
           runId: recovery.run.runId,
@@ -1103,7 +1116,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         live.killEscalation,
       );
       const dispatch = options.dispatchStoreFor(live.workspace);
-      dispatch.failRun({
+      await dispatch.failRun({
         runId: live.claim.run.runId,
         exitCode: APP_QUIT_EXIT_CODE,
         reason: "user-stop",
@@ -1118,7 +1131,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         reportError(error);
         // A stopped run is terminal even when its cosmetic note cannot be
         // stored. Mark it handled so app-quit recovery never retries it.
-        dispatch.markFailureNotePosted(live.claim.run.runId);
+        await dispatch.markFailureNotePosted(live.claim.run.runId);
       }
       notifyRunUpdated(workspaceId);
     });
@@ -1132,7 +1145,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     await enqueue(workspaceId, async () => {
       const workspace = options.workspaceFor(workspaceId);
       if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
-      options.dispatchStoreFor(workspace).setThreadDispatchPaused({
+      await options.dispatchStoreFor(workspace).setThreadDispatchPaused({
         workspaceId,
         threadId,
         paused: false,
@@ -1143,23 +1156,22 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     });
   }
 
-  function dispatchStateForThread(
+  async function dispatchStateForThread(
     workspaceId: string,
     threadId: string,
-  ): ChatDispatchThreadState {
+  ): Promise<ChatDispatchThreadState> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
     const dispatch = options.dispatchStoreFor(workspace);
-    const pauseState = dispatch.getThreadDispatchPauseState(
-      workspaceId,
-      threadId,
-    );
+    const [pauseState, pending] = await Promise.all([
+      dispatch.getThreadDispatchPauseState(workspaceId, threadId),
+      dispatch.listPending(workspaceId),
+    ]);
     const live = liveRuns.get(workspaceId);
     return {
       liveRun:
         live?.claim.run.threadId === threadId && live.finalized === false,
-      pendingCount: dispatch
-        .listPending(workspaceId)
+      pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,
       ...(pauseState?.paused && pauseState.reason
@@ -1408,7 +1420,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       quitProcesses.push(live.child);
     }
     for (const live of appQuitRuns) {
-      options.dispatchStoreFor(live.workspace).failRun({
+      await options.dispatchStoreFor(live.workspace).failRun({
         runId: live.claim.run.runId,
         exitCode: APP_QUIT_EXIT_CODE,
         reason: "app-quit",
