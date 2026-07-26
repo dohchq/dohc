@@ -1,9 +1,9 @@
 # GATE6 clone-reset rehearsal harness
 
 `dohc-rehearsal-harness` is the runnable, harness-feature-only caller for
-`run_rehearsal(RehearsalConfig)`. It exercises the GATE6 criterion against an
-exact clone of a real workspace tree without authorizing any write to the real
-workspace.
+`run_rehearsal(RehearsalConfig)`. It exercises the GATE6 criterion against a
+capture-floor-aware byte clone of a real workspace tree without authorizing
+any write to the real workspace.
 
 ## Recorded interpretation — Ice post-hoc review required
 
@@ -14,9 +14,13 @@ fingerprint; opening or migrating it would violate the cutover contract.
 The authorized cutover is a **reset**: a fresh Rust store plus recapture, with
 the prior data wipe accepted by Ice. For this rehearsal the harness therefore:
 
-1. records a hash, size, path, and mtime snapshot of the real source tree;
-2. clones every source directory and file, preserving file bytes and mtimes;
-3. proves the untouched clone exactly matches the source snapshot;
+1. records a hash, size, path, and mtime snapshot of the real source tree,
+   including the existence and root mtime of each floor-skipped directory;
+2. clones every capture-visible source directory and file, preserving file
+   bytes and mtimes, and also clones `.dohc` because the rehearsal machinery
+   operates on it;
+3. proves the untouched clone exactly matches the floor-filtered source
+   snapshot;
 4. retains any TypeScript SQLite `engine.db`/sidecars under
    `.dohc/engine/typescript-engine-byte-clone/` inside the clone;
 5. follows the existing R13/R15 fixture recipe: writes both 64-lowercase-hex
@@ -28,6 +32,24 @@ the prior data wipe accepted by Ice. For this rehearsal the harness therefore:
 
 This interpretation is deliberately recorded in the evidence and remains
 flagged for Ice's post-hoc review.
+
+## Recorded design decision — byte clone uses the capture floor
+
+The byte-clone walk imports the canonical reserved-name and ignored-prefix
+constants from `dohc_engine_files::floor`. It skips directory roots named
+`.git`, `node_modules`, or `.dohc-write-*` at any depth, with the floor's
+platform-specific normalization. It deliberately does **not** skip `.dohc`.
+
+This is a hard-floor rule, not a best-effort optimization. Reset never touches
+capture-excluded directories: they are outside the engine's world. Cloning a
+pnpm package tree would therefore introduce junction aliases the real reset
+never observes, while regenerable dependencies are not user data covered by
+the inventory's no-data-loss proof. The harness records the complete list and
+counts of skipped roots in `REHEARSAL_EVIDENCE.json`; it does not traverse or
+silently truncate their contents. The full before/after source proof still
+records each skipped root's existence and root mtime. Any alias or special file
+outside a skipped root remains a fail-closed error during cloning and
+snapshotting.
 
 The existing rehearsal driver's “capture” proof is the inventory equality and
 protected `.dohc` snapshot proof implemented by `capture_proofs`; the fixture
@@ -47,9 +69,10 @@ The binary takes:
 
 It refuses a source without a real `.dohc` directory, refuses scratch or
 recovery paths within source, and requires scratch and recovery to be separate
-non-nested directories. It refuses aliases and special files instead of
-silently skipping them. It never writes markers, databases, state, or evidence
-under `--source`.
+non-nested directories. Outside the explicitly recorded floor-skipped
+directory roots, it refuses aliases and special files instead of silently
+skipping them. It never writes markers, databases, state, or evidence under
+`--source`.
 
 The source-untouched assertion runs even when clone preparation or the
 rehearsal fails. A changed path, byte hash, size, or mtime is a hard failure,
@@ -77,7 +100,9 @@ On success, `<recovery>/REHEARSAL_EVIDENCE.json` contains:
 - the complete state record and history;
 - the `BackupFingerprint` fields and fresh engine UUID;
 - before/after source snapshot fingerprints and counts;
-- initial byte-clone and final clone counts;
+- floor-filtered clone-input, initial byte-clone, and final clone counts;
+- every floor-skipped root, its source-root mtime and kind, plus total,
+  directory, and alias root counts;
 - clone and recovery paths;
 - hashes for retained TypeScript store files and recovery artifacts;
 - per-phase timings; and

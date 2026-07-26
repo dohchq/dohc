@@ -10,11 +10,14 @@ use crate::cutover_rehearse::{
     StateRecord, run_rehearsal, validate_rehearsal_root, write_rehearsal_token_for_harness,
 };
 use crate::shadow_fence::{ShadowFenceError, write_shadow_marker_for_harness};
+use dohc_engine_files::floor::{
+    ENGINE_STORAGE_SEGMENT, IGNORED_FILE_PREFIXES, RESERVED_SEGMENTS, normalize_segment,
+};
 use dohc_engine_storage::{EngineStore, StorageError};
 use filetime::FileTime;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -47,7 +50,7 @@ pub enum HarnessError {
     ScratchRecoveryOverlap,
     #[error("source workspace changed during the rehearsal")]
     SourceChanged,
-    #[error("the initial clone did not exactly match the source hash/mtime snapshot")]
+    #[error("the initial clone did not exactly match the floor-filtered source snapshot")]
     CloneMismatch,
     #[error("the clone contains an unsupported alias or special file: {path}")]
     UnsupportedEntry { path: String },
@@ -110,6 +113,29 @@ pub struct PreservedSourceStoreEntry {
     pub sha256: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FloorSkippedRootKind {
+    Directory,
+    Alias,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FloorSkippedRoot {
+    pub relative_path: String,
+    pub kind: FloorSkippedRootKind,
+    pub source_root_modified_seconds: i64,
+    pub source_root_modified_nanoseconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FloorSkipEvidence {
+    pub root_count: usize,
+    pub directory_root_count: usize,
+    pub alias_root_count: usize,
+    pub roots: Vec<FloorSkippedRoot>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Timings {
     pub source_snapshot_before_ms: u64,
@@ -125,6 +151,7 @@ pub struct RehearsalEvidence {
     pub schema_version: u32,
     pub criterion: String,
     pub recorded_interpretation: String,
+    pub floor_clone_design_decision: String,
     pub started_at_unix_ms: i64,
     pub finished_at_unix_ms: i64,
     pub source_path: String,
@@ -136,8 +163,10 @@ pub struct RehearsalEvidence {
     pub fresh_engine_uuid: String,
     pub source_unchanged: SourceUnchangedProof,
     pub source_counts: TreeSummary,
+    pub byte_clone_input_counts: TreeSummary,
     pub initial_byte_clone_counts: TreeSummary,
     pub final_clone_counts: TreeSummary,
+    pub floor_skips: FloorSkipEvidence,
     pub ui_state_tmp_orphans: Vec<ArtifactEntry>,
     pub preserved_typescript_store: Vec<PreservedSourceStoreEntry>,
     pub recovery_artifacts: Vec<ArtifactEntry>,
@@ -158,6 +187,8 @@ struct TreeEntry {
 enum EntryKind {
     Directory,
     File,
+    FloorSkippedDirectory,
+    FloorSkippedAlias,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,7 +212,7 @@ pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError>
     let (source, scratch, recovery) = validate_paths(config)?;
 
     let source_snapshot_started = Instant::now();
-    let source_before = snapshot_tree(&source)?;
+    let source_before = snapshot_source_tree(&source)?;
     let source_snapshot_before_ms = elapsed_ms(source_snapshot_started);
 
     let operation = run_on_clone(
@@ -195,7 +226,7 @@ pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError>
     // This assertion runs even when cloning, preparation, or rehearsal failed.
     // A source mutation is always the primary safety failure.
     let source_verification_started = Instant::now();
-    let source_after = snapshot_tree(&source)?;
+    let source_after = snapshot_source_tree(&source)?;
     if source_before != source_after {
         return Err(HarnessError::SourceChanged);
     }
@@ -221,10 +252,11 @@ pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError>
             HarnessError::IncompleteOutcome("complete record lacks fresh engine UUID".to_owned())
         })?;
     let evidence = RehearsalEvidence {
-        schema_version: 1,
+        schema_version: 2,
         criterion: "GATE6 end-to-end clone-reset rehearsal on real dogfood workspace byte-clones"
             .to_owned(),
         recorded_interpretation: "The live dogfood engine.db is TypeScript-authored and the Rust fence correctly refuses its foreign fingerprint. The authorized cutover is a reset: retain the source SQLite files inside the byte clone, initialize and bind a fresh Rust store in the clone, write the two harness-only markers, then exercise run_rehearsal(NoFaults). Ice accepted the data wipe; this interpretation remains flagged for Ice's post-hoc review.".to_owned(),
+        floor_clone_design_decision: "The byte clone omits directory roots whose names are excluded by the capture floor, except .dohc, which the rehearsal machinery requires. Reset never touches floor-excluded directories because they are outside the engine's world; cloning regenerable package trees adds alias noise the real reset cannot encounter and does not strengthen the user-data inventory proof. Every omitted root and its source-root mtime are recorded, while alias refusal remains fail-closed for every entry actually cloned.".to_owned(),
         started_at_unix_ms,
         finished_at_unix_ms,
         source_path: display_path(&source),
@@ -236,8 +268,10 @@ pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError>
         fresh_engine_uuid,
         source_unchanged,
         source_counts: source_before.summary,
+        byte_clone_input_counts: completed.byte_clone_input.summary,
         initial_byte_clone_counts: completed.initial_clone.summary,
         final_clone_counts: completed.final_clone.summary,
+        floor_skips: completed.floor_skips,
         ui_state_tmp_orphans: completed.ui_state_tmp_orphans,
         preserved_typescript_store: completed.prepared.preserved_store,
         recovery_artifacts: std::mem::take(&mut completed.recovery_artifacts),
@@ -256,8 +290,10 @@ pub fn run(config: HarnessConfig<'_>) -> Result<RehearsalEvidence, HarnessError>
 
 struct CompletedClone {
     clone_path: PathBuf,
+    byte_clone_input: TreeSnapshot,
     initial_clone: TreeSnapshot,
     final_clone: TreeSnapshot,
+    floor_skips: FloorSkipEvidence,
     prepared: PreparedClone,
     state_record: StateRecord,
     ui_state_tmp_orphans: Vec<ArtifactEntry>,
@@ -286,10 +322,13 @@ fn run_on_clone(
     ensure_outside(source, &clone_path, "clone")?;
 
     let clone_started = Instant::now();
-    clone_tree(source, &clone_path)?;
+    let floor_skips = clone_tree(source, &clone_path)?;
     let initial_clone = snapshot_tree(&clone_path)?;
     let byte_clone_ms = elapsed_ms(clone_started);
-    if source_before.entries != initial_clone.entries {
+    let byte_clone_input = clone_input_snapshot(source_before);
+    if floor_skips != floor_skip_evidence(source_before)
+        || byte_clone_input.entries != initial_clone.entries
+    {
         return Err(HarnessError::CloneMismatch);
     }
     let ui_state_tmp_orphans = debris_entries(&initial_clone);
@@ -332,8 +371,10 @@ fn run_on_clone(
     let recovery_artifacts = artifact_manifest(&recovery, Some(EVIDENCE_FILE))?;
     Ok(CompletedClone {
         clone_path,
+        byte_clone_input,
         initial_clone,
         final_clone,
+        floor_skips,
         prepared,
         state_record,
         ui_state_tmp_orphans,
@@ -466,12 +507,19 @@ fn issue_token() -> Result<String, HarnessError> {
     Ok(to_hex(&bytes))
 }
 
-fn clone_tree(source: &Path, destination: &Path) -> Result<(), HarnessError> {
+fn clone_tree(source: &Path, destination: &Path) -> Result<FloorSkipEvidence, HarnessError> {
     create_dir(destination, "create clone root")?;
-    clone_directory(source, destination)
+    let mut skipped_roots = Vec::new();
+    clone_directory(source, source, destination, &mut skipped_roots)?;
+    Ok(summarize_floor_skips(skipped_roots))
 }
 
-fn clone_directory(source: &Path, destination: &Path) -> Result<(), HarnessError> {
+fn clone_directory(
+    source_root: &Path,
+    source: &Path,
+    destination: &Path,
+    skipped_roots: &mut Vec<FloorSkippedRoot>,
+) -> Result<(), HarnessError> {
     let metadata = symlink_metadata(source, "inspect source directory during clone")?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(HarnessError::UnsupportedEntry {
@@ -483,6 +531,10 @@ fn clone_directory(source: &Path, destination: &Path) -> Result<(), HarnessError
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let metadata = symlink_metadata(&source_path, "inspect source entry during clone")?;
+        if is_floor_excluded_directory_name(&entry.file_name(), &metadata) {
+            skipped_roots.push(floor_skipped_root(source_root, &source_path, &metadata)?);
+            continue;
+        }
         if metadata.file_type().is_symlink() {
             return Err(HarnessError::UnsupportedEntry {
                 path: display_path(&source_path),
@@ -490,7 +542,7 @@ fn clone_directory(source: &Path, destination: &Path) -> Result<(), HarnessError
         }
         if metadata.is_dir() {
             create_dir(&destination_path, "create cloned directory")?;
-            clone_directory(&source_path, &destination_path)?;
+            clone_directory(source_root, &source_path, &destination_path, skipped_roots)?;
         } else if metadata.is_file() {
             std::fs::copy(&source_path, &destination_path).map_err(|source| HarnessError::Io {
                 operation: "copy source file into clone",
@@ -504,6 +556,21 @@ fn clone_directory(source: &Path, destination: &Path) -> Result<(), HarnessError
         }
     }
     preserve_times(&metadata, destination)
+}
+
+fn is_floor_excluded_directory_name(name: &OsStr, metadata: &Metadata) -> bool {
+    if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+        return false;
+    }
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let normalized = normalize_segment(name);
+    normalized != ENGINE_STORAGE_SEGMENT
+        && (RESERVED_SEGMENTS.contains(&normalized.as_str())
+            || IGNORED_FILE_PREFIXES
+                .iter()
+                .any(|prefix| normalized.starts_with(prefix)))
 }
 
 fn preserve_times(metadata: &Metadata, destination: &Path) -> Result<(), HarnessError> {
@@ -530,6 +597,40 @@ fn snapshot_tree(root: &Path) -> Result<TreeSnapshot, HarnessError> {
     snapshot_directory(root, root, &mut entries)?;
     let summary = summarize(&entries);
     Ok(TreeSnapshot { entries, summary })
+}
+
+fn snapshot_source_tree(root: &Path) -> Result<TreeSnapshot, HarnessError> {
+    let metadata = symlink_metadata(root, "inspect source snapshot root")?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(HarnessError::UnsupportedEntry {
+            path: display_path(root),
+        });
+    }
+    let mut entries = Vec::new();
+    snapshot_entry(root, root, &metadata, &mut entries)?;
+    snapshot_source_directory(root, root, &mut entries)?;
+    let summary = summarize(&entries);
+    Ok(TreeSnapshot { entries, summary })
+}
+
+fn snapshot_source_directory(
+    root: &Path,
+    directory: &Path,
+    output: &mut Vec<TreeEntry>,
+) -> Result<(), HarnessError> {
+    for entry in read_dir_sorted(directory)? {
+        let path = entry.path();
+        let metadata = symlink_metadata(&path, "inspect source snapshot entry")?;
+        if is_floor_excluded_directory_name(&entry.file_name(), &metadata) {
+            snapshot_floor_skipped_root(root, &path, &metadata, output)?;
+            continue;
+        }
+        snapshot_entry(root, &path, &metadata, output)?;
+        if metadata.is_dir() {
+            snapshot_source_directory(root, &path, output)?;
+        }
+    }
+    Ok(())
 }
 
 fn snapshot_directory(
@@ -594,6 +695,31 @@ fn snapshot_entry(
     Ok(())
 }
 
+fn snapshot_floor_skipped_root(
+    root: &Path,
+    path: &Path,
+    metadata: &Metadata,
+    output: &mut Vec<TreeEntry>,
+) -> Result<(), HarnessError> {
+    let modified = FileTime::from_last_modification_time(metadata);
+    let relative_path = portable_relative(path.strip_prefix(root).map_err(|_| {
+        HarnessError::IncompleteOutcome("source snapshot path escaped root".to_owned())
+    })?)?;
+    output.push(TreeEntry {
+        relative_path,
+        kind: if metadata.file_type().is_symlink() {
+            EntryKind::FloorSkippedAlias
+        } else {
+            EntryKind::FloorSkippedDirectory
+        },
+        size_bytes: 0,
+        modified_seconds: modified.unix_seconds(),
+        modified_nanoseconds: modified.nanoseconds(),
+        sha256: String::new(),
+    });
+    Ok(())
+}
+
 fn summarize(entries: &[TreeEntry]) -> TreeSummary {
     let mut hasher = Sha256::new();
     let mut directory_count = 0;
@@ -610,6 +736,14 @@ fn summarize(entries: &[TreeEntry]) -> TreeSummary {
                 total_file_bytes = total_file_bytes.saturating_add(entry.size_bytes);
                 hasher.update(b"f");
             }
+            EntryKind::FloorSkippedDirectory => {
+                directory_count += 1;
+                hasher.update(b"x");
+            }
+            EntryKind::FloorSkippedAlias => {
+                directory_count += 1;
+                hasher.update(b"a");
+            }
         }
         hash_field(&mut hasher, entry.relative_path.as_bytes());
         hasher.update(entry.size_bytes.to_le_bytes());
@@ -622,6 +756,77 @@ fn summarize(entries: &[TreeEntry]) -> TreeSummary {
         file_count,
         total_file_bytes,
         snapshot_sha256: to_hex(&hasher.finalize()),
+    }
+}
+
+fn clone_input_snapshot(source: &TreeSnapshot) -> TreeSnapshot {
+    let entries = source
+        .entries
+        .iter()
+        .filter(|entry| {
+            !matches!(
+                entry.kind,
+                EntryKind::FloorSkippedDirectory | EntryKind::FloorSkippedAlias
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let summary = summarize(&entries);
+    TreeSnapshot { entries, summary }
+}
+
+fn floor_skipped_root(
+    root: &Path,
+    path: &Path,
+    metadata: &Metadata,
+) -> Result<FloorSkippedRoot, HarnessError> {
+    let modified = FileTime::from_last_modification_time(metadata);
+    Ok(FloorSkippedRoot {
+        relative_path: portable_relative(path.strip_prefix(root).map_err(|_| {
+            HarnessError::IncompleteOutcome("floor-skipped path escaped source root".to_owned())
+        })?)?,
+        kind: if metadata.file_type().is_symlink() {
+            FloorSkippedRootKind::Alias
+        } else {
+            FloorSkippedRootKind::Directory
+        },
+        source_root_modified_seconds: modified.unix_seconds(),
+        source_root_modified_nanoseconds: modified.nanoseconds(),
+    })
+}
+
+fn floor_skip_evidence(snapshot: &TreeSnapshot) -> FloorSkipEvidence {
+    let roots = snapshot
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let kind = match entry.kind {
+                EntryKind::FloorSkippedDirectory => FloorSkippedRootKind::Directory,
+                EntryKind::FloorSkippedAlias => FloorSkippedRootKind::Alias,
+                EntryKind::Directory | EntryKind::File => return None,
+            };
+            Some(FloorSkippedRoot {
+                relative_path: entry.relative_path.clone(),
+                kind,
+                source_root_modified_seconds: entry.modified_seconds,
+                source_root_modified_nanoseconds: entry.modified_nanoseconds,
+            })
+        })
+        .collect();
+    summarize_floor_skips(roots)
+}
+
+fn summarize_floor_skips(roots: Vec<FloorSkippedRoot>) -> FloorSkipEvidence {
+    let directory_root_count = roots
+        .iter()
+        .filter(|root| root.kind == FloorSkippedRootKind::Directory)
+        .count();
+    let alias_root_count = roots.len().saturating_sub(directory_root_count);
+    FloorSkipEvidence {
+        root_count: roots.len(),
+        directory_root_count,
+        alias_root_count,
+        roots,
     }
 }
 
@@ -1001,6 +1206,7 @@ mod tests {
         assert_eq!(evidence.state_record.current, RehearsalState::Complete);
         assert!(evidence.source_unchanged.verified);
         assert_eq!(evidence.ui_state_tmp_orphans.len(), 17);
+        assert_eq!(evidence.floor_skips.root_count, 0);
         assert_eq!(
             evidence.source_counts, evidence.initial_byte_clone_counts,
             "mtime-preserving clone must exactly match the source snapshot"
@@ -1015,6 +1221,79 @@ mod tests {
                 .preserved_typescript_store
                 .iter()
                 .any(|entry| entry.original_relative_path == ".dohc/engine/engine.db")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn node_modules_alias_is_floor_skipped_recorded_and_source_checked() {
+        let source = fixture_source();
+        let package_target = source.join("package-target");
+        std::fs::create_dir(&package_target).expect("package target");
+        std::fs::write(package_target.join("index.js"), b"module.exports = 1;\n")
+            .expect("package contents");
+        let node_modules = source.join("node_modules");
+        std::fs::create_dir(&node_modules).expect("node_modules");
+        let package_alias = node_modules.join("picomatch");
+        if let Err(error) = std::os::windows::fs::symlink_dir(&package_target, &package_alias) {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                return;
+            }
+            panic!("create directory symlink fixture: {error}");
+        }
+
+        let before = snapshot_source_tree(source.path()).expect("full source snapshot before");
+        let skipped_before = before
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "node_modules")
+            .expect("node_modules root must remain in source proof");
+        assert_eq!(skipped_before.kind, EntryKind::FloorSkippedDirectory);
+
+        let scratch_parent = ScratchDir::new().expect("scratch parent");
+        let recovery_parent = ScratchDir::new().expect("recovery parent");
+        let scratch = scratch_parent.join("clones");
+        let recovery = recovery_parent.join("artifacts");
+        let evidence = run(HarnessConfig {
+            source: source.path(),
+            scratch: &scratch,
+            recovery: &recovery,
+        })
+        .expect("floor-aware rehearsal completes");
+
+        assert_eq!(evidence.outcome, "complete");
+        assert!(evidence.source_unchanged.verified);
+        assert_eq!(evidence.floor_skips.root_count, 1);
+        assert_eq!(evidence.floor_skips.directory_root_count, 1);
+        assert_eq!(evidence.floor_skips.alias_root_count, 0);
+        assert_eq!(evidence.floor_skips.roots[0].relative_path, "node_modules");
+        assert!(
+            !Path::new(&evidence.clone_path)
+                .join("node_modules")
+                .exists(),
+            "the floor-excluded root must not be cloned"
+        );
+        assert!(
+            std::fs::symlink_metadata(&package_alias)
+                .expect("source alias remains")
+                .file_type()
+                .is_symlink(),
+            "the source fixture alias must remain untouched"
+        );
+        let after = snapshot_source_tree(source.path()).expect("full source snapshot after");
+        assert_eq!(
+            after, before,
+            "full source proof includes the skipped root's existence and mtime"
+        );
+
+        let banked: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(recovery.join(EVIDENCE_FILE)).expect("read banked evidence"),
+        )
+        .expect("parse banked evidence");
+        assert_eq!(banked["floor_skips"]["root_count"], 1);
+        assert_eq!(
+            banked["floor_skips"]["roots"][0]["relative_path"],
+            "node_modules"
         );
     }
 }
