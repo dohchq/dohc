@@ -1,0 +1,593 @@
+import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+
+export const WORKSPACE_METHOD = {
+  open: "workspace.open",
+  close: "workspace.close",
+  conflictsList: "conflicts.list",
+  conflictsOpen: "conflicts.open",
+  conflictsResolve: "conflicts.resolve",
+  searchQuery: "search.query",
+  watcherStatus: "watcher.status",
+  captureFlush: "capture.flush",
+} as const;
+
+export type WorkspaceMethod =
+  (typeof WORKSPACE_METHOD)[keyof typeof WORKSPACE_METHOD];
+export type WorkspaceJsonObject = {
+  [key: string]: JsonValue | undefined;
+};
+
+export type WorkspaceOpenParams = WorkspaceJsonObject & {
+  rootDir: string;
+  workspaceId: string;
+};
+export type WorkspaceEmptyParams = WorkspaceJsonObject;
+export type ConflictListParams = WorkspaceJsonObject & {
+  status?: "open" | "resolved";
+};
+export type ConflictOpenParams = WorkspaceJsonObject & {
+  conflict?: WorkspaceJsonObject;
+  envelope?: WorkspaceJsonObject;
+};
+export type ConflictResolveParams = WorkspaceJsonObject & {
+  local?: WorkspaceJsonObject;
+  envelope?: WorkspaceJsonObject;
+};
+export type SearchQueryParams = WorkspaceJsonObject & {
+  versionId: string;
+  query: string;
+  limit?: number;
+  nowMs?: number;
+};
+
+export type WorkspaceOpenResult = WorkspaceJsonObject & {
+  workspace: string;
+};
+export type WorkspaceCloseResult = WorkspaceJsonObject & {
+  closed: boolean;
+};
+
+export type ConflictSnapshot = WorkspaceJsonObject & {
+  workspaceId: string;
+  versionId: string;
+  objectId: string;
+  path: string;
+  text: string;
+  contentKind: "text";
+  sha256: string;
+  byteLength: number;
+  blobSha256: string;
+  updatedAtMs: number;
+  latestMomentId: string;
+  metadataOrigin: string;
+};
+
+export type ConflictFileState = WorkspaceJsonObject & {
+  path: string;
+  contentKind: "text" | "binary";
+  snapshot: ConflictSnapshot | null;
+  metadataSummary: string | null;
+  metadataCorrelationId: string | null;
+};
+
+export type ConflictRecord = WorkspaceJsonObject & {
+  id: string;
+  workspaceId: string;
+  path: string;
+  targetVersionId: string;
+  sourceVersionId: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  status: "open" | "resolved";
+  chosenFrom: "current" | "incoming" | "merged";
+  resolution:
+    | "kept-current"
+    | "applied-incoming"
+    | "applied-merged"
+    | null;
+  metadata: WorkspaceJsonObject & {
+    origin: string;
+    summary: string | null;
+    correlationId: string | null;
+  };
+  base: ConflictFileState;
+  current: ConflictFileState;
+  incoming: ConflictFileState;
+};
+
+export type PendingConflictResolve = WorkspaceJsonObject & {
+  remoteConflictId: string;
+  localConflictId: string | null;
+  path: string | null;
+  reason: string;
+};
+
+export type ReplicatedConflictResult =
+  | (WorkspaceJsonObject & {
+      replicated: true;
+      status: "applied";
+      conflictId: string;
+      inserted: boolean | null;
+      matched: boolean;
+      deferred: boolean;
+      pendingResolve: PendingConflictResolve | null;
+    })
+  | (WorkspaceJsonObject & {
+      replicated: true;
+      status: "skipped";
+    })
+  | (WorkspaceJsonObject & {
+      replicated: true;
+      status: "crashed";
+      committed: boolean;
+    });
+
+export type ConflictOpenResult =
+  | (WorkspaceJsonObject & { inserted: boolean })
+  | ReplicatedConflictResult;
+export type ConflictResolveResult =
+  | (WorkspaceJsonObject & { conflict: ConflictRecord })
+  | ReplicatedConflictResult;
+
+export type SearchResult = WorkspaceJsonObject & {
+  surface: "file" | "chat";
+  path: string;
+  title: string;
+  line: number;
+  preview: string;
+  matchStart: number;
+  matchEnd: number;
+  threadId: string | null;
+  objectId: string | null;
+};
+
+export type WatcherStatusResult = WorkspaceJsonObject & {
+  running: boolean;
+  degraded: boolean;
+  terminal: boolean;
+};
+export type CaptureFlushResult = WorkspaceJsonObject & {
+  settled: boolean;
+  running: boolean;
+  degraded: boolean;
+};
+
+export type WorkspaceMethodParamsMap = {
+  [WORKSPACE_METHOD.open]: WorkspaceOpenParams;
+  [WORKSPACE_METHOD.close]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.conflictsList]: ConflictListParams;
+  [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenParams;
+  [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveParams;
+  [WORKSPACE_METHOD.searchQuery]: SearchQueryParams;
+  [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
+};
+
+export type WorkspaceMethodResultMap = {
+  [WORKSPACE_METHOD.open]: WorkspaceOpenResult;
+  [WORKSPACE_METHOD.close]: WorkspaceCloseResult;
+  [WORKSPACE_METHOD.conflictsList]: ConflictRecord[];
+  [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
+  [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
+  [WORKSPACE_METHOD.searchQuery]: SearchResult[];
+  [WORKSPACE_METHOD.watcherStatus]: WatcherStatusResult;
+  [WORKSPACE_METHOD.captureFlush]: CaptureFlushResult;
+};
+
+export class WorkspaceProtocolShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceProtocolShapeError";
+  }
+}
+
+function objectValue(
+  value: JsonValue,
+  label: string,
+  keys: readonly string[],
+): WorkspaceJsonObject {
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    throw new WorkspaceProtocolShapeError(`${label} must be a JSON object.`);
+  }
+  for (const key of Object.keys(value)) {
+    if (!keys.includes(key)) {
+      throw new WorkspaceProtocolShapeError(`${label}.${key} is not allowed.`);
+    }
+  }
+  return value;
+}
+
+function recordValue(value: JsonValue, label: string): WorkspaceJsonObject {
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    throw new WorkspaceProtocolShapeError(`${label} must be a JSON object.`);
+  }
+  return value;
+}
+
+function stringValue(
+  object: WorkspaceJsonObject,
+  key: string,
+  label: string,
+): string {
+  const value = object[key];
+  if (typeof value !== "string") {
+    throw new WorkspaceProtocolShapeError(`${label}.${key} must be a string.`);
+  }
+  return value;
+}
+
+function nullableString(
+  object: WorkspaceJsonObject,
+  key: string,
+  label: string,
+): string | null {
+  const value = object[key];
+  if (value !== null && typeof value !== "string") {
+    throw new WorkspaceProtocolShapeError(
+      `${label}.${key} must be a string or null.`,
+    );
+  }
+  return value;
+}
+
+function booleanValue(
+  object: WorkspaceJsonObject,
+  key: string,
+  label: string,
+): boolean {
+  const value = object[key];
+  if (typeof value !== "boolean") {
+    throw new WorkspaceProtocolShapeError(`${label}.${key} must be a boolean.`);
+  }
+  return value;
+}
+
+function integerValue(
+  object: WorkspaceJsonObject,
+  key: string,
+  label: string,
+): number {
+  const value = object[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new WorkspaceProtocolShapeError(
+      `${label}.${key} must be a safe integer.`,
+    );
+  }
+  return value;
+}
+
+function enumValue<T extends string>(
+  object: WorkspaceJsonObject,
+  key: string,
+  label: string,
+  values: readonly T[],
+): T {
+  const value = object[key];
+  if (typeof value !== "string" || !values.includes(value as T)) {
+    throw new WorkspaceProtocolShapeError(`${label}.${key} is invalid.`);
+  }
+  return value as T;
+}
+
+function decodeSnapshot(value: JsonValue, label: string): ConflictSnapshot {
+  const object = objectValue(value, label, [
+    "workspaceId",
+    "versionId",
+    "objectId",
+    "path",
+    "text",
+    "contentKind",
+    "sha256",
+    "byteLength",
+    "blobSha256",
+    "updatedAtMs",
+    "latestMomentId",
+    "metadataOrigin",
+  ]);
+  if (object.contentKind !== "text") {
+    throw new WorkspaceProtocolShapeError(
+      `${label}.contentKind must be text.`,
+    );
+  }
+  return {
+    workspaceId: stringValue(object, "workspaceId", label),
+    versionId: stringValue(object, "versionId", label),
+    objectId: stringValue(object, "objectId", label),
+    path: stringValue(object, "path", label),
+    text: stringValue(object, "text", label),
+    contentKind: "text",
+    sha256: stringValue(object, "sha256", label),
+    byteLength: integerValue(object, "byteLength", label),
+    blobSha256: stringValue(object, "blobSha256", label),
+    updatedAtMs: integerValue(object, "updatedAtMs", label),
+    latestMomentId: stringValue(object, "latestMomentId", label),
+    metadataOrigin: stringValue(object, "metadataOrigin", label),
+  };
+}
+
+function decodeConflictState(
+  value: JsonValue,
+  label: string,
+): ConflictFileState {
+  const object = objectValue(value, label, [
+    "path",
+    "contentKind",
+    "snapshot",
+    "metadataSummary",
+    "metadataCorrelationId",
+  ]);
+  return {
+    path: stringValue(object, "path", label),
+    contentKind: enumValue(object, "contentKind", label, ["text", "binary"]),
+    snapshot:
+      object.snapshot === null
+        ? null
+        : decodeSnapshot(object.snapshot ?? null, `${label}.snapshot`),
+    metadataSummary: nullableString(object, "metadataSummary", label),
+    metadataCorrelationId: nullableString(
+      object,
+      "metadataCorrelationId",
+      label,
+    ),
+  };
+}
+
+export function decodeConflictRecord(
+  value: JsonValue,
+  label = "conflict",
+): ConflictRecord {
+  const object = objectValue(value, label, [
+    "id",
+    "workspaceId",
+    "path",
+    "targetVersionId",
+    "sourceVersionId",
+    "createdAtMs",
+    "updatedAtMs",
+    "status",
+    "chosenFrom",
+    "resolution",
+    "metadata",
+    "base",
+    "current",
+    "incoming",
+  ]);
+  const metadataLabel = `${label}.metadata`;
+  const metadata = objectValue(object.metadata ?? null, metadataLabel, [
+    "origin",
+    "summary",
+    "correlationId",
+  ]);
+  const resolution = object.resolution;
+  if (
+    resolution !== null &&
+    resolution !== "kept-current" &&
+    resolution !== "applied-incoming" &&
+    resolution !== "applied-merged"
+  ) {
+    throw new WorkspaceProtocolShapeError(`${label}.resolution is invalid.`);
+  }
+  return {
+    id: stringValue(object, "id", label),
+    workspaceId: stringValue(object, "workspaceId", label),
+    path: stringValue(object, "path", label),
+    targetVersionId: stringValue(object, "targetVersionId", label),
+    sourceVersionId: stringValue(object, "sourceVersionId", label),
+    createdAtMs: integerValue(object, "createdAtMs", label),
+    updatedAtMs: integerValue(object, "updatedAtMs", label),
+    status: enumValue(object, "status", label, ["open", "resolved"]),
+    chosenFrom: enumValue(object, "chosenFrom", label, [
+      "current",
+      "incoming",
+      "merged",
+    ]),
+    resolution,
+    metadata: {
+      origin: stringValue(metadata, "origin", metadataLabel),
+      summary: nullableString(metadata, "summary", metadataLabel),
+      correlationId: nullableString(metadata, "correlationId", metadataLabel),
+    },
+    base: decodeConflictState(object.base ?? null, `${label}.base`),
+    current: decodeConflictState(object.current ?? null, `${label}.current`),
+    incoming: decodeConflictState(
+      object.incoming ?? null,
+      `${label}.incoming`,
+    ),
+  };
+}
+
+function decodePendingResolve(
+  value: JsonValue,
+  label: string,
+): PendingConflictResolve {
+  const object = objectValue(value, label, [
+    "remoteConflictId",
+    "localConflictId",
+    "path",
+    "reason",
+  ]);
+  return {
+    remoteConflictId: stringValue(object, "remoteConflictId", label),
+    localConflictId: nullableString(object, "localConflictId", label),
+    path: nullableString(object, "path", label),
+    reason: stringValue(object, "reason", label),
+  };
+}
+
+function decodeReplicatedConflict(
+  value: JsonValue,
+  label: string,
+): ReplicatedConflictResult {
+  const base = recordValue(value, label);
+  if (base.replicated !== true) {
+    throw new WorkspaceProtocolShapeError(`${label}.replicated must be true.`);
+  }
+  if (base.status === "skipped") {
+    objectValue(value, label, ["replicated", "status"]);
+    return { replicated: true, status: "skipped" };
+  }
+  if (base.status === "crashed") {
+    const object = objectValue(value, label, [
+      "replicated",
+      "status",
+      "committed",
+    ]);
+    return {
+      replicated: true,
+      status: "crashed",
+      committed: booleanValue(object, "committed", label),
+    };
+  }
+  if (base.status !== "applied") {
+    throw new WorkspaceProtocolShapeError(`${label}.status is invalid.`);
+  }
+  const object = objectValue(value, label, [
+    "replicated",
+    "status",
+    "conflictId",
+    "inserted",
+    "matched",
+    "deferred",
+    "pendingResolve",
+  ]);
+  const inserted = object.inserted;
+  if (inserted !== null && typeof inserted !== "boolean") {
+    throw new WorkspaceProtocolShapeError(
+      `${label}.inserted must be a boolean or null.`,
+    );
+  }
+  return {
+    replicated: true,
+    status: "applied",
+    conflictId: stringValue(object, "conflictId", label),
+    inserted,
+    matched: booleanValue(object, "matched", label),
+    deferred: booleanValue(object, "deferred", label),
+    pendingResolve:
+      object.pendingResolve === null
+        ? null
+        : decodePendingResolve(
+            object.pendingResolve ?? null,
+            `${label}.pendingResolve`,
+          ),
+  };
+}
+
+function decodeSearchResult(value: JsonValue, label: string): SearchResult {
+  const object = objectValue(value, label, [
+    "surface",
+    "path",
+    "title",
+    "line",
+    "preview",
+    "matchStart",
+    "matchEnd",
+    "threadId",
+    "objectId",
+  ]);
+  return {
+    surface: enumValue(object, "surface", label, ["file", "chat"]),
+    path: stringValue(object, "path", label),
+    title: stringValue(object, "title", label),
+    line: integerValue(object, "line", label),
+    preview: stringValue(object, "preview", label),
+    matchStart: integerValue(object, "matchStart", label),
+    matchEnd: integerValue(object, "matchEnd", label),
+    threadId: nullableString(object, "threadId", label),
+    objectId: nullableString(object, "objectId", label),
+  };
+}
+
+export function decodeWorkspaceResult<M extends WorkspaceMethod>(
+  method: M,
+  value: JsonValue,
+): WorkspaceMethodResultMap[M] {
+  const label = `${method} result`;
+  let result: unknown;
+  switch (method) {
+    case WORKSPACE_METHOD.open: {
+      const object = objectValue(value, label, ["workspace"]);
+      result = { workspace: stringValue(object, "workspace", label) };
+      break;
+    }
+    case WORKSPACE_METHOD.close: {
+      const object = objectValue(value, label, ["closed"]);
+      result = { closed: booleanValue(object, "closed", label) };
+      break;
+    }
+    case WORKSPACE_METHOD.conflictsList:
+      if (!Array.isArray(value)) {
+        throw new WorkspaceProtocolShapeError(`${label} must be an array.`);
+      }
+      result = value.map((entry, index) =>
+        decodeConflictRecord(entry, `${label}[${index}]`),
+      );
+      break;
+    case WORKSPACE_METHOD.conflictsOpen: {
+      const object = recordValue(value, label);
+      if (object.replicated === true) {
+        result = decodeReplicatedConflict(value, label);
+      } else {
+        const local = objectValue(value, label, ["inserted"]);
+        result = { inserted: booleanValue(local, "inserted", label) };
+      }
+      break;
+    }
+    case WORKSPACE_METHOD.conflictsResolve: {
+      const object = recordValue(value, label);
+      if (object.replicated === true) {
+        result = decodeReplicatedConflict(value, label);
+      } else {
+        const local = objectValue(value, label, ["conflict"]);
+        result = {
+          conflict: decodeConflictRecord(
+            local.conflict ?? null,
+            `${label}.conflict`,
+          ),
+        };
+      }
+      break;
+    }
+    case WORKSPACE_METHOD.searchQuery:
+      if (!Array.isArray(value)) {
+        throw new WorkspaceProtocolShapeError(`${label} must be an array.`);
+      }
+      result = value.map((entry, index) =>
+        decodeSearchResult(entry, `${label}[${index}]`),
+      );
+      break;
+    case WORKSPACE_METHOD.watcherStatus: {
+      const object = objectValue(value, label, [
+        "running",
+        "degraded",
+        "terminal",
+      ]);
+      result = {
+        running: booleanValue(object, "running", label),
+        degraded: booleanValue(object, "degraded", label),
+        terminal: booleanValue(object, "terminal", label),
+      };
+      break;
+    }
+    case WORKSPACE_METHOD.captureFlush: {
+      const object = objectValue(value, label, [
+        "settled",
+        "running",
+        "degraded",
+      ]);
+      result = {
+        settled: booleanValue(object, "settled", label),
+        running: booleanValue(object, "running", label),
+        degraded: booleanValue(object, "degraded", label),
+      };
+      break;
+    }
+    default: {
+      const exhaustive: never = method;
+      throw new WorkspaceProtocolShapeError(
+        `Unsupported workspace method: ${exhaustive}`,
+      );
+    }
+  }
+  return result as WorkspaceMethodResultMap[M];
+}
