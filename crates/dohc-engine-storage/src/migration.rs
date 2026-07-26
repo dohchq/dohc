@@ -1582,7 +1582,7 @@ CREATE INDEX chat_pending_replication_by_dependency
 /// The `id` of the deferred chat-coordinate migration.
 pub(crate) const CHAT_PENDING_REPLICATION_MIGRATION_ID: &str = "v1-chat-pending-replication";
 
-/// Ordinal 17. Completes the write-metadata tuple on plaintext moments and
+/// Ordinal 18. Completes the write-metadata tuple on plaintext moments and
 /// snapshots. The TypeScript schema stores origin, summary, and correlationId
 /// together; the first Rust schema slice retained only origin.
 const V1_MOMENT_METADATA_DDL: &str = "\

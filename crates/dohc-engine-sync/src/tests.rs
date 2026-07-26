@@ -5560,7 +5560,7 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
         Some("legacy summary".to_owned()),
         Some("legacy correlation".to_owned()),
     );
-    // MUTATION: either legacy INSERT...SELECT dropping an ordinal-17 column
+    // MUTATION: either legacy INSERT...SELECT dropping an ordinal-18 column
     // changes one half of this complete-tuple assertion.
     assert_eq!(
         copied_metadata,

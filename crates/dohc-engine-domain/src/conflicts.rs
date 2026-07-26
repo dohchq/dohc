@@ -1118,14 +1118,17 @@ pub fn persist_binary_head_in_tx(
     tx.execute(
         "INSERT INTO snapshots (
              workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
-             latest_moment_id, metadata_origin, content_kind, binary_sha256
-         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, 'binary', ?8)
+             latest_moment_id, metadata_origin, metadata_summary,
+             metadata_correlation_id, content_kind, binary_sha256
+         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, NULL, NULL, 'binary', ?8)
          ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET
              path = excluded.path,
              blob_sha256 = NULL,
              updated_at_ms = excluded.updated_at_ms,
              latest_moment_id = excluded.latest_moment_id,
              metadata_origin = excluded.metadata_origin,
+             metadata_summary = excluded.metadata_summary,
+             metadata_correlation_id = excluded.metadata_correlation_id,
              content_kind = excluded.content_kind,
              binary_sha256 = excluded.binary_sha256",
         params![
@@ -1412,6 +1415,12 @@ fn map_side(
                 metadata_origin: row
                     .get(column("metadata_origin").as_str())
                     .map_err(DomainError::sql_corrupt)?,
+                metadata_summary: row
+                    .get(column("metadata_summary").as_str())
+                    .map_err(DomainError::sql_corrupt)?,
+                metadata_correlation_id: row
+                    .get(column("metadata_correlation_id").as_str())
+                    .map_err(DomainError::sql_corrupt)?,
             })
         }
         ConflictContentKind::Binary => {
@@ -1503,13 +1512,16 @@ pub fn select_snapshot_by_path_in_tx(
         i64,
         String,
         String,
+        Option<String>,
+        Option<String>,
         String,
         Option<String>,
     );
     let row: Option<HeadRow> = conn
         .query_row(
             "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
-             s.latest_moment_id, s.metadata_origin, COALESCE(s.content_kind, 'text'), \
+             s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
+             s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
              bb.sha256 FROM snapshots s \
              LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
              LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
@@ -1526,6 +1538,8 @@ pub fn select_snapshot_by_path_in_tx(
                     row.get(6)?,
                     row.get(7)?,
                     row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
                 ))
             },
         )
@@ -1539,6 +1553,8 @@ pub fn select_snapshot_by_path_in_tx(
         updated_at_ms,
         latest_moment_id,
         metadata_origin,
+        metadata_summary,
+        metadata_correlation_id,
         content_kind,
         binary_sha256,
     )) = row
@@ -1565,6 +1581,8 @@ pub fn select_snapshot_by_path_in_tx(
                     updated_at_ms,
                     latest_moment_id,
                     metadata_origin,
+                    metadata_summary,
+                    metadata_correlation_id,
                 }),
             ))
         }
@@ -1646,6 +1664,8 @@ mod tests {
             updated_at_ms: 9,
             latest_moment_id: "moment-1".to_owned(),
             metadata_origin: "user".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
         }
     }
 

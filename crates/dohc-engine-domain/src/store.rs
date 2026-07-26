@@ -332,6 +332,8 @@ impl<'a> VersionedTextStore<'a> {
             updated_at_ms: input.now_ms,
             latest_moment_id: input.moment_id.clone(),
             metadata_origin: input.metadata_origin.clone(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
         };
         let outcome = self.store.write_with(faults, |tx| {
             let moment_order = next_moment_order(tx)?;
@@ -1039,6 +1041,8 @@ impl<'a> VersionedTextStore<'a> {
                     updated_at_ms: snapshot.updated_at_ms,
                     latest_moment_id: snapshot.latest_moment_id,
                     metadata_origin: snapshot.metadata_origin,
+                    metadata_summary: snapshot.metadata_summary,
+                    metadata_correlation_id: snapshot.metadata_correlation_id,
                 }));
             }
             if snapshot.content_kind != "text" {
@@ -1081,6 +1085,8 @@ impl<'a> VersionedTextStore<'a> {
                 updated_at_ms: snapshot.updated_at_ms,
                 latest_moment_id: snapshot.latest_moment_id,
                 metadata_origin: snapshot.metadata_origin,
+                metadata_summary: snapshot.metadata_summary,
+                metadata_correlation_id: snapshot.metadata_correlation_id,
             }))
         })
     }
@@ -1215,7 +1221,8 @@ impl<'a> VersionedTextStore<'a> {
             let mut sql = String::from(
                 "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
                  operation, after_blob_sha256, before_present, before_blob_sha256, \
-                 before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+                 before_latest_moment_id, metadata_origin, metadata_summary, \
+                 metadata_correlation_id, author_json, sync_record_only, \
                  COALESCE(after_content_kind, 'text'), after_binary.sha256, \
                  COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
              COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
@@ -1298,6 +1305,7 @@ impl<'a> VersionedTextStore<'a> {
                 .prepare_cached(
                     "SELECT s.object_id, s.path, LENGTH(CAST(b.text AS BLOB)), \
                      s.updated_at_ms, s.latest_moment_id, s.metadata_origin, \
+                     s.metadata_summary, s.metadata_correlation_id, \
                      COALESCE(s.content_kind, 'text'), bb.sha256 FROM snapshots s \
                      LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
                      LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
@@ -1321,8 +1329,10 @@ impl<'a> VersionedTextStore<'a> {
                             updated_at_ms: row.get(3)?,
                             latest_moment_id: row.get(4)?,
                             metadata_origin: row.get(5)?,
-                            content_kind: row.get(6)?,
-                            binary_sha256: row.get(7)?,
+                            metadata_summary: row.get(6)?,
+                            metadata_correlation_id: row.get(7)?,
+                            content_kind: row.get(8)?,
+                            binary_sha256: row.get(9)?,
                         })
                     },
                 )
@@ -1358,8 +1368,9 @@ impl<'a> VersionedTextStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
-                     s.latest_moment_id, s.metadata_origin, \
-                     COALESCE(s.content_kind, 'text'), bb.sha256 FROM snapshots s \
+                     s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
+                     s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
+                     bb.sha256 FROM snapshots s \
                      LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
                      LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
                      WHERE s.workspace_id = ?1 AND s.version_id = ?2 ORDER BY s.path",
@@ -2541,12 +2552,16 @@ fn write_text_in_tx_with_journal(
     tx.execute(
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-           latest_moment_id, metadata_origin, content_kind, binary_sha256) \
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'text', NULL) \
+           latest_moment_id, metadata_origin, metadata_summary, \
+           metadata_correlation_id, content_kind, binary_sha256) \
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, 'text', NULL) \
          ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
            path = excluded.path, blob_sha256 = excluded.blob_sha256, \
            updated_at_ms = excluded.updated_at_ms, latest_moment_id = excluded.latest_moment_id, \
-           metadata_origin = excluded.metadata_origin, content_kind = excluded.content_kind, \
+           metadata_origin = excluded.metadata_origin, \
+           metadata_summary = excluded.metadata_summary, \
+           metadata_correlation_id = excluded.metadata_correlation_id, \
+           content_kind = excluded.content_kind, \
            binary_sha256 = excluded.binary_sha256",
         params![
             ws,
@@ -2590,6 +2605,8 @@ fn write_text_in_tx_with_journal(
             updated_at_ms: input.now_ms,
             latest_moment_id: input.moment_id.clone(),
             metadata_origin: input.metadata_origin.clone(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
         },
         moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
             reason: "moment vanished within its own write transaction",
@@ -2933,6 +2950,8 @@ pub(crate) fn write_result_from_moment(
             updated_at_ms: moment.recorded_at_ms,
             latest_moment_id: moment.moment_id.clone(),
             metadata_origin: moment.metadata_origin.clone(),
+            metadata_summary: moment.metadata_summary.clone(),
+            metadata_correlation_id: moment.metadata_correlation_id.clone(),
         },
         moment,
         deduped,
@@ -3006,6 +3025,8 @@ fn snapshot_from_moment_before(
         updated_at_ms: producer.recorded_at_ms,
         latest_moment_id: producer.moment_id,
         metadata_origin: producer.metadata_origin,
+        metadata_summary: producer.metadata_summary,
+        metadata_correlation_id: producer.metadata_correlation_id,
     })
 }
 
@@ -3031,6 +3052,8 @@ fn snapshot_from_moment_after(
         updated_at_ms: moment.recorded_at_ms,
         latest_moment_id: moment.moment_id.clone(),
         metadata_origin: moment.metadata_origin.clone(),
+        metadata_summary: moment.metadata_summary.clone(),
+        metadata_correlation_id: moment.metadata_correlation_id.clone(),
     })
 }
 
@@ -3267,6 +3290,8 @@ pub(crate) fn delete_result_from_moment(
             updated_at_ms: producer.recorded_at_ms,
             latest_moment_id: producer.moment_id,
             metadata_origin: producer.metadata_origin,
+            metadata_summary: producer.metadata_summary,
+            metadata_correlation_id: producer.metadata_correlation_id,
         },
         moment,
         deduped,
@@ -3605,6 +3630,8 @@ struct SnapshotMeta {
     updated_at_ms: i64,
     latest_moment_id: String,
     metadata_origin: String,
+    metadata_summary: Option<String>,
+    metadata_correlation_id: Option<String>,
 }
 
 fn get_snapshot_meta(
@@ -3615,7 +3642,8 @@ fn get_snapshot_meta(
 ) -> Result<Option<SnapshotMeta>, DomainError> {
     conn.query_row(
         "SELECT COALESCE(content_kind, 'text'), blob_sha256, binary_sha256, \
-         updated_at_ms, latest_moment_id, metadata_origin FROM snapshots \
+         updated_at_ms, latest_moment_id, metadata_origin, metadata_summary, \
+         metadata_correlation_id FROM snapshots \
          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
         params![workspace_id, version_id, object_id],
         |row| {
@@ -3626,6 +3654,8 @@ fn get_snapshot_meta(
                 updated_at_ms: row.get(3)?,
                 latest_moment_id: row.get(4)?,
                 metadata_origin: row.get(5)?,
+                metadata_summary: row.get(6)?,
+                metadata_correlation_id: row.get(7)?,
             })
         },
     )
@@ -3642,7 +3672,8 @@ fn get_snapshot(
     let row = conn
         .query_row(
             "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
-         s.latest_moment_id, s.metadata_origin, COALESCE(s.content_kind, 'text'), \
+         s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
+         s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
          bb.sha256 FROM snapshots s \
          LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
          LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
@@ -3746,12 +3777,16 @@ fn upsert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> Result<(), D
     conn.execute(
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-          latest_moment_id, metadata_origin, content_kind, binary_sha256) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+          latest_moment_id, metadata_origin, metadata_summary, \
+          metadata_correlation_id, content_kind, binary_sha256) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
          ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
           path = excluded.path, blob_sha256 = excluded.blob_sha256, \
           updated_at_ms = excluded.updated_at_ms, latest_moment_id = excluded.latest_moment_id, \
-          metadata_origin = excluded.metadata_origin, content_kind = excluded.content_kind, \
+          metadata_origin = excluded.metadata_origin, \
+          metadata_summary = excluded.metadata_summary, \
+          metadata_correlation_id = excluded.metadata_correlation_id, \
+          content_kind = excluded.content_kind, \
           binary_sha256 = excluded.binary_sha256",
         params![
             snapshot.workspace_id,
@@ -3762,6 +3797,8 @@ fn upsert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> Result<(), D
             snapshot.updated_at_ms,
             snapshot.latest_moment_id,
             snapshot.metadata_origin,
+            snapshot.metadata_summary,
+            snapshot.metadata_correlation_id,
             snapshot.content_kind,
             snapshot.binary_sha256,
         ],
@@ -3805,6 +3842,8 @@ fn snapshot_view(snapshot: &SnapshotRecord) -> Result<SnapshotView, DomainError>
         updated_at_ms: snapshot.updated_at_ms,
         latest_moment_id: snapshot.latest_moment_id.clone(),
         metadata_origin: snapshot.metadata_origin.clone(),
+        metadata_summary: snapshot.metadata_summary.clone(),
+        metadata_correlation_id: snapshot.metadata_correlation_id.clone(),
     })
 }
 
@@ -3823,6 +3862,8 @@ fn snapshot_text_view(snapshot: &SnapshotRecord) -> TextSnapshot {
         updated_at_ms: snapshot.updated_at_ms,
         latest_moment_id: snapshot.latest_moment_id.clone(),
         metadata_origin: snapshot.metadata_origin.clone(),
+        metadata_summary: snapshot.metadata_summary.clone(),
+        metadata_correlation_id: snapshot.metadata_correlation_id.clone(),
     }
 }
 
@@ -3837,7 +3878,8 @@ fn select_moment_by_order(
         .query_row(
             "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
              operation, after_blob_sha256, before_present, before_blob_sha256, \
-             before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+             before_latest_moment_id, metadata_origin, metadata_summary, \
+             metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
              COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
              COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
@@ -3976,6 +4018,8 @@ fn resolve_rollback_before(
             updated_at_ms: producer.recorded_at_ms,
             latest_moment_id: producer.moment_id,
             metadata_origin: producer.metadata_origin,
+            metadata_summary: producer.metadata_summary,
+            metadata_correlation_id: producer.metadata_correlation_id,
         }));
     }
     if before_state == MomentBeforeState::Absent {
@@ -4008,6 +4052,8 @@ fn resolve_rollback_before(
             updated_at_ms: previous.recorded_at_ms,
             latest_moment_id: previous.moment_id,
             metadata_origin: previous.metadata_origin,
+            metadata_summary: previous.metadata_summary,
+            metadata_correlation_id: previous.metadata_correlation_id,
         }));
     }
     Err(DomainError::InvalidInput {
@@ -4341,7 +4387,8 @@ pub(crate) fn get_moment(
         .query_row(
             "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
              operation, after_blob_sha256, before_present, before_blob_sha256, \
-             before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+             before_latest_moment_id, metadata_origin, metadata_summary, \
+             metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
              COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
              COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
@@ -4469,8 +4516,10 @@ fn map_snapshot_row(
     let updated_at_ms: i64 = row.get(4)?;
     let latest_moment_id: String = row.get(5)?;
     let metadata_origin: String = row.get(6)?;
-    let content_kind: String = row.get(7)?;
-    let binary_sha256: Option<String> = row.get(8)?;
+    let metadata_summary: Option<String> = row.get(7)?;
+    let metadata_correlation_id: Option<String> = row.get(8)?;
+    let content_kind: String = row.get(9)?;
+    let binary_sha256: Option<String> = row.get(10)?;
     let text = match content_kind.as_str() {
         "text" => text.ok_or(DomainError::StateCorrupt {
             reason: "text snapshot is missing its blob",
@@ -4495,6 +4544,8 @@ fn map_snapshot_row(
         updated_at_ms,
         latest_moment_id,
         metadata_origin,
+        metadata_summary,
+        metadata_correlation_id,
     }))
 }
 
@@ -4511,18 +4562,20 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let before_blob_sha256: Option<String> = row.get(9)?;
     let before_latest_moment_id: Option<String> = row.get(10)?;
     let metadata_origin: String = row.get(11)?;
-    let author_json: Option<String> = row.get(12)?;
-    let sync_record_only: Option<i64> = row.get(13)?;
-    let after_content_kind: String = row.get(14)?;
-    let after_binary_sha256: Option<String> = row.get(15)?;
-    let before_content_kind: String = row.get(16)?;
-    let before_binary_sha256: Option<String> = row.get(17)?;
-    let after_text: Option<String> = row.get(18)?;
-    let after_byte_length: Option<i64> = row.get(19)?;
-    let before_text: Option<String> = row.get(20)?;
-    let before_byte_length: Option<i64> = row.get(21)?;
-    let after_actual_length: Option<i64> = row.get(22)?;
-    let before_actual_length: Option<i64> = row.get(23)?;
+    let metadata_summary: Option<String> = row.get(12)?;
+    let metadata_correlation_id: Option<String> = row.get(13)?;
+    let author_json: Option<String> = row.get(14)?;
+    let sync_record_only: Option<i64> = row.get(15)?;
+    let after_content_kind: String = row.get(16)?;
+    let after_binary_sha256: Option<String> = row.get(17)?;
+    let before_content_kind: String = row.get(18)?;
+    let before_binary_sha256: Option<String> = row.get(19)?;
+    let after_text: Option<String> = row.get(20)?;
+    let after_byte_length: Option<i64> = row.get(21)?;
+    let before_text: Option<String> = row.get(22)?;
+    let before_byte_length: Option<i64> = row.get(23)?;
+    let after_actual_length: Option<i64> = row.get(24)?;
+    let before_actual_length: Option<i64> = row.get(25)?;
     // Recorded and ACTUAL lengths must agree per side — a corrupted
     // recorded length (lying small or large) fails closed for text and
     // binary alike, matching the in-band reads.
@@ -4606,6 +4659,8 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
             before_binary_sha256,
             before_latest_moment_id,
             metadata_origin,
+            metadata_summary,
+            metadata_correlation_id,
             author_json,
             // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
             // mean 'materialized' (PORTING.md §1, matching the aligned fork SQL).

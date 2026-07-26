@@ -659,7 +659,7 @@ fn create_named_version_forks_and_isolates() {
         Some("imported summary".to_owned()),
         Some("imported correlation".to_owned()),
     );
-    // MUTATION: omitting either ordinal-17 column from either INSERT...SELECT
+    // MUTATION: omitting either ordinal-18 column from either INSERT...SELECT
     // loses provenance from the live fork or its frozen comparison base.
     assert_eq!(
         copied_metadata,

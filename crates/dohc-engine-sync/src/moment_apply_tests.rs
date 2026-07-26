@@ -1,4 +1,6 @@
-use dohc_engine_domain::{RollbackTextFileMutation, VersionedTextStore};
+use dohc_engine_domain::{
+    ListMomentsQuery, RollbackTextFileMutation, VersionedTextStore, WriteText,
+};
 use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256, put_binary_blob};
 use dohc_engine_testkit::ScratchDir;
 use rusqlite::{OptionalExtension, params};
@@ -1448,6 +1450,111 @@ fn moment_append_persists_full_wire_payload_provenance() {
     // MUTATION: dropping either optional field from the moment or snapshot
     // insert makes one side of this round trip differ.
     assert_eq!(metadata, (expected.clone(), expected));
+
+    let versioned = VersionedTextStore::new(&mut store);
+    let page = versioned
+        .list_moments(&ListMomentsQuery {
+            workspace_id: "ws".to_owned(),
+            version_id: Some("main".to_owned()),
+            object_id: Some("object".to_owned()),
+            limit: 10,
+            before_moment_order: None,
+        })
+        .expect("moment read model");
+    let moment = page.moments.first().expect("imported moment");
+    assert_eq!(
+        moment.metadata_summary.as_deref(),
+        Some("adopted from peer")
+    );
+    assert_eq!(
+        moment.metadata_correlation_id.as_deref(),
+        Some("correlation-remote-adopted")
+    );
+    let snapshot = versioned
+        .read_text("ws", "main", "docs/new.md")
+        .expect("snapshot read model")
+        .expect("imported snapshot");
+    assert_eq!(
+        snapshot.metadata_summary.as_deref(),
+        Some("adopted from peer")
+    );
+    assert_eq!(
+        snapshot.metadata_correlation_id.as_deref(),
+        Some("correlation-remote-adopted")
+    );
+    let listed = versioned
+        .list_snapshot_metadata("ws", "main", None, 10)
+        .expect("snapshot list read model");
+    assert_eq!(
+        listed[0].metadata_summary.as_deref(),
+        Some("adopted from peer")
+    );
+    assert_eq!(
+        listed[0].metadata_correlation_id.as_deref(),
+        Some("correlation-remote-adopted")
+    );
+}
+
+#[test]
+fn local_overwrite_clears_imported_snapshot_metadata() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["imported", "local"]);
+    let mut payload = absent_text_payload(
+        "imported-head",
+        "metadata-object",
+        "metadata.md",
+        "imported",
+    );
+    payload["metadata"] = json!({
+        "origin": "sync",
+        "summary": "peer summary",
+        "correlationId": "peer correlation"
+    });
+    apply_moment_envelope(
+        &mut store,
+        &envelope("metadata-peer", 0, "ws", payload),
+        &NoFaults,
+    )
+    .expect("import metadata");
+
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "metadata-object".to_owned(),
+                path: "metadata.md".to_owned(),
+                text: "local".to_owned(),
+                moment_id: "local-head".to_owned(),
+                metadata_origin: "api".to_owned(),
+                author_json: None,
+                now_ms: 3_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("local overwrite");
+
+    let metadata = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT metadata_origin,metadata_summary,metadata_correlation_id \
+                 FROM snapshots WHERE workspace_id='ws' AND version_id='main' \
+                 AND object_id='metadata-object'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+        })
+        .expect("local snapshot metadata");
+    // MUTATION: omitting either optional metadata assignment from the local
+    // upsert leaves the imported value attached to the newer local head.
+    assert_eq!(metadata, ("api".to_owned(), None, None));
 }
 
 #[test]
@@ -1507,6 +1614,38 @@ fn moment_append_search_index_respects_files_and_visibility_policy() {
     // the excluded rows; skipping the healthy insert loses the public row.
     assert!(indexed(&store, "private-object").is_empty());
     assert!(indexed(&store, "hidden-object").is_empty());
+    assert_eq!(
+        indexed(&store, "public-object"),
+        [("public/doc.md".to_owned(), "public needle".to_owned())]
+    );
+
+    std::fs::write(
+        scratch.path().join(".dohc/files.toml"),
+        "rule = \"not-an-array\"\n",
+    )
+    .expect("degraded files policy");
+    hydrate_texts(&mut store, &["updated needle"]);
+    let degraded = envelope(
+        "public-peer",
+        1,
+        "ws",
+        present_text_payload(
+            "public-degraded-moment",
+            "public-object",
+            "write",
+            "public/doc.md",
+            "public/doc.md",
+            "public needle",
+            "public-moment",
+            "updated needle",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &degraded, &NoFaults).expect("degraded-policy apply"),
+        ApplyOutcome::Applied(0)
+    );
+    // A degraded policy freezes FILE indexing: the prior row remains until a
+    // healthy policy can safely decide whether to replace or remove it.
     assert_eq!(
         indexed(&store, "public-object"),
         [("public/doc.md".to_owned(), "public needle".to_owned())]

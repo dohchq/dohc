@@ -980,6 +980,8 @@ fn insert_text_conflict_persists_side_blobs_for_replicated_conflict() {
         updated_at_ms: 10,
         latest_moment_id: "m-peer".to_owned(),
         metadata_origin: "sync".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
     };
     let record = TextConflict {
         conflict_id: "replicated".to_owned(),

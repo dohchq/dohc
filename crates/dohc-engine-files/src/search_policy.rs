@@ -347,8 +347,6 @@ pub fn parse_files_policy(toml_text: &str) -> Result<Vec<FilesPolicyRule>, Vec<S
                 });
             }
         }
-    } else if rule_value.is_some() {
-        errors.push("rule must be an array of tables".to_owned());
     }
     if errors.is_empty() {
         Ok(rules)
@@ -410,8 +408,6 @@ pub fn parse_visibility_policy(toml_text: &str) -> Result<Vec<VisibilityPolicyRu
                 });
             }
         }
-    } else if rule_value.is_some() {
-        errors.push("rule must be an array of tables".to_owned());
     }
     if errors.is_empty() {
         Ok(rules)
@@ -752,6 +748,16 @@ mod tests {
         let err = parse_files_policy(toml).unwrap_err();
         assert!(err.iter().any(|e| e.contains("tracked must be a boolean")));
         assert!(err.iter().any(|e| e.contains("unknown key: bogus")));
+    }
+
+    #[test]
+    fn non_array_rule_is_reported_once() {
+        for errors in [
+            parse_files_policy("rule = \"oops\"").unwrap_err(),
+            parse_visibility_policy("rule = \"oops\"").unwrap_err(),
+        ] {
+            assert_eq!(errors, ["rule must be an array of tables"]);
+        }
     }
 
     #[test]

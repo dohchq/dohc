@@ -333,6 +333,12 @@ fn side(
             updated_at_ms,
             latest_moment_id,
             metadata_origin,
+            metadata_summary: side_metadata
+                .as_ref()
+                .and_then(|value| value.summary.clone()),
+            metadata_correlation_id: side_metadata
+                .as_ref()
+                .and_then(|value| value.correlation_id.clone()),
         })
     } else {
         None
@@ -595,13 +601,16 @@ fn select_snapshot_by_path(
         i64,
         String,
         String,
+        Option<String>,
+        Option<String>,
         String,
         Option<String>,
     );
     let row: Option<HeadRow> = tx
         .query_row(
             "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
-             s.latest_moment_id, s.metadata_origin, COALESCE(s.content_kind, 'text'), \
+             s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
+             s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
              bb.sha256 FROM snapshots s \
              LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
              LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
@@ -618,6 +627,8 @@ fn select_snapshot_by_path(
                     row.get(6)?,
                     row.get(7)?,
                     row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
                 ))
             },
         )
@@ -631,6 +642,8 @@ fn select_snapshot_by_path(
         updated_at_ms,
         latest_moment_id,
         metadata_origin,
+        metadata_summary,
+        metadata_correlation_id,
         content_kind,
         binary_sha256,
     )) = row
@@ -657,6 +670,8 @@ fn select_snapshot_by_path(
                     updated_at_ms,
                     latest_moment_id,
                     metadata_origin,
+                    metadata_summary,
+                    metadata_correlation_id,
                 }),
             ))
         }

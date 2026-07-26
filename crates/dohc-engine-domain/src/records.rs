@@ -89,6 +89,10 @@ pub struct TextSnapshot {
     pub updated_at_ms: i64,
     pub latest_moment_id: String,
     pub metadata_origin: String,
+    #[serde(default)]
+    pub metadata_summary: Option<String>,
+    #[serde(default)]
+    pub metadata_correlation_id: Option<String>,
 }
 
 /// The content exposed by a snapshot display view.
@@ -110,6 +114,8 @@ pub struct SnapshotMetadata {
     pub updated_at_ms: i64,
     pub latest_moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     /// "text" | "binary" (the stored discriminant).
     pub content_kind: String,
     pub binary_sha256: Option<String>,
@@ -126,6 +132,8 @@ pub struct SnapshotView {
     pub updated_at_ms: i64,
     pub latest_moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
 }
 
 /// The durable snapshot head for either text or binary content.
@@ -146,6 +154,8 @@ pub(crate) struct SnapshotRecord {
     pub updated_at_ms: i64,
     pub latest_moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
 }
 
 /// The binary head at a path: identity plus the blob bytes.
@@ -171,6 +181,8 @@ pub struct InbandText {
     pub updated_at_ms: i64,
     pub latest_moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
 }
 
 /// A secret whose plaintext hydrates only under the caller's in-band cap
@@ -229,6 +241,8 @@ pub struct MomentRecord {
     /// this mutation had no preimage (a first write / legacy row).
     pub before_latest_moment_id: Option<String>,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     /// A non-NULL marker in the DB → a peer-divergence record, excluded from
     /// 'latest moment' fork-point selection (`PORTING.md` §1). `false` = a
