@@ -241,8 +241,20 @@ fn enforce_share_view_boundary(
 }
 
 fn path_within_prefix(path: &str, prefix: &str) -> bool {
-    path == prefix
+    prefix.is_empty()
+        || path == prefix
         || path
             .strip_prefix(prefix)
             .is_some_and(|tail| tail.starts_with('/'))
+}
+
+#[cfg(test)]
+mod path_prefix_tests {
+    use super::path_within_prefix;
+
+    #[test]
+    fn empty_prefix_is_the_tracked_workspace_root() {
+        assert!(path_within_prefix("notes/plan.md", ""));
+        assert!(path_within_prefix("plan.md", ""));
+    }
 }

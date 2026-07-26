@@ -9,10 +9,21 @@ import {
 } from "@dohc/workspace-engine";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
+export interface RelaySyncOperations {
+  push(): ReturnType<typeof pushWorkspaceToRelay>;
+  pull(): ReturnType<typeof pullWorkspaceFromRelay>;
+  recoverOrigin(): ReturnType<typeof recoverRelayOrigin>;
+}
+
 export interface CloudSyncEngineOptions {
   rootDir: string;
   remoteWorkspaceId: string;
   relay: SyncRelayConnection;
+  // Selected once at the factory boundary. When absent, the existing
+  // TypeScript relay path below is byte-for-byte the authority. The Rust
+  // adapter supplies one bound object for the entire engine lifetime, so an
+  // individual pass can never fall back across relay identity protocols.
+  operations?: RelaySyncOperations;
   capture: WorkspaceEngineCapture;
   onChange: () => void;
   // The number of conflicts currently OPEN in the engine store. When
@@ -165,34 +176,45 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       // a fresh join must never append ops before it has the remote state.
       if (!bootstrapPass) {
         try {
-          await pushWorkspaceToRelay({
-            rootDir: options.rootDir,
-            workspaceId: options.remoteWorkspaceId,
-            relay: options.relay,
-          });
+          if (options.operations) {
+            await options.operations.push();
+          } else {
+            await pushWorkspaceToRelay({
+              rootDir: options.rootDir,
+              workspaceId: options.remoteWorkspaceId,
+              relay: options.relay,
+            });
+          }
         } catch (error) {
           if (!(error instanceof RelayOriginDivergedError)) throw error;
           // The local engine.db was restored-from-older or cloned, so its
           // origin diverged from the relay's authoritative record. Re-baseline
           // onto a fresh origin — preserving local-only work as conflicts where
           // it clashes, never dropping it — then push under the fresh origin.
-          await recoverRelayOrigin({
-            rootDir: options.rootDir,
-            workspaceId: options.remoteWorkspaceId,
-            relay: options.relay,
-          });
-          await pushWorkspaceToRelay({
-            rootDir: options.rootDir,
-            workspaceId: options.remoteWorkspaceId,
-            relay: options.relay,
-          });
+          if (options.operations) {
+            await options.operations.recoverOrigin();
+            await options.operations.push();
+          } else {
+            await recoverRelayOrigin({
+              rootDir: options.rootDir,
+              workspaceId: options.remoteWorkspaceId,
+              relay: options.relay,
+            });
+            await pushWorkspaceToRelay({
+              rootDir: options.rootDir,
+              workspaceId: options.remoteWorkspaceId,
+              relay: options.relay,
+            });
+          }
         }
       }
-      return pullWorkspaceFromRelay({
-        rootDir: options.rootDir,
-        workspaceId: options.remoteWorkspaceId,
-        relay: options.relay,
-      });
+      return options.operations
+        ? options.operations.pull()
+        : pullWorkspaceFromRelay({
+            rootDir: options.rootDir,
+            workspaceId: options.remoteWorkspaceId,
+            relay: options.relay,
+          });
     });
     // Only a FULLY successful pull (materialized + cursor committed inside
     // runRelaySync) completes the bootstrap; a throw above leaves the next

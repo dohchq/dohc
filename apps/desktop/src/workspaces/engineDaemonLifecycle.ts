@@ -177,6 +177,10 @@ export class EngineDaemonLifecycle {
     return await this.smokeWorkspaceWithClient(client, rootDir, workspaceId);
   }
 
+  currentClient(): EngineDaemonClient {
+    return this.requireClient();
+  }
+
   async stop(): Promise<void> {
     if (!this.stopPromise) this.stopPromise = this.stopOnce();
     await this.stopPromise;

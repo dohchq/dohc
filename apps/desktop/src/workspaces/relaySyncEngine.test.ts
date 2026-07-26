@@ -7,7 +7,10 @@ import {
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRelaySyncEngine } from "./relaySyncEngine";
+import {
+  createRelaySyncEngine,
+  type RelaySyncOperations,
+} from "./relaySyncEngine";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 // The push/pull transport is mocked; the capture is NOT over-mocked — its
@@ -82,6 +85,7 @@ function engine(input: {
   syncSharedChannels?: () => Promise<void>;
   afterSuccessfulPull?: () => Promise<void>;
   onRustEngineAdapterPull?: () => Promise<void>;
+  operations?: RelaySyncOperations;
 }) {
   return createRelaySyncEngine({
     rootDir: "/tmp/workspace",
@@ -96,6 +100,7 @@ function engine(input: {
     ...(input.onRustEngineAdapterPull
       ? { onRustEngineAdapterPull: input.onRustEngineAdapterPull }
       : {}),
+    ...(input.operations ? { operations: input.operations } : {}),
     debounceMs: 100,
     initialBackoffMs: 500,
     maxBackoffMs: 2000,
@@ -123,6 +128,29 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("uses one bound operation set for the whole pass without TypeScript fallback", async () => {
+    const operations: RelaySyncOperations = {
+      push: vi.fn(async () => ({ pushed: 1, originsPushed: [] })),
+      pull: vi.fn(async () => pullResult()),
+      recoverOrigin: vi.fn(async () => ({
+        oldOriginId: "old",
+        newOriginId: "new",
+        sharedPrefixLength: 0,
+        preservedOps: 0,
+      })),
+    };
+    const sync = engine({ capture: capture(), operations });
+
+    await sync.start();
+
+    expect(operations.push).toHaveBeenCalledOnce();
+    expect(operations.pull).toHaveBeenCalledOnce();
+    expect(pushMock).not.toHaveBeenCalled();
+    expect(pullMock).not.toHaveBeenCalled();
+    expect(recoverMock).not.toHaveBeenCalled();
+    await sync.stop();
+  });
+
   it("runs the dormant Rust adapter hook after a durable pull and contains failure", async () => {
     const calls: string[] = [];
     const cap = capture();

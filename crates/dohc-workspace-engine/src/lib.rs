@@ -9170,6 +9170,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "applied": applied,
             "skipped": skipped,
             "conflictsOpened": conflicts_opened,
+            "nextCursor": pending_cursor.as_ref().map(|cursor| cursor.cursor),
             "pendingCursor": pending_cursor.as_ref().map(relay_cursor_json),
             "changedPaths": changed_paths.iter().map(|change| json!({
                 "path": change.path,
@@ -9193,6 +9194,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "applied": applied,
             "skipped": skipped,
             "conflictsOpened": conflicts_opened,
+            "nextCursor": pending_cursor.cursor,
             "pendingCursor": relay_cursor_json(&pending_cursor),
             "changedPaths": changed_paths.iter().map(|change| json!({
                 "path": change.path,
@@ -9238,6 +9240,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "fetched": outcome.fetched,
             "applied": outcome.applied,
             "skipped": outcome.skipped,
+            "nextCursor": outcome.pending_cursor.cursor,
             "changedPaths": outcome.changed_paths.into_iter().map(|change| json!({
                 "path": change.path,
                 "operation": change.operation,
