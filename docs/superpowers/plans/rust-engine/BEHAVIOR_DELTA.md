@@ -626,3 +626,27 @@ Rust returns version-file diffs in byte order via `BTreeSet`/`BTreeMap`; TS sort
 paths by UTF-16 code units. The orders differ only for paths mixing BMP and
 astral-plane code points, so this is an accepted cosmetic ordering delta with no
 data or classification difference.
+
+## 13. RPC-E / #244 (chat replicated-path validation) — deliberate slug-allocation divergence
+
+### 13.1 DELIBERATE DIVERGENCE: replicated channel slug allocation is convergent, not arrival-ordered
+
+**TS behavior.** `linkedChatStore` allocates replicated channel slugs by LOCAL
+occupancy: the current slug owner keeps its slug and an incoming collider gets
+`slug-2`, `slug-3`, … (`nextFreeChannelSlug`), so after a two-way collision each
+peer's own local channel keeps the base slug. `syncFolder.test.ts` pins that
+expectation. Slug ownership therefore never converges across peers; the store
+papers over it with a local lookup alias. `createdAtMs` is replicated but unused
+for allocation.
+
+**Rust behavior.** Slug allocation is a pure convergent projection of replicated
+state: precedence is replicated `createdAtMs`, then stable wire identity, then
+channel id as the final internal tie-break. Earlier-created channels keep the
+base slug on every peer; later colliders receive bounded hashed variants; peers
+converge on identical slugs regardless of delivery order, and an incumbent's
+settled slug is never mutated by a newcomer whose id merely sorts lower.
+Regressions:
+`replicated_creation_order_determines_channel_slug_precedence`,
+`authoritative_placeholder_slug_collision_converges_across_peers`,
+`preoccupied_channel_fallback_converges_across_peers`,
+`noncolliding_channel_apply_does_not_rewrite_unchanged_slugs`.
