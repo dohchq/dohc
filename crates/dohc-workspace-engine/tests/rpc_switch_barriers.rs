@@ -69,6 +69,34 @@ async fn fixture(
     (scratch, transport, handle, workspace_id)
 }
 
+async fn open_additional_workspace(
+    transport: &InProcessTransport<EngineService>,
+    scratch: &ScratchDir,
+    workspace_id: &str,
+    id: u64,
+) -> WorkspaceHandle {
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    std::fs::write(scratch.path().join("notes.md"), "other base").expect("seed disk");
+    let opened = bounded(
+        "additional workspace.open",
+        transport.call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            ),
+        ),
+    )
+    .await
+    .expect("open additional workspace");
+    serde_json::from_value(opened.result["workspace"].clone()).expect("additional handle")
+}
+
 async fn call(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -544,6 +572,78 @@ async fn set_active_blocks_ydoc_admission_between_sweep_and_switch() {
         .expect("switch task")
         .expect("switch");
     let opened = bounded("ydoc.open task", opening).await.expect("open task");
+    assert!(opened["sessionId"].as_str().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_active_fence_does_not_block_ydoc_admission_in_another_workspace() {
+    // MUTATION: put session_ops back on EngineService and acquire that global
+    // gate in the fence + ydoc.open -> workspace B remains queued here while
+    // workspace A is paused in its destructive continuation.
+    let probe = CaptureApplyProbe::default();
+    let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+    let (_first_scratch, transport, first_handle, first_workspace) =
+        fixture("workspace-scoped-a", service).await;
+    let feature = create_feature(&transport, &first_handle, &first_workspace, 2).await;
+    let second_scratch = ScratchDir::new().expect("second scratch");
+    let second_workspace = "ws-switch-barrier-workspace-scoped-b";
+    let second_handle =
+        open_additional_workspace(&transport, &second_scratch, second_workspace, 3).await;
+
+    probe.pause_next_version_commit();
+    let switch_transport = Arc::clone(&transport);
+    let switch_handle = first_handle.clone();
+    let switch_workspace = first_workspace.clone();
+    let switching = tokio::spawn(async move {
+        switch_to(
+            &switch_transport,
+            &switch_handle,
+            &switch_workspace,
+            &feature,
+            4,
+        )
+        .await
+    });
+    bounded(
+        "workspace A setActive pre-commit probe",
+        probe.wait_until_version_commit_paused(),
+    )
+    .await;
+
+    let open_transport = Arc::clone(&transport);
+    let open_handle = second_handle.clone();
+    let mut opening = tokio::spawn(async move {
+        call(
+            &open_transport,
+            &open_handle,
+            5,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "notes.md",
+                "contentKind": "plaintext",
+            }),
+        )
+        .await
+    });
+    let admitted = tokio::time::timeout(Duration::from_secs(1), &mut opening).await;
+    let admitted_while_other_workspace_fenced = admitted.is_ok();
+
+    probe.release_version_commit();
+    bounded("workspace A setActive task", switching)
+        .await
+        .expect("switch task")
+        .expect("switch");
+    let opened = match admitted {
+        Ok(opened) => opened.expect("ydoc.open task"),
+        Err(_) => bounded("workspace B delayed ydoc.open", opening)
+            .await
+            .expect("ydoc.open task"),
+    };
+    assert!(
+        admitted_while_other_workspace_fenced,
+        "workspace A's fence must not hold workspace B's admission gate"
+    );
     assert!(opened["sessionId"].as_str().is_some());
 }
 
@@ -1285,6 +1385,68 @@ async fn create_named_fails_closed_before_touching_a_live_richdoc_session() {
         json!({ "sessionId": session_id, "updateBase64": second }),
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_named_fails_closed_for_a_normally_closed_unsettled_richdoc() {
+    // MUTATION: remove the durable richdoc preflight (or consult only the live
+    // session map) -> normal close removes the session and this stale fork
+    // succeeds even though its snapshot omits the persisted CRDT edit.
+    let probe = CaptureApplyProbe::default();
+    let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+    let (_scratch, transport, handle, workspace_id) = fixture("closed-richdoc-fork", service).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes.md",
+            "contentKind": "richdoc",
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+    let update = base64::engine::general_purpose::STANDARD
+        .encode(Ydoc::wire().richdoc_append_paragraph("persisted but not materialized"));
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": update }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    let scans_before = probe.version_scan_count();
+
+    let refused = call_error(
+        &transport,
+        &handle,
+        5,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_id,
+            "name": "closed richdoc must not fork stale",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    assert_eq!(refused.message, "richdoc-settle-unsupported");
+    assert_eq!(
+        probe.version_scan_count(),
+        scans_before,
+        "the persisted richdoc refusal must happen before the full scan"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -273,6 +273,10 @@ struct OpenWorkspace {
     /// apply and prevents a new one from resolving the destination version
     /// across the active-version boundary.
     capture_apply_gate: capture_driver::ApplyGate,
+    /// Serializes Y.Doc admission and versioned mutations for this workspace.
+    /// Version fences retain this gate through their destructive continuation,
+    /// without stalling editor traffic in unrelated open workspaces.
+    session_ops: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct YdocSession {
@@ -355,7 +359,6 @@ pub struct EngineService {
     open_lock: tokio::sync::Mutex<()>,
     next_handle: std::sync::atomic::AtomicU64,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
-    session_ops: Arc<tokio::sync::Mutex<()>>,
     leases: LeaseRegistry,
     next_session: std::sync::atomic::AtomicU64,
     /// Unique per service INSTANCE (process id + construction time):
@@ -388,7 +391,6 @@ impl Drop for EngineService {
         }
 
         let sessions = Arc::clone(&self.sessions);
-        let session_ops = Arc::clone(&self.session_ops);
         let self_writes = self.self_writes.clone();
         let supervisor = self.supervisor;
         let runtime = tokio::runtime::Handle::try_current()
@@ -398,7 +400,7 @@ impl Drop for EngineService {
             runtime.spawn(async move {
                 for (handle, workspace) in open {
                     let _capture = Arc::clone(&workspace.capture_apply_gate).lock_owned().await;
-                    let _sessions = Arc::clone(&session_ops).lock_owned().await;
+                    let _sessions = Arc::clone(&workspace.session_ops).lock_owned().await;
                     lock(&sessions).retain(|_, session| session.workspace != handle);
                     workspace.shutdown_capture().await;
                     let db_path = workspace.db_path.clone();
@@ -440,7 +442,6 @@ impl EngineService {
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            session_ops: Arc::new(tokio::sync::Mutex::new(())),
             leases: {
                 // ONE process-wide registry remains a defense in depth for
                 // non-service actor users. EngineService itself rejects a
@@ -1152,12 +1153,13 @@ impl EngineService {
                 actor,
                 capture: Arc::new(Mutex::new(Some(capture))),
                 capture_apply_gate,
+                session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
         );
         Ok(json!({ "workspace": handle }))
     }
 
-    /// Acquire the capture and session barriers in the one process-wide order
+    /// Acquire the capture and session barriers in the one per-workspace order
     /// used by version fencing and workspace teardown.
     async fn acquire_workspace_barriers(
         &self,
@@ -1201,10 +1203,10 @@ impl EngineService {
                             &format!("{operation} (ydoc barrier)")
                         ));
                     }
-                    serial = Arc::clone(&self.session_ops).lock_owned() => serial,
+                    serial = Arc::clone(&open.session_ops).lock_owned() => serial,
                 }
             }
-            None => Arc::clone(&self.session_ops).lock_owned().await,
+            None => Arc::clone(&open.session_ops).lock_owned().await,
         };
         Ok(WorkspaceBarriers {
             _capture: capture,
@@ -1324,6 +1326,7 @@ impl EngineService {
     /// probe -> lease -> authoritative re-read are mutually exclusive orders.
     async fn mutation_session_guard(
         &self,
+        open: &OpenWorkspace,
         cancellation: &OperationCancellation,
         operation: &str,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, WireError> {
@@ -1332,7 +1335,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 Err(cancellation.interruption(operation))
             }
-            serial = Arc::clone(&self.session_ops).lock_owned() => Ok(serial),
+            serial = Arc::clone(&open.session_ops).lock_owned() => Ok(serial),
         }
     }
 
@@ -1392,7 +1395,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedText.write (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedText.write (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
@@ -1459,7 +1462,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedBinary.write (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedBinary.write (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
@@ -1531,7 +1534,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedText.rename (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedText.rename (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &from_path)
             .await?;
@@ -1597,7 +1600,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedText.delete (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedText.delete (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
@@ -1654,7 +1657,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versionedText.rollback (queued)")
+            .mutation_session_guard(&open, &cancellation, "versionedText.rollback (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
@@ -1751,7 +1754,7 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
-            .mutation_session_guard(&cancellation, "versions.merge (queued)")
+            .mutation_session_guard(&open, &cancellation, "versions.merge (queued)")
             .await?;
         self.ensure_path_not_leased(&open, &params.target_version_id, &path)
             .await?;
@@ -1892,7 +1895,7 @@ impl EngineService {
 
     /// Freeze the active workspace snapshot before a version fork or switch.
     ///
-    /// Lock order is per-workspace capture gate FIRST, then the service-global
+    /// Lock order is per-workspace capture gate FIRST, then that workspace's
     /// Y.Doc/session mutation gate — the same helper used by workspace.close.
     /// Once both are held, no capture apply or session admission can straddle
     /// the session sweep, forced reconcile, and version transaction. After the
@@ -1953,17 +1956,29 @@ impl EngineService {
             })
             .map(|(session_id, _)| session_id.clone())
             .collect();
+        let has_live_richdoc = lock(&self.sessions).iter().any(|(_, session)| {
+            session.workspace == *handle
+                && session.key.version_id == source_version_id
+                && session.content_kind == ContentKind::Richdoc
+        });
         if matches!(intent, VersionFenceIntent::Fork { .. })
-            && lock(&self.sessions).iter().any(|(_, session)| {
-                session.workspace == *handle
-                    && session.key.version_id == source_version_id
-                    && session.content_kind == ContentKind::Richdoc
-            })
+            && (has_live_richdoc
+                || Self::read_under_ctx(
+                    cancellation,
+                    "versions.createNamed (richdoc preflight)",
+                    open.actor.ydoc_version_has_unsettled_richdoc(
+                        open.workspace_id.clone(),
+                        source_version_id.clone(),
+                        cancellation.token(),
+                    ),
+                )
+                .await?)
         {
             // The lower projection layer is full-fidelity, but the daemon RPC
             // still exposes richdoc-settle-unsupported. A fork does not clone
-            // version-keyed CRDT rows, so closing and forking would silently
-            // snapshot stale markdown. Refuse before touching any session.
+            // version-keyed CRDT rows (including normally-closed persisted
+            // lineages), so forking would silently snapshot stale markdown.
+            // Refuse before touching any session or scanning the filesystem.
             return Err(wire(ErrorCode::InvalidParams, "richdoc-settle-unsupported"));
         }
 
@@ -5490,7 +5505,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.apply (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         let update = base64::engine::general_purpose::STANDARD
             .decode(params.update_base64)
@@ -5549,7 +5564,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.open (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         // The first read only DERIVES the key (head resolution can't happen
         // without it). The lease is then taken on that key and the state is
@@ -5657,6 +5672,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocRecordUpdateParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         // An OWNED guard: it moves INTO the spawned task below, so a dropped
         // RPC future cannot release the session serial while the record (and
         // its first_update_pending transition) is still running — a second
@@ -5667,7 +5683,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.recordUpdate (queued)"));
             }
-            serial = Arc::clone(&self.session_ops).lock_owned() => serial,
+            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let update = base64::engine::general_purpose::STANDARD
@@ -5740,12 +5756,13 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocSettleParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.settle (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         self.ydoc_settle_inner(
             &cancellation,
@@ -5824,12 +5841,13 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocApplyExternalMarkdownEditParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.applyExternalMarkdownEdit (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         let _ = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let _ = params.markdown;
@@ -5847,18 +5865,20 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocCloseParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.close (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         self.ydoc_close_inner(&cancellation, handle.as_ref(), params)
             .await
     }
 
-    /// Close one session while the caller already owns `session_ops`.
+    /// Close one session while the caller already owns the workspace's
+    /// `session_ops`.
     /// `versions.setActive` uses the same primitive for its all-session sweep,
     /// so manual close and switch-time close have identical settle/retry/prune
     /// behavior.
@@ -5987,12 +6007,13 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocResyncParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.resync (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = open.session_ops.lock() => serial,
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let full_state = open
@@ -8974,7 +8995,8 @@ mod tests {
         let handle: WorkspaceHandle =
             serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
 
-        let held = Arc::clone(&service.session_ops).lock_owned().await;
+        let open = service.open(Some(&handle)).expect("open workspace");
+        let held = Arc::clone(&open.session_ops).lock_owned().await;
         let writing_service = Arc::clone(&service);
         let writing_handle = handle.clone();
         let mut writing = tokio::spawn(async move {

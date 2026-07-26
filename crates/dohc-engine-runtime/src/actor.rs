@@ -586,6 +586,12 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<YdocOpenState, RuntimeError>>,
     },
+    YdocVersionHasUnsettledRichdoc {
+        workspace_id: String,
+        version_id: String,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+    },
     YdocRecordUpdate {
         key: DocKey,
         path: String,
@@ -2544,6 +2550,27 @@ impl ActorHandle {
                 version_id,
                 path,
                 content_kind,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Report whether a version owns durable richdoc state whose current CRDT
+    /// projection is not the materialized version snapshot.
+    pub async fn ydoc_version_has_unsettled_richdoc(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        token: CancellationToken,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocVersionHasUnsettledRichdoc {
+                workspace_id,
+                version_id,
                 token,
                 reply,
             })
@@ -5775,6 +5802,20 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
+            Command::YdocVersionHasUnsettledRichdoc {
+                workspace_id,
+                version_id,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_version_has_unsettled_richdoc_on_store(
+                    &store,
+                    &workspace_id,
+                    &version_id,
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
             Command::YdocRecordUpdate {
                 key,
                 path,
@@ -6983,6 +7024,83 @@ fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
     // the seq pair alone would misread a claimed base as absent (double-seed +
     // NoMarker settle refusals on a valid lineage).
     marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 || marker.base_claimed
+}
+
+fn ydoc_version_has_unsettled_richdoc_on_store(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    token: &CancellationToken,
+) -> Result<bool, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let lineages: Vec<(String, bool)> = store.read_with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT docs.object_id, EXISTS ( \
+                     SELECT 1 FROM ydoc_deferred_updates AS deferred \
+                     WHERE deferred.workspace_id = docs.workspace_id \
+                       AND deferred.version_id = docs.version_id \
+                       AND deferred.object_id = docs.object_id \
+                 ) \
+                 FROM ydoc_docs AS docs \
+                 WHERE docs.workspace_id = ?1 AND docs.version_id = ?2 \
+                   AND docs.content_kind = 'richdoc' \
+                   AND (docs.head_update_seq > 0 OR docs.head_snapshot_seq > 0 \
+                        OR docs.base_claimed = 1 OR EXISTS ( \
+                            SELECT 1 FROM ydoc_deferred_updates AS deferred \
+                            WHERE deferred.workspace_id = docs.workspace_id \
+                              AND deferred.version_id = docs.version_id \
+                              AND deferred.object_id = docs.object_id \
+                        ))",
+            )
+            .map_err(StorageError::corrupt_public)?;
+        let rows = statement
+            .query_map(params![workspace_id, version_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(StorageError::corrupt_public)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt_public)
+    })?;
+
+    for (object_id, has_deferred_updates) in lineages {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        // Deferred updates are source-version state too, and a fork clones
+        // neither them nor the Y.Doc lineage. Refuse even when the currently
+        // integrated projection still happens to match its snapshot.
+        if has_deferred_updates {
+            return Ok(true);
+        }
+        let key = DocKey::new(workspace_id, version_id, object_id)?;
+        let Some(persisted) = dohc_engine_collab::load_persisted(store, &key)? else {
+            // The row predicate above says durable state exists. A missing
+            // load is inconsistent and must fail closed for the fork.
+            return Ok(true);
+        };
+        if persisted.doc.has_pending_dependencies() {
+            return Ok(true);
+        }
+        let projected = persisted.doc.project(ContentKind::Richdoc)?;
+        let projected_sha = hex_sha256(projected.markdown.as_bytes());
+        let materialized_sha: Option<String> = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256 FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![workspace_id, version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)
+        })?;
+        if materialized_sha.as_deref() != Some(projected_sha.as_str()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn ensure_mutation_version_on_store(
