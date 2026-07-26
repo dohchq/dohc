@@ -77,6 +77,41 @@ R16 (legacy deletion) is POST-cutover by design.
   conclusions require bounds calibrated on that platform. The existing
   WSL-Linux result remains scenario/portability evidence under this caveat.
 
+## 1b. macOS soak RSS growth — OPEN, cutover-relevant (recorded 2026-07-26)
+
+The cutoverBlocking soak FAILS its RSS bound on macOS and PASSES on Windows,
+reproducibly across four runs. This is recorded as an open question, not a
+resolved caveat.
+
+| | overall fit | quarter slopes (B/s) | RSS | idle drain |
+|---|---|---|---|---|
+| Windows (banked 2026-07-21) | +13.2 KB/s **PASS** | +49k, +13k, **-31k**, +4k | 8.8 → 41.6 MB | n/a (phase added later) |
+| macOS (30 min, 3 runs) | +43-46 KB/s **FAIL** | +133k, +57k, +27k, +36k | 11.7 → 122 MB | **RETAINED, 0.0% returned in 120 s** |
+
+What the two signals do and do not establish:
+- Windows RETURNS memory mid-run (negative third quarter) and flattens, so the
+  allocations are evidently being freed — the frees are not missing.
+- macOS never flattens within 30 minutes and returns nothing while idle. But
+  `RETAINED` alone does not convict: macOS `libmalloc` releases only under
+  memory pressure, so a leak-free process would also report 0% returned. The
+  drain phase deliberately does NOT call `malloc_zone_pressure_relief`, to
+  measure unaided behavior.
+- The macOS quarter slopes DECELERATE (133 → 57 → 27 → 36 KB/s). A constant-rate
+  leak against a constant cycle rate would hold a constant slope; a
+  fragmentation curve approaching steady state decelerates. That is evidence
+  against a simple leak, and it is not proof.
+
+Bound handling: the 20 KiB/s bound is NOT relaxed and the macOS verdict stays
+FAIL. What changed is that the evidence can now distinguish the cases — the
+soak gained an idle-drain phase with a tri-state disposition, the workflow
+prints per-quarter shape, and the duration is dispatchable so the curve can be
+read further out.
+
+**Cutover relevance:** 110 MB retained after 30 minutes at ~3.2 cycles/second.
+Real dogfood usage is orders of magnitude quieter (the same caveat §1 already
+records for the Windows soak), so this is not automatically a user-visible
+problem — but it is unresolved, and the desktop app ships on macOS.
+
 ## 2. Differential (TS-vs-Rust capture parity) — PASS
 - 10/10 scenarios green on BOTH engines; goldens committed
   (capture-fixtures.json / capture-goldens.json); tamper-check proves the compare
