@@ -205,6 +205,7 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.write"]> {
     this.assertWorkspace(input.workspaceId);
+    this.assertMutationMetadataSupported("versionedText.write", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textWrite,
@@ -232,6 +233,7 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
+    this.assertMutationMetadataSupported("versionedBinary.write", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.binaryWrite,
@@ -324,6 +326,7 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.merge"]> {
     this.assertWorkspace(input.workspaceId);
+    this.assertMutationMetadataSupported("versionedText.merge", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.versionsMerge,
@@ -399,6 +402,7 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.rename"]> {
     this.assertWorkspace(input.workspaceId);
+    this.assertMutationMetadataSupported("versionedText.rename", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textRename,
@@ -423,6 +427,7 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.delete"]> {
     this.assertWorkspace(input.workspaceId);
+    this.assertMutationMetadataSupported("versionedText.delete", input.metadata);
     if (input.momentId !== undefined) {
       throw new VersionedAdapterCapabilityError(
         "versionedText.delete does not accept a caller-supplied moment id.",
@@ -511,7 +516,7 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<{ changed: boolean; moment?: SecretMomentRecord }> {
     this.assertWorkspace(input.workspaceId);
-    this.assertSecretMetadataSupported("secrets.write", input.metadata);
+    this.assertMutationMetadataSupported("secrets.write", input.metadata);
     const result = await this.request(VERSIONED_METHOD.secretsWrite, {
       workspaceId: input.workspaceId,
       versionId: input.versionId,
@@ -533,7 +538,7 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<{ moment: SecretMomentRecord | null }> {
     this.assertWorkspace(input.workspaceId);
-    this.assertSecretMetadataSupported("secrets.delete", input.metadata);
+    this.assertMutationMetadataSupported("secrets.delete", input.metadata);
     return this.request(VERSIONED_METHOD.secretsDelete, {
       workspaceId: input.workspaceId,
       versionId: input.versionId,
@@ -679,7 +684,7 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["secrets.restore"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertSecretMetadataSupported(
+    this.assertMutationMetadataSupported(
       "secrets.restore",
       input.metadata,
       "restore",
@@ -744,8 +749,8 @@ export class VersionedLiveAdapter {
     }
   }
 
-  private assertSecretMetadataSupported(
-    method: "secrets.write" | "secrets.delete" | "secrets.restore",
+  private assertMutationMetadataSupported(
+    method: string,
     metadata: AdapterWriteMetadata,
     implicitOrigin?: VersionedOrigin,
   ): void {
@@ -755,7 +760,7 @@ export class VersionedLiveAdapter {
       (implicitOrigin !== undefined && metadata.origin !== implicitOrigin)
     ) {
       throw new VersionedAdapterCapabilityError(
-        `${method} cannot preserve the supplied secret mutation metadata.`,
+        `${method} cannot preserve the supplied mutation metadata.`,
       );
     }
   }

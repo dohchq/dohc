@@ -46,7 +46,6 @@ interface WorkspaceState {
   agentReads: Map<string, ChatAgentReadState>;
   humanReads: Map<string, number>;
   humanReadStates: Map<string, ChatThreadReadState>;
-  follows: Map<string, Set<string>>;
   followRecords: Map<string, ChatFollow>;
   feedReads: Map<string, ChatFeedReadState>;
   bookmarks: Map<string, ChatBookmark>;
@@ -472,12 +471,29 @@ function activeMessageReactions(state: WorkspaceState, messageId: string): ChatR
     .map(jsonClone);
 }
 
+function activeFollowTargets(
+  state: WorkspaceState,
+  workspace: string,
+  ownerUserId: string,
+): Set<string> {
+  return new Set(
+    [...state.followRecords.values()]
+      .filter(
+        (follow) =>
+          follow.workspaceId === workspace &&
+          follow.ownerUserId === ownerUserId &&
+          follow.state === "following",
+      )
+      .map((follow) => `${follow.targetKind}\0${follow.targetId}`),
+  );
+}
+
 function personalFeedMessages(
   state: WorkspaceState,
   workspace: string,
   ownerUserId: string,
 ): ChatMessage[] {
-  const follows = state.follows.get(ownerUserId) ?? new Set<string>();
+  const follows = activeFollowTargets(state, workspace, ownerUserId);
   return [...state.messages.values()]
     .filter((message) => {
       const thread = state.threads.get(message.threadId);
@@ -816,9 +832,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     targetId: string,
   ): void {
     const state = this.workspace(workspace);
-    const follows = state.follows.get(ownerUserId) ?? new Set<string>();
-    follows.add(`${targetKind}\0${targetId}`);
-    state.follows.set(ownerUserId, follows);
+    state.followRecords.set(`${ownerUserId}\0${targetKind}\0${targetId}`, {
+      workspaceId: workspace,
+      ownerUserId,
+      targetKind,
+      targetId,
+      state: "following",
+      updatedAtMs: 0,
+    });
   }
 
   seedThreadRead(workspace: string, threadId: string, lastReadSequence: number): void {
@@ -956,7 +977,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       case CHATS_METHOD.followsList:
         return this.followsList(state, workspace, params);
       case CHATS_METHOD.followsEnsureDefaults:
-        return this.ensureDefaultFollows(state, params);
+        return this.ensureDefaultFollows(state, workspace, params);
       case CHATS_METHOD.feedMarkSeen:
         return this.feedMarkSeen(state, workspace, params);
       case CHATS_METHOD.feedListPersonal:
@@ -2014,11 +2035,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
       updatedAtMs: this.tick(optionalSafeInteger(params, "nowMs")),
     };
     state.followRecords.set(key, record);
-    const follows = state.follows.get(ownerUserId) ?? new Set<string>();
-    const target = `${targetKind}\0${targetId}`;
-    if (followState === "following") follows.add(target);
-    else follows.delete(target);
-    state.follows.set(ownerUserId, follows);
     return jsonResult(record);
   }
 
@@ -2055,16 +2071,28 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult({ follows, truncated: false });
   }
 
-  private ensureDefaultFollows(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
+  private ensureDefaultFollows(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
     const owner = normalizeTrimmed(
       requiredString(params, "ownerUserId", "invalid-follow-target"),
       "invalid-follow-target",
     );
-    const follows = state.follows.get(owner) ?? new Set<string>();
     for (const channel of state.channels.values()) {
-      if (channel.kind !== "dm" && channel.wireId) follows.add(`channel\0${channel.wireId}`);
+      if (channel.kind === "dm" || !channel.wireId) continue;
+      const key = `${owner}\0channel\0${channel.wireId}`;
+      if (state.followRecords.has(key)) continue;
+      state.followRecords.set(key, {
+        workspaceId: workspace,
+        ownerUserId: owner,
+        targetKind: "channel",
+        targetId: channel.wireId,
+        state: "following",
+        updatedAtMs: 0,
+      });
     }
-    state.follows.set(owner, follows);
     return null;
   }
 
@@ -2130,7 +2158,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     params: ChatsJsonObject,
   ): JsonValue {
     const owner = requiredString(params, "ownerUserId", "invalid-follow-target");
-    const follows = state.follows.get(owner) ?? new Set<string>();
+    const follows = activeFollowTargets(state, workspace, owner);
     const feedMessages = personalFeedMessages(state, workspace, owner);
     const candidates: ChatFeedItem[] = feedMessages
       .map((message) => {
@@ -2874,7 +2902,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
         agentReads: new Map(),
         humanReads: new Map(),
         humanReadStates: new Map(),
-        follows: new Map(),
         followRecords: new Map(),
         feedReads: new Map(),
         bookmarks: new Map(),

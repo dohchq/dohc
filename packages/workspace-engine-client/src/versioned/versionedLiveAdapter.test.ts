@@ -261,6 +261,64 @@ describe("VersionedLiveAdapter", () => {
     expect(requests).toEqual([]);
   });
 
+  it("never silently drops unsupported text and binary mutation metadata", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+
+    const mutations = [
+      () =>
+        adapter.writeTextFile({
+          workspaceId: "workspace",
+          versionId: "main",
+          path: "notes/write.md",
+          text: "text",
+          metadata: { origin: "api", summary: "Write note" },
+        }),
+      () =>
+        adapter.writeBinaryFile({
+          workspaceId: "workspace",
+          versionId: "main",
+          path: "asset.bin",
+          bytes: new Uint8Array([1]),
+          metadata: { origin: "api", correlationId: "binary-write" },
+        }),
+      () =>
+        adapter.mergeTextFileFromVersion({
+          workspaceId: "workspace",
+          targetVersionId: "main",
+          sourceVersionId: "feature",
+          path: "notes/merge.md",
+          metadata: { origin: "api", summary: "Merge note" },
+        }),
+      () =>
+        adapter.renameTextFile({
+          workspaceId: "workspace",
+          versionId: "main",
+          fromPath: "notes/old.md",
+          toPath: "notes/new.md",
+          metadata: { origin: "api", correlationId: "rename-note" },
+        }),
+      () =>
+        adapter.deleteTextFile({
+          workspaceId: "workspace",
+          versionId: "main",
+          path: "notes/delete.md",
+          metadata: { origin: "api", summary: "Delete note" },
+        }),
+    ];
+
+    for (const mutate of mutations) {
+      await expect(mutate()).rejects.toBeInstanceOf(
+        VersionedAdapterCapabilityError,
+      );
+    }
+    expect(requests).toEqual([]);
+  });
+
   it("never silently drops secret mutation metadata rejected by the daemon", async () => {
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(

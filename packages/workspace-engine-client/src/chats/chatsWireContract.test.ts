@@ -267,7 +267,7 @@ describe("B2 chats wire contract and loopback", () => {
       (await roundTrip(CHATS_METHOD.followsList, {
         ownerUserId: "viewer",
       })).follows,
-    ).toHaveLength(1);
+    ).toHaveLength(5);
     expect(
       (await roundTrip(CHATS_METHOD.feedMarkSeen, {
         ownerUserId: "viewer",

@@ -854,6 +854,65 @@ describe("ChatsLiveAdapter", () => {
     ).rejects.toThrow("invalid-follow-target");
   });
 
+  it("lists seeded default channel follows without resurrecting tombstones", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "general",
+      name: "General",
+    });
+    loopback.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "private",
+      name: "Private",
+      kind: "dm",
+    });
+
+    await adapter.ensureDefaultChannelFollows({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+    });
+    await expect(
+      adapter.listFollows({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+      }),
+    ).resolves.toEqual([
+      {
+        workspaceId: WORKSPACE,
+        ownerUserId: "owner",
+        targetKind: "channel",
+        targetId: "general",
+        state: "following",
+        updatedAtMs: 0,
+      },
+    ]);
+
+    await adapter.setFollow({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      targetKind: "channel",
+      targetId: "general",
+      state: "unfollowed",
+    });
+    await adapter.ensureDefaultChannelFollows({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+    });
+    await expect(
+      adapter.listFollows({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        targetKind: "channel",
+        targetId: "general",
+        state: "unfollowed",
+      }),
+    ]);
+  });
+
   it("rejects a replicated follow whose verified owner does not match", async () => {
     const { adapter } = loopbackAdapter();
     const thread = await adapter.createThread({
