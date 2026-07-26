@@ -4191,6 +4191,11 @@ impl<'a> LinkedChatStore<'a> {
             )
         })?;
         committed(outcome)?;
+        // Post-commit read-back is race-free only because this store holds
+        // &mut EngineStore over the connection: no in-process writer can
+        // interleave between the commit and this read. A second process on
+        // the same file would break that assumption — fold the read into the
+        // boundary-replay closure if multi-writer access ever arrives.
         self.store.read_with(|conn| {
             require_follow(
                 conn,
