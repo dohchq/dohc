@@ -106,6 +106,7 @@ const REQUIRED_TABLES: &[&str] = &[
     // R10 replication, relay, and share cursors (migration ordinal 5).
     "sync_identity",
     "replication_log",
+    "replication_pending_resolves",
     "replication_peers",
     "sync_relay_cursors",
     "sync_relay_push_state",

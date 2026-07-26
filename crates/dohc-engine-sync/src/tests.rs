@@ -3154,6 +3154,86 @@ fn version_create_shipped_snapshot_rejects_a_missing_blob_deliberately() {
 }
 
 #[test]
+fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
+    for (index, content_kind) in [None, Some("text"), Some("binary")].into_iter().enumerate() {
+        let (_scratch, _path, mut engine) = store();
+        seed_replication_version(&mut engine, "main", "main");
+        let text_sha = dohc_engine_storage::hex_sha256(b"content");
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,7,'content')",
+                    [&text_sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed text blob");
+        let binary_sha = engine
+            .put_binary_blob(b"content")
+            .expect("seed binary blob");
+        let mut snapshot = shipped_text_snapshot(
+            &format!("valid-kind-object-{index}"),
+            &format!("valid-kind-{index}.md"),
+            if content_kind == Some("binary") {
+                &binary_sha
+            } else {
+                &text_sha
+            },
+        );
+        if let Some(kind) = content_kind {
+            snapshot["contentKind"] = json!(kind);
+        }
+        let operation = version_create_with_shipped_snapshots(
+            &format!("valid-kind-peer-{index}"),
+            &format!("valid-kind-version-{index}"),
+            vec![snapshot],
+        );
+
+        assert!(
+            matches!(
+                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+            ),
+            "{content_kind:?} must remain accepted"
+        );
+    }
+
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let text_sha = dohc_engine_storage::hex_sha256(b"content");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,7,'content')",
+                [&text_sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed text blob");
+    let mut malformed = shipped_text_snapshot("richdoc-object", "richdoc.md", &text_sha);
+    malformed["contentKind"] = json!("richdoc");
+    let operation = version_create_with_shipped_snapshots(
+        "richdoc-kind-peer",
+        "richdoc-kind-version",
+        vec![malformed],
+    );
+
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Err(SyncError::InvalidInput {
+            reason: "version.create shipped snapshot content kind is invalid"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "richdoc-kind-peer").expect("ack"),
+        -1,
+        "an unknown content kind must not be journaled or acknowledged"
+    );
+}
+
+#[test]
 fn version_create_shipped_snapshot_rejects_duplicate_paths_deliberately() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
@@ -4035,6 +4115,94 @@ fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "relay-conflict-peer").expect("conflict ack"),
         0
+    );
+}
+
+#[test]
+fn relay_retry_surfaces_pending_resolve_acked_before_later_error() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let resolve = envelope(
+        "retry-pending-peer",
+        0,
+        "conflict.resolve",
+        json!({
+            "conflictId": "missing-on-receiver",
+            "status": "resolved",
+            "chosenFrom": "incoming",
+            "resolution": "applied-incoming",
+            "updatedAtMs": 10,
+            "path": "notes/retry.md"
+        }),
+    );
+    let missing_sha = dohc_engine_storage::hex_sha256(b"hydrate before retry");
+    let later = version_create_with_shipped_snapshots(
+        "retry-later-peer",
+        "retry-later-version",
+        vec![shipped_text_snapshot(
+            "retry-later-object",
+            "retry-later.md",
+            &missing_sha,
+        )],
+    );
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![resolve, later],
+            next_cursor: "retry-cursor".into(),
+        })),
+    });
+
+    assert!(matches!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        Err(RelayError::Local(_))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "retry-pending-peer").expect("resolve ack"),
+        0,
+        "the deferred resolve commits before the later envelope fails"
+    );
+    assert!(
+        read_relay_cursor(&engine, "ws")
+            .expect("relay cursor")
+            .is_none(),
+        "the failed batch must remain retryable"
+    );
+
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,20,'hydrate before retry')",
+                [&missing_sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("hydrate later envelope");
+
+    let retry = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("retry pull");
+    let SyncPassOutcome::Complete {
+        applied,
+        skipped,
+        pending_resolves,
+        ..
+    } = retry
+    else {
+        panic!("retry must complete: {retry:?}");
+    };
+    assert_eq!((applied, skipped), (1, 1));
+    assert_eq!(
+        pending_resolves,
+        vec![PendingResolve {
+            remote_conflict_id: "missing-on-receiver".to_owned(),
+            local_conflict_id: None,
+            path: Some("notes/retry.md".to_owned()),
+            reason: PendingResolveReason::UnmatchedTarget,
+        }],
+        "the retry must reconstruct the already-acked pending decision"
     );
 }
 

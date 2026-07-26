@@ -225,6 +225,14 @@ fn validate_shipped_snapshots(snapshots: &[ForkSnapshot]) -> Result<(), SyncErro
                 reason: "version.create shipped snapshot paths must be unique",
             });
         }
+        if !matches!(
+            snapshot.content_kind.as_deref(),
+            None | Some("text" | "binary")
+        ) {
+            return Err(SyncError::InvalidInput {
+                reason: "version.create shipped snapshot content kind is invalid",
+            });
+        }
     }
     Ok(())
 }

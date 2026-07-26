@@ -300,6 +300,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
                 }
                 ApplyOutcome::Skipped => {
+                    if let Some(pending) =
+                        crate::conflict_apply::read_replayed_pending_resolve(store, op)
+                            .map_err(local)?
+                    {
+                        pending_resolves.push(pending);
+                    }
                     skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?
                 }
                 ApplyOutcome::Crashed { .. } => {

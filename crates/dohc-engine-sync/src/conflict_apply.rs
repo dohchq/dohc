@@ -85,12 +85,96 @@ pub fn apply_conflict_envelope(
         return Err(SyncError::UnsupportedOperation);
     }
     apply_envelope_with(store, envelope, faults, |tx, op| {
-        match op.op_kind.as_str() {
+        let result = match op.op_kind.as_str() {
             "conflict.open" => apply_open(tx, op),
             "conflict.resolve" => apply_resolve(tx, op),
             _ => Err(SyncError::UnsupportedOperation),
+        }?;
+        if let Some(pending) = result.pending_resolve.as_ref() {
+            persist_pending_resolve(tx, op, pending)?;
         }
+        Ok(result)
     })
+}
+
+pub(crate) fn read_replayed_pending_resolve(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Option<PendingResolve>, SyncError> {
+    if envelope.op_kind != "conflict.resolve" {
+        return Ok(None);
+    }
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT remote_conflict_id, local_conflict_id, path, reason \
+             FROM replication_pending_resolves \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![
+                envelope.workspace_id,
+                envelope.origin_id,
+                envelope.origin_seq
+            ],
+            |row| {
+                let reason: String = row.get(3)?;
+                Ok(PendingResolve {
+                    remote_conflict_id: row.get(0)?,
+                    local_conflict_id: row.get(1)?,
+                    path: row.get(2)?,
+                    reason: pending_resolve_reason(&reason)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+    })
+}
+
+fn persist_pending_resolve(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    pending: &PendingResolve,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT INTO replication_pending_resolves \
+         (workspace_id,origin_id,origin_seq,remote_conflict_id,local_conflict_id,path,reason) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            envelope.workspace_id,
+            envelope.origin_id,
+            envelope.origin_seq,
+            pending.remote_conflict_id,
+            pending.local_conflict_id,
+            pending.path,
+            pending_resolve_reason_str(pending.reason)
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+const fn pending_resolve_reason_str(reason: PendingResolveReason) -> &'static str {
+    match reason {
+        PendingResolveReason::PathChange => "path-change",
+        PendingResolveReason::Merged => "merged",
+        PendingResolveReason::StaleHead => "stale-head",
+        PendingResolveReason::BinaryUnhydrated => "binary-unhydrated",
+        PendingResolveReason::BinaryApplyFailed => "binary-apply-failed",
+        PendingResolveReason::TextApplyRejected => "text-apply-rejected",
+        PendingResolveReason::UnmatchedTarget => "unmatched-target",
+    }
+}
+
+fn pending_resolve_reason(value: &str) -> rusqlite::Result<PendingResolveReason> {
+    match value {
+        "path-change" => Ok(PendingResolveReason::PathChange),
+        "merged" => Ok(PendingResolveReason::Merged),
+        "stale-head" => Ok(PendingResolveReason::StaleHead),
+        "binary-unhydrated" => Ok(PendingResolveReason::BinaryUnhydrated),
+        "binary-apply-failed" => Ok(PendingResolveReason::BinaryApplyFailed),
+        "text-apply-rejected" => Ok(PendingResolveReason::TextApplyRejected),
+        "unmatched-target" => Ok(PendingResolveReason::UnmatchedTarget),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 
 #[derive(Deserialize)]
@@ -333,16 +417,10 @@ fn apply_resolve(
         // null` + the payload path, mirroring the oracle, so a reconciliation
         // layer can show it instead of it vanishing silently.
         //
-        // This surfacing is deliberately BEST-EFFORT / informational and is not
-        // durably persisted: unlike the four defer reasons — each backed by an
-        // Open `conflicts` row that survives a crash — an unmatched resolve has
-        // NO local state to reconcile (the conflict does not exist on this
-        // node), so there is nothing actionable to rebuild. A commit-to-response
-        // crash + replay returns `Skipped` and drops only the diagnostic
-        // surfacing of a peer's decision about a conflict we never held — never
-        // any convergence-relevant or actionable state. Durable persistence
-        // (a pending-resolve table) would need a migration and is unwarranted
-        // for a purely informational no-op.
+        // The generic conflict wrapper persists this structured result beside
+        // the imported coordinate in the same transaction, so a relay retry
+        // can surface the exact decision even though applying this resolve
+        // created no local conflict state.
         return Ok(ConflictApplyResult {
             conflict_id: payload.conflict_id.clone(),
             inserted: None,
