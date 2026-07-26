@@ -1417,8 +1417,9 @@ impl<'a> VersionedTextStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT f.object_id, f.path, b.text, f.blob_sha256, f.updated_at_ms, \
-                     f.latest_moment_id, f.metadata_origin, \
-                     COALESCE(f.content_kind, 'text'), bb.sha256 FROM fork_base_snapshots f \
+                     f.latest_moment_id, f.metadata_origin, f.metadata_summary, \
+                     f.metadata_correlation_id, COALESCE(f.content_kind, 'text'), \
+                     bb.sha256 FROM fork_base_snapshots f \
                      LEFT JOIN blobs b ON b.sha256 = f.blob_sha256 \
                      LEFT JOIN binary_blobs bb ON bb.sha256 = f.binary_sha256 \
                      WHERE f.workspace_id = ?1 AND f.version_id = ?2 ORDER BY f.path",
