@@ -54,6 +54,7 @@ const REQUEST_DEADLINE_MS = 15_000;
 const REGEX_SCAN_TIMEOUT_MS = 5_000;
 const RUN_MESSAGE_LINK_ATTEMPTS = 3;
 const RUN_MESSAGE_LINK_RETRY_MS = 25;
+const RUN_MESSAGE_LINK_DEADLINE_MS = 1_000;
 const TOKEN_RE = /^[a-f0-9]{64}$/u;
 
 const authEnvelopeSchema = z.object({ token: z.string() }).passthrough();
@@ -128,6 +129,7 @@ export interface CliServerOptions {
   platform?: NodeJS.Platform;
   regexScanTimeoutMs?: number;
   runMessageLinkRetryMs?: number;
+  runMessageLinkDeadlineMs?: number;
 }
 
 export interface CliServerHandle {
@@ -761,15 +763,24 @@ async function linkRunMessage(
 ): Promise<string | null> {
   if (input.actor !== "agent" || !input.runId) return null;
   const retryMs = options.runMessageLinkRetryMs ?? RUN_MESSAGE_LINK_RETRY_MS;
+  const deadlineMs =
+    options.runMessageLinkDeadlineMs ?? RUN_MESSAGE_LINK_DEADLINE_MS;
   for (let attempt = 1; attempt <= RUN_MESSAGE_LINK_ATTEMPTS; attempt += 1) {
     try {
-      const run = await context.dispatchStore.getRunRecord(input.runId);
+      const requestOptions = { deadlineMs };
+      const run = await context.dispatchStore.getRunRecord(
+        input.runId,
+        requestOptions,
+      );
       if (!run || run.workspaceId !== context.workspaceId) return null;
-      await context.dispatchStore.recordRunMessage({
-        workspaceId: context.workspaceId,
-        messageId: input.messageId,
-        runId: input.runId,
-      });
+      await context.dispatchStore.recordRunMessage(
+        {
+          workspaceId: context.workspaceId,
+          messageId: input.messageId,
+          runId: input.runId,
+        },
+        requestOptions,
+      );
       return null;
     } catch (error) {
       if (

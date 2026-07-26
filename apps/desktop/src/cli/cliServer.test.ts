@@ -718,6 +718,56 @@ describe("CLI socket server", () => {
     ).toEqual([]);
   });
 
+  it("forwards a deadline to every provenance RPC attempt", async () => {
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_deadline_trigger",
+      threadId: "thread_deadline",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for deadline linkage.");
+    const lookupDeadlines: Array<number | undefined> = [];
+    const linkDeadlines: Array<number | undefined> = [];
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async getRunRecord(runId, requestOptions) {
+          lookupDeadlines.push(requestOptions?.deadlineMs);
+          return originalDispatch.getRunRecord(runId);
+        },
+        async recordRunMessage(_input, requestOptions) {
+          linkDeadlines.push(requestOptions?.deadlineMs);
+          await new Promise<void>((_resolve, reject) => {
+            setTimeout(
+              () => reject(new Error("daemon request deadline exceeded")),
+              requestOptions?.deadlineMs ?? 100,
+            );
+          });
+          return true;
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkDeadlineMs = 1;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Deadline provenance",
+      body: "The post remains bounded when linkage does not respond.",
+    });
+
+    expect(lookupDeadlines).toEqual([1, 1, 1]);
+    expect(linkDeadlines).toEqual([1, 1, 1]);
+    expect(result.warning).toContain(
+      "agent-run provenance could not be recorded after 3 attempts",
+    );
+  });
+
   it("shows a message branch and lists candidates for an ambiguous id prefix", async () => {
     const first = await post({
       actor: "human",

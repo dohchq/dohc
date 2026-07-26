@@ -187,7 +187,7 @@ describe("live agent dispatch store", () => {
         workspaceId: WORKSPACE.workspaceId,
         messageId: "reply",
         runId: run.runId,
-      }),
+      }, { deadlineMs: 321 }),
     ).resolves.toBe(true);
     await expect(
       store.listRunMessages(WORKSPACE.workspaceId, run.runId),
@@ -198,7 +198,9 @@ describe("live agent dispatch store", () => {
     await expect(
       store.runRecordsForThread(WORKSPACE.workspaceId, "thread"),
     ).resolves.toEqual({ trigger: run });
-    await expect(store.getRunRecord(run.runId)).resolves.toEqual(run);
+    await expect(
+      store.getRunRecord(run.runId, { deadlineMs: 654 }),
+    ).resolves.toEqual(run);
     await expect(
       store.setThreadDispatchPaused({
         workspaceId: WORKSPACE.workspaceId,
@@ -237,6 +239,16 @@ describe("live agent dispatch store", () => {
         logPath: "logs/run-fixed/run-fixed.log",
       },
     });
+    expect(
+      client.requests.find(
+        ({ method }) => method === "chats.dispatch.recordRunMessage",
+      )?.deadlineMs,
+    ).toBe(321);
+    expect(
+      client.requests
+        .filter(({ method }) => method === "chats.dispatch.getRunRecord")
+        .at(-1)?.deadlineMs,
+    ).toBe(654);
     expect(
       new Set(
         client.requests
@@ -288,18 +300,37 @@ describe("live agent dispatch store", () => {
     });
   });
 
-  it("workspace_sessions_serialize_open_and_rebind_after_reconnect", async () => {
+  it("workspace_sessions_join_one_in_progress_rebind_after_concurrent_reconnects", async () => {
+    // MUTATION: clear entry.opening in either reconnect catch -> both stale
+    // operations issue workspace.open and leak one of the resulting handles.
     let openCount = 0;
-    let refused = false;
+    let staleOperationCount = 0;
+    let releaseStaleOperations!: () => void;
+    const staleOperations = new Promise<void>((resolve) => {
+      releaseStaleOperations = resolve;
+    });
+    let signalReopenStarted!: () => void;
+    const reopenStarted = new Promise<void>((resolve) => {
+      signalReopenStarted = resolve;
+    });
+    let releaseReopen!: () => void;
+    const reopenGate = new Promise<void>((resolve) => {
+      releaseReopen = resolve;
+    });
     const client = mockClient(async (request) => {
       if (request.method === "workspace.open") {
         openCount += 1;
-        await Promise.resolve();
+        if (openCount === 2) {
+          signalReopenStarted();
+          await reopenGate;
+        }
         return { workspace: `handle-${openCount}` };
       }
       if (request.method === "workspace.close") return { closed: true };
-      if (!refused) {
-        refused = true;
+      if (request.workspace === "handle-1") {
+        staleOperationCount += 1;
+        if (staleOperationCount === 2) releaseStaleOperations();
+        await staleOperations;
         throw {
           wireError: {
             code: "WORKSPACE_UNAVAILABLE",
@@ -316,27 +347,34 @@ describe("live agent dispatch store", () => {
     openSessions.push(sessions);
     const { store } = createLiveAgentDispatchStore(WORKSPACE, sessions);
 
-    await expect(
-      Promise.all([
-        store.recordRunMessage({
-          workspaceId: WORKSPACE.workspaceId,
-          messageId: "reply-a",
-          runId: run.runId,
-        }),
-        store.recordRunMessage({
-          workspaceId: WORKSPACE.workspaceId,
-          messageId: "reply-b",
-          runId: run.runId,
-        }),
-      ]),
-    ).resolves.toEqual([true, true]);
+    const operations = Promise.all([
+      store.recordRunMessage({
+        workspaceId: WORKSPACE.workspaceId,
+        messageId: "reply-a",
+        runId: run.runId,
+      }),
+      store.recordRunMessage({
+        workspaceId: WORKSPACE.workspaceId,
+        messageId: "reply-b",
+        runId: run.runId,
+      }),
+    ]);
+    await reopenStarted;
+    releaseReopen();
+
+    await expect(operations).resolves.toEqual([true, true]);
+    expect(staleOperationCount).toBe(2);
     expect(openCount).toBe(2);
     expect(
       client.requests
         .filter(({ method }) => method === "workspace.open")
         .map(({ params }) => params),
     ).toEqual([
-      { rootDir: WORKSPACE.rootPath, workspaceId: WORKSPACE.workspaceId },
+      {
+        rootDir: WORKSPACE.rootPath,
+        workspaceId: WORKSPACE.workspaceId,
+        recoverRunningDispatches: false,
+      },
       {
         rootDir: WORKSPACE.rootPath,
         workspaceId: WORKSPACE.workspaceId,

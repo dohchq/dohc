@@ -155,6 +155,11 @@ interface LiveRun {
   killEscalation: ReturnType<typeof setTimeout> | null;
   releaseWorkspace: (() => Promise<void>) | null;
   finalized: boolean;
+  terminalIntent:
+    | { kind: "complete"; exitCode: number }
+    | { kind: "fail"; exitCode?: number; reason: string }
+    | null;
+  terminalDurable: boolean;
 }
 
 interface SpawnedRun {
@@ -660,66 +665,85 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     live: LiveRun,
     exitCode: number | null,
     signal: NodeJS.Signals | null,
-  ): Promise<void> {
-    if (live.finalized) {
-      if (stopped) return;
-      if (liveRuns.get(live.workspace.workspaceId) === live) {
-        if (live.killEscalation) clearTimeout(live.killEscalation);
-        live.killEscalation = null;
-        clearLiveAttribution(live);
-        liveRuns.delete(live.workspace.workspaceId);
-        await releaseLiveWorkspace(live);
-        await scanAndDrain(live.workspace);
-      }
-      return;
+  ): Promise<boolean> {
+    if (stopped || liveRuns.get(live.workspace.workspaceId) !== live) {
+      return false;
     }
-    live.finalized = true;
-    clearTimeout(live.timeout);
-    if (live.killEscalation) clearTimeout(live.killEscalation);
-    live.killEscalation = null;
-    const code = exitCode ?? signalExitCode(signal);
+    if (!live.finalized) {
+      live.finalized = true;
+      clearTimeout(live.timeout);
+      if (live.killEscalation) clearTimeout(live.killEscalation);
+      live.killEscalation = null;
+      live.terminalIntent = {
+        kind: "complete",
+        exitCode: exitCode ?? signalExitCode(signal),
+      };
+    }
+    const intent = live.terminalIntent;
+    if (!intent) return false;
     const dispatch = options.dispatchStoreFor(live.workspace);
-    try {
+    if (!live.terminalDurable) {
       let linkedMessages: string[] | null = null;
+      if (intent.kind === "complete") {
+        try {
+          linkedMessages = await dispatch.listRunMessages(
+            live.workspace.workspaceId,
+            live.claim.run.runId,
+          );
+        } catch (error) {
+          reportError(error);
+        }
+        if (intent.exitCode !== 0) {
+          await postFailureNote(
+            live.workspace,
+            live.claim.run,
+            `⚠ Agent run failed (exit ${intent.exitCode}). Open the run chip for details.`,
+          ).catch(reportError);
+        } else if (linkedMessages?.length === 0) {
+          await postFailureNote(
+            live.workspace,
+            live.claim.run,
+            "⚠ Agent run produced no reply. Open the run chip for details.",
+          ).catch(reportError);
+        }
+      }
       try {
-        linkedMessages = await dispatch.listRunMessages(
-          live.workspace.workspaceId,
-          live.claim.run.runId,
-        );
+        if (intent.kind === "complete") {
+          await dispatch.completeRun({
+            runId: live.claim.run.runId,
+            exitCode: intent.exitCode,
+          });
+        } else {
+          await dispatch.failRun({
+            runId: live.claim.run.runId,
+            ...(intent.exitCode !== undefined
+              ? { exitCode: intent.exitCode }
+              : {}),
+            reason: intent.reason,
+          });
+        }
+        live.terminalDurable = true;
+        notifyRunUpdated(live.workspace.workspaceId);
       } catch (error) {
         reportError(error);
+        return false;
       }
-      if (code !== 0) {
-        await postFailureNote(
-          live.workspace,
-          live.claim.run,
-          `⚠ Agent run failed (exit ${code}). Open the run chip for details.`,
-        ).catch(reportError);
-      } else if (linkedMessages?.length === 0) {
-        await postFailureNote(
-          live.workspace,
-          live.claim.run,
-          "⚠ Agent run produced no reply. Open the run chip for details.",
-        ).catch(reportError);
-      }
-      await dispatch.completeRun({
-        runId: live.claim.run.runId,
-        exitCode: code,
-      });
-      notifyRunUpdated(live.workspace.workspaceId);
-    } finally {
-      if (liveRuns.get(live.workspace.workspaceId) === live) {
-        liveRuns.delete(live.workspace.workspaceId);
-      }
-      clearLiveAttribution(live);
-      await releaseLiveWorkspace(live);
     }
-    await scanAndDrain(live.workspace);
+    if (!live.child.hasExited()) return false;
+    liveRuns.delete(live.workspace.workspaceId);
+    clearLiveAttribution(live);
+    await releaseLiveWorkspace(live);
+    return true;
   }
 
   async function timeOutLiveRun(live: LiveRun): Promise<void> {
     if (live.finalized) return;
     live.finalized = true;
+    live.terminalIntent = {
+      kind: "fail",
+      exitCode: 124,
+      reason: `timed out after ${live.timeoutMinutes}m`,
+    };
     live.killEscalation = terminateWithEscalation(
       live.child,
       live.killEscalation,
@@ -730,12 +754,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       live.claim.run,
       `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Open the run chip for details.`,
     ).catch(reportError);
-    await dispatch.failRun({
-      runId: live.claim.run.runId,
-      exitCode: 124,
-      reason: `timed out after ${live.timeoutMinutes}m`,
-    });
-    notifyRunUpdated(live.workspace.workspaceId);
+    try {
+      await dispatch.failRun({
+        runId: live.claim.run.runId,
+        exitCode: 124,
+        reason: `timed out after ${live.timeoutMinutes}m`,
+      });
+      live.terminalDurable = true;
+      notifyRunUpdated(live.workspace.workspaceId);
+    } catch (error) {
+      reportError(error);
+    }
   }
 
   async function failClaimBeforeRun(
@@ -805,19 +834,25 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         killEscalation: null,
         releaseWorkspace,
         finalized: false,
+        terminalIntent: null,
+        terminalDurable: false,
       };
       liveRuns.set(workspace.workspaceId, live);
       runReservations.delete(workspace.workspaceId);
       spawned.child.onExit((code, signal) => {
-        void enqueue(workspace.workspaceId, () =>
-          finishLiveRun(live, code, signal),
-        );
+        void enqueue(workspace.workspaceId, async () => {
+          if (await finishLiveRun(live, code, signal)) {
+            await scanAndDrain(live.workspace);
+          }
+        });
       });
       spawned.child.onError((error) => {
         reportError(error);
-        void enqueue(workspace.workspaceId, () =>
-          finishLiveRun(live, 1, null),
-        );
+        void enqueue(workspace.workspaceId, async () => {
+          if (await finishLiveRun(live, 1, null)) {
+            await scanAndDrain(live.workspace);
+          }
+        });
       });
       notifyRunUpdated(workspace.workspaceId);
       const publishWorking = () =>
@@ -1033,6 +1068,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   async function scanAndDrain(workspace: ChatDispatchWorkspace): Promise<void> {
+    const recovering = liveRuns.get(workspace.workspaceId);
+    if (recovering?.finalized) {
+      if (!(await finishLiveRun(recovering, null, null))) return;
+    }
     await startupSweep(workspace);
     await scanTriggers(workspace);
     await drain(workspace);
@@ -1113,6 +1152,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (!live || live.finalized) return;
       stoppedRun = true;
       live.finalized = true;
+      live.terminalIntent = {
+        kind: "fail",
+        exitCode: APP_QUIT_EXIT_CODE,
+        reason: "user-stop",
+      };
       clearTimeout(live.timeout);
       live.killEscalation = terminateWithEscalation(
         live.child,
@@ -1124,6 +1168,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         exitCode: APP_QUIT_EXIT_CODE,
         reason: "user-stop",
       });
+      live.terminalDurable = true;
       try {
         await postFailureNote(
           live.workspace,

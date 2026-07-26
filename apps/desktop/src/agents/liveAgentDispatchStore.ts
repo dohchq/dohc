@@ -18,7 +18,10 @@ import {
   RUN_ID_LOG_TOKEN,
   type ChatDispatchRecovery,
 } from "./chatDispatchService";
-import type { AwaitableAgentDispatchStore } from "./awaitableAgentDispatchStore";
+import type {
+  AgentDispatchRequestOptions,
+  AwaitableAgentDispatchStore,
+} from "./awaitableAgentDispatchStore";
 
 export interface LiveAgentDispatchStoreHandle {
   store: AwaitableAgentDispatchStore;
@@ -40,19 +43,26 @@ export function createLiveAgentDispatchStore(
 
   const invoke = async <T>(
     operation: (adapter: ChatsLiveAdapter) => Promise<T>,
-    runId?: string,
+    invokeOptions: {
+      runId?: string;
+      retryTransportErrors?: boolean;
+    } = {},
   ): Promise<T> =>
     await sessions.run(workspace, async ({ client, workspace: handle }) => {
       const adapter = new ChatsLiveAdapter(client, handle, {
         workspaceId: workspace.workspaceId,
-        ...(runId
+        ...(invokeOptions.runId
           ? {
               createId: (kind) =>
-                kind === "run" ? runId : `${kind}-${randomUUID()}`,
+                kind === "run"
+                  ? invokeOptions.runId!
+                  : `${kind}-${randomUUID()}`,
             }
           : {}),
       });
       return await operation(adapter);
+    }, {
+      retryTransportErrors: invokeOptions.retryTransportErrors,
     });
 
   const store: AwaitableAgentDispatchStore = {
@@ -75,15 +85,21 @@ export function createLiveAgentDispatchStore(
                 }
               : {}),
           }),
-        runId,
+        { runId },
       );
     },
     failPendingForThread: async (input) =>
       await invoke(async (adapter) => await adapter.failPendingForThread(input)),
     completeRun: async (input) =>
-      await invoke(async (adapter) => await adapter.completeRun(input)),
+      await invoke(
+        async (adapter) => await adapter.completeRun(input),
+        { retryTransportErrors: true },
+      ),
     failRun: async (input) =>
-      await invoke(async (adapter) => await adapter.failRun(input)),
+      await invoke(
+        async (adapter) => await adapter.failRun(input),
+        { retryTransportErrors: true },
+      ),
     listPending: async (workspaceId) =>
       (await invoke(async (adapter) => await adapter.listPending(workspaceId))) as AgentDispatchRecord[],
     openRuns: async (workspaceId) =>
@@ -92,8 +108,19 @@ export function createLiveAgentDispatchStore(
       (await invoke(async (adapter) => await adapter.markFailureNotePosted(runId))) as AgentRunRecord,
     recentDispatchCount: async (input) =>
       await invoke(async (adapter) => await adapter.recentDispatchCount(input)),
-    recordRunMessage: async (input) =>
-      await invoke(async (adapter) => await adapter.recordRunMessage(input)),
+    recordRunMessage: async (
+      input,
+      requestOptions?: AgentDispatchRequestOptions,
+    ) =>
+      await invoke(async (adapter) =>
+        await adapter.request(
+          CHATS_METHOD.dispatchRecordRunMessage,
+          {
+            messageId: input.messageId,
+            runId: input.runId,
+          },
+          requestOptions,
+        )),
     listRunMessages: async (workspaceId, runId) =>
       await invoke(async (adapter) => await adapter.listRunMessages(workspaceId, runId)),
     runIdForMessage: async (workspaceId, messageId) =>
@@ -103,8 +130,16 @@ export function createLiveAgentDispatchStore(
         async (adapter) =>
           await adapter.runRecordsForThread(workspaceId, threadId, options),
       )) as Record<string, AgentRunRecord>,
-    getRunRecord: async (runId) =>
-      (await invoke(async (adapter) => await adapter.getRunRecord(runId))) as AgentRunRecord | null,
+    getRunRecord: async (
+      runId,
+      requestOptions?: AgentDispatchRequestOptions,
+    ) =>
+      (await invoke(async (adapter) =>
+        await adapter.request(
+          CHATS_METHOD.dispatchGetRunRecord,
+          { runId },
+          requestOptions,
+        ))) as AgentRunRecord | null,
     setThreadDispatchPaused: async (input) =>
       (await invoke(async (adapter) => await adapter.setThreadDispatchPaused(input))) as ThreadDispatchPauseState,
     threadDispatchPaused: async (workspaceId, threadId) =>
