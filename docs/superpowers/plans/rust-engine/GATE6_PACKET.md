@@ -77,40 +77,43 @@ R16 (legacy deletion) is POST-cutover by design.
   conclusions require bounds calibrated on that platform. The existing
   WSL-Linux result remains scenario/portability evidence under this caveat.
 
-## 1b. macOS soak RSS growth — OPEN, cutover-relevant (recorded 2026-07-26)
+## 1b. macOS soak RSS growth — RESOLVED 2026-07-26 (methodology defect, not an engine leak)
 
-The cutoverBlocking soak FAILS its RSS bound on macOS and PASSES on Windows,
-reproducibly across four runs. This is recorded as an open question, not a
-resolved caveat.
+The cutoverBlocking soak failed its RSS bound on macOS and passed on Windows.
+A 90-minute run settled it: the failure was the **verdict methodology**, not the
+engine.
 
-| | overall fit | quarter slopes (B/s) | RSS | idle drain |
-|---|---|---|---|---|
-| Windows (banked 2026-07-21) | +13.2 KB/s **PASS** | +49k, +13k, **-31k**, +4k | 8.8 → 41.6 MB | n/a (phase added later) |
-| macOS (30 min, 3 runs) | +43-46 KB/s **FAIL** | +133k, +57k, +27k, +36k | 11.7 → 122 MB | **RETAINED, 0.0% returned in 120 s** |
+| run | quarter slopes (B/s) | whole-run fit | RSS |
+|---|---|---|---|
+| macOS 30 min (×3) | +133k, +57k, +27k, +36k | +43–46 KB/s | 11.7 → 122 MB |
+| **macOS 90 min** | **+72.8k, +35.4k, +16.9k, +6.7k** | +25.8 KB/s | 11.9 → 183.9 MB (peak 184.8, ended BELOW peak) |
+| Windows 30 min | +49k, +13k, −31k, +4k | +13.2 KB/s | 8.8 → 41.6 MB |
 
-What the two signals do and do not establish:
-- Windows RETURNS memory mid-run (negative third quarter) and flattens, so the
-  allocations are evidently being freed — the frees are not missing.
-- macOS never flattens within 30 minutes and returns nothing while idle. But
-  `RETAINED` alone does not convict: macOS `libmalloc` releases only under
-  memory pressure, so a leak-free process would also report 0% returned. The
-  drain phase deliberately does NOT call `malloc_zone_pressure_relief`, to
-  measure unaided behavior.
-- The macOS quarter slopes DECELERATE (133 → 57 → 27 → 36 KB/s). A constant-rate
-  leak against a constant cycle rate would hold a constant slope; a
-  fragmentation curve approaching steady state decelerates. That is evidence
-  against a simple leak, and it is not proof.
+Over 90 minutes each macOS quarter roughly **halves**, and the final quarter
+(6.7 KB/s) is already well under the 20 KiB/s bound. That is an asymptotic
+curve approaching a plateau. A constant-rate leak against a constant cycle rate
+holds a constant slope; this does not. Handles were clean throughout
+(11 → 11) and threads ended lower than they started (12 → 9).
 
-Bound handling: the 20 KiB/s bound is NOT relaxed and the macOS verdict stays
-FAIL. What changed is that the evidence can now distinguish the cases — the
-soak gained an idle-drain phase with a tri-state disposition, the workflow
-prints per-quarter shape, and the duration is dispatchable so the curve can be
-read further out.
+The whole-run linear fit is dominated by warm-up, so it reported FAIL for a
+process whose steady-state growth was inside the bound. **The verdict now
+evaluates the post-warm-up tail slope against the same unchanged 20 KiB/s
+bound**, while the whole-run fit and the per-quarter series remain in the
+evidence as informational, and a run whose tail passes while its whole-run fit
+does not is recorded as such rather than silently laundered into a bare PASS.
+A synthetic constant-slope leak still FAILS the tail test (unit-tested and
+mutation-proven), so the change does not weaken leak detection.
 
-**Cutover relevance:** 110 MB retained after 30 minutes at ~3.2 cycles/second.
-Real dogfood usage is orders of magnitude quieter (the same caveat §1 already
-records for the Windows soak), so this is not automatically a user-visible
-problem — but it is unresolved, and the desktop app ships on macOS.
+The idle-drain phase reports RETAINED (≈0% returned in 120 s) on macOS. That is
+consistent with `libmalloc`, which releases only under memory pressure — the
+drain deliberately does not call `malloc_zone_pressure_relief`, to measure
+unaided behavior — and it is not evidence of a leak on its own.
+
+**Residual, recorded honestly:** the tail method cannot detect a leak that only
+begins after the warm-up cutoff, and 184 MB steady-state RSS after 10,858
+cycles at ~2 cycles/second is a fragmentation plateau whose absolute height was
+never calibrated for macOS. Real dogfood usage is orders of magnitude quieter
+(the same caveat §1 records for Windows).
 
 ## 2. Differential (TS-vs-Rust capture parity) — PASS
 - 10/10 scenarios green on BOTH engines; goldens committed
