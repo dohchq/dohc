@@ -61,10 +61,9 @@ const THREAD_SLACK: i64 = 8;
 /// A true leak over a 30–60 minute run dwarfs this; transient allocator
 /// behavior does not.
 const MAX_RSS_SLOPE_BYTES_PER_SEC: f64 = 20.0 * 1024.0;
-/// The trend fit is only evidence with enough samples behind it: below this
-/// the slope assertion FAILS rather than passing vacuously.
+/// A trend fit is only evidence with enough samples behind it.
 const MIN_TREND_SAMPLES: usize = 24;
-/// ...and with enough WALL-CLOCK span: a short window cannot distinguish
+/// A fit also needs enough WALL-CLOCK span: a short window cannot distinguish
 /// cache warmup from a leak (a 3-minute quick run measures ~80 KiB/s of
 /// page-cache fill on a healthy daemon). Below this span the trend is
 /// reported as NOT EVALUATED — never as leak evidence in either direction.
@@ -491,6 +490,71 @@ fn rss_slope(samples: &[Sample]) -> f64 {
         var += dt * dt;
     }
     if var == 0.0 { 0.0 } else { cov / var }
+}
+
+fn trend_span_secs(samples: &[Sample]) -> f64 {
+    match (samples.first(), samples.last()) {
+        (Some(first), Some(last)) => last.at_secs - first.at_secs,
+        _ => 0.0,
+    }
+}
+
+fn trend_tail(samples: &[Sample]) -> &[Sample] {
+    // A final-half cutoff scales with dispatchable soak durations and only
+    // passes after the lower-growth shape persists for half the observations.
+    &samples[samples.len() / 2..]
+}
+
+fn rss_slopes_by_quarter(samples: &[Sample]) -> Vec<f64> {
+    (0..4)
+        .map(|quarter| {
+            let start = quarter * samples.len() / 4;
+            let end = (quarter + 1) * samples.len() / 4;
+            rss_slope(&samples[start..end])
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RssTrendDisposition {
+    Pass,
+    Fail,
+    NotEvaluated,
+}
+
+#[derive(Debug)]
+struct RssTrendClassification {
+    disposition: RssTrendDisposition,
+    whole_run_slope_bytes_per_sec: f64,
+    tail_slope_bytes_per_sec: f64,
+    tail_samples: usize,
+    tail_span_secs: f64,
+    warmup_dominated_whole_run_fit: bool,
+}
+
+fn classify_rss_trend(samples: &[Sample]) -> RssTrendClassification {
+    let whole_run_slope_bytes_per_sec = rss_slope(samples);
+    let tail = trend_tail(samples);
+    let tail_slope_bytes_per_sec = rss_slope(tail);
+    let tail_span_secs = trend_span_secs(tail);
+    let evaluated = tail.len() >= MIN_TREND_SAMPLES && tail_span_secs >= MIN_TREND_SPAN_SECS;
+    let disposition = if !evaluated {
+        RssTrendDisposition::NotEvaluated
+    } else if tail_slope_bytes_per_sec <= MAX_RSS_SLOPE_BYTES_PER_SEC {
+        RssTrendDisposition::Pass
+    } else {
+        RssTrendDisposition::Fail
+    };
+
+    RssTrendClassification {
+        disposition,
+        whole_run_slope_bytes_per_sec,
+        tail_slope_bytes_per_sec,
+        tail_samples: tail.len(),
+        tail_span_secs,
+        warmup_dominated_whole_run_fit: disposition == RssTrendDisposition::Pass
+            && whole_run_slope_bytes_per_sec > MAX_RSS_SLOPE_BYTES_PER_SEC,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -997,7 +1061,8 @@ async fn main() {
         threads: threads_drain_start,
     };
     samples.push(drain_start_sample.clone());
-    let slope = rss_slope(&samples);
+    let trend = classify_rss_trend(&samples);
+    let quarter_slopes = rss_slopes_by_quarter(&samples);
     eprintln!(
         "soak: phase 3 — {}s unaided idle drain (no allocator release request)",
         DRAIN_WINDOW.as_secs()
@@ -1037,23 +1102,17 @@ async fn main() {
     let (handle_base, thread_base) = (handles_base, threads_base);
     let handles_ok = handles_end as i64 <= handle_base as i64 + HANDLE_SLACK;
     let threads_ok = threads_end as i64 <= thread_base as i64 + THREAD_SLACK;
-    // The workload fit is evaluated-and-ok, evaluated-and-over-bound, or NOT
-    // EVALUATED (too few samples / too short a span — quick runs). The
-    // combined RSS disposition below further separates an over-bound fit
-    // whose idle drain reclaims most growth from one that retains it.
-    let fit_span = match (samples.first(), samples.last()) {
-        (Some(first), Some(last)) => last.at_secs - first.at_secs,
-        _ => 0.0,
-    };
-    let trend_evaluated = samples.len() >= MIN_TREND_SAMPLES && fit_span >= MIN_TREND_SPAN_SECS;
-    let rss_disposition = if !trend_evaluated {
-        "NOT-EVALUATED"
-    } else if slope <= MAX_RSS_SLOPE_BYTES_PER_SEC {
-        "PASS"
-    } else if drain_disposition == DrainDisposition::Reclaimed {
-        "RETAINED-RECLAIMED"
-    } else {
-        "FAIL"
+    // The tail fit is evaluated-and-ok, evaluated-and-over-bound, or NOT
+    // EVALUATED. The combined RSS disposition further separates an
+    // over-bound tail whose idle drain reclaims most growth.
+    let trend_evaluated = trend.disposition != RssTrendDisposition::NotEvaluated;
+    let rss_disposition = match trend.disposition {
+        RssTrendDisposition::NotEvaluated => "NOT-EVALUATED",
+        RssTrendDisposition::Pass => "PASS",
+        RssTrendDisposition::Fail if drain_disposition == DrainDisposition::Reclaimed => {
+            "RETAINED-RECLAIMED"
+        }
+        RssTrendDisposition::Fail => "FAIL",
     };
     let rss_ok = rss_disposition != "FAIL";
 
@@ -1119,7 +1178,10 @@ async fn main() {
         },
         "trendSamples": samples.len(),
         "minTrendSamples": MIN_TREND_SAMPLES,
-        "trendFitSpanSecs": fit_span,
+        "trendFitSpanSecsWholeRun": trend_span_secs(&samples),
+        "trendTailSelection": "final-half-of-workload-samples",
+        "trendTailSamples": trend.tail_samples,
+        "trendFitSpanSecsTail": trend.tail_span_secs,
         "trendEvaluated": trend_evaluated,
         "cleanShutdown": clean_shutdown,
         "hardCapped": hard_capped,
@@ -1130,6 +1192,7 @@ async fn main() {
             "maxRssSlopeBytesPerSec": MAX_RSS_SLOPE_BYTES_PER_SEC,
             "minTrendSamples": MIN_TREND_SAMPLES,
             "minTrendSpanSecs": MIN_TREND_SPAN_SECS,
+            "trendTailFraction": 0.5,
             "drainWindowSecs": DRAIN_WINDOW.as_secs(),
             "minDrainSamples": MIN_DRAIN_SAMPLES,
             "drainReclaimedMinFractionOfRunGrowth": DRAIN_RECLAIMED_MIN_FRACTION,
@@ -1137,8 +1200,11 @@ async fn main() {
         // An over-bound fit whose unaided drain returns most growth is a
         // retention signal, distinct from both PASS and leak-shaped FAIL.
         "rssDisposition": rss_disposition,
+        "warmupDominatedWholeRunFit": trend.warmup_dominated_whole_run_fit,
         "final": { "rss": rss_end, "handles": handles_end, "threads": threads_end },
-        "rssSlopeBytesPerSec": slope,
+        "rssSlopeBytesPerSecWholeRun": trend.whole_run_slope_bytes_per_sec,
+        "rssSlopeBytesPerSecTail": trend.tail_slope_bytes_per_sec,
+        "rssSlopeBytesPerSecByQuarter": quarter_slopes,
         "assertions": {
             // The keys SAY what they CHECK: within the recorded slack —
             // never "exactly baseline", which no Windows run can hold.
@@ -1150,12 +1216,12 @@ async fn main() {
                 process_sampling.handle_thread_slack_calibrated_for_platform,
             // Tri-state: null when the trend was not evaluated, so a
             // scenarios-only artifact can never read as leak evidence.
-            "rssSlopeWithinThreshold": if trend_evaluated {
-                json!(slope <= MAX_RSS_SLOPE_BYTES_PER_SEC)
+            "rssTailSlopeWithinThreshold": if trend_evaluated {
+                json!(trend.tail_slope_bytes_per_sec <= MAX_RSS_SLOPE_BYTES_PER_SEC)
             } else {
                 json!(null)
             },
-            "rssAcceptedBySlopeOrDrainReclamation": if trend_evaluated {
+            "rssAcceptedByTailSlopeOrDrainReclamation": if trend_evaluated {
                 json!(rss_ok)
             } else {
                 json!(null)
@@ -1184,7 +1250,8 @@ async fn main() {
 
     println!(
         "- {} | soak-{tier} | {}/{} | {} | cycles={} crashes={} durationSecs={} \
-         rssDisposition={} rssSlopeB/s={:.1} drain={} rssDrain {}->{} min={} \
+         rssDisposition={} rssSlopeWholeB/s={:.1} rssSlopeTailB/s={:.1} \
+         warmupDominatedWholeRunFit={} drain={} rssDrain {}->{} min={} \
          drop={} ({}) handles {}->{} threads {}->{} handleThreadSlackCalibration={}",
         chrono_like_now(),
         std::env::consts::OS,
@@ -1197,7 +1264,9 @@ async fn main() {
         crashes,
         started.elapsed().as_secs(),
         rss_disposition,
-        slope,
+        trend.whole_run_slope_bytes_per_sec,
+        trend.tail_slope_bytes_per_sec,
+        trend.warmup_dominated_whole_run_fit,
         match drain_disposition {
             DrainDisposition::Reclaimed => "RECLAIMED",
             DrainDisposition::Retained => "RETAINED",
@@ -1300,6 +1369,74 @@ mod tests {
                 threads: 10,
             })
             .collect()
+    }
+
+    fn synthetic_trend(
+        count: usize,
+        interval_secs: f64,
+        rss_at: impl Fn(f64) -> f64,
+    ) -> Vec<Sample> {
+        (0..count)
+            .map(|index| {
+                let at_secs = index as f64 * interval_secs;
+                Sample {
+                    at_secs,
+                    rss_bytes: rss_at(at_secs).round() as u64,
+                    handles: 10,
+                    threads: 10,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn trend_classifier_fails_constant_slope_leak() {
+        let samples = synthetic_trend(61, 30.0, |seconds| {
+            12_000_000.0 + seconds * (MAX_RSS_SLOPE_BYTES_PER_SEC + 8_192.0)
+        });
+
+        let trend = classify_rss_trend(&samples);
+
+        assert_eq!(trend.disposition, RssTrendDisposition::Fail);
+        assert!(trend.tail_slope_bytes_per_sec > MAX_RSS_SLOPE_BYTES_PER_SEC);
+    }
+
+    #[test]
+    fn trend_classifier_passes_decelerating_asymptote() {
+        let samples = synthetic_trend(61, 30.0, |seconds| {
+            12_000_000.0 + 100_000_000.0 * (1.0 - (-seconds / 300.0).exp())
+        });
+
+        let trend = classify_rss_trend(&samples);
+
+        assert_eq!(trend.disposition, RssTrendDisposition::Pass);
+        assert!(trend.tail_slope_bytes_per_sec <= MAX_RSS_SLOPE_BYTES_PER_SEC);
+        assert!(trend.whole_run_slope_bytes_per_sec > MAX_RSS_SLOPE_BYTES_PER_SEC);
+        assert!(trend.warmup_dominated_whole_run_fit);
+    }
+
+    #[test]
+    fn trend_classifier_passes_flat_series() {
+        let samples = synthetic_trend(61, 30.0, |_| 12_000_000.0);
+
+        let trend = classify_rss_trend(&samples);
+
+        assert_eq!(trend.disposition, RssTrendDisposition::Pass);
+        assert_eq!(trend.tail_slope_bytes_per_sec, 0.0);
+        assert!(!trend.warmup_dominated_whole_run_fit);
+    }
+
+    #[test]
+    fn trend_classifier_not_evaluated_with_too_few_tail_samples() {
+        let samples = synthetic_trend(46, 60.0, |seconds| {
+            12_000_000.0 + seconds * (MAX_RSS_SLOPE_BYTES_PER_SEC + 8_192.0)
+        });
+
+        let trend = classify_rss_trend(&samples);
+
+        assert_eq!(trend.tail_samples, MIN_TREND_SAMPLES - 1);
+        assert!(trend.tail_span_secs >= MIN_TREND_SPAN_SECS);
+        assert_eq!(trend.disposition, RssTrendDisposition::NotEvaluated);
     }
 
     #[test]
