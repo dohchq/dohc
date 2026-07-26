@@ -592,7 +592,7 @@ fn create_named_version_forks_and_isolates() {
 
     vt.write_text(&write("main", "a.md", "v1", "m1", "o1", 10), &NO_FAULTS)
         .expect("write main");
-    drop(vt);
+    let _ = vt;
     store
         .read_with(|conn| {
             conn.execute(
@@ -631,7 +631,7 @@ fn create_named_version_forks_and_isolates() {
     let snaps = vt.list_snapshots(WS, "feat").expect("snaps");
     assert_eq!(snaps.len(), 1);
     assert_eq!(snaps[0].object_id, "o1");
-    drop(vt);
+    let _ = vt;
     let copied_metadata = store
         .read_with(|conn| {
             let read = |table: &str| {
