@@ -1,28 +1,34 @@
 # GATE 6 — release-candidate evidence packet
 
-**Status: PACKET ASSEMBLED 2026-07-24 — REHEARSAL PARTIALLY EVIDENCED
-2026-07-26. GATE NOT CLOSED.** GATE6 is the release-CANDIDATE gate. Ice
-explicitly authorized the cutover on 2026-07-25 (`DECISIONS.md`, R15 go/no-go).
-The remaining criterion — an end-to-end **clone-reset rehearsal on REAL dogfood
-workspace byte-clones** — is HALF recorded:
+**Status: PACKET ASSEMBLED 2026-07-24 — REHEARSAL CRITERION EVIDENCED
+2026-07-26.** GATE6 is the release-CANDIDATE gate. Ice explicitly authorized the
+cutover on 2026-07-25 (`DECISIONS.md`, R15 go/no-go). The remaining criterion —
+an end-to-end **clone-reset rehearsal on REAL dogfood workspace byte-clones** —
+is now RECORDED, both halves:
 
-- **EVIDENCED (2026-07-26):** the reset machinery itself. The rehearsal ran
-  `not-started → complete` against a byte-clone of `C:/Users/ice/dohc/personal`
-  (restore-tested backup, handle move-aside, fresh store init, filesystem
-  inventory preserved across the reset), with the source verified byte-identical
-  before and after. Evidence: `REHEARSAL_EVIDENCE-2026-07-26.json`. Two
-  real-data findings were closed on the way: pnpm-junction floor exclusion in
-  the byte-clone, and the TS-authored live-DB reset interpretation (recorded and
-  FLAGGED for Ice's post-hoc review).
-- **NOT YET EVIDENCED:** RECAPTURE. `run_rehearsal` compares the filesystem
-  inventory across the reset but never drives the production capture/projection
-  pipeline, so a `complete` outcome does NOT show that the workspace's files are
-  recaptured into the fresh Rust store with settled projections — the property
-  the cutover actually depends on. Caught by codex review on PR #259. The
-  harness must run the real capture flow post-reset and compare the resulting
-  store against the pre-reset inventory before this criterion is closed.
+- **Reset.** The rehearsal ran `not-started → complete` against a byte-clone of
+  `C:/Users/ice/dohc/personal` (restore-tested backup, handle move-aside, fresh
+  store init), with the source verified byte-identical before and after
+  (snapshot sha equal, `source_unchanged.verified = true`).
+- **Recapture.** The production capture/projection flow was driven against the
+  reset clone and compared to the pre-reset inventory:
+  **27/27 paths, 27/27 records, 27 content identities verified, projections
+  settled, zero mismatches.** The 27 is independently corroborated: the source
+  tree contains exactly 27 user-content files outside `.dohc` and the capture
+  floor. An incomplete recapture fails the harness and banks no complete
+  evidence (fixture-tested).
 
-Do NOT treat this criterion as met until the recapture half is banked.
+Evidence: `REHEARSAL_EVIDENCE-2026-07-26.json` (schema 4) in this directory. It
+also records the preserved TypeScript store byte-clone, floor skips, hardlink
+clone semantics, the 17 `ui-state.json.tmp-*` orphans found in real data, and
+per-phase timings.
+
+Four real-data findings were closed to get here: pnpm-junction floor exclusion,
+pnpm-hardlink clone semantics (copy as independent inodes, record topology),
+the missing recapture proof itself (codex review, PR #259), and the
+TS-authored live-DB reset interpretation — **the last remains FLAGGED for Ice's
+post-hoc review**, since it encodes what "rehearsal on a TS-authored workspace"
+means for a Rust reset.
 
 **WHAT GATE6 ASSERTS:** NO GATE6-BLOCKING IMPLEMENTATION SHARD REMAINS, and the
 engine is EVIDENCED (gate/soak/differential green, every claim below carrying its
