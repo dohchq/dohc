@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
-use dohc_engine_storage::{EngineStore, FaultInjector, hex_sha256};
+use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
+use dohc_engine_storage::{EngineStore, FaultInjector, get_binary_blob, hex_sha256};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -447,6 +448,21 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
             reason: "moment.append payload is invalid",
         });
     }
+    validate_canonical_tracked_path(&payload.path)?;
+    if let Some(path) = payload.payload_before_path.as_deref() {
+        validate_canonical_tracked_path(path)?;
+    }
+    validate_canonical_tracked_path(&payload.payload_after_path)?;
+    Ok(())
+}
+
+fn validate_canonical_tracked_path(path: &str) -> Result<(), SyncError> {
+    let (classification, normalized) = classify_engine_file_path_normalized(path);
+    if classification != PathClassification::Tracked || normalized.as_deref() != Some(path) {
+        return Err(SyncError::InvalidInput {
+            reason: "moment.append path must be canonical tracked plaintext",
+        });
+    }
     Ok(())
 }
 
@@ -592,15 +608,7 @@ fn require_blob_text(tx: &Transaction<'_>, sha: &str) -> Result<String, SyncErro
 }
 
 fn require_binary_blob(tx: &Transaction<'_>, sha: &str) -> Result<i64, SyncError> {
-    let bytes: Option<Vec<u8>> = tx
-        .query_row(
-            "SELECT bytes FROM binary_blobs WHERE sha256=?1",
-            [sha],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    bytes
+    get_binary_blob(tx, sha)?
         .map(|bytes| bytes.len() as i64)
         .ok_or(SyncError::BlobInvalid)
 }
@@ -794,13 +802,20 @@ fn insert_moment(
         .map_err(|_| SyncError::InvalidInput {
             reason: "moment.append author is invalid",
         })?;
+    let payload_before_kind = payload
+        .payload_before_path
+        .as_ref()
+        .map(|_| ContentKind::from_wire(payload.payload_before_content_kind.as_deref()).as_str());
     tx.execute(
         "INSERT INTO moments (
            workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,
            operation,after_blob_sha256,before_present,before_blob_sha256,
            before_latest_moment_id,metadata_origin,author_json,sync_record_only,
-           after_content_kind,after_binary_sha256,before_content_kind,before_binary_sha256
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+           after_content_kind,after_binary_sha256,before_content_kind,before_binary_sha256,
+           payload_before_path,payload_before_content_kind,payload_before_blob_sha256,
+           payload_after_path,payload_after_content_kind,payload_after_blob_sha256
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,
+                   ?20,?21,?22,?23,?24,?25)",
         params![
             workspace_id,
             order,
@@ -821,6 +836,12 @@ fn insert_moment(
             after_binary_sha,
             before_kind.as_str(),
             before_binary_sha,
+            payload.payload_before_path,
+            payload_before_kind,
+            payload.payload_before_blob_sha256,
+            payload.payload_after_path,
+            after_kind.as_str(),
+            payload.payload_after_blob_sha256,
         ],
     )
     .map_err(SyncError::persist)?;

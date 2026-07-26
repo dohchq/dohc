@@ -1002,6 +1002,282 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
 }
 
 #[test]
+fn moment_append_rejects_non_tracked_or_noncanonical_paths_before_mutation() {
+    let mut secret_after = absent_text_payload(
+        "secret-after",
+        "secret-after-object",
+        "docs/safe.md",
+        "content",
+    );
+    secret_after["payloadAfterPath"] = json!("app/.env");
+
+    let mut noncanonical_path = absent_text_payload(
+        "noncanonical-path",
+        "noncanonical-path-object",
+        "docs/safe.md",
+        "content",
+    );
+    noncanonical_path["path"] = json!("a//b.md");
+
+    let mut noncanonical_after = absent_text_payload(
+        "noncanonical-after",
+        "noncanonical-after-object",
+        "docs/safe.md",
+        "content",
+    );
+    noncanonical_after["payloadAfterPath"] = json!("a//b.md");
+
+    let mut secret_before = absent_text_payload(
+        "secret-before",
+        "secret-before-object",
+        "docs/new.md",
+        "content",
+    );
+    secret_before["payloadBeforePath"] = json!("app/.env");
+    secret_before["payloadBeforeBlobSha256"] = json!(text_sha("content"));
+
+    for (case, payload, object_id) in [
+        (
+            "secret payloadAfterPath",
+            secret_after,
+            "secret-after-object",
+        ),
+        (
+            "noncanonical path",
+            noncanonical_path,
+            "noncanonical-path-object",
+        ),
+        (
+            "noncanonical payloadAfterPath",
+            noncanonical_after,
+            "noncanonical-after-object",
+        ),
+        (
+            "secret payloadBeforePath",
+            secret_before,
+            "secret-before-object",
+        ),
+    ] {
+        let (_scratch, mut store) = test_store();
+        hydrate_texts(&mut store, &["content"]);
+        let op = envelope("peer", 0, "ws", payload);
+        let error = match apply_moment_envelope(&mut store, &op, &NoFaults) {
+            Ok(outcome) => panic!("{case} unexpectedly applied as {outcome:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, SyncError::InvalidInput { .. }),
+            "{case} must be malformed input, got {error:?}"
+        );
+        let persisted: (i64, i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND object_id=?1",
+                        [object_id],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' AND object_id=?1",
+                        [object_id],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM path_aliases WHERE workspace_id='ws' AND object_id=?1",
+                        [object_id],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("rejected path leaves no rows");
+        assert_eq!(persisted, (0, 0, 0), "{case} persisted poisoned rows");
+        assert_eq!(
+            read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
+            -1,
+            "{case} advanced the peer ack"
+        );
+    }
+
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["content"]);
+    let canonical = envelope(
+        "peer",
+        0,
+        "ws",
+        absent_text_payload(
+            "canonical",
+            "canonical-object",
+            "docs/canonical.md",
+            "content",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &canonical, &NoFaults).expect("canonical tracked path"),
+        ApplyOutcome::Applied(0)
+    );
+    assert_eq!(
+        snapshot(&store, "canonical-object").unwrap().0,
+        "docs/canonical.md"
+    );
+    assert_eq!(
+        aliases(&store, "canonical-object"),
+        ["docs/canonical.md".to_owned()]
+    );
+}
+
+#[test]
+fn moment_append_persists_full_wire_payload_provenance() {
+    let (_scratch, mut store) = test_store();
+    seed_text_moment(
+        &mut store,
+        "object",
+        "docs/new.md",
+        "agreed",
+        "local-head",
+        None,
+        true,
+    );
+    let remote_before = b"\0remote binary preimage\xff";
+    let remote_before_sha = store
+        .read_with(|conn| put_binary_blob(conn, remote_before))
+        .expect("remote before blob");
+    let after_sha = text_sha("agreed");
+    let payload = json!({
+        "momentId": "remote-adopted",
+        "versionId": "main",
+        "objectId": "object",
+        "objectCreatedAtMs": 1,
+        "path": "remote/old.bin",
+        "recordedAtMs": 2_000,
+        "operation": "rename",
+        "payloadBeforeBlobSha256": remote_before_sha,
+        "payloadBeforePath": "remote/old.bin",
+        "payloadBeforeContentKind": "binary",
+        "payloadBeforeByteLength": remote_before.len(),
+        "payloadAfterBlobSha256": after_sha,
+        "payloadAfterPath": "docs/new.md",
+        "payloadAfterContentKind": "text",
+        "payloadAfterByteLength": "agreed".len(),
+        "metadata": {"origin": "sync"},
+        "beforePresent": "present",
+        "beforeObjectId": "object",
+        "beforeVersionId": "main",
+        "beforePath": "remote/old.bin",
+        "beforeBlobSha256": remote_before_sha,
+        "beforeContentKind": "binary",
+        "beforeByteLength": remote_before.len(),
+        "beforeUpdatedAtMs": 100,
+        "beforeLatestMomentId": "remote-before",
+        "beforeMetadata": {"origin": "api"}
+    });
+    let op = envelope("peer", 0, "ws", payload);
+    assert_eq!(
+        apply_moment_envelope(&mut store, &op, &NoFaults).expect("content-convergent adoption"),
+        ApplyOutcome::Applied(0)
+    );
+
+    let provenance = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT payload_before_path,payload_before_content_kind,
+                        payload_before_blob_sha256,payload_after_path,
+                        payload_after_content_kind,payload_after_blob_sha256
+                 FROM moments WHERE workspace_id='ws' AND moment_id='remote-adopted'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+        })
+        .expect("payload provenance");
+    assert_eq!(
+        provenance,
+        (
+            Some("remote/old.bin".to_owned()),
+            Some("binary".to_owned()),
+            Some(remote_before_sha),
+            Some("docs/new.md".to_owned()),
+            Some("text".to_owned()),
+            Some(after_sha),
+        )
+    );
+}
+
+#[test]
+fn moment_append_rejects_a_poisoned_binary_blob_as_storage_corruption_before_mutation() {
+    let (_scratch, mut store) = test_store();
+    let claimed = hex_sha256(b"honest binary");
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES (?1,?2,?3)",
+                params![claimed, b"poisoned".len() as i64, b"poisoned".as_slice()],
+            )
+        })
+        .expect("poison binary blob");
+    let payload = json!({
+        "momentId": "binary-moment",
+        "versionId": "main",
+        "objectId": "binary-object",
+        "objectCreatedAtMs": 1,
+        "path": "assets/file.bin",
+        "recordedAtMs": 2_000,
+        "operation": "write",
+        "payloadBeforeBlobSha256": null,
+        "payloadBeforePath": null,
+        "payloadAfterBlobSha256": claimed,
+        "payloadAfterPath": "assets/file.bin",
+        "payloadAfterContentKind": "binary",
+        "payloadAfterByteLength": b"honest binary".len(),
+        "metadata": {"origin": "sync"},
+        "beforePresent": "absent"
+    });
+    let op = envelope("peer", 0, "ws", payload);
+    let error = apply_moment_envelope(&mut store, &op, &NoFaults)
+        .expect_err("poisoned binary blob must fail closed");
+    assert!(
+        matches!(
+            error,
+            SyncError::Storage(dohc_engine_storage::StorageError::BlobIntegrity { .. })
+        ),
+        "local blob corruption must remain a hard storage error, got {error:?}"
+    );
+    let persisted: (i64, i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='binary-moment'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' AND object_id='binary-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM path_aliases WHERE workspace_id='ws' AND object_id='binary-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("failed binary apply leaves no rows");
+    assert_eq!(persisted, (0, 0, 0));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
+        -1
+    );
+}
+
+#[test]
 fn moment_append_require_blob_text_rejects_a_poisoned_address_before_ack() {
     let (_scratch, mut store) = test_store();
     let claimed = text_sha("honest");
@@ -1030,7 +1306,7 @@ fn moment_append_require_blob_text_rejects_a_poisoned_address_before_ack() {
 }
 
 #[test]
-fn moment_append_insert_row_rejects_an_empty_binary_digest_even_if_hydrated() {
+fn moment_append_rejects_an_empty_binary_digest_as_storage_corruption_even_if_hydrated() {
     let (_scratch, mut store) = test_store();
     store
         .read_with(|conn| {
@@ -1059,7 +1335,9 @@ fn moment_append_insert_row_rejects_an_empty_binary_digest_even_if_hydrated() {
     let op = envelope("peer", 0, "ws", payload);
     assert!(matches!(
         apply_moment_envelope(&mut store, &op, &NoFaults),
-        Err(SyncError::BlobInvalid)
+        Err(SyncError::Storage(
+            dohc_engine_storage::StorageError::BlobIntegrity { .. }
+        ))
     ));
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
