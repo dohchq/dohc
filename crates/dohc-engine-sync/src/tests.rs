@@ -4028,6 +4028,234 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
 }
 
 #[test]
+fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let ciphertext = b"canonical-secret-ciphertext";
+    let sha = engine
+        .put_binary_blob(ciphertext)
+        .expect("secret ciphertext blob");
+    let payload = |path: &str| {
+        json!({
+            "versionId": "main",
+            "path": path,
+            "metadata": {"origin": "sync"},
+            "ivBase64": STANDARD.encode([1_u8; SECRET_IV_BYTES]),
+            "authTagBase64": STANDARD.encode([2_u8; SECRET_TAG_BYTES]),
+            "ciphertextSha256": sha,
+            "byteLength": ciphertext.len()
+        })
+    };
+
+    let seed = envelope(
+        "canonical-secret-seed",
+        0,
+        "secret.file.put",
+        payload("a/b.env"),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+    ));
+
+    let shadow = envelope(
+        "noncanonical-secret-peer",
+        0,
+        "secret.file.put",
+        payload("a//b.env"),
+    );
+    let refusal = apply_replication_envelope(&mut engine, &shadow, &NoFaults, &NoLiveLeases);
+    let paths = engine
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT path FROM secret_files \
+                 WHERE workspace_id='ws' AND version_id='main' ORDER BY path",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()
+        })
+        .expect("secret paths");
+    if matches!(
+        refusal,
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+    ) {
+        assert_eq!(
+            paths,
+            vec!["a//b.env", "a/b.env"],
+            "current-code bug proof: the raw wire spelling persists beside its canonical alias"
+        );
+    }
+    assert!(matches!(
+        refusal,
+        Err(SyncError::InvalidInput {
+            reason: "secret replication path must be canonical"
+        })
+    ));
+    assert_eq!(
+        paths,
+        vec!["a/b.env"],
+        "MUTATION: without the canonical guard, the raw wire spelling persists as a shadow row"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "noncanonical-secret-peer").expect("ack"),
+        -1
+    );
+
+    let mut canonical = envelope(
+        "canonical-secret-update",
+        0,
+        "secret.file.put",
+        payload("a/b.env"),
+    );
+    canonical.recorded_at_ms = 3_000;
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &canonical, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "canonical-secret-update").expect("ack"),
+        0
+    );
+}
+
+#[test]
+fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let ciphertext = b"collision-secret-ciphertext";
+    let sha = engine
+        .put_binary_blob(ciphertext)
+        .expect("secret ciphertext blob");
+    engine
+        .write_with(&NoFaults, |tx| -> Result<(), SyncError> {
+            tx.execute(
+                "INSERT INTO secret_moments \
+                 (workspace_id,moment_order,moment_id,version_id,path,recorded_at_ms,operation,metadata_origin,after_present) \
+                 VALUES ('ws',1,'secret-sync-collision-peer-0','main','unrelated.env',100,'delete','api',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok(())
+        })
+        .expect("seed colliding local secret moment");
+
+    let operation = envelope(
+        "collision-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "main",
+            "path": "target.env",
+            "metadata": {"origin": "sync"},
+            "ivBase64": STANDARD.encode([1_u8; SECRET_IV_BYTES]),
+            "authTagBase64": STANDARD.encode([2_u8; SECRET_TAG_BYTES]),
+            "ciphertextSha256": sha,
+            "byteLength": ciphertext.len()
+        }),
+    );
+    let refusal = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases);
+    let state = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM secret_files \
+                     WHERE workspace_id='ws' AND version_id='main' AND path='target.env'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                conn.query_row(
+                    "SELECT path FROM secret_moments \
+                     WHERE workspace_id='ws' AND moment_id='secret-sync-collision-peer-0'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?,
+            ))
+        })
+        .expect("secret collision state");
+    if matches!(
+        refusal,
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+    ) {
+        assert_eq!(
+            state,
+            (1, "unrelated.env".to_owned()),
+            "current-code bug proof: the tip references an unrelated pre-existing history row"
+        );
+    }
+    assert!(matches!(
+        refusal,
+        Err(SyncError::InvalidInput {
+            reason: "replicated secret moment id collides with existing history"
+        })
+    ));
+    assert_eq!(
+        state,
+        (0, "unrelated.env".to_owned()),
+        "the collision must roll back the incoming tip and preserve the existing owner"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "collision-peer").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn secret_put_redelivery_skips_its_own_synthesized_moment() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let ciphertext = b"redelivery-secret-ciphertext";
+    let sha = engine
+        .put_binary_blob(ciphertext)
+        .expect("secret ciphertext blob");
+    let operation = envelope(
+        "redelivery-secret-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "main",
+            "path": "app/.env",
+            "metadata": {"origin": "sync"},
+            "ivBase64": STANDARD.encode([1_u8; SECRET_IV_BYTES]),
+            "authTagBase64": STANDARD.encode([2_u8; SECRET_TAG_BYTES]),
+            "ciphertextSha256": sha,
+            "byteLength": ciphertext.len()
+        }),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+    ));
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Skipped)
+    ));
+    let history_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM secret_moments \
+                 WHERE workspace_id='ws' AND moment_id='secret-sync-redelivery-secret-peer-0'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("secret history count");
+    assert_eq!(history_rows, 1);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "redelivery-secret-peer").expect("ack"),
+        0
+    );
+}
+
+#[test]
 fn central_router_recognizes_every_owned_kind_and_fails_unknown_closed() {
     for kind in crate::router::owned_op_kinds() {
         let (_scratch, _path, mut engine) = store();

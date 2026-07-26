@@ -1,12 +1,13 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dohc_engine_domain::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};
+use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
-use crate::{ApplyOutcome, PathClass, ReplicationEnvelope, SyncError};
+use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,11 +102,7 @@ fn validate_common(
         version_id,
         "secret version_id must be non-empty and bounded",
     )?;
-    if crate::classify_share_path(path) != PathClass::Secret {
-        return Err(SyncError::InvalidInput {
-            reason: "secret replication path is not secret-classified",
-        });
-    }
+    validate_canonical_secret_path(path)?;
     if !matches!(
         metadata.origin.as_str(),
         "api" | "local-file" | "restore" | "sync" | "unknown"
@@ -124,6 +121,21 @@ fn validate_common(
     if !version_exists {
         return Err(SyncError::InvalidInput {
             reason: "secret target version is missing",
+        });
+    }
+    Ok(())
+}
+
+fn validate_canonical_secret_path(path: &str) -> Result<(), SyncError> {
+    let (classification, normalized) = classify_engine_file_path_normalized(path);
+    if classification != PathClassification::Secret {
+        return Err(SyncError::InvalidInput {
+            reason: "secret replication path is not secret-classified",
+        });
+    }
+    if normalized.as_deref() != Some(path) {
+        return Err(SyncError::InvalidInput {
+            reason: "secret replication path must be canonical",
         });
     }
     Ok(())
@@ -331,11 +343,7 @@ fn require_version(
 }
 
 fn validate_fork_row(row: &SecretForkRow) -> Result<(), SyncError> {
-    if crate::classify_share_path(&row.path) != PathClass::Secret {
-        return Err(SyncError::InvalidInput {
-            reason: "secret fork path is not secret-classified",
-        });
-    }
+    validate_canonical_secret_path(&row.path)?;
     validate_base64(&row.iv_base64, SECRET_IV_BYTES, "secret fork iv is invalid")?;
     validate_base64(
         &row.auth_tag_base64,
@@ -439,13 +447,23 @@ fn insert_moment(
         ),
         None => (0_i64, None, None, None, None),
     };
-    tx.execute(
+    let inserted = tx
+        .execute(
         "INSERT OR IGNORE INTO secret_moments \
          (workspace_id,moment_order,moment_id,version_id,path,recorded_at_ms,operation,metadata_origin,metadata_summary,metadata_correlation_id,after_present,after_iv_base64,after_auth_tag_base64,after_ciphertext_base64,after_byte_length) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![op.workspace_id,order,moment_id,version_id,path,op.recorded_at_ms,if present == 1 { "write" } else { "delete" },metadata.origin,metadata.summary,metadata.correlation_id,present,iv,tag,ciphertext,byte_length],
     )
-    .map_err(SyncError::persist)?;
+        .map_err(SyncError::persist)?;
+    // Legitimate redelivery is resolved by `apply_envelope_with` against the
+    // atomic replication log before this mutation runs. Reaching this insert
+    // with an occupied synthesized ID therefore means unrelated local history
+    // already owns the ID; do not let the tip reference that row.
+    if inserted == 0 {
+        return Err(SyncError::InvalidInput {
+            reason: "replicated secret moment id collides with existing history",
+        });
+    }
     if remote_wins(tx, op, version_id, path, after)? {
         if let Some((iv, tag, ciphertext, byte_length)) = after {
             tx.execute(
