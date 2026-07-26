@@ -9,7 +9,6 @@ import {
   type LinkedChatStore,
 } from "@dohc/workspace-engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveSpawnCommand } from "../process/windowsSpawn";
 import type { RunnerSettings } from "../settings/userSettings";
 import { nativeTmpdir } from "../workspaces/testTemp";
 import {
@@ -387,6 +386,7 @@ afterEach(async () => {
     await rm(fixture.root, { recursive: true, force: true });
   }
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 describe("chatDispatchService", () => {
@@ -584,6 +584,13 @@ describe("chatDispatchService", () => {
   });
 
   it("keeps workspace FIFO to one live run and builds the configured spawn contract", async () => {
+    // Pin command resolution to a no-op: with an empty host PATH the resolver
+    // can never find a claude binary or .cmd shim on the machine running the
+    // tests, so the spawn contract below (bare command, unwrapped args) is
+    // asserted identically everywhere. The runner env still prepends the
+    // fixture's CLI bin dir, which the PATH assertion below relies on.
+    vi.stubEnv("PATH", "");
+    vi.stubEnv("Path", "");
     const fixture = await createFixture({
       runner: {
         command: 'claude -p --allowedTools "Bash(dohc chat:*)"',
@@ -612,12 +619,7 @@ describe("chatDispatchService", () => {
     ]);
 
     const firstSpawn = fixture.spawnCalls[0]!;
-    // The service resolves the parsed binary through resolveSpawnCommand, so
-    // on win32 this is an absolute .EXE/.CMD path when claude is installed.
-    // Computing the expectation with the same resolver keeps the parsing
-    // contract under test ("claude", not the whole configured line) on every
-    // platform and machine.
-    expect(firstSpawn.command).toBe(resolveSpawnCommand("claude", []).command);
+    expect(firstSpawn.command).toBe("claude");
     expect(firstSpawn.args.slice(0, -1)).toEqual(["-p", "--allowedTools", "Bash(dohc chat:*)"]);
     const prompt = firstSpawn.args.at(-1);
     expect(prompt).toContain("# Launch review");
