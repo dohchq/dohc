@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const CLI_PROTOCOL_VERSION = 1;
+export const CLI_PROTOCOL_VERSION = 2;
 export const CLI_JSON_SCHEMA_VERSION = 1;
 
 export const cliActorSchema = z.enum(["human", "agent"]);

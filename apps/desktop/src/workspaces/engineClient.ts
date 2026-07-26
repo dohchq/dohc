@@ -514,6 +514,7 @@ interface PendingRequest {
   readonly callerId: number;
   readonly resolve: (response: Response) => void;
   readonly reject: (error: EngineClientError) => void;
+  readonly deadlineTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface PendingBlob {
@@ -644,7 +645,24 @@ export class EngineClient implements EngineTransport {
 
     const wireId = this.nextRequestId++;
     return new Promise<Response>((resolve, reject) => {
-      this.pending.set(wireId, { callerId: request.id, resolve, reject });
+      const deadlineTimer =
+        request.deadlineMs !== undefined && request.deadlineMs !== null
+          ? setTimeout(() => {
+              if (!this.pending.has(wireId)) return;
+              this.fail(
+                new EngineClientError(
+                  "transport-error",
+                  `Engine request ${wireId} timed out after ${request.deadlineMs}ms.`,
+                ),
+              );
+            }, request.deadlineMs)
+          : undefined;
+      this.pending.set(wireId, {
+        callerId: request.id,
+        resolve,
+        reject,
+        ...(deadlineTimer ? { deadlineTimer } : {}),
+      });
       void this.writeEnvelope({
         type: "request",
         ...request,
@@ -656,6 +674,7 @@ export class EngineClient implements EngineTransport {
         const pending = this.pending.get(wireId);
         if (!pending) return;
         this.pending.delete(wireId);
+        if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
         pending.reject(
           new EngineClientError(
             "transport-error",
@@ -1105,6 +1124,7 @@ export class EngineClient implements EngineTransport {
       );
     }
     this.pending.delete(response.id);
+    if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
     pending.resolve({ id: pending.callerId, result: response.result });
   }
 
@@ -1127,6 +1147,7 @@ export class EngineClient implements EngineTransport {
       );
     }
     this.pending.delete(id);
+    if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
     // A failed request's announced blob streams are dead: free their budget and
     // drop them so a late FIN cannot dispatch a blob the caller saw fail.
     for (const [streamId, stream] of this.blobStreams) {
@@ -1168,7 +1189,10 @@ export class EngineClient implements EngineTransport {
     this.connection.offError(this.handleStreamError);
     this.connection.offClose(this.handleStreamClose);
     this.readyReject(error);
-    for (const pending of this.pending.values()) pending.reject(error);
+    for (const pending of this.pending.values()) {
+      if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
+      pending.reject(error);
+    }
     this.pending.clear();
     this.blobStreams.clear();
     this.bufferedBlobBytes = 0;

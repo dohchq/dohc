@@ -29,6 +29,7 @@ export const CHAT_DISPATCH_BUDGET_MAX = 10;
 export const RUNNER_SELF_TEST_TIMEOUT_MS = 120_000;
 export const RUNNER_KILL_GRACE_MS = 10_000;
 export const APP_QUIT_KILL_GRACE_MS = 1_500;
+export const CHAT_DISPATCH_RECOVERY_BACKOFF_MS = 1_000;
 export const RUN_ID_LOG_TOKEN = "{runId}";
 export const APP_QUIT_EXIT_CODE = 143;
 
@@ -315,6 +316,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const budgetBypassThreads = new Set<string>();
   const workspaceChains = new Map<string, Promise<void>>();
   const sweptWorkspaces = new Set<string>();
+  const recoveryTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  const pendingNoReplyChecks = new Map<
+    string,
+    { workspace: ChatDispatchWorkspace; run: AgentRunRecord }
+  >();
   let pumpTimer: ReturnType<typeof setInterval> | null = null;
   let pumpInFlight: Promise<void> | null = null;
   let started = false;
@@ -346,6 +355,23 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }),
     );
     return run;
+  }
+
+  function runKey(workspaceId: string, runId: string): string {
+    return `${workspaceId}\u0000${runId}`;
+  }
+
+  function scheduleRecoveryScan(workspaceId: string): void {
+    if (stopped || recoveryTimers.has(workspaceId)) return;
+    const timer = setTimeout(() => {
+      recoveryTimers.delete(workspaceId);
+      if (stopped) return;
+      void scanWorkspace(workspaceId).catch((error) => {
+        reportError(error);
+        scheduleRecoveryScan(workspaceId);
+      });
+    }, CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+    recoveryTimers.set(workspaceId, timer);
   }
 
   function threadKey(workspaceId: string, threadId: string): string {
@@ -692,6 +718,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           );
         } catch (error) {
           reportError(error);
+          if (intent.exitCode === 0) {
+            pendingNoReplyChecks.set(
+              runKey(live.workspace.workspaceId, live.claim.run.runId),
+              { workspace: live.workspace, run: live.claim.run },
+            );
+            scheduleRecoveryScan(live.workspace.workspaceId);
+          }
         }
         if (intent.exitCode !== 0) {
           await postFailureNote(
@@ -726,6 +759,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         notifyRunUpdated(live.workspace.workspaceId);
       } catch (error) {
         reportError(error);
+        scheduleRecoveryScan(live.workspace.workspaceId);
         return false;
       }
     }
@@ -1067,11 +1101,39 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     sweptWorkspaces.add(workspace.workspaceId);
   }
 
+  async function recoverNoReplyChecks(
+    workspace: ChatDispatchWorkspace,
+  ): Promise<void> {
+    const pending = [...pendingNoReplyChecks.entries()].filter(
+      ([, recovery]) =>
+        recovery.workspace.workspaceId === workspace.workspaceId,
+    );
+    for (const [key, recovery] of pending) {
+      try {
+        const linked = await options
+          .dispatchStoreFor(workspace)
+          .listRunMessages(workspace.workspaceId, recovery.run.runId);
+        if (linked.length === 0) {
+          await postFailureNote(
+            workspace,
+            recovery.run,
+            "⚠ Agent run produced no reply. Open the run chip for details.",
+          );
+        }
+        pendingNoReplyChecks.delete(key);
+      } catch (error) {
+        reportError(error);
+        scheduleRecoveryScan(workspace.workspaceId);
+      }
+    }
+  }
+
   async function scanAndDrain(workspace: ChatDispatchWorkspace): Promise<void> {
     const recovering = liveRuns.get(workspace.workspaceId);
     if (recovering?.finalized) {
       if (!(await finishLiveRun(recovering, null, null))) return;
     }
+    await recoverNoReplyChecks(workspace);
     await startupSweep(workspace);
     await scanTriggers(workspace);
     await drain(workspace);
@@ -1445,6 +1507,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     stopped = true;
     if (pumpTimer) clearInterval(pumpTimer);
     pumpTimer = null;
+    for (const timer of recoveryTimers.values()) clearTimeout(timer);
+    recoveryTimers.clear();
     const pumpAtStop = pumpInFlight;
     const appQuitRuns: LiveRun[] = [];
     const runWorkspacesToRelease: LiveRun[] = [];
@@ -1503,6 +1567,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     selfTestReservations.clear();
     runReservations.clear();
     budgetBypassThreads.clear();
+    pendingNoReplyChecks.clear();
     liveRuns.clear();
     await Promise.all([...workspaceChains.values()].map((chain) => chain.catch(() => undefined)));
     await Promise.all(quitTerminations);

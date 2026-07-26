@@ -8,7 +8,10 @@ import {
   EngineWorkspaceRebindError,
   EngineWorkspaceSessions,
 } from "../workspaces/engineWorkspaceSessions";
-import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
+import {
+  TERMINAL_DISPATCH_DEADLINE_MS,
+  createLiveAgentDispatchStore,
+} from "./liveAgentDispatchStore";
 
 const WORKSPACE = {
   workspaceId: "workspace-live-dispatch",
@@ -249,6 +252,29 @@ describe("live agent dispatch store", () => {
         .filter(({ method }) => method === "chats.dispatch.getRunRecord")
         .at(-1)?.deadlineMs,
     ).toBe(654);
+    // MUTATION: restore the convenience completeRun/failRun calls -> these
+    // terminal attempts (including their read-after-write) lose their deadlines.
+    expect(
+      client.requests
+        .filter(
+          ({ method }) =>
+            method === "chats.dispatch.complete" ||
+            method === "chats.dispatch.fail",
+        )
+        .map(({ deadlineMs }) => deadlineMs),
+    ).toEqual([
+      TERMINAL_DISPATCH_DEADLINE_MS,
+      TERMINAL_DISPATCH_DEADLINE_MS,
+    ]);
+    expect(
+      client.requests
+        .filter(({ method }) => method === "chats.dispatch.getRunRecord")
+        .slice(0, 2)
+        .map(({ deadlineMs }) => deadlineMs),
+    ).toEqual([
+      TERMINAL_DISPATCH_DEADLINE_MS,
+      TERMINAL_DISPATCH_DEADLINE_MS,
+    ]);
     expect(
       new Set(
         client.requests

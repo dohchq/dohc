@@ -23,6 +23,7 @@ import {
   APP_QUIT_KILL_GRACE_MS,
   CHAT_DISPATCH_BUDGET_MAX,
   CHAT_DISPATCH_PUMP_MS,
+  CHAT_DISPATCH_RECOVERY_BACKOFF_MS,
   NO_RUNNER_NOTE,
   RUNNER_KILL_GRACE_MS,
   RUNNER_SELF_TEST_TIMEOUT_MS,
@@ -969,9 +970,8 @@ describe("chatDispatchService", () => {
   });
 
   it("keeps an exited live claim recoverable until daemon completion is durable", async () => {
-    // MUTATION: remove transport retry or restore unconditional terminal
-    // cleanup -> fewer than six attempts run, or the only running ledger claim
-    // and workspace lease disappear before any daemon records completion.
+    // MUTATION: remove the explicit recovery timer -> a local-only workspace
+    // never makes the seventh repair attempt after the first six are exhausted.
     const fixture = await createFixture({
       dispatchBackend: "live",
       temporaryRunActivity: true,
@@ -990,6 +990,7 @@ describe("chatDispatchService", () => {
       throw new Error("Expected a live run and injectable completion failures.");
     }
     await linkAgentReply(fixture, first.threadId, claim.run.runId);
+    vi.useFakeTimers();
     fixture.rejectCompleteRuns(
       Array.from(
         { length: 6 },
@@ -1018,8 +1019,12 @@ describe("chatDispatchService", () => {
     expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
     expect(fixture.runActivity).toEqual({ acquires: 1, releases: 0 });
     expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.syncRequests).toEqual([]);
 
-    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS - 1);
+    expect(fixture.completeRunRequests).toBe(6);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks(100);
 
     expect(fixture.completeRunRequests).toBe(7);
     expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
@@ -1031,6 +1036,7 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(
       second.threadId,
     );
+    expect(fixture.syncRequests).toEqual([]);
   });
 
   it("releases the live slot when the final run-message lookup rejects", async () => {
@@ -1040,7 +1046,7 @@ describe("chatDispatchService", () => {
       dispatchBackend: "live",
       temporaryRunActivity: true,
     });
-    await createAgentThread(fixture, {
+    const first = await createAgentThread(fixture, {
       body: "Finish while the daemon read is unavailable.",
       authorUserId: "user_local",
     });
@@ -1066,6 +1072,20 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(next.threadId);
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
+    const messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: first.threadId,
+    });
+    expect(
+      messages.filter(
+        ({ body }) =>
+          body ===
+          "⚠ Agent run produced no reply. Open the run chip for details.",
+      ),
+    ).toHaveLength(1);
+    expect(fixture.dispatch.getRunRecord(firstClaim.run.runId)).toMatchObject({
+      failureNotePosted: true,
+    });
   });
 
   it("coalesces pending triggers in one thread and dispatches a later message as a follow-up", async () => {

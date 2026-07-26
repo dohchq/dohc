@@ -405,6 +405,35 @@ describe("EngineClient", () => {
     transport.close();
   });
 
+  it("enforces request deadlines when a connected peer stays silent", async () => {
+    // MUTATION: remove the client timer or only serialize deadlineMs -> this
+    // promise never settles because the peer deliberately leaves its socket open.
+    vi.useFakeTimers();
+    try {
+      const peer = new FakePeerConnection();
+      const transport = client(peer);
+      peer.acknowledge();
+      await transport.ready();
+
+      const operation = transport.sendRequest({
+        ...request(55, "silent.method"),
+        deadlineMs: 25,
+      });
+      const rejection = expect(operation).rejects.toMatchObject({
+        code: "transport-error",
+        message: "Engine request 1 timed out after 25ms.",
+      });
+
+      await vi.advanceTimersByTimeAsync(25);
+      await rejection;
+      await expect(
+        transport.sendRequest(request(56, "after.timeout")),
+      ).rejects.toMatchObject({ code: "closed" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects a matching wire error with the generated WireError payload", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);

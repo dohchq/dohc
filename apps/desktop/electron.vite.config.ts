@@ -13,6 +13,7 @@ export const mainBundledWorkspaceDeps = [
   "@dohc/workspace-core",
   "@dohc/workspace-contracts",
   "@dohc/workspace-engine",
+  "@dohc/workspace-engine-client",
   "@dohc/workspace-fs",
   "@dohc/workspace-kernel-client",
   "@dohc/sqlite-worker",
@@ -20,6 +21,7 @@ export const mainBundledWorkspaceDeps = [
 
 export const preloadBundledRuntimeDeps = [
   // Sandboxed preloads cannot resolve app/workspace packages at runtime.
+  "@dohc/workspace-contracts",
   "@dohc/workspace-core",
   "zod",
 ];

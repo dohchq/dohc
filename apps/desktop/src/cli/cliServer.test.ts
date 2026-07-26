@@ -313,10 +313,10 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
-  it("returns the fixed version mismatch before opening a workspace", async () => {
+  it("rejects an older CLI before opening a workspace", async () => {
     const response = await rawRequest({
       token,
-      protocolVersion: CLI_PROTOCOL_VERSION + 1,
+      protocolVersion: CLI_PROTOCOL_VERSION - 1,
       verb: "channels",
       args: { cwd: workspaceRoot, actor: "human" },
     });

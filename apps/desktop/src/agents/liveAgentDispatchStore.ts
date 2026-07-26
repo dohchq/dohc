@@ -34,6 +34,8 @@ export interface LiveAgentDispatchStoreHandle {
   close(): Promise<void>;
 }
 
+export const TERMINAL_DISPATCH_DEADLINE_MS = 2_000;
+
 export function createLiveAgentDispatchStore(
   workspace: EngineWorkspace,
   sessions: EngineWorkspaceSessions,
@@ -92,12 +94,52 @@ export function createLiveAgentDispatchStore(
       await invoke(async (adapter) => await adapter.failPendingForThread(input)),
     completeRun: async (input) =>
       await invoke(
-        async (adapter) => await adapter.completeRun(input),
+        async (adapter) => {
+          const requestOptions = {
+            deadlineMs: TERMINAL_DISPATCH_DEADLINE_MS,
+          };
+          await adapter.request(
+            CHATS_METHOD.dispatchComplete,
+            input,
+            requestOptions,
+          );
+          const completed = await adapter.request(
+            CHATS_METHOD.dispatchGetRunRecord,
+            { runId: input.runId },
+            requestOptions,
+          );
+          if (!completed) {
+            throw new Error(
+              "The daemon acknowledged completion but did not return the run record.",
+            );
+          }
+          return completed as AgentRunRecord;
+        },
         { retryTransportErrors: true },
       ),
     failRun: async (input) =>
       await invoke(
-        async (adapter) => await adapter.failRun(input),
+        async (adapter) => {
+          const requestOptions = {
+            deadlineMs: TERMINAL_DISPATCH_DEADLINE_MS,
+          };
+          await adapter.request(
+            CHATS_METHOD.dispatchFail,
+            input,
+            requestOptions,
+          );
+          const failed = await adapter.request(
+            CHATS_METHOD.dispatchGetRunRecord,
+            { runId: input.runId },
+            requestOptions,
+          );
+          if (!failed) {
+            throw new Error(
+              "The daemon acknowledged failure but did not return the run record.",
+            );
+          }
+          return failed as AgentRunRecord;
+        },
         { retryTransportErrors: true },
       ),
     listPending: async (workspaceId) =>

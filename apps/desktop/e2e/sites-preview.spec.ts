@@ -238,6 +238,10 @@ async function selectPreviewMode(
   if (!(await option.isVisible())) {
     await page.getByTestId("site-preview-options").click();
   }
+  await expect(option).toBeEnabled();
+  if (!(await option.isVisible())) {
+    await page.getByTestId("site-preview-options").click();
+  }
   await option.click();
 }
 

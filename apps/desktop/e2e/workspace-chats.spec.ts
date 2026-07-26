@@ -57,7 +57,7 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     await expect(page.getByTestId("chats-message-body")).toContainText(
       "Let's plan the launch this week.",
     );
-    await expect(page.getByTestId("chats-message-author")).toHaveText("Ice");
+    await expect(page.getByTestId("chats-message-author")).toHaveText("You");
 
     // Replies land through the thread composer.
     const composer = page.getByTestId("chats-composer");
