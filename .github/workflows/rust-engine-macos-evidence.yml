@@ -43,6 +43,10 @@ on:
         type: choice
         default: full
         options: [full, quick]
+      soak_minutes:
+        description: "full-mode soak duration in minutes. Longer runs are how a decelerating fragmentation curve is told apart from a constant-rate leak."
+        type: string
+        default: "30"
 
 permissions:
   contents: read
@@ -165,7 +169,9 @@ jobs:
           mkdir -p tools/rust-engine-program/soak-evidence
           if [ "$SOAK_MODE" = "full" ]; then
             EVIDENCE_TIER="cutoverBlocking"
-            ARGS="--minutes 30 --cycles 1000"
+            SOAK_MINUTES="${{ inputs.soak_minutes }}"
+            case "$SOAK_MINUTES" in ''|*[!0-9]*) SOAK_MINUTES=30 ;; esac
+            ARGS="--minutes $SOAK_MINUTES --cycles 1000"
           else
             EVIDENCE_TIER="quick-smoke"
             echo "::warning::quick mode is NON-GATING — it cannot satisfy the GATE6 cutoverBlocking evidence."
