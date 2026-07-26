@@ -66,6 +66,9 @@ export type ConflictFileState = WorkspaceJsonObject & {
   path: string;
   contentKind: "text" | "binary";
   snapshot: ConflictSnapshot | null;
+  binarySha256: string | null;
+  binaryObjectId: string | null;
+  binaryLatestMomentId: string | null;
   metadataSummary: string | null;
   metadataCorrelationId: string | null;
 };
@@ -313,6 +316,9 @@ function decodeConflictState(
     "path",
     "contentKind",
     "snapshot",
+    "binarySha256",
+    "binaryObjectId",
+    "binaryLatestMomentId",
     "metadataSummary",
     "metadataCorrelationId",
   ]);
@@ -323,6 +329,13 @@ function decodeConflictState(
       object.snapshot === null
         ? null
         : decodeSnapshot(object.snapshot ?? null, `${label}.snapshot`),
+    binarySha256: nullableString(object, "binarySha256", label),
+    binaryObjectId: nullableString(object, "binaryObjectId", label),
+    binaryLatestMomentId: nullableString(
+      object,
+      "binaryLatestMomentId",
+      label,
+    ),
     metadataSummary: nullableString(object, "metadataSummary", label),
     metadataCorrelationId: nullableString(
       object,

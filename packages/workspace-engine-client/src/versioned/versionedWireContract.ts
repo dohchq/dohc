@@ -62,6 +62,8 @@ type MutationMetadata = JsonObject & {
   authorJson?: string;
   requestId?: string;
   nowMs?: number;
+  summary?: string;
+  correlationId?: string;
 };
 
 export type VersionedTextWriteParams = MutationMetadata & {
@@ -165,6 +167,8 @@ export type SecretsWriteParams = JsonObject & {
   text: string;
   origin: VersionedOrigin;
   momentId: string;
+  summary?: string;
+  correlationId?: string;
 };
 
 export type SecretsListParams = JsonObject & {
@@ -184,6 +188,8 @@ export type SecretsDeleteParams = JsonObject & {
   path: string;
   origin: VersionedOrigin;
   momentId: string;
+  summary?: string;
+  correlationId?: string;
 };
 
 export type SecretsForkParams = JsonObject & {
@@ -262,6 +268,8 @@ export type SnapshotMetadata = JsonObject & {
   updatedAtMs: number;
   latestMomentId: string;
   metadataOrigin: string;
+  metadataSummary?: string | null;
+  metadataCorrelationId?: string | null;
 };
 
 export type TextWriteSnapshot = SnapshotMetadata & {
@@ -300,6 +308,8 @@ export type MomentRecord = JsonObject & {
   beforeBinarySha256: string | null;
   beforeLatestMomentId: string | null;
   metadataOrigin: string;
+  metadataSummary?: string | null;
+  metadataCorrelationId?: string | null;
   author: MomentAuthor;
   syncRecordOnly: boolean;
   afterText: string | null;
@@ -384,6 +394,8 @@ export type VersionedTextListEntry = JsonObject & {
   updatedAtMs: number;
   latestMomentId: string;
   metadataOrigin: string;
+  metadataSummary?: string | null;
+  metadataCorrelationId?: string | null;
 };
 
 export type VersionedTextListResult = JsonObject & {
@@ -752,9 +764,11 @@ function snapshotMetadataValue(
     "updatedAtMs",
     "latestMomentId",
     "metadataOrigin",
+    "metadataSummary",
+    "metadataCorrelationId",
     ...extraKeys,
   ]);
-  return {
+  const result: SnapshotMetadata = {
     workspaceId: stringValue(object, "workspaceId", label),
     versionId: stringValue(object, "versionId", label),
     objectId: stringValue(object, "objectId", label),
@@ -766,6 +780,17 @@ function snapshotMetadataValue(
     latestMomentId: stringValue(object, "latestMomentId", label),
     metadataOrigin: stringValue(object, "metadataOrigin", label),
   };
+  if (object.metadataSummary !== undefined) {
+    result.metadataSummary = nullableStringValue(object, "metadataSummary", label);
+  }
+  if (object.metadataCorrelationId !== undefined) {
+    result.metadataCorrelationId = nullableStringValue(
+      object,
+      "metadataCorrelationId",
+      label,
+    );
+  }
+  return result;
 }
 
 function momentAuthorValue(value: JsonValue, label: string): MomentAuthor {
@@ -813,6 +838,8 @@ function momentValue(value: JsonValue, label: string): MomentRecord {
     "beforeBinarySha256",
     "beforeLatestMomentId",
     "metadataOrigin",
+    "metadataSummary",
+    "metadataCorrelationId",
     "author",
     "syncRecordOnly",
     "afterText",
@@ -826,7 +853,7 @@ function momentValue(value: JsonValue, label: string): MomentRecord {
   if (operation !== "write" && operation !== "delete" && operation !== "rename") {
     throw new VersionedProtocolShapeError(`${label}.operation is invalid.`);
   }
-  return {
+  const result: MomentRecord = {
     momentOrder: numberValue(object, "momentOrder", label),
     momentId: stringValue(object, "momentId", label),
     versionId: stringValue(object, "versionId", label),
@@ -852,6 +879,17 @@ function momentValue(value: JsonValue, label: string): MomentRecord {
     beforeByteLength: nullableNumberValue(object, "beforeByteLength", label),
     beforeInbandLimitBytes: nullableNumberValue(object, "beforeInbandLimitBytes", label),
   };
+  if (object.metadataSummary !== undefined) {
+    result.metadataSummary = nullableStringValue(object, "metadataSummary", label);
+  }
+  if (object.metadataCorrelationId !== undefined) {
+    result.metadataCorrelationId = nullableStringValue(
+      object,
+      "metadataCorrelationId",
+      label,
+    );
+  }
+  return result;
 }
 
 function secretMomentValue(value: JsonValue, label: string): SecretMomentRecord {
@@ -947,6 +985,8 @@ export function decodeVersionedTextReadResult(value: JsonValue): VersionedTextRe
     "updatedAtMs",
     "latestMomentId",
     "metadataOrigin",
+    "metadataSummary",
+    "metadataCorrelationId",
     "inbandLimitBytes",
   ]);
   const metadata = snapshotMetadataValue(value, label, [
@@ -1483,8 +1523,10 @@ export function decodeVersionedTextListResult(
       "updatedAtMs",
       "latestMomentId",
       "metadataOrigin",
+      "metadataSummary",
+      "metadataCorrelationId",
     ]);
-    return {
+    const decoded: VersionedTextListEntry = {
       path: stringValue(row, "path", entryLabel),
       objectId: stringValue(row, "objectId", entryLabel),
       contentKind: contentKindValue(row, "contentKind", entryLabel),
@@ -1494,6 +1536,21 @@ export function decodeVersionedTextListResult(
       latestMomentId: stringValue(row, "latestMomentId", entryLabel),
       metadataOrigin: stringValue(row, "metadataOrigin", entryLabel),
     };
+    if (row.metadataSummary !== undefined) {
+      decoded.metadataSummary = nullableStringValue(
+        row,
+        "metadataSummary",
+        entryLabel,
+      );
+    }
+    if (row.metadataCorrelationId !== undefined) {
+      decoded.metadataCorrelationId = nullableStringValue(
+        row,
+        "metadataCorrelationId",
+        entryLabel,
+      );
+    }
+    return decoded;
   });
   return {
     files,

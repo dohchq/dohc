@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import {
@@ -9,7 +10,12 @@ import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { nativeTmpdir } from "./testTemp";
 
-const binaryPath = "C:/w/_targets/rpcs6/debug/dohc-workspace-engine.exe";
+const binaryPath = fileURLToPath(
+  new URL(
+    "../../../../target/debug/dohc-workspace-engine.exe",
+    import.meta.url,
+  ),
+);
 const originalRustAdapter = process.env.DOHC_RUST_ENGINE_ADAPTER;
 const originalKernelSidecar = process.env.DOHC_KERNEL_SIDECAR;
 const roots: string[] = [];

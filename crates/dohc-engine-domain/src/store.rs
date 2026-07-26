@@ -281,6 +281,12 @@ impl<'a> VersionedTextStore<'a> {
             input.to_path.as_bytes(),
             input.moment_id.as_bytes(),
             input.metadata_origin.as_bytes(),
+            input.metadata_summary.as_deref().unwrap_or("").as_bytes(),
+            input
+                .metadata_correlation_id
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
             author_kind,
             author_json,
         ]);
@@ -332,8 +338,8 @@ impl<'a> VersionedTextStore<'a> {
             updated_at_ms: input.now_ms,
             latest_moment_id: input.moment_id.clone(),
             metadata_origin: input.metadata_origin.clone(),
-            metadata_summary: None,
-            metadata_correlation_id: None,
+            metadata_summary: input.metadata_summary.clone(),
+            metadata_correlation_id: input.metadata_correlation_id.clone(),
         };
         let outcome = self.store.write_with(faults, |tx| {
             let moment_order = next_moment_order(tx)?;
@@ -341,17 +347,18 @@ impl<'a> VersionedTextStore<'a> {
                 "INSERT INTO moments \
                  (workspace_id, moment_order, moment_id, version_id, object_id, path, \
                   recorded_at_ms, operation, after_blob_sha256, before_present, \
-                  before_blob_sha256, before_latest_moment_id, metadata_origin, author_json, \
+                  before_blob_sha256, before_latest_moment_id, metadata_origin, \
+                  metadata_summary, metadata_correlation_id, author_json, \
                   sync_record_only, after_content_kind, after_binary_sha256, \
                   before_content_kind, before_binary_sha256, \
                   payload_before_path, payload_before_content_kind, \
                   payload_before_blob_sha256, \
                   payload_after_path, payload_after_content_kind, \
                   payload_after_blob_sha256) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'rename', ?8, 2, ?8, ?9, ?10, ?11, \
-                         NULL, ?12, ?13, ?12, ?13, ?14, ?12, \
-                         CASE ?12 WHEN 'binary' THEN ?13 ELSE ?8 END, ?6, ?12, \
-                         CASE ?12 WHEN 'binary' THEN ?13 ELSE ?8 END)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'rename', ?8, 2, ?8, ?9, ?10, \
+                         ?11, ?12, ?13, NULL, ?14, ?15, ?14, ?15, ?16, ?14, \
+                         CASE ?14 WHEN 'binary' THEN ?15 ELSE ?8 END, ?6, ?14, \
+                         CASE ?14 WHEN 'binary' THEN ?15 ELSE ?8 END)",
                 params![
                     ws,
                     moment_order,
@@ -363,6 +370,8 @@ impl<'a> VersionedTextStore<'a> {
                     before.blob_sha256,
                     before.latest_moment_id,
                     input.metadata_origin,
+                    input.metadata_summary,
+                    input.metadata_correlation_id,
                     input.author_json,
                     before.content_kind,
                     before.binary_sha256,
@@ -1914,6 +1923,8 @@ fn capture_ingest_in_tx(
         text: input.text.clone(),
         moment_id,
         metadata_origin: input.metadata_origin.clone(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
         request_id: None,
@@ -2053,6 +2064,8 @@ fn capture_retire_in_tx(
         moment_id,
         request_id: None,
         metadata_origin: "capture".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms: input.now_ms,
     };
@@ -2250,6 +2263,8 @@ fn capture_ingest_binary_in_tx(
             binary_sha256: &binary_sha256,
             moment_id: &moment_id,
             metadata_origin: &input.metadata_origin,
+            metadata_summary: None,
+            metadata_correlation_id: None,
             author_json: input.author_json.as_deref(),
             now_ms: input.now_ms,
         },
@@ -2481,6 +2496,12 @@ fn write_text_in_tx_with_journal(
         input.moment_id.as_bytes(),
         input.object_id.as_bytes(),
         input.metadata_origin.as_bytes(),
+        input.metadata_summary.as_deref().unwrap_or("").as_bytes(),
+        input
+            .metadata_correlation_id
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
         author_kind,
         author_json,
     ]);
@@ -2499,6 +2520,8 @@ fn write_text_in_tx_with_journal(
             && existing.after_content_kind == "text"
             && existing.after_blob_sha256.as_deref() == Some(blob.as_str())
             && existing.metadata_origin == input.metadata_origin
+            && existing.metadata_summary == input.metadata_summary
+            && existing.metadata_correlation_id == input.metadata_correlation_id
             && existing.author_json == input.author_json;
         if exact {
             return write_result_from_moment(tx, ws, existing, true);
@@ -2572,15 +2595,16 @@ fn write_text_in_tx_with_journal(
         "INSERT INTO moments \
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
            operation, after_blob_sha256, before_present, before_blob_sha256, \
-           before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+           before_latest_moment_id, metadata_origin, metadata_summary, \
+           metadata_correlation_id, author_json, sync_record_only, \
            after_content_kind, after_binary_sha256, before_content_kind, before_binary_sha256, \
            payload_before_path, payload_before_content_kind, payload_before_blob_sha256, \
            payload_after_path, payload_after_content_kind, \
            payload_after_blob_sha256) \
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', ?8, ?9, ?10, ?11, ?12, ?13, \
-                  NULL, 'text', NULL, ?14, ?15, \
-                  CASE WHEN ?9 = 2 THEN ?6 END, CASE WHEN ?9 = 2 THEN ?14 END, \
-                  CASE ?14 WHEN 'binary' THEN ?15 ELSE ?10 END, ?6, 'text', ?8)",
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', ?8, ?9, ?10, ?11, ?12, \
+                  ?13, ?14, ?15, NULL, 'text', NULL, ?16, ?17, \
+                  CASE WHEN ?9 = 2 THEN ?6 END, CASE WHEN ?9 = 2 THEN ?16 END, \
+                  CASE ?16 WHEN 'binary' THEN ?17 ELSE ?10 END, ?6, 'text', ?8)",
         params![
             ws,
             moment_order,
@@ -2594,6 +2618,8 @@ fn write_text_in_tx_with_journal(
             before_blob,
             before_latest_moment_id,
             input.metadata_origin,
+            input.metadata_summary,
+            input.metadata_correlation_id,
             input.author_json,
             before_content_kind,
             before_binary_sha256,
@@ -2605,7 +2631,7 @@ fn write_text_in_tx_with_journal(
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
            latest_moment_id, metadata_origin, metadata_summary, \
            metadata_correlation_id, content_kind, binary_sha256) \
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, 'text', NULL) \
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'text', NULL) \
          ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
            path = excluded.path, blob_sha256 = excluded.blob_sha256, \
            updated_at_ms = excluded.updated_at_ms, latest_moment_id = excluded.latest_moment_id, \
@@ -2623,6 +2649,8 @@ fn write_text_in_tx_with_journal(
             input.now_ms,
             input.moment_id,
             input.metadata_origin,
+            input.metadata_summary,
+            input.metadata_correlation_id,
         ],
     )
     .map_err(DomainError::sql_persist)?;
@@ -2656,8 +2684,8 @@ fn write_text_in_tx_with_journal(
             updated_at_ms: input.now_ms,
             latest_moment_id: input.moment_id.clone(),
             metadata_origin: input.metadata_origin.clone(),
-            metadata_summary: None,
-            metadata_correlation_id: None,
+            metadata_summary: input.metadata_summary.clone(),
+            metadata_correlation_id: input.metadata_correlation_id.clone(),
         },
         moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
             reason: "moment vanished within its own write transaction",
@@ -2705,6 +2733,12 @@ pub fn write_binary_in_tx(
         input.moment_id.as_bytes(),
         input.object_id.as_bytes(),
         input.metadata_origin.as_bytes(),
+        input.metadata_summary.as_deref().unwrap_or("").as_bytes(),
+        input
+            .metadata_correlation_id
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
         author_kind,
         author_json,
     ]);
@@ -2777,6 +2811,8 @@ pub fn write_binary_in_tx(
             binary_sha256: sha256.clone(),
             moment_id: input.moment_id.clone(),
             metadata_origin: input.metadata_origin.clone(),
+            metadata_summary: input.metadata_summary.clone(),
+            metadata_correlation_id: input.metadata_correlation_id.clone(),
             author_json: input.author_json.clone(),
             // ACTIVE version only: disk mirrors the active version, so a
             // non-active write must not enqueue a job — the open-time replay
@@ -3154,6 +3190,12 @@ pub fn delete_text_in_tx(
         input.path.as_bytes(),
         input.moment_id.as_bytes(),
         input.metadata_origin.as_bytes(),
+        input.metadata_summary.as_deref().unwrap_or("").as_bytes(),
+        input
+            .metadata_correlation_id
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
         author_kind,
         author_json,
     ]);
@@ -3183,15 +3225,16 @@ pub fn delete_text_in_tx(
         "INSERT INTO moments \
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
            operation, after_blob_sha256, before_present, before_blob_sha256, \
-           before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+           before_latest_moment_id, metadata_origin, metadata_summary, \
+           metadata_correlation_id, author_json, sync_record_only, \
            after_content_kind, after_binary_sha256, before_content_kind, before_binary_sha256, \
            payload_before_path, payload_before_content_kind, payload_before_blob_sha256, \
            payload_after_path, payload_after_content_kind, \
            payload_after_blob_sha256) \
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'delete', ?8, 2, ?8, ?9, ?10, ?11, \
-                  NULL, ?12, ?13, ?12, ?13, ?6, ?12, \
-                  CASE ?12 WHEN 'binary' THEN ?13 ELSE ?8 END, ?6, ?12, \
-                  CASE ?12 WHEN 'binary' THEN ?13 ELSE ?8 END)",
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'delete', ?8, 2, ?8, ?9, ?10, \
+                  ?11, ?12, ?13, NULL, ?14, ?15, ?14, ?15, ?6, ?14, \
+                  CASE ?14 WHEN 'binary' THEN ?15 ELSE ?8 END, ?6, ?14, \
+                  CASE ?14 WHEN 'binary' THEN ?15 ELSE ?8 END)",
         params![
             ws,
             moment_order,
@@ -3203,6 +3246,8 @@ pub fn delete_text_in_tx(
             before.blob_sha256,
             before.latest_moment_id,
             input.metadata_origin,
+            input.metadata_summary,
+            input.metadata_correlation_id,
             input.author_json,
             before.content_kind,
             before.binary_sha256,

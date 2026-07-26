@@ -261,6 +261,7 @@ pub struct SecretDelete {
     pub moment_id: String,
     pub metadata_origin: String,
     pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
 }
 
@@ -1371,7 +1372,7 @@ fn delete_secret_file_inner(
         operation: SecretOp::Delete,
         metadata_origin: input.metadata_origin.clone(),
         metadata_summary: input.metadata_summary.clone(),
-        metadata_correlation_id: None,
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
     };
     let outcome = store.write_with(faults, |tx| {
         let moment_order = next_secret_moment_order(tx, ws)?;
@@ -1480,6 +1481,7 @@ pub fn capture_secret_retire(
             moment_id,
             metadata_origin: input.metadata_origin.clone(),
             metadata_summary: Some(format!("Deleted {basename}")),
+            metadata_correlation_id: None,
             now_ms: input.now_ms,
         },
         SecretDeleteDiskIntent::AlreadyAbsent,

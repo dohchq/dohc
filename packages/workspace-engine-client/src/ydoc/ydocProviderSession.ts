@@ -41,7 +41,7 @@ export interface EngineYdocProviderSession {
   readonly initialUpdate: Uint8Array;
   readonly contentKind: YdocContentKind;
   readonly path: string;
-  applyLocalUpdate(update: Uint8Array): void;
+  applyLocalUpdate(update: Uint8Array): Promise<void>;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
   applyExternalMarkdownEdit(
     markdown: string,
@@ -149,7 +149,7 @@ export async function openEngineYdocProviderSession(
     path: session.path,
 
     applyLocalUpdate(update) {
-      if (closed) return;
+      if (closed) return Promise.resolve();
       let operation: Promise<unknown>;
       try {
         operation = session.applyLocalUpdate(update);
@@ -166,6 +166,7 @@ export async function openEngineYdocProviderSession(
         });
       void journalChain.catch(() => undefined);
       requestSettle();
+      return journalChain;
     },
 
     async settleNow(settleOptions) {

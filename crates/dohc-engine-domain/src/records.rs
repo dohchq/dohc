@@ -303,6 +303,8 @@ pub struct WriteText {
     /// The (unique-per-workspace) id to pin on the new moment.
     pub moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
     /// Optional idempotency key: a same-payload retry replays exactly-once.
@@ -320,6 +322,8 @@ pub struct WriteBinary {
     pub bytes: Vec<u8>,
     pub moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
     /// Optional idempotency key: a same-payload retry replays exactly-once.
@@ -408,6 +412,8 @@ pub struct DeleteTextFile {
     pub moment_id: String,
     pub request_id: Option<String>,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
 }
@@ -422,6 +428,8 @@ pub struct RenameTextFile {
     pub moment_id: String,
     pub request_id: Option<String>,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
 }

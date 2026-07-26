@@ -260,6 +260,8 @@ pub struct WriteBinaryFile {
     /// Provenance recorded on the moment and snapshot. Mirrored resolve
     /// passes `"sync"` (the historical hardcode); capture passes `"capture"`.
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     /// `Some(preimage)`: enqueue a materialization job sharing the moment's
     /// generation (mirrored resolve — the bytes must REACH disk). `None`: no
@@ -286,6 +288,8 @@ pub struct ResolveTextConflict {
     pub write_moment_id: String,
     pub delete_moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,
@@ -1014,6 +1018,8 @@ pub fn write_binary_file_in_tx(
             binary_sha256: &input.binary_sha256,
             moment_id: &input.moment_id,
             metadata_origin: &input.metadata_origin,
+            metadata_summary: input.metadata_summary.as_deref(),
+            metadata_correlation_id: input.metadata_correlation_id.as_deref(),
             author_json: input.author_json.as_deref(),
             now_ms: input.now_ms,
         },
@@ -1052,6 +1058,8 @@ pub struct PersistBinaryHead<'a> {
     pub binary_sha256: &'a str,
     pub moment_id: &'a str,
     pub metadata_origin: &'a str,
+    pub metadata_summary: Option<&'a str>,
+    pub metadata_correlation_id: Option<&'a str>,
     pub author_json: Option<&'a str>,
     pub now_ms: i64,
 }
@@ -1083,7 +1091,8 @@ pub fn persist_binary_head_in_tx(
         "INSERT INTO moments (
              workspace_id, moment_order, moment_id, version_id, object_id, path,
              recorded_at_ms, operation, after_blob_sha256, before_present,
-             before_blob_sha256, before_latest_moment_id, metadata_origin, author_json,
+             before_blob_sha256, before_latest_moment_id, metadata_origin,
+             metadata_summary, metadata_correlation_id, author_json,
              sync_record_only, after_content_kind, after_binary_sha256,
              before_content_kind, before_binary_sha256,
              payload_before_path, payload_before_content_kind,
@@ -1092,9 +1101,9 @@ pub fn persist_binary_head_in_tx(
              payload_after_blob_sha256
          ) VALUES (
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', NULL, ?8,
-             ?9, ?10, ?11, ?12, NULL, 'binary', ?13, ?14, ?15,
-             CASE WHEN ?8 = 2 THEN ?6 END, CASE WHEN ?8 = 2 THEN ?14 END,
-             CASE ?14 WHEN 'binary' THEN ?15 ELSE ?9 END, ?6, 'binary', ?13
+             ?9, ?10, ?11, ?12, ?13, ?14, NULL, 'binary', ?15, ?16, ?17,
+             CASE WHEN ?8 = 2 THEN ?6 END, CASE WHEN ?8 = 2 THEN ?16 END,
+             CASE ?16 WHEN 'binary' THEN ?17 ELSE ?9 END, ?6, 'binary', ?15
          )",
         params![
             head.workspace_id,
@@ -1108,6 +1117,8 @@ pub fn persist_binary_head_in_tx(
             before_blob_sha256,
             before_latest_moment_id,
             head.metadata_origin,
+            head.metadata_summary,
+            head.metadata_correlation_id,
             head.author_json,
             head.binary_sha256,
             before_content_kind,
@@ -1120,7 +1131,7 @@ pub fn persist_binary_head_in_tx(
              workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
              latest_moment_id, metadata_origin, metadata_summary,
              metadata_correlation_id, content_kind, binary_sha256
-         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, NULL, NULL, 'binary', ?8)
+         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, 'binary', ?10)
          ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET
              path = excluded.path,
              blob_sha256 = NULL,
@@ -1139,6 +1150,8 @@ pub fn persist_binary_head_in_tx(
             head.now_ms,
             head.moment_id,
             head.metadata_origin,
+            head.metadata_summary,
+            head.metadata_correlation_id,
             head.binary_sha256,
         ],
     )
@@ -1167,6 +1180,8 @@ fn write_input(
         text: text.to_owned(),
         moment_id: moment_id.to_owned(),
         metadata_origin: input.metadata_origin.clone(),
+        metadata_summary: input.metadata_summary.clone(),
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
         request_id: None,
@@ -1181,6 +1196,8 @@ fn delete_input(input: &ResolveTextConflict, version_id: &str, path: &str) -> De
         moment_id: input.delete_moment_id.clone(),
         request_id: None,
         metadata_origin: input.metadata_origin.clone(),
+        metadata_summary: input.metadata_summary.clone(),
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
     }
@@ -1838,6 +1855,8 @@ mod tests {
                         binary_sha256: sha.clone(),
                         moment_id: "job-a".to_owned(),
                         metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         materialize: Some(Preimage::Absent),
                         now_ms: 10,
@@ -1859,6 +1878,8 @@ mod tests {
                         binary_sha256: sha.clone(),
                         moment_id: "job-b".to_owned(),
                         metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         materialize: Some(Preimage::Absent),
                         now_ms: 11,
@@ -1897,6 +1918,8 @@ mod tests {
                         binary_sha256: sha.clone(),
                         moment_id: "binary-moment".to_owned(),
                         metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         materialize: Some(Preimage::Absent),
                         now_ms: 10,
@@ -1952,6 +1975,8 @@ mod tests {
                     text: "after binary".to_owned(),
                     moment_id: "text-moment".to_owned(),
                     metadata_origin: "user".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
                     author_json: None,
                     now_ms: 11,
                     request_id: None,

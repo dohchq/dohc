@@ -5,6 +5,9 @@ import {
   decodeWorkspaceResult,
   type WorkspaceHandle,
 } from "@dohc/workspace-engine-client";
+import { randomBytes } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { EngineDaemonClient } from "./engineDaemonLifecycle";
 
 export interface EngineWorkspace {
@@ -41,6 +44,16 @@ export interface EngineWorkspaceSessionsOptions {
 const TRANSPORT_REBIND_ATTEMPTS = 6;
 const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
 const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
+const SHADOW_CLONE_TOKEN = /^[0-9a-f]{64}$/;
+
+function isAlreadyExists(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "EEXIST"
+  );
+}
 
 export class EngineWorkspaceRebindError extends Error {
   readonly workspaceId: string;
@@ -52,19 +65,14 @@ export class EngineWorkspaceRebindError extends Error {
   }
 }
 
-function requiresReconnect(error: unknown): boolean {
+export function isEngineSessionReconnectError(error: unknown): boolean {
   return (
-    error instanceof DaemonRefusalError &&
-    error.disposition === "afterReconnect"
-  );
-}
-
-function isTransportError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "transport-error"
+    (error instanceof DaemonRefusalError &&
+      error.disposition === "afterReconnect") ||
+    (typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "transport-error")
   );
 }
 
@@ -83,6 +91,7 @@ async function defaultSleep(ms: number): Promise<void> {
 
 export class EngineWorkspaceSessions {
   private readonly entries = new Map<string, SessionEntry>();
+  private readonly preparations = new Map<string, Promise<void>>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
 
@@ -128,9 +137,13 @@ export class EngineWorkspaceSessions {
       try {
         return await operation(binding);
       } catch (error) {
-        const retryAfterReconnect = requiresReconnect(error);
+        const retryAfterReconnect = isEngineSessionReconnectError(error);
         const retryAfterTransport =
-          options.retryTransportErrors === true && isTransportError(error);
+          options.retryTransportErrors === true &&
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "transport-error";
         if (
           (!retryAfterReconnect && !retryAfterTransport) ||
           attempt >= maxAttempts
@@ -210,6 +223,7 @@ export class EngineWorkspaceSessions {
     client: EngineDaemonClient,
     workspace: EngineWorkspace,
   ): Promise<EngineWorkspaceBinding> {
+    await this.prepareWorkspace(workspace.rootPath);
     const requester = new WorkspaceDaemonRequester(client);
     const raw = await requester.request(WORKSPACE_METHOD.open, {
       rootDir: workspace.rootPath,
@@ -217,6 +231,39 @@ export class EngineWorkspaceSessions {
     });
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
     return { client, workspace: opened.workspace };
+  }
+
+  private async prepareWorkspace(rootPath: string): Promise<void> {
+    let preparation = this.preparations.get(rootPath);
+    if (!preparation) {
+      preparation = (async () => {
+        const markerDirectory = join(rootPath, ".dohc", "engine");
+        const markerPath = join(markerDirectory, "SHADOW_CLONE");
+        await mkdir(markerDirectory, { recursive: true });
+        try {
+          await writeFile(
+            markerPath,
+            randomBytes(32).toString("hex"),
+            { encoding: "utf8", flag: "wx", mode: 0o600 },
+          );
+        } catch (error) {
+          if (!isAlreadyExists(error)) throw error;
+          const token = await readFile(markerPath, "utf8");
+          if (!SHADOW_CLONE_TOKEN.test(token)) {
+            throw new Error(
+              `Rust engine shadow marker is invalid for ${rootPath}.`,
+            );
+          }
+        }
+      })();
+      this.preparations.set(rootPath, preparation);
+      preparation.catch(() => {
+        if (this.preparations.get(rootPath) === preparation) {
+          this.preparations.delete(rootPath);
+        }
+      });
+    }
+    await preparation;
   }
 
   private async closeBinding(binding: EngineWorkspaceBinding): Promise<void> {

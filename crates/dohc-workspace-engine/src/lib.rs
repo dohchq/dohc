@@ -59,6 +59,7 @@ const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 /// string limit (64 KiB per string): base64 expands 4/3, so this raw cap
 /// leaves headroom under it. Larger binary blobs use raw blob-chunk egress.
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
+const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
 
 /// Aggregate hydrated blob bytes allowed to wait for or flow through framed
 /// egress. A single stored blob may be this large, so exact-byte reservations
@@ -1426,7 +1427,7 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
         let text = params.text;
-        if text.len() > MAX_INBAND_CONTENT_BYTES {
+        if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
@@ -1458,6 +1459,8 @@ impl EngineService {
                     moment_id,
                     request_id,
                     metadata_origin: origin,
+                    metadata_summary: params.summary,
+                    metadata_correlation_id: params.correlation_id,
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
@@ -1524,6 +1527,8 @@ impl EngineService {
                     bytes,
                     moment_id,
                     metadata_origin: origin,
+                    metadata_summary: params.summary,
+                    metadata_correlation_id: params.correlation_id,
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
@@ -1594,6 +1599,8 @@ impl EngineService {
                     moment_id,
                     request_id,
                     metadata_origin: origin,
+                    metadata_summary: params.summary,
+                    metadata_correlation_id: params.correlation_id,
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
@@ -1656,6 +1663,8 @@ impl EngineService {
                     moment_id,
                     request_id,
                     metadata_origin: origin,
+                    metadata_summary: params.summary,
+                    metadata_correlation_id: params.correlation_id,
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
@@ -1816,6 +1825,8 @@ impl EngineService {
                     request_id,
                     conflict_id,
                     metadata_origin: origin,
+                    metadata_summary: params.summary,
+                    metadata_correlation_id: params.correlation_id,
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
@@ -3010,8 +3021,8 @@ impl EngineService {
                     text,
                     moment_id: params.moment_id,
                     metadata_origin: origin,
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
+                    metadata_summary: params.summary,
+                    metadata_correlation_id: params.correlation_id,
                     now_ms: now_ms()?,
                     disk_intent: SecretDiskIntent::Materialize,
                 },
@@ -3048,7 +3059,8 @@ impl EngineService {
                     path,
                     moment_id: params.moment_id,
                     metadata_origin: origin,
-                    metadata_summary: None,
+                    metadata_summary: params.summary,
+                    metadata_correlation_id: params.correlation_id,
                     now_ms: now_ms()?,
                 },
                 Arc::new(NoFaults),
@@ -6254,6 +6266,8 @@ impl EngineService {
                     write_moment_id: local.write_moment_id,
                     delete_moment_id: local.delete_moment_id,
                     metadata_origin: local.metadata_origin,
+                    metadata_summary: local.metadata_summary,
+                    metadata_correlation_id: local.metadata_correlation_id,
                     author_json: local.author_json,
                     now_ms: local.now_ms.unwrap_or(now_ms()?),
                     request_id,
@@ -6674,6 +6688,10 @@ struct VersionedTextWriteParams {
     #[serde(default)]
     metadata_origin: Option<String>,
     #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
+    #[serde(default)]
     author: Option<Value>,
     #[serde(default)]
     author_json: Option<String>,
@@ -6701,6 +6719,10 @@ struct VersionedBinaryWriteParams {
     #[serde(default)]
     metadata_origin: Option<String>,
     #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
+    #[serde(default)]
     author: Option<Value>,
     #[serde(default)]
     author_json: Option<String>,
@@ -6725,6 +6747,10 @@ struct VersionedTextRenameParams {
     #[serde(default)]
     metadata_origin: Option<String>,
     #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
+    #[serde(default)]
     author: Option<Value>,
     #[serde(default)]
     author_json: Option<String>,
@@ -6745,6 +6771,10 @@ struct VersionedTextDeleteParams {
     origin: Option<String>,
     #[serde(default)]
     metadata_origin: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
     #[serde(default)]
@@ -6799,6 +6829,10 @@ struct VersionedTextMergeParams {
     origin: Option<String>,
     #[serde(default)]
     metadata_origin: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
     #[serde(default)]
@@ -6878,6 +6912,10 @@ struct SecretsWriteParams {
     text: String,
     origin: String,
     moment_id: String,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -6888,6 +6926,10 @@ struct SecretsDeleteParams {
     path: String,
     origin: String,
     moment_id: String,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -7150,6 +7192,8 @@ struct LocalResolveDto {
     write_moment_id: String,
     delete_moment_id: String,
     metadata_origin: String,
+    metadata_summary: Option<String>,
+    metadata_correlation_id: Option<String>,
     author_json: Option<String>,
     now_ms: Option<i64>,
 }
@@ -8546,6 +8590,9 @@ fn conflict_state_json(state: &ConflictFileState) -> Value {
             ConflictContentKind::Binary => "binary",
         },
         "snapshot": state.snapshot.as_ref().map(snapshot_json),
+        "binarySha256": state.binary_sha256,
+        "binaryObjectId": state.binary_object_id,
+        "binaryLatestMomentId": state.binary_latest_moment_id,
         "metadataSummary": state.metadata_summary,
         "metadataCorrelationId": state.metadata_correlation_id
     })

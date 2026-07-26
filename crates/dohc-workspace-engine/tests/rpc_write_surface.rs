@@ -160,6 +160,41 @@ async fn write_response_shape_contains_object_snapshot_moment_and_deduped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_mutations_persist_summary_and_correlation_metadata() {
+    let (_scratch, transport, handle) = fixture("mutation-provenance").await;
+    let result = call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "path": "provenance.md",
+            "text": "captured",
+            "origin": "local-file",
+            "summary": "Updated provenance.md",
+            "correlationId": "capture-pass-1",
+            "requestId": "provenance-write-1",
+        }),
+    )
+    .await;
+    assert_eq!(
+        result["snapshot"]["metadataSummary"],
+        "Updated provenance.md"
+    );
+    assert_eq!(
+        result["snapshot"]["metadataCorrelationId"],
+        "capture-pass-1"
+    );
+    assert_eq!(result["moment"]["metadataSummary"], "Updated provenance.md");
+    assert_eq!(result["moment"]["metadataCorrelationId"], "capture-pass-1");
+
+    let listed = moments(&transport, &handle, 3).await;
+    assert_eq!(listed[0]["metadataSummary"], "Updated provenance.md");
+    assert_eq!(listed[0]["metadataCorrelationId"], "capture-pass-1");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
     // MUTATION: let ensure_main_version bootstrap the caller's arbitrary id ->
     // either draft write succeeds and creates versioned state.
@@ -370,22 +405,32 @@ async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn over_cap_write_refuses_before_commit() {
+async fn capture_sized_text_write_succeeds_and_over_cap_refuses_before_commit() {
     // MUTATION: commit text/binary and only then refuse -> the moment count changes.
     let (_scratch, transport, handle) = fixture("cap").await;
     write(&transport, &handle, 2, "seed.md", "seed", "cap-seed").await;
     let before = moments(&transport, &handle, 3).await.len();
+    write(
+        &transport,
+        &handle,
+        4,
+        "capture-sized.md",
+        &"x".repeat(128 * 1024),
+        "capture-sized",
+    )
+    .await;
+    assert_eq!(moments(&transport, &handle, 5).await.len(), before + 1);
     let refused = transport
         .call(
             RequestContext::unbounded(),
             request(
-                4,
+                6,
                 "versionedText.write",
                 Some(handle.clone()),
                 json!({
                     "versionId": "main",
                     "path": "too-big.md",
-                    "text": "x".repeat(49 * 1024),
+                    "text": "x".repeat(128 * 1024 + 1),
                     "origin": "api",
                     "requestId": "too-big",
                 }),
@@ -394,12 +439,12 @@ async fn over_cap_write_refuses_before_commit() {
         .await
         .expect_err("over cap");
     assert_eq!(refused.message, "content-exceeds-inband-cap");
-    assert_eq!(moments(&transport, &handle, 5).await.len(), before);
+    assert_eq!(moments(&transport, &handle, 7).await.len(), before + 1);
     let refused = transport
         .call(
             RequestContext::unbounded(),
             request(
-                6,
+                8,
                 "versionedBinary.write",
                 Some(handle.clone()),
                 json!({
@@ -413,7 +458,7 @@ async fn over_cap_write_refuses_before_commit() {
         .await
         .expect_err("over-cap binary");
     assert_eq!(refused.message, "content-exceeds-inband-cap");
-    assert_eq!(moments(&transport, &handle, 7).await.len(), before);
+    assert_eq!(moments(&transport, &handle, 9).await.len(), before + 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3884,6 +3929,8 @@ async fn rollback_rejects_sync_record_only_moment() {
                     text: "sync".to_owned(),
                     moment_id: "sync-marker".to_owned(),
                     metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
                     author_json: None,
                     now_ms: 2,
                     request_id: None,
@@ -4638,6 +4685,8 @@ fn seed_versions(root: &Path, workspace_id: &str) {
                 text: "base".to_owned(),
                 moment_id: "base-moment".to_owned(),
                 metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 author_json: None,
                 now_ms: 2,
                 request_id: None,
@@ -4668,6 +4717,8 @@ fn seed_versions(root: &Path, workspace_id: &str) {
                 text: "incoming".to_owned(),
                 moment_id: "incoming-moment".to_owned(),
                 metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 author_json: None,
                 now_ms: 4,
                 request_id: None,
@@ -4685,6 +4736,8 @@ fn seed_versions(root: &Path, workspace_id: &str) {
                 bytes: vec![1, 2, 3],
                 moment_id: "binary-moment".to_owned(),
                 metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 author_json: None,
                 now_ms: 5,
                 request_id: None,
@@ -5018,6 +5071,8 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
                         text: "target".to_owned(),
                         moment_id: format!("target-{index:03}"),
                         metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         now_ms: 10 + index,
                         request_id: None,
@@ -5051,6 +5106,8 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
                         text: "source".to_owned(),
                         moment_id: format!("source-{index:03}"),
                         metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         now_ms: 600 + index,
                         request_id: None,
@@ -5083,6 +5140,8 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
                         text: path.to_owned(),
                         moment_id: moment_id.to_owned(),
                         metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         now_ms: 900,
                         request_id: None,

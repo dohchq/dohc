@@ -25,6 +25,8 @@ fn write(version_id: &str, text: &str, moment_id: &str, object_id: &str) -> Writ
         text: text.to_owned(),
         moment_id: moment_id.to_owned(),
         metadata_origin: "api".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms: 10,
         request_id: None,
@@ -97,6 +99,8 @@ async fn active_merge_drains_materialization_before_rpc_return_even_when_complet
         request_id: Some("merge-drain-request".to_owned()),
         conflict_id: "merge-drain-conflict".to_owned(),
         metadata_origin: "api".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms: 30,
     };

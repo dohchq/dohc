@@ -60,6 +60,31 @@ export interface VersionedLiveAdapterOptions {
   ) => string;
 }
 
+const LIST_TEXT_FILE_HYDRATION_CONCURRENCY = 8;
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  operation: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, values.length) },
+      async () => {
+        for (;;) {
+          const index = nextIndex;
+          nextIndex += 1;
+          if (index >= values.length) return;
+          results[index] = await operation(values[index]!);
+        }
+      },
+    ),
+  );
+  return results;
+}
+
 export class VersionedLiveAdapter {
   readonly workspace: WorkspaceHandle;
   readonly workspaceId: string;
@@ -213,7 +238,6 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.write"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedText.write", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textWrite,
@@ -223,6 +247,12 @@ export class VersionedLiveAdapter {
         path: input.path,
         text: input.text,
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
         requestId,
@@ -241,7 +271,6 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedBinary.write", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.binaryWrite,
@@ -251,6 +280,12 @@ export class VersionedLiveAdapter {
         path: input.path,
         bytes: Array.from(input.bytes),
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
         requestId,
@@ -396,7 +431,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.merge"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedText.merge", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.versionsMerge,
@@ -406,6 +440,12 @@ export class VersionedLiveAdapter {
         sourceVersionId: input.sourceVersionId,
         path: input.path,
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         requestId,
       },
       { idempotencyKey: requestId },
@@ -444,14 +484,15 @@ export class VersionedLiveAdapter {
   }): Promise<VersionedTextReadValue[]> {
     this.assertWorkspace(input.workspaceId);
     const metadata = await this.listTextFileMetadata(input);
-    const snapshots = await Promise.all(
-      metadata.map(async (row) =>
+    const snapshots = await mapWithConcurrency(
+      metadata,
+      LIST_TEXT_FILE_HYDRATION_CONCURRENCY,
+      async (row) =>
         await this.readTextFile({
           workspaceId: input.workspaceId,
           versionId: input.versionId,
           path: row.path,
         }),
-      ),
     );
     return snapshots.filter(
       (snapshot): snapshot is VersionedTextReadValue => snapshot !== null,
@@ -485,7 +526,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.rename"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedText.rename", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textRename,
@@ -495,6 +535,12 @@ export class VersionedLiveAdapter {
         fromPath: input.fromPath,
         toPath: input.toPath,
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         requestId,
       },
       { idempotencyKey: requestId },
@@ -510,7 +556,6 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.delete"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedText.delete", input.metadata);
     if (input.momentId !== undefined) {
       throw new VersionedAdapterCapabilityError(
         "versionedText.delete does not accept a caller-supplied moment id.",
@@ -524,6 +569,12 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         ...(input.author ? { author: input.author } : {}),
         requestId,
       },
@@ -599,7 +650,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<{ changed: boolean; moment?: SecretMomentRecord }> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("secrets.write", input.metadata);
     const result = await this.request(VERSIONED_METHOD.secretsWrite, {
       workspaceId: input.workspaceId,
       versionId: input.versionId,
@@ -607,6 +657,12 @@ export class VersionedLiveAdapter {
       text: input.text,
       origin: input.metadata.origin,
       momentId: this.createId("moment"),
+      ...(input.metadata.summary !== undefined
+        ? { summary: input.metadata.summary }
+        : {}),
+      ...(input.metadata.correlationId !== undefined
+        ? { correlationId: input.metadata.correlationId }
+        : {}),
     });
     return {
       changed: result.changed,
@@ -621,13 +677,18 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<{ moment: SecretMomentRecord | null }> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("secrets.delete", input.metadata);
     return this.request(VERSIONED_METHOD.secretsDelete, {
       workspaceId: input.workspaceId,
       versionId: input.versionId,
       path: input.path,
       origin: input.metadata.origin,
       momentId: this.createId("moment"),
+      ...(input.metadata.summary !== undefined
+        ? { summary: input.metadata.summary }
+        : {}),
+      ...(input.metadata.correlationId !== undefined
+        ? { correlationId: input.metadata.correlationId }
+        : {}),
     });
   }
 

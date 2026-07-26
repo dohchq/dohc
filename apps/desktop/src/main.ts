@@ -2410,16 +2410,19 @@ app.on("will-quit", (event) => {
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
-  const rustEngineStop = (async () => {
+  const captureStop = engineYDocStop
+    .then(() => chatDispatchStop)
+    .then(() => activity.stopAll());
+  const rustEngineStop = captureStop.then(async () => {
     await rustEngineWorkspaceSessions?.closeAll();
     await rustEngineDaemon?.stop();
-  })();
+  });
   void Promise.race([
     Promise.all([
       agentSessionStop,
       cliServerStop,
       chatDispatchStop,
-      engineYDocStop.then(() => chatDispatchStop).then(() => activity.stopAll()),
+      captureStop,
       chatStoreStop,
       dispatchStoreStop,
       searchStoreStop,

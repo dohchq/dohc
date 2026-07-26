@@ -28,8 +28,13 @@ import {
   openEngineYDocProviderSession,
   type EngineYDocProviderSession,
 } from "../collab/ydocEngineProviderSession";
-import { openEngineYdocProviderSessionRust } from "../collab/ydocEngineProviderSessionRust";
+import {
+  openEngineYdocProviderSessionRust,
+  type EngineYdocProviderSessionRust,
+  type EngineYdocProviderSessionRustOptions,
+} from "../collab/ydocEngineProviderSessionRust";
 import type { EngineTransport } from "@dohc/workspace-engine-client";
+import * as Y from "yjs";
 import {
   isTextMediaType,
   mediaTypeForPath,
@@ -54,7 +59,10 @@ import {
   type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
 import { isRustEngineAdapterEnabled } from "./engineClientFlag";
-import type { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import {
+  isEngineSessionReconnectError,
+  type EngineWorkspaceSessions,
+} from "./engineWorkspaceSessions";
 import {
   createCaptureLiveStores,
   type CaptureTextFileMetadata,
@@ -445,6 +453,10 @@ export interface WorkspaceEngineCaptureOptions {
   // reconnect-safe session owner supplies the daemon-backed text, secret, and
   // Y.Doc paths. Injectable stores still take precedence in focused tests.
   rustEngineSessions?: EngineWorkspaceSessions;
+  // Injectable only to simulate daemon generations in focused restart tests.
+  openRustYDocProviderSession?: (
+    options: EngineYdocProviderSessionRustOptions,
+  ) => Promise<EngineYdocProviderSessionRust>;
 }
 
 export interface EngineDiskWriter {
@@ -974,6 +986,174 @@ export function createWorkspaceEngineCapture(
     close: (opts?: { settle?: boolean; summary?: string }) => Promise<void>;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
+
+  async function openRestartSafeRustYDocSession(input: {
+    versionId: string;
+    path: string;
+    contentKind?: YDocContentKind;
+    onRemoteUpdate: (update: Uint8Array) => void;
+    onSettled: (result: {
+      sha256: string;
+      markdown: string;
+    }) => void | Promise<void>;
+  }): Promise<EngineYDocProviderSession> {
+    const sessions = options.rustEngineSessions!;
+    const openProvider =
+      options.openRustYDocProviderSession ??
+      openEngineYdocProviderSessionRust;
+    const workspace = { workspaceId, rootPath };
+    let canonicalDoc: Y.Doc | null = null;
+    let current: EngineYdocProviderSessionRust | null = null;
+    let closed = false;
+    let operationChain: Promise<void> = Promise.resolve();
+
+    const append = <T>(operation: () => Promise<T>): Promise<T> => {
+      const pending = operationChain.then(operation);
+      operationChain = pending.then(
+        () => undefined,
+        () => undefined,
+      );
+      return pending;
+    };
+
+    const openGeneration = async (): Promise<EngineYdocProviderSessionRust> =>
+      await sessions.run(
+        workspace,
+        async (binding) => {
+          if (typeof binding.client.onEvent !== "function") {
+            throw new Error(
+              "Rust engine client does not expose Y.Doc event delivery.",
+            );
+          }
+          let opened: EngineYdocProviderSessionRust | null = null;
+          const requestReconnect = (error: unknown): void => {
+            if (
+              opened === null ||
+              closed ||
+              !isEngineSessionReconnectError(error)
+            ) {
+              return;
+            }
+            const failed = opened;
+            void append(async () => {
+              if (current === failed) await rebind(failed);
+            }).catch((rebindError: unknown) => {
+              onError(`Y.Doc rebind of ${input.path}`, rebindError);
+            });
+          };
+          opened = await openProvider({
+            transport: binding.client as EngineTransport,
+            workspace: binding.workspace,
+            versionId: input.versionId,
+            path: input.path,
+            ...(input.contentKind
+              ? { contentKind: input.contentKind }
+              : {}),
+            onRemoteUpdate: (update) => {
+              if (current !== opened || canonicalDoc === null) return;
+              Y.applyUpdate(canonicalDoc, update);
+              input.onRemoteUpdate(update);
+            },
+            onLocalEditError: requestReconnect,
+            onSessionError: requestReconnect,
+            onSettled: input.onSettled,
+          });
+          return opened;
+        },
+        { retryTransportErrors: true },
+      );
+
+    const rebind = async (
+      failed: EngineYdocProviderSessionRust,
+    ): Promise<void> => {
+      if (current !== failed || canonicalDoc === null || closed) return;
+      const replacement = await openGeneration();
+
+      // Reconcile daemon-side edits into the stable renderer document first,
+      // then replay every renderer edit missing from the replacement. The
+      // exposed Y.Doc never changes identity across daemon generations.
+      const remoteDelta = Y.encodeStateAsUpdate(
+        replacement.doc,
+        Y.encodeStateVector(canonicalDoc),
+      );
+      if (remoteDelta.byteLength > 2) {
+        Y.applyUpdate(canonicalDoc, remoteDelta);
+        input.onRemoteUpdate(remoteDelta);
+      }
+      const replay = Y.encodeStateAsUpdate(
+        canonicalDoc,
+        Y.encodeStateVector(replacement.doc),
+      );
+      if (replay.byteLength > 2) {
+        await replacement.applyLocalUpdate(replay);
+      }
+      current = replacement;
+      await failed.close({ settle: false }).catch(() => undefined);
+    };
+
+    const executeWithReconnect = async <T>(
+      operation: (session: EngineYdocProviderSessionRust) => Promise<T>,
+    ): Promise<T> => {
+      if (closed || current === null) {
+        throw new Error(`Y.Doc session for ${input.path} is closed.`);
+      }
+      const generation = current;
+      try {
+        return await operation(generation);
+      } catch (error) {
+        if (!isEngineSessionReconnectError(error)) throw error;
+        await rebind(generation);
+        if (current === null) throw error;
+        return await operation(current);
+      }
+    };
+
+    current = await openGeneration();
+    canonicalDoc = current.doc;
+    const initialUpdate = current.initialUpdate;
+    const contentKind = current.contentKind;
+    const sessionPath = current.path;
+
+    return {
+      doc: canonicalDoc,
+      initialUpdate,
+      contentKind,
+      path: sessionPath,
+      applyLocalUpdate(update) {
+        void append(async () => {
+          await executeWithReconnect(async (session) => {
+            await session.applyLocalUpdate(update);
+          });
+        }).catch((error: unknown) => {
+          onError(`Y.Doc local update of ${input.path}`, error);
+        });
+      },
+      settleNow(settleOptions) {
+        return append(async () =>
+          await executeWithReconnect(async (session) =>
+            await session.settleNow(settleOptions),
+          ),
+        );
+      },
+      applyExternalMarkdownEdit(markdown) {
+        return append(async () => {
+          const result = await executeWithReconnect(async (session) =>
+            await session.applyExternalMarkdownEdit(markdown),
+          );
+          return { supported: result.kind === "merged" };
+        });
+      },
+      close(closeOptions) {
+        return append(async () => {
+          if (closed || current === null) return;
+          await executeWithReconnect(async (session) => {
+            await session.close(closeOptions);
+          });
+          closed = true;
+        });
+      },
+    };
+  }
 
   // Flush (settle) + release every live Y.Doc session whose path matches, so a
   // destructive/rewriting op can never collide with a later stale settle.
@@ -1806,45 +1986,15 @@ export function createWorkspaceEngineCapture(
         }
       };
       const session = useRustEngine
-        ? await options.rustEngineSessions!.run(
-            { workspaceId, rootPath },
-            async (binding) => {
-              if (typeof binding.client.onEvent !== "function") {
-                throw new Error(
-                  "Rust engine client does not expose Y.Doc event delivery.",
-                );
-              }
-              const rustSession = await openEngineYdocProviderSessionRust({
-                transport: binding.client as EngineTransport,
-                workspace: binding.workspace,
-                versionId,
-                path: input.path,
-                ...(input.contentKind
-                  ? { contentKind: input.contentKind }
-                  : {}),
-                onRemoteUpdate: input.onRemoteUpdate,
-                onSettled,
-              });
-              const compatibleSession: EngineYDocProviderSession = {
-                doc: rustSession.doc,
-                initialUpdate: rustSession.initialUpdate,
-                contentKind: rustSession.contentKind,
-                path: rustSession.path,
-                applyLocalUpdate: (update) =>
-                  rustSession.applyLocalUpdate(update),
-                settleNow: async (settleOptions) =>
-                  await rustSession.settleNow(settleOptions),
-                applyExternalMarkdownEdit: async (markdown) => {
-                  const result =
-                    await rustSession.applyExternalMarkdownEdit(markdown);
-                  return { supported: result.kind === "merged" };
-                },
-                close: async (closeOptions) =>
-                  await rustSession.close(closeOptions),
-              };
-              return compatibleSession;
-            },
-          )
+        ? await openRestartSafeRustYDocSession({
+            versionId,
+            path: input.path,
+            ...(input.contentKind
+              ? { contentKind: input.contentKind }
+              : {}),
+            onRemoteUpdate: input.onRemoteUpdate,
+            onSettled,
+          })
         : await openEngineYDocProviderSession({
             store: engine,
             rootDir: rootPath,

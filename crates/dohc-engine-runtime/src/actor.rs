@@ -7683,6 +7683,8 @@ fn ydoc_settle_on_store(
                 text: projection_for_write.markdown.clone(),
                 moment_id,
                 metadata_origin: "ydoc".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 author_json: None,
                 now_ms,
                 request_id: None,
