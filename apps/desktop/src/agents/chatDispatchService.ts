@@ -20,7 +20,11 @@ import {
   killChildTreeWin32,
   resolveSpawnCommand,
 } from "../process/windowsSpawn";
-import type { AwaitableAgentDispatchStore } from "./awaitableAgentDispatchStore";
+import {
+  AGENT_DISPATCH_RPC_DEADLINE_MS,
+  type AgentDispatchRequestOptions,
+  type AwaitableAgentDispatchStore,
+} from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
@@ -166,6 +170,13 @@ interface LiveRun {
 interface SpawnedRun {
   child: RunnerProcess;
   logPath: string;
+}
+
+interface PendingPreRunFailure {
+  workspace: ChatDispatchWorkspace;
+  claim: AgentDispatchClaim;
+  reason: string;
+  releaseWorkspace: (() => Promise<void>) | null;
 }
 
 interface SelfTestState {
@@ -324,12 +335,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     string,
     { workspace: ChatDispatchWorkspace; run: AgentRunRecord }
   >();
+  const pendingPreRunFailures = new Map<string, PendingPreRunFailure>();
   let pumpTimer: ReturnType<typeof setInterval> | null = null;
   let pumpInFlight: Promise<void> | null = null;
   let started = false;
   let stopped = true;
   let shuttingDown = false;
   let paused = false;
+  const durableDispatchRequest: AgentDispatchRequestOptions = {
+    deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS,
+    retryTransportErrors: true,
+  };
 
   function reportError(error: unknown): void {
     try {
@@ -381,6 +397,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   function workspaceProcessReserved(workspaceId: string): boolean {
     return (
       liveRuns.has(workspaceId) ||
+      pendingPreRunFailures.has(workspaceId) ||
       runReservations.has(workspaceId) ||
       selfTests.has(workspaceId) ||
       selfTestReservations.has(workspaceId) ||
@@ -527,6 +544,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     threadId: string,
     body: string,
     runId?: string,
+    dispatchRequest?: AgentDispatchRequestOptions,
   ): Promise<string | null> {
     if (!(await options.authorizeServiceNote(workspace, threadId))) {
       reportError(
@@ -548,11 +566,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     });
     if (runId) {
       try {
-        await options.dispatchStoreFor(workspace).recordRunMessage({
-          workspaceId: workspace.workspaceId,
-          messageId: message.id,
-          runId,
-        });
+        await options.dispatchStoreFor(workspace).recordRunMessage(
+          {
+            workspaceId: workspace.workspaceId,
+            messageId: message.id,
+            runId,
+          },
+          dispatchRequest,
+        );
       } catch {
         // The report itself is authoritative; a provenance chip is optional.
       }
@@ -581,7 +602,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     body: string,
   ): Promise<void> {
     const dispatch = options.dispatchStoreFor(workspace);
-    const current = await dispatch.getRunRecord(run.runId);
+    const current = await dispatch.getRunRecord(
+      run.runId,
+      durableDispatchRequest,
+    );
     if (current?.failureNotePosted) return;
     if (!(await agentNoteAlreadyExists(workspace, run.threadId, body))) {
       await sendAgentMessage(
@@ -589,9 +613,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         run.threadId,
         body,
         run.runId,
+        durableDispatchRequest,
       );
     }
-    await dispatch.markFailureNotePosted(run.runId);
+    await dispatch.markFailureNotePosted(run.runId, durableDispatchRequest);
   }
 
   async function mostRecentAgentNoteIs(
@@ -715,6 +740,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           linkedMessages = await dispatch.listRunMessages(
             live.workspace.workspaceId,
             live.claim.run.runId,
+            durableDispatchRequest,
           );
         } catch (error) {
           reportError(error);
@@ -804,12 +830,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function failClaimBeforeRun(
     workspace: ChatDispatchWorkspace,
     claim: AgentDispatchClaim,
-    cause: unknown,
+    reason: string,
   ): Promise<void> {
     try {
       options.setRunAttribution(workspace.workspaceId, null);
     } catch {}
-    const detail = cause instanceof Error && cause.message ? cause.message : "unknown error";
     await postFailureNote(
       workspace,
       claim.run,
@@ -817,9 +842,33 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     ).catch(reportError);
     await options.dispatchStoreFor(workspace).failRun({
       runId: claim.run.runId,
-      reason: `runner failed to start: ${detail}`,
+      reason,
     });
     notifyRunUpdated(workspace.workspaceId);
+  }
+
+  async function recoverPreRunFailure(
+    recovery: PendingPreRunFailure,
+  ): Promise<boolean> {
+    try {
+      await options.dispatchStoreFor(recovery.workspace).failRun({
+        runId: recovery.claim.run.runId,
+        reason: recovery.reason,
+      });
+      if (
+        pendingPreRunFailures.get(recovery.workspace.workspaceId) === recovery
+      ) {
+        pendingPreRunFailures.delete(recovery.workspace.workspaceId);
+      }
+      notifyRunUpdated(recovery.workspace.workspaceId);
+      await releaseWorkspaceLease(recovery.releaseWorkspace);
+      recovery.releaseWorkspace = null;
+      return true;
+    } catch (error) {
+      reportError(error);
+      scheduleRecoveryScan(recovery.workspace.workspaceId);
+      return false;
+    }
   }
 
   async function startClaim(
@@ -904,10 +953,22 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       runReservations.delete(workspace.workspaceId);
       reportError(error);
+      const detail =
+        error instanceof Error && error.message ? error.message : "unknown error";
+      const reason = `runner failed to start: ${detail}`;
       try {
-        await failClaimBeforeRun(workspace, claim, error);
-      } finally {
+        await failClaimBeforeRun(workspace, claim, reason);
         await releaseWorkspaceLease(releaseWorkspace);
+      } catch (persistenceError) {
+        reportError(persistenceError);
+        pendingPreRunFailures.set(workspace.workspaceId, {
+          workspace,
+          claim,
+          reason,
+          releaseWorkspace,
+        });
+        scheduleRecoveryScan(workspace.workspaceId);
+        return;
       }
       if ((await dispatch.openRuns(workspace.workspaceId)).length === 0) {
         await scanAndDrain(workspace);
@@ -1049,6 +1110,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const linked = await dispatch.listRunMessages(
         workspace.workspaceId,
         claim.run.runId,
+        durableDispatchRequest,
       );
       if (linked.length === 0 && !claim.run.failureNotePosted) {
         await postFailureNote(
@@ -1076,10 +1138,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const linked = await dispatch.listRunMessages(
         workspace.workspaceId,
         recovery.run.runId,
+        durableDispatchRequest,
       );
       if (linked.length > 0) {
         if (!recovery.run.failureNotePosted) {
-          await dispatch.markFailureNotePosted(recovery.run.runId);
+          await dispatch.markFailureNotePosted(
+            recovery.run.runId,
+            durableDispatchRequest,
+          );
         }
         continue;
       }
@@ -1112,7 +1178,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       try {
         const linked = await options
           .dispatchStoreFor(workspace)
-          .listRunMessages(workspace.workspaceId, recovery.run.runId);
+          .listRunMessages(
+            workspace.workspaceId,
+            recovery.run.runId,
+            durableDispatchRequest,
+          );
         if (linked.length === 0) {
           await postFailureNote(
             workspace,
@@ -1129,6 +1199,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   async function scanAndDrain(workspace: ChatDispatchWorkspace): Promise<void> {
+    const preRunFailure = pendingPreRunFailures.get(workspace.workspaceId);
+    if (preRunFailure && !(await recoverPreRunFailure(preRunFailure))) return;
     const recovering = liveRuns.get(workspace.workspaceId);
     if (recovering?.finalized) {
       if (!(await finishLiveRun(recovering, null, null))) return;
@@ -1550,6 +1622,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ),
       pumpAtStop?.catch(() => undefined) ?? Promise.resolve(),
     ]);
+    const preRunFailures = [...pendingPreRunFailures.values()];
     for (const test of selfTests.values()) {
       test.settled = true;
       if (test.poll) clearTimeout(test.poll);
@@ -1568,11 +1641,18 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     runReservations.clear();
     budgetBypassThreads.clear();
     pendingNoReplyChecks.clear();
+    pendingPreRunFailures.clear();
     liveRuns.clear();
     await Promise.all([...workspaceChains.values()].map((chain) => chain.catch(() => undefined)));
     await Promise.all(quitTerminations);
     await Promise.all(
-      runWorkspacesToRelease.map((live) => releaseLiveWorkspace(live)),
+      [
+        ...runWorkspacesToRelease.map((live) => releaseLiveWorkspace(live)),
+        ...preRunFailures.map(async (recovery) => {
+          await releaseWorkspaceLease(recovery.releaseWorkspace);
+          recovery.releaseWorkspace = null;
+        }),
+      ],
     );
   }
 

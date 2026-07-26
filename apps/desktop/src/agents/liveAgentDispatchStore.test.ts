@@ -3,7 +3,7 @@ import type {
   Request,
   Response,
 } from "@dohc/workspace-engine-client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EngineWorkspaceRebindError,
   EngineWorkspaceSessions,
@@ -174,7 +174,9 @@ describe("live agent dispatch store", () => {
     await expect(store.openRuns(WORKSPACE.workspaceId)).resolves.toEqual([
       { dispatch, run },
     ]);
-    await expect(store.markFailureNotePosted(run.runId)).resolves.toEqual({
+    await expect(
+      store.markFailureNotePosted(run.runId, { deadlineMs: 432 }),
+    ).resolves.toEqual({
       ...run,
       failureNotePosted: true,
     });
@@ -193,7 +195,11 @@ describe("live agent dispatch store", () => {
       }, { deadlineMs: 321 }),
     ).resolves.toBe(true);
     await expect(
-      store.listRunMessages(WORKSPACE.workspaceId, run.runId),
+      store.listRunMessages(
+        WORKSPACE.workspaceId,
+        run.runId,
+        { deadlineMs: 543 },
+      ),
     ).resolves.toEqual(["reply"]);
     await expect(
       store.runIdForMessage(WORKSPACE.workspaceId, "reply"),
@@ -234,6 +240,11 @@ describe("live agent dispatch store", () => {
     expect(
       client.requests.find(
         ({ method }) => method === "chats.dispatch.claimNextPending",
+      )?.deadlineMs,
+    ).toBe(TERMINAL_DISPATCH_DEADLINE_MS);
+    expect(
+      client.requests.find(
+        ({ method }) => method === "chats.dispatch.claimNextPending",
       ),
     ).toMatchObject({
       params: {
@@ -242,6 +253,16 @@ describe("live agent dispatch store", () => {
         logPath: "logs/run-fixed/run-fixed.log",
       },
     });
+    expect(
+      client.requests.find(
+        ({ method }) => method === "chats.dispatch.markFailureNotePosted",
+      )?.deadlineMs,
+    ).toBe(432);
+    expect(
+      client.requests.find(
+        ({ method }) => method === "chats.dispatch.listRunMessages",
+      )?.deadlineMs,
+    ).toBe(543);
     expect(
       client.requests.find(
         ({ method }) => method === "chats.dispatch.recordRunMessage",
@@ -305,6 +326,83 @@ describe("live agent dispatch store", () => {
         "chats.dispatch.listAppQuitRecoveries",
       ]),
     );
+  });
+
+  it("reuses one pre-minted run id until an ambiguous claim resolves", async () => {
+    // MUTATION: mint inside each attempt or clear the unresolved id on rejection
+    // -> the three claim requests carry different ids and strand the committed run.
+    let claimAttempts = 0;
+    const client = mockClient((request) => {
+      if (request.method === "workspace.open") {
+        return { workspace: "handle-claim-retry" };
+      }
+      if (request.method === "workspace.close") return { closed: true };
+      if (request.method !== "chats.dispatch.claimNextPending") {
+        throw new Error(`Unexpected request: ${request.method}`);
+      }
+      claimAttempts += 1;
+      if (claimAttempts <= 2) {
+        throw {
+          code: "transport-error",
+          message: "claim response was lost",
+        };
+      }
+      return { dispatch, run };
+    });
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      {
+        transportRebindAttempts: 2,
+        sleep: async () => undefined,
+      },
+    );
+    openSessions.push(sessions);
+    const createRunId = vi.fn(() => "run-fixed");
+    const { store } = createLiveAgentDispatchStore(WORKSPACE, sessions, {
+      createRunId,
+    });
+
+    await expect(
+      store.claimNextPending(WORKSPACE.workspaceId, {
+        command: "codex",
+        logPath: "logs/{runId}.log",
+      }),
+    ).rejects.toMatchObject({ code: "transport-error" });
+    await expect(
+      store.claimNextPending(WORKSPACE.workspaceId, {
+        command: "codex",
+        logPath: "logs/{runId}.log",
+      }),
+    ).resolves.toEqual({ dispatch, run });
+
+    const claims = client.requests.filter(
+      ({ method }) => method === "chats.dispatch.claimNextPending",
+    );
+    expect(createRunId).toHaveBeenCalledTimes(1);
+    expect(claims).toHaveLength(3);
+    expect(
+      claims.map(
+        ({ params }) => (params as { runId?: JsonValue }).runId,
+      ),
+    ).toEqual([
+      "run-fixed",
+      "run-fixed",
+      "run-fixed",
+    ]);
+    expect(
+      claims.map(
+        ({ params }) => (params as { logPath?: JsonValue }).logPath,
+      ),
+    ).toEqual([
+      "logs/run-fixed.log",
+      "logs/run-fixed.log",
+      "logs/run-fixed.log",
+    ]);
+    expect(claims.map(({ deadlineMs }) => deadlineMs)).toEqual([
+      TERMINAL_DISPATCH_DEADLINE_MS,
+      TERMINAL_DISPATCH_DEADLINE_MS,
+      TERMINAL_DISPATCH_DEADLINE_MS,
+    ]);
   });
 
   it("live_dispatch_rejects_a_corrupt_dispatch_decode", async () => {

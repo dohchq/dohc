@@ -3,6 +3,7 @@ import {
   CHATS_METHOD,
   ChatsLiveAdapter,
   type ChatRecoveriesPage,
+  type ChatRunMessagesPage,
 } from "@dohc/workspace-engine-client";
 import type {
   AgentDispatchClaim,
@@ -18,9 +19,10 @@ import {
   RUN_ID_LOG_TOKEN,
   type ChatDispatchRecovery,
 } from "./chatDispatchService";
-import type {
-  AgentDispatchRequestOptions,
-  AwaitableAgentDispatchStore,
+import {
+  AGENT_DISPATCH_RPC_DEADLINE_MS,
+  type AgentDispatchRequestOptions,
+  type AwaitableAgentDispatchStore,
 } from "./awaitableAgentDispatchStore";
 
 export interface LiveAgentDispatchStoreHandle {
@@ -34,7 +36,7 @@ export interface LiveAgentDispatchStoreHandle {
   close(): Promise<void>;
 }
 
-export const TERMINAL_DISPATCH_DEADLINE_MS = 2_000;
+export const TERMINAL_DISPATCH_DEADLINE_MS = AGENT_DISPATCH_RPC_DEADLINE_MS;
 
 export function createLiveAgentDispatchStore(
   workspace: EngineWorkspace,
@@ -42,6 +44,7 @@ export function createLiveAgentDispatchStore(
   options: { createRunId?: () => string } = {},
 ): LiveAgentDispatchStoreHandle {
   const createRunId = options.createRunId ?? (() => `run_${randomUUID()}`);
+  const unresolvedClaimRunIds = new Map<string, string>();
 
   const invoke = async <T>(
     operation: (adapter: ChatsLiveAdapter) => Promise<T>,
@@ -73,22 +76,37 @@ export function createLiveAgentDispatchStore(
     recordTrigger: async (input) =>
       await invoke(async (adapter) => await adapter.recordTrigger(input)),
     claimNextPending: async (workspaceId, claimOptions = {}) => {
-      const runId = createRunId();
-      return await invoke(
+      if (workspaceId !== workspace.workspaceId) {
+        throw new Error(
+          `Workspace ${workspaceId} does not match this dispatch store.`,
+        );
+      }
+      const runId = unresolvedClaimRunIds.get(workspaceId) ?? createRunId();
+      unresolvedClaimRunIds.set(workspaceId, runId);
+      const claim = await invoke(
         async (adapter) =>
-          await adapter.claimNextPending(workspaceId, {
-            ...claimOptions,
-            ...(claimOptions.logPath
-              ? {
-                  logPath: claimOptions.logPath.replaceAll(
-                    RUN_ID_LOG_TOKEN,
-                    runId,
-                  ),
-                }
-              : {}),
-          }),
-        { runId },
+          await adapter.request(
+            CHATS_METHOD.dispatchClaimNextPending,
+            {
+              runId,
+              ...claimOptions,
+              ...(claimOptions.logPath
+                ? {
+                    logPath: claimOptions.logPath.replaceAll(
+                      RUN_ID_LOG_TOKEN,
+                      runId,
+                    ),
+                  }
+                : {}),
+            },
+            { deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS },
+          ),
+        { runId, retryTransportErrors: true },
       );
+      if (unresolvedClaimRunIds.get(workspaceId) === runId) {
+        unresolvedClaimRunIds.delete(workspaceId);
+      }
+      return claim as AgentDispatchClaim | null;
     },
     failPendingForThread: async (input) =>
       await invoke(async (adapter) => await adapter.failPendingForThread(input)),
@@ -146,25 +164,69 @@ export function createLiveAgentDispatchStore(
       (await invoke(async (adapter) => await adapter.listPending(workspaceId))) as AgentDispatchRecord[],
     openRuns: async (workspaceId) =>
       (await invoke(async (adapter) => await adapter.openRuns(workspaceId))) as AgentDispatchClaim[],
-    markFailureNotePosted: async (runId) =>
-      (await invoke(async (adapter) => await adapter.markFailureNotePosted(runId))) as AgentRunRecord,
+    markFailureNotePosted: async (
+      runId,
+      requestOptions?: AgentDispatchRequestOptions,
+    ) =>
+      (await invoke(
+        async (adapter) =>
+          await adapter.request(
+            CHATS_METHOD.dispatchMarkFailureNotePosted,
+            { runId },
+            requestOptions,
+          ),
+        { retryTransportErrors: requestOptions?.retryTransportErrors },
+      )) as AgentRunRecord,
     recentDispatchCount: async (input) =>
       await invoke(async (adapter) => await adapter.recentDispatchCount(input)),
     recordRunMessage: async (
       input,
       requestOptions?: AgentDispatchRequestOptions,
     ) =>
-      await invoke(async (adapter) =>
-        await adapter.request(
-          CHATS_METHOD.dispatchRecordRunMessage,
-          {
-            messageId: input.messageId,
-            runId: input.runId,
-          },
-          requestOptions,
-        )),
-    listRunMessages: async (workspaceId, runId) =>
-      await invoke(async (adapter) => await adapter.listRunMessages(workspaceId, runId)),
+      await invoke(
+        async (adapter) =>
+          await adapter.request(
+            CHATS_METHOD.dispatchRecordRunMessage,
+            {
+              messageId: input.messageId,
+              runId: input.runId,
+            },
+            requestOptions,
+          ),
+        { retryTransportErrors: requestOptions?.retryTransportErrors },
+      ),
+    listRunMessages: async (
+      workspaceId,
+      runId,
+      requestOptions?: AgentDispatchRequestOptions,
+    ) => {
+      if (workspaceId !== workspace.workspaceId) {
+        throw new Error(
+          `Workspace ${workspaceId} does not match this dispatch store.`,
+        );
+      }
+      return await invoke(
+        async (adapter) => {
+          const messageIds: string[] = [];
+          let cursor: string | undefined;
+          do {
+            const page: ChatRunMessagesPage = await adapter.request(
+              CHATS_METHOD.dispatchListRunMessages,
+              {
+                runId,
+                pageLimit: 500,
+                ...(cursor !== undefined ? { cursor } : {}),
+              },
+              requestOptions,
+            );
+            messageIds.push(...page.messageIds);
+            cursor = page.nextCursor ?? undefined;
+          } while (cursor !== undefined);
+          return messageIds;
+        },
+        { retryTransportErrors: requestOptions?.retryTransportErrors },
+      );
+    },
     runIdForMessage: async (workspaceId, messageId) =>
       await invoke(async (adapter) => await adapter.runIdForMessage(workspaceId, messageId)),
     runRecordsForThread: async (workspaceId, threadId, options) =>
@@ -176,12 +238,15 @@ export function createLiveAgentDispatchStore(
       runId,
       requestOptions?: AgentDispatchRequestOptions,
     ) =>
-      (await invoke(async (adapter) =>
-        await adapter.request(
-          CHATS_METHOD.dispatchGetRunRecord,
-          { runId },
-          requestOptions,
-        ))) as AgentRunRecord | null,
+      (await invoke(
+        async (adapter) =>
+          await adapter.request(
+            CHATS_METHOD.dispatchGetRunRecord,
+            { runId },
+            requestOptions,
+          ),
+        { retryTransportErrors: requestOptions?.retryTransportErrors },
+      )) as AgentRunRecord | null,
     setThreadDispatchPaused: async (input) =>
       (await invoke(async (adapter) => await adapter.setThreadDispatchPaused(input))) as ThreadDispatchPauseState,
     threadDispatchPaused: async (workspaceId, threadId) =>
