@@ -7,12 +7,33 @@ import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
 
 export interface MinimalDaemonClient {
   sendRequest(request: Request): Promise<Response>;
+  onBlob?(handler: (blob: CompletedDaemonBlob) => void): () => void;
   close(): void;
+}
+
+export interface CompletedDaemonBlob {
+  readonly requestId: number;
+  readonly streamId: number;
+  readonly totalBytes?: number | null;
+  readonly sha256?: string | null;
+  readonly bytes: Uint8Array;
 }
 
 export type DaemonRefusalDisposition =
   | "terminal"
   | Exclude<Retryability, "no">;
+
+export class DaemonClientCapabilityError extends Error {
+  readonly capability: "blobs";
+
+  constructor() {
+    super(
+      'The daemon client does not expose the negotiated "blobs" capability.',
+    );
+    this.name = "DaemonClientCapabilityError";
+    this.capability = "blobs";
+  }
+}
 
 export class DaemonProtocolError extends Error {
   constructor(message: string) {
@@ -104,6 +125,56 @@ export class WorkspaceDaemonRequester {
     },
   ): Promise<Response["result"]> {
     const id = this.nextRequestId++;
+    return this.send(id, method, params, options);
+  }
+
+  async requestWithBlob(
+    method: string,
+    params: Request["params"],
+    expectsBlob: (result: Response["result"]) => boolean,
+    options?: {
+      workspace?: WorkspaceHandle;
+      idempotencyKey?: string;
+      deadlineMs?: number;
+    },
+  ): Promise<{
+    result: Response["result"];
+    blob: CompletedDaemonBlob | null;
+  }> {
+    const id = this.nextRequestId++;
+    let completedBlob: CompletedDaemonBlob | null = null;
+    const unsubscribe = this.client.onBlob?.((blob) => {
+      if (blob.requestId !== id) return;
+      completedBlob = blob;
+    });
+
+    try {
+      const result = await this.send(id, method, params, options);
+      if (!expectsBlob(result)) return { result, blob: null };
+      if (unsubscribe === undefined) {
+        throw new DaemonClientCapabilityError();
+      }
+      if (completedBlob === null) {
+        throw new DaemonProtocolError(
+          `Request ${id} returned blob metadata without a correlated completed blob.`,
+        );
+      }
+      return { result, blob: completedBlob };
+    } finally {
+      unsubscribe?.();
+    }
+  }
+
+  private async send(
+    id: number,
+    method: string,
+    params: Request["params"],
+    options?: {
+      workspace?: WorkspaceHandle;
+      idempotencyKey?: string;
+      deadlineMs?: number;
+    },
+  ): Promise<Response["result"]> {
     let response: Response;
     try {
       response = await this.client.sendRequest({

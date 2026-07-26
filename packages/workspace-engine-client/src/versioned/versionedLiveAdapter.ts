@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
+  DaemonClientCapabilityError,
+  DaemonProtocolError,
   WorkspaceDaemonRequester,
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
@@ -276,13 +278,51 @@ export class VersionedLiveAdapter {
     sha256: string;
   }): Promise<Uint8Array | null> {
     this.assertWorkspace(input.workspaceId);
-    const result = await this.request(VERSIONED_METHOD.binaryReadBlob, input);
-    if (result.bytesBase64 === null) {
-      throw new VersionedAdapterCapabilityError(
-        "The binary blob was delivered out-of-band, which this minimal daemon client does not expose.",
+    let delivery: Awaited<
+      ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>
+    >;
+    try {
+      delivery = await this.requester.requestWithBlob(
+        VERSIONED_METHOD.binaryReadBlob,
+        input,
+        (raw) =>
+          decodeVersionedResult(VERSIONED_METHOD.binaryReadBlob, raw)
+            .bytesBase64 === null,
+        { workspace: this.workspace },
+      );
+    } catch (error) {
+      if (error instanceof DaemonClientCapabilityError) {
+        throw new VersionedAdapterCapabilityError(error.message);
+      }
+      throw error;
+    }
+    const result = decodeVersionedResult(
+      VERSIONED_METHOD.binaryReadBlob,
+      delivery.result,
+    );
+    if (result.bytesBase64 !== null) {
+      return this.decodeBase64(result.bytesBase64);
+    }
+    if (delivery.blob === null) {
+      throw new DaemonProtocolError(
+        "The daemon returned out-of-band blob metadata without a completed blob.",
       );
     }
-    return this.decodeBase64(result.bytesBase64);
+    const expectedSha256 = input.sha256.toLowerCase();
+    if (delivery.blob.sha256 !== expectedSha256) {
+      throw new DaemonProtocolError(
+        "The completed blob digest does not match the requested binary digest.",
+      );
+    }
+    if (
+      result.byteLength !== undefined &&
+      delivery.blob.bytes.byteLength !== result.byteLength
+    ) {
+      throw new DaemonProtocolError(
+        "The completed blob length does not match the binary metadata.",
+      );
+    }
+    return new Uint8Array(delivery.blob.bytes);
   }
 
   async readTextFile(input: {

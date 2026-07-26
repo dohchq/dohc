@@ -241,6 +241,113 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it("consumes the matching out-of-band blob for an over-cap binary read", async () => {
+    const bytes = new Uint8Array([0, 255, 17, 42, 99]);
+    const sha256 = "a".repeat(64);
+    const requests: Request[] = [];
+    const blobHandlers = new Set<
+      Parameters<NonNullable<MinimalDaemonClient["onBlob"]>>[0]
+    >();
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      onBlob(handler) {
+        blobHandlers.add(handler);
+        return () => blobHandlers.delete(handler);
+      },
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        if (request.method === VERSIONED_METHOD.binaryRead) {
+          return {
+            id: request.id,
+            result: {
+              objectId: "object",
+              sha256,
+              byteLength: bytes.byteLength,
+              bytesBase64: null,
+              inbandLimitBytes: 48 * 1024,
+            },
+          };
+        }
+        for (const handler of blobHandlers) {
+          handler({
+            requestId: request.id + 100,
+            streamId: 999,
+            totalBytes: 1,
+            sha256,
+            bytes: new Uint8Array([7]),
+          });
+          handler({
+            requestId: request.id,
+            streamId: request.id,
+            totalBytes: bytes.byteLength,
+            sha256,
+            bytes,
+          });
+        }
+        return {
+          id: request.id,
+          result: {
+            bytesBase64: null,
+            byteLength: bytes.byteLength,
+            inbandLimitBytes: 48 * 1024,
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.readBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "large.bin",
+      }),
+    ).resolves.toEqual(bytes);
+    expect(requests.map((request) => request.method)).toEqual([
+      VERSIONED_METHOD.binaryRead,
+      VERSIONED_METHOD.binaryReadBlob,
+    ]);
+    expect(blobHandlers.size).toBe(0);
+  });
+
+  it("fails with a typed capability error when blob egress is unavailable", async () => {
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        return {
+          id: request.id,
+          result:
+            request.method === VERSIONED_METHOD.binaryRead
+              ? {
+                  objectId: "object",
+                  sha256: "b".repeat(64),
+                  byteLength: 49 * 1024,
+                  bytesBase64: null,
+                  inbandLimitBytes: 48 * 1024,
+                }
+              : {
+                  bytesBase64: null,
+                  byteLength: 49 * 1024,
+                  inbandLimitBytes: 48 * 1024,
+                },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.readBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "large.bin",
+      }),
+    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
+  });
+
   it("rejects a caller-supplied delete moment id the daemon cannot preserve", async () => {
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(

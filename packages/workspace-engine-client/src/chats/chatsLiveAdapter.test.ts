@@ -13,7 +13,10 @@ import {
   type ChatsMethod,
   type ChatsMethodParamsMap,
 } from "./chatsWireContract";
-import { ChatsLiveAdapter } from "./chatsLiveAdapter";
+import {
+  ChatsAdapterCapabilityError,
+  ChatsLiveAdapter,
+} from "./chatsLiveAdapter";
 import { ChatsLoopbackEngine } from "./chatsLoopbackEngine";
 
 const WORKSPACE = "ws-handle";
@@ -446,7 +449,11 @@ describe("ChatsLiveAdapter", () => {
   it("encodes every one of the 60 chats methods with the workspace handle and exact params", async () => {
     expect(CHAT_REQUEST_CASES).toHaveLength(60);
     const requests: Request[] = [];
-    const adapter = new ChatsLiveAdapter(captureClient(requests), WORKSPACE);
+    const adapter = new ChatsLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
 
     for (const entry of CHAT_REQUEST_CASES) {
       await expect(
@@ -678,6 +685,7 @@ describe("ChatsLiveAdapter", () => {
     const adapter = new ChatsLiveAdapter(
       mockDaemon(requests, (_request, index) => results[index] ?? null),
       WORKSPACE,
+      { workspaceId: "workspace" },
     );
 
     await expect(
@@ -763,7 +771,11 @@ describe("ChatsLiveAdapter", () => {
       };
 
       await expect(
-        new ChatsLiveAdapter(refusalClient, WORKSPACE).request(
+        new ChatsLiveAdapter(
+          refusalClient,
+          WORKSPACE,
+          { workspaceId: "workspace" },
+        ).request(
           CHATS_METHOD.channelsList,
           {},
         ),
@@ -775,6 +787,15 @@ describe("ChatsLiveAdapter", () => {
       } satisfies Partial<DaemonRefusalError>);
     },
   );
+
+  it("requires a workspace binding before the adapter can issue requests", () => {
+    const requests: Request[] = [];
+    expect(() => {
+      // @ts-expect-error The logical workspace binding is intentionally required.
+      new ChatsLiveAdapter(captureClient(requests), WORKSPACE);
+    }).toThrow(ChatsAdapterCapabilityError);
+    expect(requests).toEqual([]);
+  });
 
   it("decodes loopback answers through the live adapter for an existing RPC path", async () => {
     const loopback = new ChatsLoopbackEngine();
@@ -795,6 +816,65 @@ describe("ChatsLiveAdapter", () => {
         channelId: "channel",
       }),
     ).resolves.toBe("channel");
+  });
+
+  it("uses a fresh idempotency key for added, removed, then added reaction transitions", async () => {
+    const loopback = new ChatsLoopbackEngine();
+    const requests: Request[] = [];
+    let nextId = 0;
+    const adapter = new ChatsLiveAdapter(
+      {
+        async sendRequest(request) {
+          requests.push(request);
+          return loopback.sendRequest(request);
+        },
+        close: () => undefined,
+      },
+      WORKSPACE,
+      {
+        workspaceId: "workspace",
+        createId: (kind) => `${kind}-${++nextId}`,
+      },
+    );
+    loopback.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "channel",
+      name: "General",
+    });
+    const started = await adapter.startChannelThread({
+      workspaceId: "workspace",
+      channelId: "channel",
+      author: { kind: "human", displayName: "Ice" },
+      body: "React here",
+    });
+    const reaction = {
+      workspaceId: "workspace",
+      threadId: started.thread.id,
+      messageId: started.message.id,
+      emoji: "👍",
+      author: {
+        authorId: "ice",
+        kind: "human" as const,
+        displayName: "Ice",
+      },
+    };
+
+    await adapter.setReaction({ ...reaction, state: "added" });
+    await adapter.setReaction({ ...reaction, state: "removed" });
+    await adapter.setReaction({ ...reaction, state: "added" });
+
+    const transitions = requests.filter(
+      (request) => request.method === CHATS_METHOD.reactionSet,
+    );
+    expect(transitions.map((request) => request.idempotencyKey)).toHaveLength(3);
+    expect(new Set(transitions.map((request) => request.idempotencyKey)).size)
+      .toBe(3);
+    await expect(
+      adapter.listReactions({
+        workspaceId: "workspace",
+        threadId: started.thread.id,
+      }),
+    ).resolves.toMatchObject([{ state: "added" }]);
   });
 
   it("marks only the personal-feed head that the caller actually displayed", async () => {

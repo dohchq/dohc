@@ -51,7 +51,7 @@ export class ChatsAdapterCapabilityError extends Error {
 }
 
 export interface ChatsLiveAdapterOptions {
-  workspaceId?: string;
+  workspaceId: string;
   createId?: (
     kind: "channel" | "message" | "run" | "thread",
   ) => string;
@@ -59,15 +59,20 @@ export interface ChatsLiveAdapterOptions {
 
 export class ChatsLiveAdapter {
   readonly workspace: WorkspaceHandle;
-  readonly workspaceId?: string;
+  readonly workspaceId: string;
   private readonly requester: WorkspaceDaemonRequester;
   private readonly createId: NonNullable<ChatsLiveAdapterOptions["createId"]>;
 
   constructor(
     client: MinimalDaemonClient,
     workspace: WorkspaceHandle,
-    options: ChatsLiveAdapterOptions = {},
+    options: ChatsLiveAdapterOptions,
   ) {
+    if (typeof options?.workspaceId !== "string") {
+      throw new ChatsAdapterCapabilityError(
+        "ChatsLiveAdapter requires a workspaceId binding.",
+      );
+    }
     this.requester = new WorkspaceDaemonRequester(client);
     this.workspace = workspace;
     this.workspaceId = options.workspaceId;
@@ -501,12 +506,7 @@ export class ChatsLiveAdapter {
         state: input.state,
       },
       {
-        idempotencyKey: [
-          input.messageId,
-          input.emoji,
-          input.author.authorId,
-          input.state,
-        ].join(":"),
+        idempotencyKey: `reaction-${randomUUID()}`,
       },
     );
   }
@@ -997,7 +997,7 @@ export class ChatsLiveAdapter {
   }
 
   private assertWorkspace(workspaceId: string): void {
-    if (this.workspaceId !== undefined && workspaceId !== this.workspaceId) {
+    if (workspaceId !== this.workspaceId) {
       throw new ChatsAdapterCapabilityError(
         `Workspace ${workspaceId} does not match this adapter's workspace.`,
       );
