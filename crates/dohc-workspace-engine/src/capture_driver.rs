@@ -65,6 +65,7 @@ struct CaptureApplyProbeInner {
     gate_wait_armed: std::sync::atomic::AtomicBool,
     gate_wait_entered: tokio::sync::Semaphore,
     version_scan_count: std::sync::atomic::AtomicU64,
+    manifest_refresh_count: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(feature = "harness")]
@@ -85,6 +86,7 @@ impl Default for CaptureApplyProbeInner {
             gate_wait_armed: std::sync::atomic::AtomicBool::new(false),
             gate_wait_entered: tokio::sync::Semaphore::new(0),
             version_scan_count: std::sync::atomic::AtomicU64::new(0),
+            manifest_refresh_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -172,6 +174,10 @@ impl CaptureApplyProbe {
         self.inner.version_scan_count.load(Ordering::Acquire)
     }
 
+    pub fn manifest_refresh_count(&self) -> u64 {
+        self.inner.manifest_refresh_count.load(Ordering::Acquire)
+    }
+
     async fn pause_if_armed(&self) {
         if self.inner.armed.swap(false, Ordering::AcqRel) {
             self.inner.entered.add_permits(1);
@@ -222,6 +228,12 @@ impl CaptureApplyProbe {
 
     pub(crate) fn record_version_scan(&self) {
         self.inner.version_scan_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn record_manifest_refresh(&self) {
+        self.inner
+            .manifest_refresh_count
+            .fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -1504,6 +1516,8 @@ pub(crate) struct CaptureDriver {
     /// The epoch is sampled into each layer; a mismatch makes the old layer
     /// restart before it may apply again.
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(feature = "harness")]
+    apply_probe: Option<CaptureApplyProbe>,
 }
 
 /// A dropped-but-untaken driver must never keep running: cancel on Drop (the
@@ -1532,6 +1546,8 @@ impl CaptureDriver {
         let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        #[cfg(feature = "harness")]
+        let driver_probe = apply_probe.clone();
         let task = tokio::spawn(drive(
             root,
             actor,
@@ -1553,6 +1569,8 @@ impl CaptureDriver {
             flush_tx,
             baseline,
             refresh_epoch,
+            #[cfg(feature = "harness")]
+            apply_probe: driver_probe,
         }
     }
 
@@ -1585,6 +1603,10 @@ impl CaptureDriver {
     /// held, so the epoch change is ordered before that next apply.
     pub(crate) fn request_manifest_refresh(&self) {
         self.refresh_epoch.fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.apply_probe {
+            probe.record_manifest_refresh();
+        }
     }
 
     /// Cancel the loop SYNCHRONOUSLY and hand back the join handle; the
