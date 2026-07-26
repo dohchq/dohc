@@ -1,12 +1,16 @@
 # GATE 6 — release-candidate evidence packet
 
-**Status: PACKET ASSEMBLED 2026-07-24 — GATE NOT YET CLOSED.** GATE6 is the
-release-CANDIDATE gate. Ice explicitly authorized the cutover on 2026-07-25
-(`DECISIONS.md`, R15 go/no-go), so one criterion remains: an end-to-end
-**clone-reset rehearsal on REAL dogfood workspace byte-clones**. The machinery is
-built + gate-verified by its rehearsal-on-clones test suite, but it has NOT been
-run against Ice's real data. Do NOT treat `SHARDS.tsv`/this packet as gate-closed
-until that rehearsal is recorded.
+**Status: PACKET ASSEMBLED 2026-07-24 — EVIDENCE COMPLETE 2026-07-26.** GATE6 is
+the release-CANDIDATE gate. Ice explicitly authorized the cutover on 2026-07-25
+(`DECISIONS.md`, R15 go/no-go). The remaining criterion — an end-to-end
+**clone-reset rehearsal on REAL dogfood workspace byte-clones** — was RECORDED
+2026-07-26: the rehearsal ran `not-started → complete` against a byte-clone of
+`C:/Users/ice/dohc/personal`, source verified byte-identical before/after
+(evidence: `REHEARSAL_EVIDENCE-2026-07-26.json` in this directory). Two
+real-data findings were closed on the way (pnpm-junction floor exclusion in the
+byte-clone; the TS-authored live DB reset interpretation — the latter recorded
+and FLAGGED for Ice's post-hoc review). Subject to that review, both GATE6
+criteria are now met.
 
 **WHAT GATE6 ASSERTS:** NO GATE6-BLOCKING IMPLEMENTATION SHARD REMAINS, and the
 engine is EVIDENCED (gate/soak/differential green, every claim below carrying its
