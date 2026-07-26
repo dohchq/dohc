@@ -386,6 +386,7 @@ afterEach(async () => {
     await rm(fixture.root, { recursive: true, force: true });
   }
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 describe("chatDispatchService", () => {
@@ -583,6 +584,13 @@ describe("chatDispatchService", () => {
   });
 
   it("keeps workspace FIFO to one live run and builds the configured spawn contract", async () => {
+    // Pin command resolution to a no-op: with an empty host PATH the resolver
+    // can never find a claude binary or .cmd shim on the machine running the
+    // tests, so the spawn contract below (bare command, unwrapped args) is
+    // asserted identically everywhere. The runner env still prepends the
+    // fixture's CLI bin dir, which the PATH assertion below relies on.
+    vi.stubEnv("PATH", "");
+    vi.stubEnv("Path", "");
     const fixture = await createFixture({
       runner: {
         command: 'claude -p --allowedTools "Bash(dohc chat:*)"',

@@ -249,13 +249,26 @@ describe("CLI socket server", () => {
       const code = typeof error === "object" && error !== null && "code" in error
         ? error.code
         : undefined;
-      if (process.env.CODEX_SANDBOX_NETWORK_DISABLED !== "1" || code !== "EPERM") {
+      const sandboxDenied =
+        process.env.CODEX_SANDBOX_NETWORK_DISABLED === "1" && code === "EPERM";
+      // Node on win32 cannot listen on an AF_UNIX filesystem path (the CLI
+      // server is unix-only; startCliServer guards win32 and the suite forces
+      // platform "linux" to reach the real listener). Pinned to the listen
+      // syscall so an EACCES from the earlier mkdir/chmod/write steps still
+      // throws.
+      const syscall =
+        typeof error === "object" && error !== null && "syscall" in error
+          ? error.syscall
+          : undefined;
+      const win32NoAfUnix =
+        process.platform === "win32" && code === "EACCES" && syscall === "listen";
+      if (!sandboxDenied && !win32NoAfUnix) {
         throw error;
       }
-      // The managed test sandbox forbids every listener, including AF_UNIX.
-      // State/token setup already ran before listen failed. Run requests
-      // through the exact authenticated line handler so command/store
-      // coverage remains live.
+      // No listener is available here (sandbox forbids every listener; win32
+      // lacks AF_UNIX). State/token setup already ran before listen failed.
+      // Run requests through the exact authenticated line handler so
+      // command/store coverage remains live.
       server = null;
       token = "a".repeat(64);
     }
@@ -1106,12 +1119,14 @@ describe("CLI socket server", () => {
     expect(await agentUnreadIds()).not.toContain(agentTarget.threadId);
   });
 
-  it("secures the CLI state directory, token, and socket", async () => {
-    if (server) {
-      expect((await stat(stateDir)).mode & 0o777).toBe(0o700);
-      expect((await stat(server.tokenPath)).mode & 0o777).toBe(0o600);
-      expect((await stat(server.socketPath)).mode & 0o777).toBe(0o600);
-    }
+  it("secures the CLI state directory, token, and socket", async (ctx) => {
+    // Without a live listener (win32, sandbox) the mode assertions this test
+    // is named for cannot run — skip loudly instead of reporting a hollow
+    // green.
+    if (!server) ctx.skip();
+    expect((await stat(stateDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(server!.tokenPath)).mode & 0o777).toBe(0o600);
+    expect((await stat(server!.socketPath)).mode & 0o777).toBe(0o600);
     expect(calls.openWorkspace).toBe(0);
     expect(errors).toEqual([]);
   });

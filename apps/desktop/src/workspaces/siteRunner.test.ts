@@ -209,7 +209,13 @@ describe("startSiteDevServer", () => {
     const elapsed = Date.now() - startedAt;
 
     // Reject waited for the delayed exit; without the fix it fires at ~150ms.
-    expect(elapsed).toBeGreaterThanOrEqual(readyTimeoutMs + sigtermExitDelayMs - 100);
+    // On win32 stopChild reaches killChildTreeWin32 (taskkill /T /F) before
+    // it ever sends SIGTERM, so the child dies immediately and the delay is
+    // unobservable; the pid liveness check below still catches the regression
+    // (verified: re-injecting `void stopChild` fails it 5/5 on Windows).
+    if (process.platform !== "win32") {
+      expect(elapsed).toBeGreaterThanOrEqual(readyTimeoutMs + sigtermExitDelayMs - 100);
+    }
 
     // And the child is confirmed down by the time the rejection surfaces.
     const pid = Number((await readFile(pidFile, "utf8")).trim());
