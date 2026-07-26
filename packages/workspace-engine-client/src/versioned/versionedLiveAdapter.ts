@@ -423,6 +423,11 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.delete"]> {
     this.assertWorkspace(input.workspaceId);
+    if (input.momentId !== undefined) {
+      throw new VersionedAdapterCapabilityError(
+        "versionedText.delete does not accept a caller-supplied moment id.",
+      );
+    }
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textDelete,
@@ -506,6 +511,7 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<{ changed: boolean; moment?: SecretMomentRecord }> {
     this.assertWorkspace(input.workspaceId);
+    this.assertSecretMetadataSupported("secrets.write", input.metadata);
     const result = await this.request(VERSIONED_METHOD.secretsWrite, {
       workspaceId: input.workspaceId,
       versionId: input.versionId,
@@ -527,6 +533,7 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<{ moment: SecretMomentRecord | null }> {
     this.assertWorkspace(input.workspaceId);
+    this.assertSecretMetadataSupported("secrets.delete", input.metadata);
     return this.request(VERSIONED_METHOD.secretsDelete, {
       workspaceId: input.workspaceId,
       versionId: input.versionId,
@@ -672,6 +679,11 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["secrets.restore"]> {
     this.assertWorkspace(input.workspaceId);
+    this.assertSecretMetadataSupported(
+      "secrets.restore",
+      input.metadata,
+      "restore",
+    );
     const before = await this.getSecretMoment({
       workspaceId: input.workspaceId,
       momentId: input.momentId,
@@ -728,6 +740,22 @@ export class VersionedLiveAdapter {
     if (this.workspaceId !== undefined && workspaceId !== this.workspaceId) {
       throw new VersionedAdapterCapabilityError(
         `Workspace ${workspaceId} does not match this adapter's workspace.`,
+      );
+    }
+  }
+
+  private assertSecretMetadataSupported(
+    method: "secrets.write" | "secrets.delete" | "secrets.restore",
+    metadata: AdapterWriteMetadata,
+    implicitOrigin?: VersionedOrigin,
+  ): void {
+    if (
+      metadata.summary !== undefined ||
+      metadata.correlationId !== undefined ||
+      (implicitOrigin !== undefined && metadata.origin !== implicitOrigin)
+    ) {
+      throw new VersionedAdapterCapabilityError(
+        `${method} cannot preserve the supplied secret mutation metadata.`,
       );
     }
   }

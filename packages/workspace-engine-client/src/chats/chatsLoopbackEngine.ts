@@ -262,6 +262,111 @@ function normalizePath(path: string): string {
   return normalized;
 }
 
+function isAbsolutePathLike(path: string): boolean {
+  return (
+    path.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/u.test(path) ||
+    path.startsWith("\\\\")
+  );
+}
+
+function decodeTrackedPathEscapes(path: string): string {
+  let decoded = path;
+  for (;;) {
+    const next = decoded
+      .replace(/%25/giu, "%")
+      .replace(/%2e/giu, ".")
+      .replace(/%2f/giu, "/")
+      .replace(/%5c/giu, "\\");
+    if (next === decoded) return decoded;
+    decoded = next;
+  }
+}
+
+function stripWindowsAliasSuffix(segment: string): string {
+  return segment.replace(/[. ]+$/u, "");
+}
+
+function isReserved83Alias(segment: string, stem: string): boolean {
+  const match = /^([A-Za-z0-9]{1,8})~(\d+)$/u.exec(segment);
+  if (!match) return false;
+  const digits = match[2] ?? "";
+  const baseLength = Math.min(stem.length, 7 - digits.length);
+  return (
+    baseLength >= 1 &&
+    (match[1] ?? "").toUpperCase() === stem.slice(0, baseLength)
+  );
+}
+
+function policySegments(path: string): string[] {
+  return path
+    .replaceAll("\\", "/")
+    .split("/")
+    .map((segment) => stripWindowsAliasSuffix(segment).toLowerCase());
+}
+
+// Mirrors dohc-engine-files policy::classify_engine_file_path_normalized.
+// Bookmark projections are plaintext, so only a canonical Tracked path may
+// enter the projection queue.
+function normalizeTrackedPath(path: string): string {
+  if (path.includes("\0") || isAbsolutePathLike(path)) {
+    throw new Error("invalid-path");
+  }
+  const decoded = decodeTrackedPathEscapes(path);
+  if (isAbsolutePathLike(decoded)) throw new Error("invalid-path");
+  const segments = decoded.replaceAll("\\", "/").split("/");
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === ".." || /^[. ]+$/u.test(segment)) {
+      throw new Error("invalid-path");
+    }
+  }
+  const normalized = segments
+    .filter((segment) => segment !== "" && segment !== ".")
+    .join("/");
+  if (normalized.length === 0) throw new Error("invalid-path");
+
+  const classifiedSegments = policySegments(normalized);
+  const first = classifiedSegments[0] ?? "";
+  const reserved =
+    classifiedSegments.some(
+      (segment) =>
+        segment === ".dohc" || isReserved83Alias(segment, "DOHC"),
+    ) ||
+    first === "shared-with-me" ||
+    isReserved83Alias(first, "SHARED");
+  const ignored = classifiedSegments.some(
+    (segment) =>
+      segment === ".dohc" ||
+      segment === ".git" ||
+      segment === "node_modules" ||
+      segment.startsWith(".dohc-write-"),
+  );
+  const basename = classifiedSegments.at(-1) ?? "";
+  const secret =
+    classifiedSegments.some((segment) => segment === ".env") ||
+    basename.endsWith(".env") ||
+    basename.startsWith(".env.");
+  if (reserved || ignored || secret) throw new Error("invalid-path");
+  return normalized;
+}
+
+function validateProjectionPath(path: string): string {
+  if (
+    path.length === 0 ||
+    path.includes("\0") ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path[1] === ":" ||
+    path.includes("..") ||
+    path === ".dohc" ||
+    path.startsWith(".dohc/")
+  ) {
+    throw new Error("invalid-bookmark-target");
+  }
+  return path;
+}
+
 function base32LowercaseNoPadding(bytes: Uint8Array): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
   let output = "";
@@ -333,6 +438,22 @@ function bookmarkKey(ownerUserId: string, bookmarkId: string): string {
   return `${ownerUserId}\0${bookmarkId}`;
 }
 
+function bookmarkId(
+  ownerUserId: string,
+  targetKind: "message" | "thread",
+  targetId: string,
+): string {
+  const digest = createHash("sha256")
+    .update(ownerUserId)
+    .update("\0")
+    .update(targetKind)
+    .update("\0")
+    .update(targetId)
+    .digest()
+    .subarray(0, 16);
+  return `bookmark_${base32LowercaseNoPadding(digest)}`;
+}
+
 function runLinkKey(messageId: string): string {
   return messageId;
 }
@@ -349,6 +470,48 @@ function activeMessageReactions(state: WorkspaceState, messageId: string): ChatR
     .filter((reaction) => reaction.messageId === messageId && reaction.state === "added")
     .sort((left, right) => left.atMs - right.atMs || compareText(left.reactionId, right.reactionId))
     .map(jsonClone);
+}
+
+function personalFeedMessages(
+  state: WorkspaceState,
+  workspace: string,
+  ownerUserId: string,
+): ChatMessage[] {
+  const follows = state.follows.get(ownerUserId) ?? new Set<string>();
+  return [...state.messages.values()]
+    .filter((message) => {
+      const thread = state.threads.get(message.threadId);
+      const channel = thread?.channelId
+        ? state.channels.get(thread.channelId)
+        : undefined;
+      const openingMessageId = thread
+        ? threadMessages(state, thread.id)[0]?.id
+        : undefined;
+      return message.workspaceId === workspace && !!thread && (
+        follows.has(`thread\0${thread.id}`) ||
+        (
+          message.id === openingMessageId &&
+          channel?.wireId !== null &&
+          channel?.wireId !== undefined &&
+          follows.has(`channel\0${channel.wireId}`)
+        ) ||
+        (
+          message.author.kind === "human" &&
+          message.authorUserId !== undefined &&
+          follows.has(`person\0${message.authorUserId}`)
+        ) ||
+        (
+          message.author.kind === "agent" &&
+          message.authorUserId !== undefined &&
+          follows.has(`agent\0${message.authorUserId}`)
+        )
+      );
+    })
+    .sort(
+      (left, right) =>
+        right.createdAtMs - left.createdAtMs ||
+        compareText(right.id, left.id),
+    );
 }
 
 function codeRanges(body: string): Array<[number, number]> {
@@ -422,6 +585,50 @@ function pageLimit(params: ChatsJsonObject): number {
 
 function encodeCursor(binding: string, index: number): string {
   return Buffer.from(JSON.stringify({ version: 1, binding, index }), "utf8").toString("base64url");
+}
+
+function encodeFeedCursor(message: ChatMessage): string {
+  return Buffer.from(
+    JSON.stringify([message.createdAtMs, message.id]),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeFeedCursor(cursor: string): {
+  createdAtMs: number;
+  messageId: string;
+} {
+  try {
+    if (
+      cursor.length === 0 ||
+      cursor.length > 512 ||
+      !/^[A-Za-z0-9_-]+$/u.test(cursor)
+    ) {
+      throw new Error();
+    }
+    const decoded = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as unknown;
+    if (
+      Buffer.from(JSON.stringify(decoded), "utf8").toString("base64url") !==
+      cursor
+    ) {
+      throw new Error();
+    }
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length !== 2 ||
+      !Number.isSafeInteger(decoded[0]) ||
+      typeof decoded[1] !== "string" ||
+      decoded[1].length === 0 ||
+      decoded[1].length > 256
+    ) {
+      throw new Error();
+    }
+    return { createdAtMs: decoded[0] as number, messageId: decoded[1] };
+  } catch {
+    throw new Error("invalid-follow-target");
+  }
 }
 
 function decodeCursor(params: ChatsJsonObject, binding: string): number {
@@ -1767,11 +1974,23 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const ownerUserId = requiredString(
-      params,
-      "ownerUserId",
+    const ownerUserId = normalizeTrimmed(
+      requiredString(params, "ownerUserId", "invalid-follow-target"),
       "invalid-follow-target",
     );
+    const replicationOwner = optionalString(
+      params,
+      "replicationOwnerUserId",
+    );
+    const replicationOwnerUserId = replicationOwner === undefined
+      ? undefined
+      : normalizeTrimmed(replicationOwner, "invalid-follow-target");
+    if (
+      replicationOwnerUserId !== undefined &&
+      replicationOwnerUserId !== ownerUserId
+    ) {
+      throw new Error("invalid-follow-target");
+    }
     const targetKind = requiredString(params, "targetKind");
     if (!["person", "agent", "channel", "thread"].includes(targetKind)) {
       throw new Error("invalid-follow-target");
@@ -1837,7 +2056,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
   }
 
   private ensureDefaultFollows(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
-    const owner = requiredString(params, "ownerUserId", "invalid-follow-target");
+    const owner = normalizeTrimmed(
+      requiredString(params, "ownerUserId", "invalid-follow-target"),
+      "invalid-follow-target",
+    );
     const follows = state.follows.get(owner) ?? new Set<string>();
     for (const channel of state.channels.values()) {
       if (channel.kind !== "dm" && channel.wireId) follows.add(`channel\0${channel.wireId}`);
@@ -1851,26 +2073,53 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const ownerUserId = requiredString(
-      params,
-      "ownerUserId",
+    const ownerUserId = normalizeTrimmed(
+      requiredString(params, "ownerUserId", "invalid-follow-target"),
       "invalid-follow-target",
     );
-    requiredString(params, "headCursor", "invalid-cursor");
-    const latest = [...state.messages.values()]
-      .filter((message) => message.workspaceId === workspace)
-      .sort(
-        (left, right) =>
-          right.createdAtMs - left.createdAtMs ||
-          compareText(right.id, left.id),
-      )[0];
-    const result: ChatFeedReadState = {
+    const replicationOwner = optionalString(
+      params,
+      "replicationOwnerUserId",
+    );
+    const replicationOwnerUserId = replicationOwner === undefined
+      ? undefined
+      : normalizeTrimmed(replicationOwner, "invalid-follow-target");
+    if (
+      replicationOwnerUserId !== undefined &&
+      replicationOwnerUserId !== ownerUserId
+    ) {
+      throw new Error("invalid-follow-target");
+    }
+    const cursor = decodeFeedCursor(
+      requiredString(params, "headCursor", "invalid-follow-target"),
+    );
+    const visible = personalFeedMessages(state, workspace, ownerUserId).some(
+      (message) =>
+        message.createdAtMs === cursor.createdAtMs &&
+        message.id === cursor.messageId,
+    );
+    if (!visible) throw new Error("invalid-follow-target");
+
+    const prior = state.feedReads.get(ownerUserId);
+    const requestedAtMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    const candidate: ChatFeedReadState = {
       workspaceId: workspace,
       ownerUserId,
-      lastSeenCreatedAtMs: latest?.createdAtMs ?? 0,
-      lastSeenMessageId: latest?.id ?? "",
-      updatedAtMs: this.tick(optionalSafeInteger(params, "nowMs")),
+      lastSeenCreatedAtMs: cursor.createdAtMs,
+      lastSeenMessageId: cursor.messageId,
+      updatedAtMs: Math.max(
+        requestedAtMs,
+        (prior?.updatedAtMs ?? -1) + 1,
+      ),
     };
+    const advances =
+      prior === undefined ||
+      candidate.lastSeenCreatedAtMs > prior.lastSeenCreatedAtMs ||
+      (
+        candidate.lastSeenCreatedAtMs === prior.lastSeenCreatedAtMs &&
+        compareText(candidate.lastSeenMessageId, prior.lastSeenMessageId) >= 0
+      );
+    const result = advances ? candidate : prior;
     state.feedReads.set(ownerUserId, result);
     return jsonResult(result);
   }
@@ -1882,36 +2131,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const owner = requiredString(params, "ownerUserId", "invalid-follow-target");
     const follows = state.follows.get(owner) ?? new Set<string>();
-    const candidates: ChatFeedItem[] = [...state.messages.values()]
-      .filter((message) => {
-        const thread = state.threads.get(message.threadId);
-        const channel = thread?.channelId
-          ? state.channels.get(thread.channelId)
-          : undefined;
-        const openingMessageId = thread
-          ? threadMessages(state, thread.id)[0]?.id
-          : undefined;
-        return !!thread && (
-          follows.has(`thread\0${thread.id}`) ||
-          (
-            message.id === openingMessageId &&
-            channel?.wireId !== null &&
-            channel?.wireId !== undefined &&
-            follows.has(`channel\0${channel.wireId}`)
-          ) ||
-          (
-            message.author.kind === "human" &&
-            message.authorUserId !== undefined &&
-            follows.has(`person\0${message.authorUserId}`)
-          ) ||
-          (
-            message.author.kind === "agent" &&
-            message.authorUserId !== undefined &&
-            follows.has(`agent\0${message.authorUserId}`)
-          )
-        );
-      })
-      .sort((left, right) => right.createdAtMs - left.createdAtMs || compareText(right.id, left.id))
+    const feedMessages = personalFeedMessages(state, workspace, owner);
+    const candidates: ChatFeedItem[] = feedMessages
       .map((message) => {
         const thread = state.threads.get(message.threadId)!;
         const channel = thread.channelId ? state.channels.get(thread.channelId) : undefined;
@@ -1974,7 +2195,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult({
       items: result.values,
       nextCursor: result.nextCursor,
-      headCursor: head ? encodeCursor(`${workspace}\0feedHead`, 0) : null,
+      headCursor: head ? encodeFeedCursor(head.message) : null,
       readState: state.feedReads.get(owner) ?? null,
     });
   }
@@ -2002,18 +2223,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (mode !== "live" && mode !== "snapshot") {
       throw new Error("invalid-bookmark-target");
     }
-    const destinationPath = normalizePath(
+    const destinationPath = normalizeTrackedPath(
       requiredString(params, "destinationPath", "invalid-path"),
     );
-    if (
-      [...state.bookmarks.values()].some(
-        (bookmark) =>
-          bookmark.ownerUserId === ownerUserId &&
-          bookmark.destinationPath === destinationPath,
-      )
-    ) {
-      throw new Error("target-exists");
-    }
     const thread =
       targetKind === "thread"
         ? this.requireThread(state, targetId)
@@ -2022,8 +2234,31 @@ export class ChatsLoopbackEngine implements EngineTransport {
             state.messages.get(targetId)?.threadId ?? "",
           );
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    const existing = [...state.bookmarks.values()].find(
+      (bookmark) =>
+        bookmark.ownerUserId === ownerUserId &&
+        bookmark.targetKind === targetKind &&
+        bookmark.targetId === targetId,
+    );
+    if (existing) {
+      const resetsProjection =
+        existing.destinationPath !== destinationPath ||
+        existing.state === "archived";
+      existing.threadId = thread.id;
+      if (targetKind === "message") existing.messageId = targetId;
+      else delete existing.messageId;
+      existing.mode = mode;
+      existing.destinationPath = destinationPath;
+      existing.state = "active";
+      existing.generation += 1;
+      existing.projectionState = "pending";
+      delete existing.failureReason;
+      if (resetsProjection) delete existing.projectionObjectId;
+      existing.updatedAtMs = atMs;
+      return jsonResult(existing);
+    }
     const bookmark: ChatBookmark = {
-      bookmarkId: `bookmark-${state.bookmarks.size + 1}`,
+      bookmarkId: bookmarkId(ownerUserId, targetKind, targetId),
       workspaceId: workspace,
       ownerUserId,
       targetKind,
@@ -2113,17 +2348,54 @@ export class ChatsLoopbackEngine implements EngineTransport {
       bookmark.generation === generation &&
       bookmark.state === "active" &&
       bookmark.projectionState === "pending";
+    const projectionObjectId = optionalString(
+      params,
+      "projectionObjectId",
+    );
+    const projectionPath = optionalString(params, "projectionPath");
+    if (
+      (projectionObjectId === undefined) !== (projectionPath === undefined)
+    ) {
+      throw new Error("invalid-bookmark-target");
+    }
+    const projectionIdentity =
+      projectionObjectId === undefined || projectionPath === undefined
+        ? undefined
+        : {
+            objectId: normalizeTrimmed(
+              projectionObjectId,
+              "invalid-bookmark-target",
+            ),
+            path: validateProjectionPath(projectionPath),
+          };
+    if (
+      projectionIdentity !== undefined &&
+      (
+        projectionIdentity.objectId.length > 256 ||
+        /[\u0000-\u001f\u007f]/u.test(projectionIdentity.objectId)
+      )
+    ) {
+      throw new Error("invalid-bookmark-target");
+    }
     if (applied) {
+      if (
+        projectionIdentity !== undefined &&
+        (
+          projectionIdentity.path !== bookmark.destinationPath ||
+          (
+            bookmark.projectionObjectId !== undefined &&
+            bookmark.projectionObjectId !== projectionIdentity.objectId
+          )
+        )
+      ) {
+        throw new Error("invalid-bookmark-target");
+      }
       bookmark.projectionState = "ready";
       bookmark.projectedGeneration = generation;
       bookmark.lastProjectedAtMs =
         optionalSafeInteger(params, "projectedAtMs") ?? this.tick();
-      const projectionObjectId = optionalString(
-        params,
-        "projectionObjectId",
-      );
-      if (projectionObjectId !== undefined) {
-        bookmark.projectionObjectId = projectionObjectId;
+      if (projectionIdentity !== undefined) {
+        bookmark.projectionObjectId = projectionIdentity.objectId;
       }
       delete bookmark.failureReason;
       bookmark.updatedAtMs = bookmark.lastProjectedAtMs;

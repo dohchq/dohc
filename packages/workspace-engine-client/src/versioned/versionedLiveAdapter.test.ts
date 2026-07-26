@@ -20,7 +20,10 @@ import {
   type VersionedMethod,
   type VersionedMethodParamsMap,
 } from "./versionedWireContract";
-import { VersionedLiveAdapter } from "./versionedLiveAdapter";
+import {
+  VersionedAdapterCapabilityError,
+  VersionedLiveAdapter,
+} from "./versionedLiveAdapter";
 import { VersionedLoopbackEngine } from "./versionedLoopbackEngine";
 
 const WORKSPACE = "workspace";
@@ -238,6 +241,90 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it("rejects a caller-supplied delete moment id the daemon cannot preserve", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+
+    await expect(
+      adapter.deleteTextFile({
+        workspaceId: "workspace",
+        versionId: "main",
+        path: "notes/delete.md",
+        metadata: { origin: "api" },
+        momentId: "caller-moment",
+      }),
+    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
+    expect(requests).toEqual([]);
+  });
+
+  it("never silently drops secret mutation metadata rejected by the daemon", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+
+    await expect(
+      adapter.writeSecretFile({
+        workspaceId: "workspace",
+        versionId: "main",
+        path: ".env",
+        text: "TOKEN=value",
+        metadata: { origin: "api", summary: "Set token" },
+      }),
+    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
+    await expect(
+      adapter.deleteSecretFile({
+        workspaceId: "workspace",
+        versionId: "main",
+        path: ".env",
+        metadata: { origin: "api", correlationId: "operation-1" },
+      }),
+    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
+    await expect(
+      adapter.restoreSecretFileToBeforeMoment({
+        workspaceId: "workspace",
+        momentId: "secret-moment",
+        metadata: { origin: "restore", summary: "Undo secret change" },
+      }),
+    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
+    await expect(
+      adapter.restoreSecretFileToBeforeMoment({
+        workspaceId: "workspace",
+        momentId: "secret-moment",
+        metadata: { origin: "api" },
+      }),
+    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
+    expect(requests).toEqual([]);
+
+    await expect(
+      adapter.applySecretFileFromVersion({
+        workspaceId: "workspace",
+        sourceVersionId: "source",
+        targetVersionId: "target",
+        path: ".env",
+        metadata: {
+          origin: "sync",
+          summary: "Apply source secret",
+          correlationId: "operation-2",
+        },
+      }),
+    ).rejects.toBe(SENTINEL);
+    expect(requests[0]).toMatchObject({
+      method: VERSIONED_METHOD.secretsApply,
+      params: {
+        origin: "sync",
+        summary: "Apply source secret",
+        correlationId: "operation-2",
+      },
+    });
+  });
+
   it("encodes every one of the 30 versioned methods with exact params", async () => {
     expect(VERSIONED_REQUEST_CASES).toHaveLength(30);
     const requests: Request[] = [];

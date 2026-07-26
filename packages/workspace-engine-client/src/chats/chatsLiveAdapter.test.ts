@@ -422,6 +422,26 @@ function mockDaemon(
   };
 }
 
+function loopbackAdapter(): {
+  adapter: ChatsLiveAdapter;
+  loopback: ChatsLoopbackEngine;
+} {
+  const loopback = new ChatsLoopbackEngine();
+  let nextId = 0;
+  const adapter = new ChatsLiveAdapter(
+    {
+      sendRequest: (request) => loopback.sendRequest(request),
+      close: () => undefined,
+    },
+    WORKSPACE,
+    {
+      workspaceId: "workspace",
+      createId: (kind) => `${kind}-${++nextId}`,
+    },
+  );
+  return { adapter, loopback };
+}
+
 describe("ChatsLiveAdapter", () => {
   it("encodes every one of the 60 chats methods with the workspace handle and exact params", async () => {
     expect(CHAT_REQUEST_CASES).toHaveLength(60);
@@ -775,5 +795,245 @@ describe("ChatsLiveAdapter", () => {
         channelId: "channel",
       }),
     ).resolves.toBe("channel");
+  });
+
+  it("marks only the personal-feed head that the caller actually displayed", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "channel",
+      name: "General",
+    });
+    const started = await adapter.startChannelThread({
+      workspaceId: "workspace",
+      channelId: "channel",
+      author: { kind: "human", displayName: "Ice" },
+      body: "Displayed",
+    });
+    await adapter.setFollow({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      targetKind: "thread",
+      targetId: started.thread.id,
+      state: "following",
+    });
+    const displayed = await adapter.listPersonalFeed({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+    });
+    expect(displayed.headCursor).toBeDefined();
+
+    const arrivedLater = await adapter.sendMessage({
+      workspaceId: "workspace",
+      threadId: started.thread.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Arrived later",
+    });
+    const seen = await adapter.markPersonalFeedSeen({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      headCursor: displayed.headCursor!,
+    });
+
+    expect(seen.lastSeenMessageId).toBe(started.message.id);
+    expect(seen.lastSeenMessageId).not.toBe(arrivedLater.id);
+
+    await adapter.setFollow({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      targetKind: "thread",
+      targetId: started.thread.id,
+      state: "unfollowed",
+    });
+    await expect(
+      adapter.markPersonalFeedSeen({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+        headCursor: displayed.headCursor!,
+      }),
+    ).rejects.toThrow("invalid-follow-target");
+  });
+
+  it("rejects a replicated follow whose verified owner does not match", async () => {
+    const { adapter } = loopbackAdapter();
+    const thread = await adapter.createThread({
+      workspaceId: "workspace",
+      title: "Thread",
+      linkedFile: { objectId: "object" },
+    });
+
+    await expect(
+      adapter.setFollow({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+        replicationOwnerUserId: "someone-else",
+        targetKind: "thread",
+        targetId: thread.id,
+        state: "following",
+      }),
+    ).rejects.toThrow("invalid-follow-target");
+    await expect(
+      adapter.listFollows({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("requires bookmark projection object and path identities together", async () => {
+    const { adapter } = loopbackAdapter();
+    const thread = await adapter.createThread({
+      workspaceId: "workspace",
+      title: "Thread",
+      linkedFile: { objectId: "object" },
+    });
+    const bookmark = await adapter.saveBookmark({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      targetKind: "thread",
+      targetId: thread.id,
+      mode: "live",
+      destinationPath: "bookmarks/thread.md",
+    });
+
+    await expect(
+      adapter.markBookmarkReady({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+        bookmarkId: bookmark.bookmarkId,
+        generation: bookmark.generation,
+        projectionObjectId: "projection-object",
+      }),
+    ).rejects.toThrow("invalid-bookmark-target");
+    await expect(
+      adapter.markBookmarkReady({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+        bookmarkId: bookmark.bookmarkId,
+        generation: bookmark.generation,
+        projectionPath: bookmark.destinationPath,
+      }),
+    ).rejects.toThrow("invalid-bookmark-target");
+    await expect(
+      adapter.markBookmarkReady({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+        bookmarkId: bookmark.bookmarkId,
+        generation: bookmark.generation,
+        projectionObjectId: "projection-object",
+        projectionPath: bookmark.destinationPath,
+      }),
+    ).resolves.toMatchObject({ applied: true });
+  });
+
+  it("rejects non-tracked bookmark destination paths before projection", async () => {
+    const { adapter } = loopbackAdapter();
+    const thread = await adapter.createThread({
+      workspaceId: "workspace",
+      title: "Thread",
+      linkedFile: { objectId: "object" },
+    });
+
+    for (const destinationPath of [
+      ".env",
+      "secrets%252eenv",
+      ".dohc/engine/engine.db",
+      "DOHC~1/bookmark.md",
+      "%252e%252e/outside.md",
+    ]) {
+      await expect(
+        adapter.saveBookmark({
+          workspaceId: "workspace",
+          ownerUserId: "owner",
+          targetKind: "thread",
+          targetId: thread.id,
+          mode: "live",
+          destinationPath,
+        }),
+        destinationPath,
+      ).rejects.toThrow("invalid-path");
+    }
+
+    await expect(
+      adapter.saveBookmark({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+        targetKind: "thread",
+        targetId: thread.id,
+        mode: "live",
+        destinationPath: "bookmarks/./thread.md",
+      }),
+    ).resolves.toMatchObject({ destinationPath: "bookmarks/thread.md" });
+  });
+
+  it("upserts a bookmark by owner and target and queues a fresh generation", async () => {
+    const { adapter } = loopbackAdapter();
+    const thread = await adapter.createThread({
+      workspaceId: "workspace",
+      title: "Thread",
+      linkedFile: { objectId: "object" },
+    });
+    const first = await adapter.saveBookmark({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      targetKind: "thread",
+      targetId: thread.id,
+      mode: "live",
+      destinationPath: "bookmarks/first.md",
+    });
+    await adapter.markBookmarkReady({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      bookmarkId: first.bookmarkId,
+      generation: first.generation,
+      projectionObjectId: "projection-object",
+      projectionPath: first.destinationPath,
+    });
+
+    const updated = await adapter.saveBookmark({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      targetKind: "thread",
+      targetId: thread.id,
+      mode: "snapshot",
+      destinationPath: "bookmarks/updated.md",
+    });
+
+    expect(updated).toMatchObject({
+      bookmarkId: first.bookmarkId,
+      mode: "snapshot",
+      destinationPath: "bookmarks/updated.md",
+      generation: 2,
+      projectedGeneration: 1,
+      projectionState: "pending",
+    });
+    expect(updated.projectionObjectId).toBeUndefined();
+    await expect(
+      adapter.listBookmarks({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+      }),
+    ).resolves.toHaveLength(1);
+
+    const otherThread = await adapter.createThread({
+      workspaceId: "workspace",
+      title: "Other thread",
+      linkedFile: { objectId: "other-object" },
+    });
+    const otherTarget = await adapter.saveBookmark({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      targetKind: "thread",
+      targetId: otherThread.id,
+      mode: "live",
+      destinationPath: updated.destinationPath,
+    });
+    expect(otherTarget.bookmarkId).not.toBe(updated.bookmarkId);
+    await expect(
+      adapter.listBookmarks({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+      }),
+    ).resolves.toHaveLength(2);
   });
 });

@@ -282,7 +282,7 @@ describe("B2 chats wire contract and loopback", () => {
         workspaceId: WORKSPACE,
         ownerUserId: "viewer",
         targetKind: "thread",
-        targetId: "file-thread",
+        targetId: `seed-target-${bookmarkId}`,
         threadId: "file-thread",
         mode: "live",
         destinationPath: `bookmarks/${bookmarkId}.md`,
