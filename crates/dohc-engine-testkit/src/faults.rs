@@ -76,11 +76,54 @@ impl FaultInjector for PanicFaults {
 /// [`GateFaults::release`] is called, then lets every future traversal proceed.
 /// Wedging the worker this way lets a test back up the bounded command queue and
 /// observe [`dohc_engine_runtime::RuntimeError::Overloaded`].
+mod wait_flag {
+    use super::{Condvar, Mutex};
+
+    /// One sticky predicate and its permanently paired condition variable.
+    /// Private fields prevent callers from waiting on `changed` with any other
+    /// mutex guard.
+    pub(super) struct WaitFlag {
+        value: Mutex<bool>,
+        changed: Condvar,
+    }
+
+    impl WaitFlag {
+        pub(super) fn new() -> Self {
+            Self {
+                value: Mutex::new(false),
+                changed: Condvar::new(),
+            }
+        }
+
+        pub(super) fn wait(&self) {
+            let mut value = self.value.lock().unwrap_or_else(|p| p.into_inner());
+            while !*value {
+                value = self.changed.wait(value).unwrap_or_else(|p| p.into_inner());
+            }
+        }
+
+        pub(super) fn set(&self) {
+            let mut value = self.value.lock().unwrap_or_else(|p| p.into_inner());
+            *value = true;
+            self.changed.notify_all();
+        }
+
+        #[cfg(test)]
+        pub(super) fn pair_addresses(&self) -> (*const Mutex<bool>, *const Condvar) {
+            (
+                std::ptr::from_ref(&self.value),
+                std::ptr::from_ref(&self.changed),
+            )
+        }
+    }
+}
+
+use wait_flag::WaitFlag;
+
 pub struct GateFaults {
     point: FaultPoint,
-    open: Mutex<bool>,
-    reached: Mutex<bool>,
-    changed: Condvar,
+    open: WaitFlag,
+    reached: WaitFlag,
 }
 
 impl GateFaults {
@@ -88,44 +131,45 @@ impl GateFaults {
     pub fn at(point: FaultPoint) -> Arc<Self> {
         Arc::new(GateFaults {
             point,
-            open: Mutex::new(false),
-            reached: Mutex::new(false),
-            changed: Condvar::new(),
+            open: WaitFlag::new(),
+            reached: WaitFlag::new(),
         })
     }
 
     /// Block until the worker has reached (and is parked at) the gate.
     pub fn wait_until_reached(&self) {
-        let mut reached = self.reached.lock().unwrap_or_else(|p| p.into_inner());
-        while !*reached {
-            reached = self
-                .changed
-                .wait(reached)
-                .unwrap_or_else(|p| p.into_inner());
-        }
+        self.reached.wait();
     }
 
     /// Open the gate, releasing the parked worker and all future traversals.
     pub fn release(&self) {
-        let mut open = self.open.lock().unwrap_or_else(|p| p.into_inner());
-        *open = true;
-        self.changed.notify_all();
+        self.open.set();
     }
 }
 
 impl FaultInjector for GateFaults {
     fn poll(&self, point: FaultPoint) -> FaultAction {
         if point == self.point {
-            {
-                let mut reached = self.reached.lock().unwrap_or_else(|p| p.into_inner());
-                *reached = true;
-                self.changed.notify_all();
-            }
-            let mut open = self.open.lock().unwrap_or_else(|p| p.into_inner());
-            while !*open {
-                open = self.changed.wait(open).unwrap_or_else(|p| p.into_inner());
-            }
+            self.reached.set();
+            self.open.wait();
         }
         FaultAction::Continue
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_conditions_own_distinct_mutex_condvar_pairs() {
+        let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
+        let reached = gate.reached.pair_addresses();
+        let open = gate.open.pair_addresses();
+
+        // MUTATION: collapse the two conditions back onto one mutex or one
+        // Condvar and the corresponding address assertion fails.
+        assert_ne!(reached.0, open.0, "conditions must not share a mutex");
+        assert_ne!(reached.1, open.1, "conditions must not share a condvar");
     }
 }

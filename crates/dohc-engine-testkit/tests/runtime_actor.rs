@@ -351,8 +351,9 @@ fn restart_after_panicked_predecessor_continues_generation() {
     assert_eq!(reopened.snapshot().expect("snap").documents, 1);
 }
 
-// oracle: bounded backpressure is observable — filling the command queue behind
-// a wedged worker yields a typed Overloaded, not an unbounded queue or a hang.
+// oracle: bounded backpressure is observable and recoverable — repeatedly
+// filling the command queue behind a wedged worker yields a typed Overloaded,
+// then draining it restores normal writes without a lost wakeup.
 #[test]
 fn full_command_queue_reports_overloaded() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -360,33 +361,79 @@ fn full_command_queue_reports_overloaded() {
     let sup = WorkspaceSupervisor::new();
     let handle = sup.open(&db, 1).expect("open").actor;
 
-    // Wedge the worker: it dequeues this write and parks inside the gate.
-    let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
-    let gate_dyn: Arc<dyn FaultInjector> = gate.clone();
-    handle
-        .try_submit_write(write("wedge", "wd", "held", 1), gate_dyn)
-        .expect("submit wedger");
-    gate.wait_until_reached();
+    for round in 0..4 {
+        // Wedge the worker: it dequeues this write and parks inside the gate.
+        let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
+        let gate_dyn: Arc<dyn FaultInjector> = gate.clone();
+        handle
+            .try_submit_write(
+                write(
+                    &format!("wedge-{round}"),
+                    &format!("wd-{round}"),
+                    "held",
+                    round,
+                ),
+                gate_dyn,
+            )
+            .expect("submit wedger");
+        gate.wait_until_reached();
 
-    // Fill the bounded queue; a bounded number of submits must hit Overloaded.
-    let mut overloaded = false;
-    for i in 0..512 {
-        match handle.try_submit_write(
-            write(&format!("fill-{i}"), &format!("fd-{i}"), "x", 1),
-            Arc::new(NoFaults),
-        ) {
-            Ok(()) => {}
-            Err(err) if err.code() == "overloaded" => {
-                overloaded = true;
-                break;
+        // Fill the bounded queue; a bounded number of submits must hit
+        // Overloaded, and it must remain overloaded while the gate is closed.
+        let mut accepted = 0;
+        for i in 0..512 {
+            match handle.try_submit_write(
+                write(
+                    &format!("fill-{round}-{i}"),
+                    &format!("fd-{round}-{i}"),
+                    "x",
+                    round,
+                ),
+                Arc::new(NoFaults),
+            ) {
+                Ok(()) => accepted += 1,
+                Err(err) if err.code() == "overloaded" => break,
+                Err(err) => panic!("unexpected error while filling queue: {err}"),
             }
-            Err(err) => panic!("unexpected error while filling queue: {err}"),
         }
-    }
-    assert!(overloaded, "a full bounded queue must report Overloaded");
+        assert!(
+            accepted > 0,
+            "the bounded queue must accept work before full"
+        );
+        let err = handle
+            .try_submit_write(
+                write(
+                    &format!("still-full-{round}"),
+                    &format!("still-full-doc-{round}"),
+                    "x",
+                    round,
+                ),
+                Arc::new(NoFaults),
+            )
+            .expect_err("a wedged full queue must stay overloaded");
+        assert_eq!(err.code(), "overloaded");
 
-    // Release the worker before teardown so close can drain (no deadlock).
-    gate.release();
+        // Release, drain all FIFO work, and prove a normal blocking write can
+        // enter behind it and receive an acknowledgement. Repeating the cycle
+        // exercises both condition-variable paths and queue recovery.
+        gate.release();
+        let outcome = handle
+            .write(
+                write(
+                    &format!("recover-{round}"),
+                    &format!("recover-doc-{round}"),
+                    "recovered",
+                    round,
+                ),
+                Arc::new(NoFaults),
+            )
+            .expect("queue must recover after drain");
+        assert!(matches!(
+            outcome,
+            WriteOutcome::Acked { deduped: false, .. }
+        ));
+    }
+
     sup.close_all().expect("close all");
 }
 
