@@ -906,6 +906,10 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.captureFlush, {});
   }
 
+  async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
+  }
+
   async close(): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.close, {});
   }

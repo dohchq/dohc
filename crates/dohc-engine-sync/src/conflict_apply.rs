@@ -351,6 +351,7 @@ fn side(
         // always fails closed downstream in `insert_text_conflict_if_absent`
         // for lacking a blob reference, same as before BINCONFLICT.
         binary_sha256: None,
+        binary_byte_length: None,
         binary_object_id: None,
         binary_latest_moment_id: None,
         content_kind,
@@ -605,13 +606,15 @@ fn select_snapshot_by_path(
         Option<String>,
         String,
         Option<String>,
+        Option<i64>,
+        Option<i64>,
     );
     let row: Option<HeadRow> = tx
         .query_row(
             "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
              s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
              s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
-             bb.sha256 FROM snapshots s \
+              bb.sha256, bb.byte_length, LENGTH(bb.bytes) FROM snapshots s \
              LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
              LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
              WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3",
@@ -629,6 +632,8 @@ fn select_snapshot_by_path(
                     row.get(8)?,
                     row.get(9)?,
                     row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
                 ))
             },
         )
@@ -646,6 +651,8 @@ fn select_snapshot_by_path(
         metadata_correlation_id,
         content_kind,
         binary_sha256,
+        binary_byte_length,
+        binary_actual_length,
     )) = row
     else {
         return Ok(ConflictFileState::text(path.to_owned(), None));
@@ -679,12 +686,21 @@ fn select_snapshot_by_path(
             let binary_sha256 = binary_sha256.ok_or(SyncError::InvalidInput {
                 reason: "binary snapshot is missing its blob",
             })?;
+            let binary_byte_length = binary_byte_length.ok_or(SyncError::InvalidInput {
+                reason: "binary snapshot is missing its byte length",
+            })?;
+            if binary_byte_length < 0 || binary_actual_length != Some(binary_byte_length) {
+                return Err(SyncError::InvalidInput {
+                    reason: "binary snapshot has an invalid byte length",
+                });
+            }
             // Carry the binary head's IDENTITY (object + latest moment), not just
             // path+bytes, so the exact-head stale gate rejects a
             // same-bytes-but-recreated head instead of clobbering it.
             Ok(ConflictFileState::binary_head(
                 snapshot_path,
                 binary_sha256,
+                binary_byte_length,
                 object_id,
                 latest_moment_id,
             ))

@@ -98,6 +98,7 @@ function conflict(status: "open" | "resolved" = "open"): ConflictRecord {
     contentKind: "text" as const,
     snapshot,
     binarySha256: null,
+    binaryByteLength: null,
     binaryObjectId: null,
     binaryLatestMomentId: null,
     metadataSummary: "side summary",
@@ -194,6 +195,49 @@ describe("createCaptureLiveStores", () => {
             origin: "local-file",
             summary: "side summary",
           },
+        },
+      },
+    ]);
+  });
+
+  it("preserves nonempty binary conflict-side byte lengths", async () => {
+    const binaryState = {
+      path: "asset.bin",
+      contentKind: "binary" as const,
+      snapshot: null,
+      binarySha256: "b".repeat(64),
+      binaryByteLength: 17,
+      binaryObjectId: "binary-object",
+      binaryLatestMomentId: "binary-moment",
+      metadataSummary: null,
+      metadataCorrelationId: null,
+    };
+    const client = clientFor(async (request) => ({
+      id: request.id,
+      result: [
+        {
+          ...conflict(),
+          path: "asset.bin",
+          base: binaryState,
+          current: binaryState,
+          incoming: binaryState,
+        },
+      ],
+    }));
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    await expect(
+      store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" }),
+    ).resolves.toMatchObject([
+      {
+        current: {
+          exists: true,
+          contentKind: "binary",
+          sha256: "b".repeat(64),
+          byteLength: 17,
         },
       },
     ]);
@@ -393,6 +437,102 @@ describe("createCaptureLiveStores", () => {
         momentId: "resolved-moment",
       }),
     ).rejects.toThrow("exceeds the RPC in-band limit");
+  });
+
+  it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(
+    "rejects corrupt author provenance returned by %s",
+    async (method) => {
+      const corruptMoment = { ...moment, author: { corrupt: true } as const };
+      const client = clientFor(async (request) => ({
+        id: request.id,
+        result:
+          method === VERSIONED_METHOD.momentsGet
+            ? corruptMoment
+            : {
+                moments: [corruptMoment],
+                nextBeforeMomentOrder: null,
+                latestMomentOrder: 1,
+              },
+      }));
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+        sessionsFor(client),
+      );
+
+      const read =
+        method === VERSIONED_METHOD.momentsGet
+          ? store.getMoment({
+              workspaceId: WORKSPACE_ID,
+              momentId: "resolved-moment",
+            })
+          : store.listMoments({ workspaceId: WORKSPACE_ID });
+      await expect(read).rejects.toMatchObject({ code: "state-corrupt" });
+    },
+  );
+
+  it("hydrates a delete preimage from the atomic mutation result", async () => {
+    const requests: Request[] = [];
+    const client = clientFor(async (request) => {
+      requests.push(request);
+      expect(request.method).toBe(VERSIONED_METHOD.textDelete);
+      return {
+        id: request.id,
+        result: {
+          object: {
+            id: "object",
+            workspaceId: WORKSPACE_ID,
+            createdAtMs: 1,
+          },
+          before: {
+            workspaceId: WORKSPACE_ID,
+            versionId: "main",
+            objectId: "object",
+            path: "note.md",
+            contentKind: "text",
+            sha256: "c".repeat(64),
+            byteLength: 13,
+            updatedAtMs: 3,
+            latestMomentId: "concurrent-moment",
+            metadataOrigin: "api",
+          },
+          moment: {
+            ...moment,
+            operation: "delete",
+            beforeBlobSha256: "c".repeat(64),
+            beforeLatestMomentId: "concurrent-moment",
+            beforeText: "newer content",
+            beforeByteLength: 13,
+            afterBlobSha256: null,
+            afterText: "",
+            afterByteLength: 0,
+          },
+          deduped: false,
+        },
+      };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    await expect(
+      store.deleteTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "note.md",
+        metadata: { origin: "api" },
+      }),
+    ).resolves.toMatchObject({
+      before: {
+        text: "newer content",
+        sha256: "c".repeat(64),
+        latestMomentId: "concurrent-moment",
+      },
+      moment: {
+        payload: { before: { text: "newer content", sha256: "c".repeat(64) } },
+      },
+    });
+    expect(requests).toHaveLength(1);
   });
 
   it("keeps digest and byte length on metadata-only listings", async () => {

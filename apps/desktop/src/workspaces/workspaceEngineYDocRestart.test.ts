@@ -59,6 +59,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   const secondClient = client(2);
   const thirdClient = client(3);
   let currentClient = firstClient;
+  let secondGenerationApplyCount = 0;
   const sessions = new EngineWorkspaceSessions(
     { currentClient: () => currentClient },
     { sleep: async () => undefined },
@@ -87,7 +88,18 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
       path: options.path,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
-        if (generation < 3) {
+        if (generation === 2 && secondGenerationApplyCount++ === 0) {
+          const beforeRemote = Y.encodeStateVector(doc);
+          doc.getText("plainText").insert(
+            doc.getText("plainText").length,
+            " remote",
+          );
+          options.onRemoteUpdate(
+            Y.encodeStateAsUpdate(doc, beforeRemote),
+          );
+          return;
+        }
+        if (generation === 1 || generation === 2) {
           currentClient = generation === 1 ? secondClient : thirdClient;
           throw Object.assign(new Error("daemon exited"), {
             code: "transport-error",
@@ -142,11 +154,15 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
 
   const settled = await session.settleNow();
-  expect(settled.markdown).toBe("seed survives");
+  expect(settled.markdown).toBe("seed survives remote");
   expect(openedDocs).toHaveLength(2);
-  expect(openedDocs[1].getText("plainText").toString()).toBe("seed survives");
+  expect(openedDocs[1].getText("plainText").toString()).toBe(
+    "seed survives remote",
+  );
   expect(session.doc).toBe(stableDoc);
-  expect(stableDoc.getText("plainText").toString()).toBe("seed survives");
+  expect(stableDoc.getText("plainText").toString()).toBe(
+    "seed survives remote",
+  );
 
   const beforeSecondRestart = Y.encodeStateVector(rendererDoc);
   rendererDoc.getText("plainText").insert(13, " twice");
@@ -155,13 +171,18 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   );
 
   const settledAfterSecondRestart = await session.settleNow();
-  expect(settledAfterSecondRestart.markdown).toBe("seed survives twice");
+  expect(settledAfterSecondRestart.markdown).toBe(
+    "seed survives twice remote",
+  );
   expect(openedDocs).toHaveLength(3);
   expect(openedDocs[2].getText("plainText").toString()).toBe(
-    "seed survives twice",
+    "seed survives twice remote",
   );
   expect(stableDoc.getText("plainText").toString()).toBe(
-    "seed survives twice",
+    "seed survives twice remote",
+  );
+  expect(rendererDoc.getText("plainText").toString()).toBe(
+    "seed survives twice remote",
   );
 
   await session.close({ settle: false });

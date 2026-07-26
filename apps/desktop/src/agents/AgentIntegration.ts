@@ -43,7 +43,10 @@ export interface AgentIntegrationOptions {
   // lives) — null if the workspace is unknown.
   rootFor(workspaceId: string): string | null;
   // Sets/clears the watcher's per-workspace active-run slot.
-  setAgentRun(workspaceId: string, run: ActiveAgentRun | null): void;
+  setAgentRun(
+    workspaceId: string,
+    run: ActiveAgentRun | null,
+  ): void | Promise<void>;
   // Spawns the MCP stdio server for a workspace. Injectable so tests never
   // launch a real child. Omitted ⇒ enabling only flips the toggle (the user's
   // AI tool launches its own copy via the config snippet).
@@ -170,7 +173,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       await writeRuns(root, runs);
     });
     try {
-      options.setAgentRun(workspaceId, {
+      await options.setAgentRun(workspaceId, {
         agentId: record.agentId,
         onBehalfOf: record.onBehalfOf,
         agentRunId: record.id,
@@ -206,12 +209,12 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     // Otherwise ending a stale/older runId would silently clear a newer active
     // run's attribution slot + child (start A, start B, end A must not unhook B).
     if (s.activeRun?.id === runId) {
-      options.setAgentRun(workspaceId, null);
-      s.activeRun = null;
       if (s.mcp) {
         s.mcp.stop();
         s.mcp = null;
       }
+      await options.setAgentRun(workspaceId, null);
+      s.activeRun = null;
     }
     const recorded = await serialize(s, async () => {
       const runs = await readRuns(root);
@@ -248,14 +251,14 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
   }
 
   // Quit path: stop every managed child and clear slots.
-  function stopAll(): void {
+  async function stopAll(): Promise<void> {
     for (const [workspaceId, s] of states) {
       if (s.mcp) {
         s.mcp.stop();
         s.mcp = null;
       }
       if (s.activeRun) {
-        options.setAgentRun(workspaceId, null);
+        await options.setAgentRun(workspaceId, null);
         s.activeRun = null;
       }
     }

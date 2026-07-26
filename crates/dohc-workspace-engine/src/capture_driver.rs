@@ -30,8 +30,8 @@ use dohc_engine_files::{
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Serializes every capture reconcile+apply with an active-version switch.
@@ -1504,6 +1504,7 @@ pub(crate) struct CaptureDriver {
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
     status: Arc<DriverStatus>,
+    author_json: Arc<Mutex<Option<String>>>,
     /// Bounded: a caller flood means capture is already busy doing exactly
     /// what flush asks for; excess callers wait for a slot.
     flush_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>>,
@@ -1543,6 +1544,7 @@ impl CaptureDriver {
     ) -> CaptureDriver {
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
+        let author_json = Arc::new(Mutex::new(None));
         let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1555,6 +1557,7 @@ impl CaptureDriver {
             self_writes,
             cancel.clone(),
             Arc::clone(&status),
+            Arc::clone(&author_json),
             baseline_tx,
             flush_rx,
             apply_gate,
@@ -1566,6 +1569,7 @@ impl CaptureDriver {
             cancel,
             task: Some(task),
             status,
+            author_json,
             flush_tx,
             baseline,
             refresh_epoch,
@@ -1581,6 +1585,13 @@ impl CaptureDriver {
         &self,
     ) -> tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>> {
         self.flush_tx.clone()
+    }
+
+    pub(crate) fn set_author_json(&self, author_json: Option<String>) {
+        *self
+            .author_json
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = author_json;
     }
 
     /// Wait until the startup baseline reconcile has been applied (or the
@@ -2257,6 +2268,7 @@ struct RealEnv {
     actor: ActorHandle,
     workspace_id: String,
     status: Arc<DriverStatus>,
+    author_json: Arc<Mutex<Option<String>>>,
     self_writes: SelfWriteSuppression,
     apply_gate: ApplyGate,
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
@@ -2264,7 +2276,14 @@ struct RealEnv {
     apply_probe: Option<CaptureApplyProbe>,
 }
 
-impl RealEnv {}
+impl RealEnv {
+    fn capture_author(&self) -> Option<String> {
+        self.author_json
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
 
 impl DriverEnv for RealEnv {
     type Layer = FilesLayer;
@@ -2328,6 +2347,7 @@ impl DriverEnv for RealEnv {
             initial,
             &self.status,
             &self.self_writes,
+            self.capture_author(),
         )
         .await;
         // The open barrier must not release on a FAILED baseline: a caller
@@ -2358,6 +2378,7 @@ impl DriverEnv for RealEnv {
                         run,
                         &self.status,
                         &self.self_writes,
+                        self.capture_author(),
                     )
                     .await
                 }
@@ -2425,6 +2446,7 @@ impl DriverEnv for RealEnv {
                     run,
                     &self.status,
                     &self.self_writes,
+                    self.capture_author(),
                 )
                 .await;
                 // A clean-looking tick with a NON-EMPTY quarantine is not
@@ -2470,6 +2492,7 @@ async fn drive(
     self_writes: SelfWriteSuppression,
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
+    author_json: Arc<Mutex<Option<String>>>,
     baseline_tx: tokio::sync::watch::Sender<bool>,
     flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
     apply_gate: ApplyGate,
@@ -2481,6 +2504,7 @@ async fn drive(
         actor,
         workspace_id,
         status: Arc::clone(&status),
+        author_json,
         self_writes,
         apply_gate,
         refresh_epoch,
@@ -2540,8 +2564,17 @@ pub(crate) async fn reconcile_full_for_switch(
                 ReconcileRun::Completed(plan)
                     if !plan.ops.is_empty() || !plan.retained_over_cap.is_empty()
             );
-            if apply_run_with_handle(root, actor, workspace_id, &handle, run, status, self_writes)
-                .await
+            if apply_run_with_handle(
+                root,
+                actor,
+                workspace_id,
+                &handle,
+                run,
+                status,
+                self_writes,
+                None,
+            )
+            .await
             {
                 Ok(manifest_changed)
             } else {
@@ -2616,6 +2649,7 @@ async fn apply_run(
     run: ReconcileRun,
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
+    author_json: Option<String>,
 ) -> bool {
     apply_run_with_handle(
         root,
@@ -2625,6 +2659,7 @@ async fn apply_run(
         run,
         status,
         self_writes,
+        author_json,
     )
     .await
 }
@@ -2637,6 +2672,7 @@ async fn apply_run_with_handle(
     run: ReconcileRun,
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
+    author_json: Option<String>,
 ) -> bool {
     let plan = match run {
         ReconcileRun::Completed(plan) => plan,
@@ -2671,6 +2707,7 @@ async fn apply_run_with_handle(
     // teardown cannot interrupt a half-applied plan.
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let apply_plan = plan.clone();
+    let apply_author_json = author_json.clone();
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
         .spawn(move || {
@@ -2683,7 +2720,7 @@ async fn apply_run_with_handle(
                 version_id,
                 apply_root,
                 now_ms,
-                None,
+                apply_author_json,
                 apply_self_writes,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
@@ -2741,6 +2778,7 @@ async fn apply_run_with_handle(
             let retire_path = path.clone();
             let retire_root = root.to_path_buf();
             let retire_self_writes = self_writes.clone();
+            let retire_author_json = author_json.clone();
             let retired = tokio::task::spawn_blocking(move || {
                 let mut sink = StoreCaptureSink::new_with_self_writes(
                     retire_actor,
@@ -2748,7 +2786,7 @@ async fn apply_run_with_handle(
                     retire_version,
                     retire_root,
                     now_ms,
-                    None,
+                    retire_author_json,
                     retire_self_writes,
                 );
                 sink.retire_policy_excluded(&retire_path)

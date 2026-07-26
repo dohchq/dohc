@@ -282,6 +282,10 @@ export interface WorkspaceEngineCapture {
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
   captureBatch(events: readonly WatcherEvent[]): void;
+  // Updates the daemon capture owner's live authorship state. Starting a run
+  // is ordered before the caller launches agent work; clearing first flushes
+  // the daemon so every write observed during the run retains its author.
+  setActiveAgentRun(run: ActiveAgentRun | null): Promise<void>;
   // Registers engine-originated disk writes the watcher is about to observe;
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
@@ -1010,6 +1014,10 @@ export function createWorkspaceEngineCapture(
     let current: EngineYdocProviderSessionRust | null = null;
     let closed = false;
     let operationChain: Promise<void> = Promise.resolve();
+    const openingRemoteUpdates = new WeakMap<
+      EngineYdocProviderSessionRust,
+      { updates: Uint8Array[]; installed: boolean }
+    >();
 
     const append = <T>(operation: () => Promise<T>): Promise<T> => {
       const pending = operationChain.then(operation);
@@ -1030,6 +1038,7 @@ export function createWorkspaceEngineCapture(
             );
           }
           let opened: EngineYdocProviderSessionRust | null = null;
+          const opening = { updates: [] as Uint8Array[], installed: false };
           const requestReconnect = (error: unknown): void => {
             if (
               opened === null ||
@@ -1054,7 +1063,10 @@ export function createWorkspaceEngineCapture(
               ? { contentKind: input.contentKind }
               : {}),
             onRemoteUpdate: (update) => {
-              if (current !== opened || canonicalDoc === null) return;
+              if (current !== opened || canonicalDoc === null) {
+                if (!opening.installed) opening.updates.push(update);
+                return;
+              }
               Y.applyUpdate(canonicalDoc, update);
               input.onRemoteUpdate(update);
             },
@@ -1062,6 +1074,7 @@ export function createWorkspaceEngineCapture(
             onSessionError: requestReconnect,
             onSettled: input.onSettled,
           });
+          openingRemoteUpdates.set(opened, opening);
           return opened;
         },
         { retryTransportErrors: true },
@@ -1072,6 +1085,8 @@ export function createWorkspaceEngineCapture(
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
       const replacement = await openGeneration();
+      const opening = openingRemoteUpdates.get(replacement);
+      const updatesIncludedInRemoteDelta = opening?.updates.length ?? 0;
 
       // Reconcile daemon-side edits into the stable renderer document first,
       // then replay every renderer edit missing from the replacement. The
@@ -1092,6 +1107,14 @@ export function createWorkspaceEngineCapture(
         await replacement.applyLocalUpdate(replay);
       }
       current = replacement;
+      if (opening) {
+        opening.installed = true;
+        openingRemoteUpdates.delete(replacement);
+        for (const update of opening.updates.slice(updatesIncludedInRemoteDelta)) {
+          Y.applyUpdate(canonicalDoc, update);
+          input.onRemoteUpdate(update);
+        }
+      }
       await failed.close({ settle: false }).catch(() => undefined);
     };
 
@@ -1114,6 +1137,11 @@ export function createWorkspaceEngineCapture(
 
     current = await openGeneration();
     canonicalDoc = current.doc;
+    const initialOpening = openingRemoteUpdates.get(current);
+    if (initialOpening) {
+      initialOpening.installed = true;
+      openingRemoteUpdates.delete(current);
+    }
     const initialUpdate = current.initialUpdate;
     const contentKind = current.contentKind;
     const sessionPath = current.path;
@@ -1917,9 +1945,12 @@ export function createWorkspaceEngineCapture(
   return {
     start() {
       if (options.daemonOwnsCapture) {
-        enqueue("daemon capture startup", async () => {
-          await engineStore();
-        });
+        enqueue("daemon capture startup", () =>
+          reportCaptureOutcome(async () => {
+            await engineStore();
+            return true;
+          }),
+        );
         return;
       }
       enqueue("startup reconciliation", () =>
@@ -1967,6 +1998,24 @@ export function createWorkspaceEngineCapture(
           return pathFailures === 0;
         }),
       );
+    },
+
+    setActiveAgentRun(run) {
+      return enqueueResult("daemon capture authorship", async () => {
+        if (!options.daemonOwnsCapture) return;
+        const engine = await engineStore();
+        if (run === null) await engine.flushCapture?.();
+        await engine.setCaptureAuthor?.(
+          run === null
+            ? null
+            : {
+                kind: "agent",
+                agentId: run.agentId,
+                onBehalfOf: run.onBehalfOf,
+                agentRunId: run.agentRunId,
+              },
+        );
+      });
     },
 
     registerExpectedEngineEvents,

@@ -277,11 +277,12 @@ export class EngineWorkspaceSessions {
         }
       })();
       this.preparations.set(rootPath, preparation);
-      preparation.catch(() => {
+      const release = () => {
         if (this.preparations.get(rootPath) === preparation) {
           this.preparations.delete(rootPath);
         }
-      });
+      };
+      void preparation.then(release, release);
     }
     await preparation;
   }

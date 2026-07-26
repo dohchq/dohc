@@ -1,14 +1,15 @@
-import type {
-  ActorNeutralWriteMetadata,
-  FileObjectRecord,
-  MomentAuthor,
-  SecretFileMoment,
-  SecretFileStore,
-  TextFileSnapshot,
-  VersionedTextFileState,
-  VersionedTextMoment,
-  VersionedTextMomentSummary,
-  VersionedTextStore,
+import {
+  VersionedTextStoreError,
+  type ActorNeutralWriteMetadata,
+  type FileObjectRecord,
+  type MomentAuthor,
+  type SecretFileMoment,
+  type SecretFileStore,
+  type TextFileSnapshot,
+  type VersionedTextFileState,
+  type VersionedTextMoment,
+  type VersionedTextMomentSummary,
+  type VersionedTextStore,
 } from "@dohc/workspace-engine";
 import {
   VersionedLiveAdapter,
@@ -44,6 +45,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
   flushCapture?(): Promise<void>;
+  setCaptureAuthor?(author: MomentAuthor | null): Promise<void>;
 };
 
 export interface CaptureLiveStores {
@@ -110,12 +112,12 @@ function snapshotFromWire(
 }
 
 function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefined {
-  if (
-    author === null ||
-    "corrupt" in author ||
-    author.kind !== "agent"
-  ) {
-    return undefined;
+  if (author === null) return undefined;
+  if ("corrupt" in author) {
+    throw new VersionedTextStoreError(
+      "state-corrupt",
+      "Engine moment contains corrupt author provenance.",
+    );
   }
   return {
     kind: "agent",
@@ -183,7 +185,14 @@ function momentFromWire(
     operation: moment.operation,
     payload: {
       before,
-      after: payloadSnapshot(moment, "after"),
+      // The engine's delete wire record has no post-delete content fields,
+      // while the oracle deliberately repeats the deleted snapshot in
+      // payload.after. Reconstruct that compatibility shape from the atomic
+      // preimage carried by the same mutation response.
+      after:
+        moment.operation === "delete" && before !== null
+          ? { ...before }
+          : payloadSnapshot(moment, "after"),
     },
     metadata: metadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
@@ -262,6 +271,9 @@ function conflictStateFromWire(state: ConflictFileState): VersionedTextFileState
         path: state.path,
         contentKind: "binary",
         sha256: state.binarySha256,
+        ...(state.binaryByteLength !== null
+          ? { byteLength: state.binaryByteLength }
+          : {}),
         ...(state.binaryObjectId !== null
           ? { objectId: state.binaryObjectId }
           : {}),
@@ -574,10 +586,6 @@ export function createCaptureLiveStores(
       author?: MomentAuthor;
       momentId?: string;
     }) {
-      const before = await store.readTextFile(input);
-      if (!before) {
-        throw new Error(`Engine text head for ${input.path} disappeared before delete.`);
-      }
       const { metadata, author, ...deleteInput } = input;
       const raw = await runMutation(
         async (adapter) =>
@@ -587,6 +595,28 @@ export function createCaptureLiveStores(
             metadata: adapterMetadata(metadata),
           }),
       );
+      if (!raw.moment.beforePresent) {
+        throw new VersionedTextStoreError(
+          "state-corrupt",
+          `Engine delete result for ${input.path} has no preimage.`,
+        );
+      }
+      const beforePayload = payloadSnapshot(raw.moment, "before");
+      const wireBefore: VersionedTextReadValue =
+        raw.before.contentKind === "text"
+          ? {
+              ...raw.before,
+              contentKind: "text",
+              blobSha256: raw.before.sha256,
+              text: beforePayload.text,
+            }
+          : {
+              ...raw.before,
+              contentKind: "binary",
+              blobSha256: raw.before.sha256,
+              text: "",
+            };
+      const before = snapshotFromWire(wireBefore, input.metadata);
       return {
         object: raw.object,
         before,
@@ -855,6 +885,14 @@ export function createCaptureLiveStores(
     async flushCapture() {
       await runRead(async (adapter) => {
         await adapter.flushCapture();
+      });
+    },
+
+    async setCaptureAuthor(author: MomentAuthor | null) {
+      await runMutation(async (adapter) => {
+        await adapter.setCaptureAuthor(
+          author === null ? null : adapterAuthor(author),
+        );
       });
     },
 

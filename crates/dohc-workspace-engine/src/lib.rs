@@ -649,6 +649,10 @@ impl EngineService {
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
+            "capture.setAuthor" => {
+                self.capture_set_author(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "versions.active" => {
                 self.versions_active(&ctx, request.workspace, request.params)
                     .await?
@@ -2510,6 +2514,34 @@ impl EngineService {
                 Err(_) => Ok(unavailable),
             }
         }
+    }
+
+    async fn capture_set_author(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CaptureSetAuthorParams = parse(params)?;
+        let author_json = validated_author(params.author.as_ref(), None)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _apply = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("capture.setAuthor (queued)"));
+            }
+            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+        };
+        let capture = lock(&open.capture);
+        let driver = capture.as_ref().ok_or_else(|| {
+            wire(
+                ErrorCode::WorkspaceUnavailable,
+                "capture driver unavailable",
+            )
+        })?;
+        driver.set_author_json(author_json);
+        Ok(json!({ "updated": true }))
     }
 
     /// Await an actor read under the request's cancellation/deadline — the
@@ -7406,6 +7438,12 @@ struct EmptyParams {}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaptureSetAuthorParams {
+    author: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatChannelCreateParams {
     channel_id: String,
     name: String,
@@ -7997,6 +8035,7 @@ impl ConflictStateDto {
             // actual binary payload through this RPC surface is out of scope
             // for BINCONFLICT (schema + persistence only).
             binary_sha256: None,
+            binary_byte_length: None,
             binary_object_id: None,
             binary_latest_moment_id: None,
             content_kind,
@@ -8773,6 +8812,7 @@ fn conflict_state_json(state: &ConflictFileState) -> Value {
         },
         "snapshot": state.snapshot.as_ref().map(snapshot_json),
         "binarySha256": state.binary_sha256,
+        "binaryByteLength": state.binary_byte_length,
         "binaryObjectId": state.binary_object_id,
         "binaryLatestMomentId": state.binary_latest_moment_id,
         "metadataSummary": state.metadata_summary,

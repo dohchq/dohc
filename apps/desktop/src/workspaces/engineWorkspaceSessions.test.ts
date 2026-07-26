@@ -168,4 +168,49 @@ describe("EngineWorkspaceSessions", () => {
       ).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
+
+  it("revalidates prepared directories before a daemon-generation reopen", async () => {
+    const rootPath = await tempRoot();
+    const outside = await tempRoot();
+    let generation = 1;
+    let opens = 0;
+    const clientForGeneration = (clientGeneration: number): EngineDaemonClient => ({
+      close: () => undefined,
+      async sendRequest(request) {
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        opens += 1;
+        return {
+          id: request.id,
+          result: { workspace: `workspace-handle-${clientGeneration}` },
+        };
+      },
+    });
+    let client = clientForGeneration(generation);
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await sessions.run(
+      { workspaceId: "workspace", rootPath },
+      async (binding) => binding.workspace,
+    );
+    await rm(join(rootPath, ".dohc"), { recursive: true, force: true });
+    await symlink(
+      outside,
+      join(rootPath, ".dohc"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    generation += 1;
+    client = clientForGeneration(generation);
+
+    await expect(
+      sessions.run(
+        { workspaceId: "workspace", rootPath },
+        async (binding) => binding.workspace,
+      ),
+    ).rejects.toThrow("must not be a symlink");
+    expect(opens).toBe(1);
+  });
 });

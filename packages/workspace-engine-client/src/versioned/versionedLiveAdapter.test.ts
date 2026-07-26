@@ -179,6 +179,7 @@ const WORKSPACE_REQUEST_CASES: WorkspaceRequestCase[] = [
   },
   { method: WORKSPACE_METHOD.watcherStatus, params: {} },
   { method: WORKSPACE_METHOD.captureFlush, params: {} },
+  { method: WORKSPACE_METHOD.captureSetAuthor, params: { author: null } },
 ];
 
 const snapshot = {
@@ -200,6 +201,7 @@ const conflictState = {
   contentKind: "text",
   snapshot,
   binarySha256: null,
+  binaryByteLength: null,
   binaryObjectId: null,
   binaryLatestMomentId: null,
   metadataSummary: null,
@@ -242,6 +244,10 @@ const WORKSPACE_DECODER_CASES: Array<{
   {
     method: WORKSPACE_METHOD.captureFlush,
     valid: { settled: true, running: true, degraded: false },
+  },
+  {
+    method: WORKSPACE_METHOD.captureSetAuthor,
+    valid: { updated: true },
   },
 ];
 

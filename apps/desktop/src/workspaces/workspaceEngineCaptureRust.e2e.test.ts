@@ -88,6 +88,25 @@ it.skipIf(!existsSync(binaryPath))(
       await capture.flush();
       expect(await capture.fileObjectIdForPath("note.md")).toBeTruthy();
 
+      const activeRun = {
+        agentId: "dohc-e2e-agent",
+        onBehalfOf: "local",
+        agentRunId: "run-rust-capture-author",
+      };
+      await capture.setActiveAgentRun(activeRun);
+      await writeFile(join(root, "agent-note.md"), "written by agent\n", "utf8");
+      capture.captureBatch([{ path: "agent-note.md", operation: "update" }]);
+      const [agentMoment] = await waitForPathMoments(
+        capture,
+        "agent-note.md",
+        1,
+      );
+      await capture.setActiveAgentRun(null);
+      expect(agentMoment?.author).toEqual({
+        kind: "agent",
+        ...activeRun,
+      });
+
       const draft = await capture.createVersion("Draft");
       await writeFile(join(root, "note.md"), draftText, "utf8");
       capture.captureBatch([{ path: "note.md", operation: "update" }]);

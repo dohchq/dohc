@@ -9,6 +9,7 @@ export const WORKSPACE_METHOD = {
   searchQuery: "search.query",
   watcherStatus: "watcher.status",
   captureFlush: "capture.flush",
+  captureSetAuthor: "capture.setAuthor",
 } as const;
 
 export type WorkspaceMethod =
@@ -67,6 +68,7 @@ export type ConflictFileState = WorkspaceJsonObject & {
   contentKind: "text" | "binary";
   snapshot: ConflictSnapshot | null;
   binarySha256: string | null;
+  binaryByteLength: number | null;
   binaryObjectId: string | null;
   binaryLatestMomentId: string | null;
   metadataSummary: string | null;
@@ -158,6 +160,19 @@ export type CaptureFlushResult = WorkspaceJsonObject & {
   running: boolean;
   degraded: boolean;
 };
+export type CaptureSetAuthorParams = WorkspaceJsonObject & {
+  author:
+    | (WorkspaceJsonObject & {
+        kind: "agent";
+        agentId: string;
+        onBehalfOf: string;
+        agentRunId?: string;
+      })
+    | null;
+};
+export type CaptureSetAuthorResult = WorkspaceJsonObject & {
+  updated: true;
+};
 
 export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.open]: WorkspaceOpenParams;
@@ -168,6 +183,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQuery]: SearchQueryParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
 };
 
 export type WorkspaceMethodResultMap = {
@@ -179,6 +195,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.searchQuery]: SearchResult[];
   [WORKSPACE_METHOD.watcherStatus]: WatcherStatusResult;
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResult;
+  [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorResult;
 };
 
 export class WorkspaceProtocolShapeError extends Error {
@@ -263,6 +280,23 @@ function integerValue(
   return value;
 }
 
+function nullableInteger(
+  object: WorkspaceJsonObject,
+  key: string,
+  label: string,
+): number | null {
+  const value = object[key];
+  if (
+    value !== null &&
+    (typeof value !== "number" || !Number.isSafeInteger(value))
+  ) {
+    throw new WorkspaceProtocolShapeError(
+      `${label}.${key} must be a safe integer or null.`,
+    );
+  }
+  return value;
+}
+
 function enumValue<T extends string>(
   object: WorkspaceJsonObject,
   key: string,
@@ -321,6 +355,7 @@ function decodeConflictState(
     "contentKind",
     "snapshot",
     "binarySha256",
+    "binaryByteLength",
     "binaryObjectId",
     "binaryLatestMomentId",
     "metadataSummary",
@@ -334,6 +369,7 @@ function decodeConflictState(
         ? null
         : decodeSnapshot(object.snapshot ?? null, `${label}.snapshot`),
     binarySha256: nullableString(object, "binarySha256", label),
+    binaryByteLength: nullableInteger(object, "binaryByteLength", label),
     binaryObjectId: nullableString(object, "binaryObjectId", label),
     binaryLatestMomentId: nullableString(
       object,
@@ -605,6 +641,16 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
         running: booleanValue(object, "running", label),
         degraded: booleanValue(object, "degraded", label),
       };
+      break;
+    }
+    case WORKSPACE_METHOD.captureSetAuthor: {
+      const object = objectValue(value, label, ["updated"]);
+      if (object.updated !== true) {
+        throw new WorkspaceProtocolShapeError(
+          `${label}.updated must be true.`,
+        );
+      }
+      result = { updated: true };
       break;
     }
     default: {

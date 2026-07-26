@@ -116,7 +116,7 @@ export interface ChatDispatchServiceOptions {
   setRunAttribution(
     workspaceId: string,
     run: { agentId: string; onBehalfOf: string; agentRunId: string } | null,
-  ): void;
+  ): void | Promise<void>;
   runSlotOccupied?(workspaceId: string): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
   requeueFailedTrigger?(input: {
@@ -626,9 +626,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     });
   }
 
-  function clearLiveAttribution(live: LiveRun): void {
+  async function clearLiveAttribution(live: LiveRun): Promise<void> {
     try {
-      options.setRunAttribution(live.workspace.workspaceId, null);
+      await options.setRunAttribution(live.workspace.workspaceId, null);
     } catch (error) {
       reportError(error);
     }
@@ -662,7 +662,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (liveRuns.get(live.workspace.workspaceId) === live) {
         if (live.killEscalation) clearTimeout(live.killEscalation);
         live.killEscalation = null;
-        clearLiveAttribution(live);
+        await clearLiveAttribution(live);
         liveRuns.delete(live.workspace.workspaceId);
         await releaseLiveWorkspace(live);
         await scanAndDrain(live.workspace);
@@ -697,12 +697,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       notifyRunUpdated(live.workspace.workspaceId);
     } catch (error) {
       liveRuns.delete(live.workspace.workspaceId);
-      clearLiveAttribution(live);
+      await clearLiveAttribution(live);
       await releaseLiveWorkspace(live);
       throw error;
     }
     liveRuns.delete(live.workspace.workspaceId);
-    clearLiveAttribution(live);
+    await clearLiveAttribution(live);
     await releaseLiveWorkspace(live);
     await scanAndDrain(live.workspace);
   }
@@ -734,7 +734,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     cause: unknown,
   ): Promise<void> {
     try {
-      options.setRunAttribution(workspace.workspaceId, null);
+      await options.setRunAttribution(workspace.workspaceId, null);
     } catch {}
     const detail = cause instanceof Error && cause.message ? cause.message : "unknown error";
     await postFailureNote(
@@ -760,7 +760,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     runReservations.add(workspace.workspaceId);
     try {
       const identity = await options.identityFor(workspace.workspaceId);
-      options.setRunAttribution(workspace.workspaceId, {
+      await options.setRunAttribution(workspace.workspaceId, {
         agentId: "dohc-chat-runner",
         onBehalfOf: "local",
         agentRunId: claim.run.runId,
@@ -1240,7 +1240,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               : "A runner became active before the self-test could start.",
           };
         }
-        options.setRunAttribution(workspaceId, {
+        await options.setRunAttribution(workspaceId, {
           agentId: "dohc-chat-runner-self-test",
           onBehalfOf: "local",
           agentRunId: runId,
@@ -1266,7 +1266,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             }
             selfTests.delete(workspaceId);
             try {
-              options.setRunAttribution(workspaceId, null);
+              await options.setRunAttribution(workspaceId, null);
             } catch (error) {
               reportError(error);
             }
@@ -1367,7 +1367,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         });
       } catch (error) {
         try {
-          options.setRunAttribution(workspaceId, null);
+          await options.setRunAttribution(workspaceId, null);
         } catch {}
         reportError(error);
         return {
@@ -1403,7 +1403,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         if (live.presenceHeartbeat) clearInterval(live.presenceHeartbeat);
         appQuitRuns.push(live);
       }
-      clearLiveAttribution(live);
       runWorkspacesToRelease.push(live);
       quitProcesses.push(live.child);
     }
@@ -1427,7 +1426,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       clearTimeout(test.timeout);
       if (test.killEscalation) clearTimeout(test.killEscalation);
       try {
-        options.setRunAttribution(test.workspaceId, null);
+        await options.setRunAttribution(test.workspaceId, null);
       } catch {}
       test.resolve({
         ok: false,
@@ -1441,6 +1440,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     liveRuns.clear();
     await Promise.all([...workspaceChains.values()].map((chain) => chain.catch(() => undefined)));
     await Promise.all(quitTerminations);
+    await Promise.all(runWorkspacesToRelease.map(clearLiveAttribution));
     await Promise.all(
       runWorkspacesToRelease.map((live) => releaseLiveWorkspace(live)),
     );

@@ -162,10 +162,14 @@ function capture(root: string, options: {
   });
 }
 
-function mockLiveSessions(loopback: VersionedLoopbackEngine) {
+function mockLiveSessions(
+  loopback: VersionedLoopbackEngine,
+  requests?: Request[],
+) {
   const client = {
     close: () => undefined,
     async sendRequest(request: Request): Promise<Response> {
+      requests?.push(request);
       const params = request.params as Record<string, JsonValue | undefined>;
       if (request.method === "workspace.open") {
         return {
@@ -181,6 +185,9 @@ function mockLiveSessions(loopback: VersionedLoopbackEngine) {
           id: request.id,
           result: { settled: true, running: true, degraded: false },
         };
+      }
+      if (request.method === "capture.setAuthor") {
+        return { id: request.id, result: { updated: true } };
       }
       return await loopback.sendRequest(request);
     },
@@ -459,10 +466,10 @@ describe("workspaceEngineCapture batch capture", () => {
       .filter(({ request }) => request.method === "versionedText.read")
       .map(({ index }) => index);
     expect(listIndex).toBeGreaterThanOrEqual(0);
-    // Two reads belong to the delete itself: deleteIfTracked checks presence,
-    // then the live facade captures the preimage for the TS-compatible result.
-    // Hydrating listTextFiles here would add a third, pre-delete read.
-    expect(readIndexes).toHaveLength(2);
+    // The one read belongs to deleteIfTracked's presence check. The live
+    // facade must use the mutation's atomic preimage, not race it with a
+    // second pre-delete read. Hydrating listTextFiles would add another read.
+    expect(readIndexes).toHaveLength(1);
     expect(readIndexes.every((index) => index > listIndex)).toBe(true);
     await engine.stop();
   });
@@ -1892,6 +1899,41 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     expect(readEngineMoments(root).map((m) => m.path)).toEqual(["note.md"]);
   });
 
+  it("mutation proof: daemon startup open failure raises the capture outcome", async () => {
+    const root = await tempRoot();
+    const { store, state } = flakyStore(root);
+    const outcomes: boolean[] = [];
+    const errors: string[] = [];
+    let resolveOutcome!: () => void;
+    const outcomeReported = new Promise<void>((resolve) => {
+      resolveOutcome = resolve;
+    });
+    let resolveError!: () => void;
+    const errorReported = new Promise<void>((resolve) => {
+      resolveError = resolve;
+    });
+    const engine = capture(root, {
+      store,
+      daemonOwnsCapture: true,
+      onCaptureOutcome: ({ ok }) => {
+        outcomes.push(ok);
+        resolveOutcome();
+      },
+      onError: (context) => {
+        errors.push(context);
+        resolveError();
+      },
+    });
+
+    engine.start();
+    await Promise.all([outcomeReported, errorReported]);
+
+    expect(outcomes).toEqual([false]);
+    expect(errors).toEqual(["daemon capture startup"]);
+    state.failing = false;
+    await engine.stop();
+  });
+
   it("reports a failed outcome when only one path in a batch fails", async () => {
     const root = await tempRoot();
     await write(root, "good.md", "fine\n");
@@ -2177,6 +2219,35 @@ describe("createDefaultDiskWriter symlink containment", () => {
 // unchanged — an absent run means an absent author).
 describe("workspaceEngineCapture agent attribution", () => {
   const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+
+  it("mutation proof: daemon author state is set before work and flushed before clear", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, requests),
+      daemonOwnsCapture: true,
+    });
+
+    await engine.setActiveAgentRun(run);
+    await engine.setActiveAgentRun(null);
+
+    const authorRequests = requests.filter((request) =>
+      request.method === "capture.setAuthor" ||
+      request.method === "capture.flush",
+    );
+    expect(authorRequests.map((request) => request.method)).toEqual([
+      "capture.setAuthor",
+      "capture.flush",
+      "capture.setAuthor",
+    ]);
+    expect(authorRequests[0]?.params).toEqual({
+      author: { kind: "agent", ...run },
+    });
+    expect(authorRequests[2]?.params).toEqual({ author: null });
+    await engine.stop();
+  });
 
   it("stamps captured writes and deletes with the active run's author", async () => {
     const root = await tempRoot();
