@@ -1795,7 +1795,9 @@ impl EngineService {
                     "sha256": snapshot.blob_sha256,
                     "updatedAtMs": snapshot.updated_at_ms,
                     "latestMomentId": snapshot.latest_moment_id,
-                    "metadataOrigin": snapshot.metadata_origin
+                    "metadataOrigin": snapshot.metadata_origin,
+                    "metadataSummary": snapshot.metadata_summary,
+                    "metadataCorrelationId": snapshot.metadata_correlation_id
                 });
                 if over_cap {
                     body["inbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
@@ -2105,6 +2107,8 @@ impl EngineService {
                     "updatedAtMs": row.updated_at_ms,
                     "latestMomentId": row.latest_moment_id,
                     "metadataOrigin": row.metadata_origin,
+                    "metadataSummary": row.metadata_summary,
+                    "metadataCorrelationId": row.metadata_correlation_id,
                 })
             })
             .collect();
@@ -7076,6 +7080,8 @@ impl SnapshotDto {
             updated_at_ms: self.updated_at_ms,
             latest_moment_id: self.latest_moment_id,
             metadata_origin: self.metadata_origin,
+            metadata_summary: None,
+            metadata_correlation_id: None,
         })
     }
 }
@@ -7607,6 +7613,8 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         "beforeBinarySha256": moment.before_binary_sha256,
         "beforeLatestMomentId": moment.before_latest_moment_id,
         "metadataOrigin": moment.metadata_origin,
+        "metadataSummary": moment.metadata_summary,
+        "metadataCorrelationId": moment.metadata_correlation_id,
         // PARSED author (TS momentAuthorFromRow parity): absent column =
         // actor-neutral; unparseable JSON surfaces as an explicit corrupt
         // marker, never silently dropped and never trusted raw.
@@ -7704,7 +7712,9 @@ fn snapshot_json(snapshot: &TextSnapshot) -> Value {
         "blobSha256": snapshot.blob_sha256,
         "updatedAtMs": snapshot.updated_at_ms,
         "latestMomentId": snapshot.latest_moment_id,
-        "metadataOrigin": snapshot.metadata_origin
+        "metadataOrigin": snapshot.metadata_origin,
+        "metadataSummary": snapshot.metadata_summary,
+        "metadataCorrelationId": snapshot.metadata_correlation_id
     })
 }
 
@@ -7759,6 +7769,8 @@ fn snapshot_metadata_json(
         "updatedAtMs": snapshot.updated_at_ms,
         "latestMomentId": snapshot.latest_moment_id,
         "metadataOrigin": snapshot.metadata_origin,
+        "metadataSummary": snapshot.metadata_summary,
+        "metadataCorrelationId": snapshot.metadata_correlation_id,
     })
 }
 
@@ -8156,7 +8168,6 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
         | SyncError::UnsupportedOperation
-        | SyncError::MomentAppendNotImplemented
         | SyncError::ShareBoundaryViolation
         | SyncError::BlobInvalid => ErrorCode::InvalidParams,
     }

@@ -437,6 +437,21 @@ fn insert_moment(
         .checked_add(1)
         .ok_or(SyncError::CoordinateDiverged)?;
     let moment_id = format!("secret-sync-{}-{}", op.origin_id, op.origin_seq);
+    let collision: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM moments \
+                           WHERE workspace_id=?1 AND moment_id=?2) \
+                 OR EXISTS(SELECT 1 FROM secret_moments \
+                           WHERE workspace_id=?1 AND moment_id=?2)",
+            params![op.workspace_id, moment_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if collision {
+        return Err(SyncError::InvalidInput {
+            reason: "replicated secret moment id collides with existing history",
+        });
+    }
     let (present, iv, tag, ciphertext, byte_length) = match after {
         Some((iv, tag, ciphertext, byte_length)) => (
             1_i64,

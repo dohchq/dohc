@@ -39,6 +39,10 @@ notify = "8"
 # pointing at a dead inode. Already in the tree via `notify`; same safe API the
 # runtime's EngineDbIdentity uses, so this crate keeps forbid(unsafe_code).
 file-id = "0.2"
+# Shared `.dohc/files.toml` / `visibility.toml` parsing and search-policy
+# resolution. Both the runtime's local index path and sync's replicated index
+# path consume this one implementation.
+toml = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 # Safe descriptor-relative filesystem operations. On Linux this also exposes

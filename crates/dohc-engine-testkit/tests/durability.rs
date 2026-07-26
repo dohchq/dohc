@@ -349,9 +349,10 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // (ordinal 11), the deferred Y.Doc coordinates table (ordinal 12), the
     // request-ledger kind discriminator (ordinal 13), secret capture ownership
     // (ordinal 14), moment payload provenance (ordinal 15), replication
-    // pending resolves (ordinal 16), and deferred chat coordinates
-    // (ordinal 17).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 18);
+    // pending resolves (ordinal 16), deferred chat coordinates (ordinal 17),
+    // imported moment metadata provenance (ordinal 18), and the imported
+    // moment rollback preimage (ordinal 19).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 20);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

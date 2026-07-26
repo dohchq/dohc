@@ -157,6 +157,8 @@ fn incoming_text_snapshot(path: &str, text: &str) -> TextSnapshot {
         updated_at_ms: 1_900,
         latest_moment_id: format!("incoming-moment-{path}"),
         metadata_origin: "user".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
     }
 }
 

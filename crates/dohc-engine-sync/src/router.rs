@@ -15,6 +15,7 @@ use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
+    pub conflicts_opened: i64,
 }
 
 impl RoutedApply {
@@ -81,8 +82,12 @@ pub fn apply_replication_envelope(
         ),
         OwnedRoute::Conflict => map_applied(
             crate::apply_conflict_envelope(store, envelope, faults),
-            |conflict| RoutedApply {
-                conflict: Some(conflict),
+            |conflict| {
+                let conflicts_opened = i64::from(conflict.inserted == Some(true));
+                RoutedApply {
+                    conflict: Some(conflict),
+                    conflicts_opened,
+                }
             },
         ),
         OwnedRoute::Workspace => plain(crate::version_apply::apply_workspace_envelope(
@@ -91,18 +96,14 @@ pub fn apply_replication_envelope(
         OwnedRoute::Version => plain(crate::version_apply::apply_version_envelope(
             store, envelope, faults,
         )),
-        OwnedRoute::Moment => plain(apply_unimplemented_moment_envelope(store, envelope, faults)),
+        OwnedRoute::Moment => map_applied(
+            crate::apply_moment_envelope(store, envelope, faults),
+            |conflicts_opened| RoutedApply {
+                conflicts_opened,
+                ..RoutedApply::default()
+            },
+        ),
     }
-}
-
-fn apply_unimplemented_moment_envelope(
-    store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-) -> Result<ApplyOutcome<()>, SyncError> {
-    crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
-        Err(SyncError::MomentAppendNotImplemented)
-    })
 }
 
 fn plain(

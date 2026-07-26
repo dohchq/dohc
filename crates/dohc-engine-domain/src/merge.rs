@@ -855,7 +855,8 @@ fn select_snapshot(
 ) -> Result<Option<TextSnapshot>, DomainError> {
     let sql = format!(
         "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
-         s.latest_moment_id, s.metadata_origin FROM {table} s \
+         s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
+         s.metadata_correlation_id FROM {table} s \
          JOIN blobs b ON b.sha256 = s.blob_sha256 \
          WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3"
     );
@@ -870,6 +871,8 @@ fn select_snapshot(
             updated_at_ms: row.get(4)?,
             latest_moment_id: row.get(5)?,
             metadata_origin: row.get(6)?,
+            metadata_summary: row.get(7)?,
+            metadata_correlation_id: row.get(8)?,
         })
     })
     .optional()
