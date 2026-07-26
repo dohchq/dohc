@@ -1438,7 +1438,6 @@ UPDATE secret_moments SET capture_owned = 1
 /// The `id` of the secret capture-ownership migration.
 pub(crate) const SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID: &str = "v1-secret-capture-ownership";
 
-<<<<<<< HEAD
 /// Ordinal 15. Ports the TS oracle's moment PAYLOAD provenance, which is a
 /// different thing from the rollback preimage Rust already stores. The oracle
 /// records what the OPERATION carried (`payload.before` / `payload.after`)
