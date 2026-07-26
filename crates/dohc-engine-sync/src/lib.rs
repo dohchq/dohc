@@ -30,8 +30,9 @@ pub use conflict_apply::{
     ConflictApplyResult, PendingResolve, PendingResolveReason, apply_conflict_envelope,
 };
 pub use cursor::{
-    CursorKind, RelayCursor, SharedPeerPosition, commit_relay_cursor, read_pushed_seq,
-    read_relay_cursor, read_shared_peer_position,
+    CursorKind, RelayCursor, ShareCursor, SharedPeerPosition, commit_relay_cursor,
+    commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
+    read_shared_peer_position,
 };
 pub use error::{RelayError, SyncError};
 pub use hydration::{BlobContent, BlobHydration, hydrate_blob_content};
@@ -43,16 +44,17 @@ pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH, MAX_WIRE_INTEGER,
     ReplicationEnvelope,
 };
-pub use moment_apply::apply_moment_envelope;
+pub use moment_apply::{MomentMaterializationChange, apply_moment_envelope};
 pub use path_policy::{PathClass, classify_share_path};
 pub use relay::{
     BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
     BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RelaySyncClient, RelayTransport, ShareBlobRequest, ShareReplicationEnvelope,
-    ShareViewRequest, ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
-    SyncPassOutcome,
+    PushResponse, RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest,
+    ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
+    SharedChannelResponse, SyncPassOutcome,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;

@@ -68,6 +68,19 @@ enum ContentKind {
     Binary,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MomentMaterializationChange {
+    pub path: String,
+    pub operation: &'static str,
+    pub content_kind: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MomentApplyResult {
+    pub conflicts_opened: i64,
+    pub materialization_changes: Vec<MomentMaterializationChange>,
+}
+
 impl ContentKind {
     fn from_wire(value: Option<&str>) -> Self {
         if value == Some("binary") {
@@ -170,6 +183,18 @@ pub fn apply_moment_envelope(
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<i64>, SyncError> {
+    apply_moment_envelope_detailed(store, envelope, faults).map(|outcome| match outcome {
+        ApplyOutcome::Applied(result) => ApplyOutcome::Applied(result.conflicts_opened),
+        ApplyOutcome::Skipped => ApplyOutcome::Skipped,
+        ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
+    })
+}
+
+pub(crate) fn apply_moment_envelope_detailed(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
     if envelope.op_kind != "moment.append" {
         return Err(SyncError::UnsupportedOperation);
     }
@@ -180,11 +205,79 @@ pub fn apply_moment_envelope(
     })
 }
 
+pub(crate) fn redelivered_materialization_changes(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Vec<MomentMaterializationChange>, SyncError> {
+    if envelope.op_kind != "moment.append" {
+        return Ok(Vec::new());
+    }
+    let payload: MomentAppendPayload =
+        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append payload is malformed",
+        })?;
+    let materialized = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS( \
+               SELECT 1 FROM moments m \
+               WHERE m.workspace_id=?1 AND m.moment_id=?2 AND m.version_id=?3 \
+                 AND m.object_id=?4 AND m.operation=?5 AND m.path=?6 \
+                 AND m.recorded_at_ms=?7 AND m.sync_record_only IS NULL \
+             ) AND COALESCE( \
+               (SELECT version_id FROM active_versions WHERE workspace_id=?1), \
+               (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1), \
+               '' \
+             )=?3",
+            params![
+                envelope.workspace_id,
+                payload.moment_id,
+                payload.version_id,
+                payload.object_id,
+                payload.operation,
+                payload.path,
+                payload.recorded_at_ms,
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(SyncError::corrupt)
+    })?;
+    if !materialized {
+        return Ok(Vec::new());
+    }
+
+    let kind = ContentKind::from_wire(payload.payload_after_content_kind.as_deref()).as_str();
+    let mut changes = Vec::new();
+    if payload.operation == "delete" {
+        changes.push(MomentMaterializationChange {
+            path: payload.path,
+            operation: "delete",
+            content_kind: kind,
+        });
+        return Ok(changes);
+    }
+    if payload.operation == "rename"
+        && let Some(before_path) = payload.payload_before_path
+        && before_path != payload.payload_after_path
+    {
+        changes.push(MomentMaterializationChange {
+            path: before_path,
+            operation: "delete",
+            content_kind: kind,
+        });
+    }
+    changes.push(MomentMaterializationChange {
+        path: payload.payload_after_path,
+        operation: "write",
+        content_kind: kind,
+    });
+    Ok(changes)
+}
+
 fn apply_moment_append(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     search_policy: Option<&SearchPolicySnapshot>,
-) -> Result<i64, SyncError> {
+) -> Result<MomentApplyResult, SyncError> {
     let payload: MomentAppendPayload =
         serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
             reason: "moment.append payload is malformed",
@@ -262,10 +355,14 @@ fn apply_moment_append(
     if content_fast_forward && payload.operation == "delete" {
         ensure_file_object(tx, &envelope.workspace_id, &payload)?;
         insert_moment(tx, &envelope.workspace_id, &payload, &remote_before, true)?;
-        return Ok(0);
+        return Ok(MomentApplyResult {
+            conflicts_opened: 0,
+            materialization_changes: Vec::new(),
+        });
     }
 
     if head_fast_forward || content_fast_forward {
+        let active = is_active_version(tx, &envelope.workspace_id, &payload.version_id)?;
         let adopted_before = if content_fast_forward && !head_fast_forward {
             local.as_ref().map_or(remote_before.clone(), |snapshot| {
                 MomentBefore::Present(Box::new(snapshot.clone()))
@@ -301,7 +398,17 @@ fn apply_moment_append(
                 &payload.version_id,
                 &payload.object_id,
             )?;
-            return Ok(0);
+            return Ok(MomentApplyResult {
+                conflicts_opened: 0,
+                materialization_changes: active
+                    .then(|| MomentMaterializationChange {
+                        path: payload.path.clone(),
+                        operation: "delete",
+                        content_kind: after_kind.as_str(),
+                    })
+                    .into_iter()
+                    .collect(),
+            });
         }
 
         if payload.operation == "rename" {
@@ -359,7 +466,28 @@ fn apply_moment_append(
             after_text.as_deref().unwrap_or(""),
             search_policy,
         )?;
-        return Ok(0);
+        let mut materialization_changes = Vec::new();
+        if active {
+            if payload.operation == "rename"
+                && let Some(before_path) = payload.payload_before_path.as_deref()
+                && before_path != payload.payload_after_path
+            {
+                materialization_changes.push(MomentMaterializationChange {
+                    path: before_path.to_owned(),
+                    operation: "delete",
+                    content_kind: after_kind.as_str(),
+                });
+            }
+            materialization_changes.push(MomentMaterializationChange {
+                path: payload.payload_after_path.clone(),
+                operation: "write",
+                content_kind: after_kind.as_str(),
+            });
+        }
+        return Ok(MomentApplyResult {
+            conflicts_opened: 0,
+            materialization_changes,
+        });
     }
 
     ensure_file_object(tx, &envelope.workspace_id, &payload)?;
@@ -443,7 +571,29 @@ fn apply_moment_append(
             },
         )?;
     }
-    Ok(opened)
+    Ok(MomentApplyResult {
+        conflicts_opened: opened,
+        materialization_changes: Vec::new(),
+    })
+}
+
+fn is_active_version(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<bool, SyncError> {
+    let active: Option<String> = tx
+        .query_row(
+            "SELECT COALESCE( \
+               (SELECT version_id FROM active_versions WHERE workspace_id=?1), \
+               (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1) \
+             )",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(active.as_deref() == Some(version_id))
 }
 
 fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {

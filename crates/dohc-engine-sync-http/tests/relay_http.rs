@@ -785,11 +785,10 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     let handler_etag = etag.clone();
     let server = FakeServer::start(move |request| {
         assert_eq!(request.header("authorization"), Some("Bearer test-token"));
-        handler_seen.lock().expect("seen endpoints").insert(format!(
-            "{} {}",
-            request.method,
-            request.path()
-        ));
+        let mut seen = handler_seen.lock().expect("seen endpoints");
+        seen.insert(format!("{} {}", request.method, request.path()));
+        seen.insert(format!("TARGET {}", request.target));
+        drop(seen);
         match (request.method.as_str(), request.path()) {
             ("POST", "/sync/workspaces") => {
                 let body = request.json();
@@ -949,6 +948,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     transport
         .shared_channel_push(SharedChannelRequest {
             share_id: "share-1".to_owned(),
+            channel_wire_id: "wire-1".to_owned(),
             origin_id: "member".to_owned(),
             cursor: 0,
             ops: vec![ShareReplicationEnvelope {
@@ -963,6 +963,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     transport
         .shared_channel_pull(SharedChannelRequest {
             share_id: "share-1".to_owned(),
+            channel_wire_id: "wire-1".to_owned(),
             origin_id: "member".to_owned(),
             cursor: 0,
             ops: Vec::new(),
@@ -999,6 +1000,9 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     ] {
         assert!(seen.contains(endpoint), "missing endpoint {endpoint}");
     }
+    assert!(
+        seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500&channelWireId=wire-1")
+    );
 }
 
 #[test]

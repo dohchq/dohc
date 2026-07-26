@@ -414,7 +414,12 @@ impl RelayTransport for HttpRelayTransport {
         &self,
         req: SharedChannelRequest,
     ) -> Result<SharedChannelResponse, RelayError> {
-        let page = self.read_share_log(&req.share_id, req.cursor, 500)?;
+        let page = self.read_share_log(
+            &req.share_id,
+            req.cursor,
+            500,
+            &[("channelWireId", req.channel_wire_id)],
+        )?;
         Ok(SharedChannelResponse {
             ops: page.ops,
             next_cursor: page.next_cursor,
@@ -453,7 +458,7 @@ impl RelayTransport for HttpRelayTransport {
     }
 
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
-        let page = self.read_share_log(&req.share_id, req.cursor, req.limit)?;
+        let page = self.read_share_log(&req.share_id, req.cursor, req.limit, &[])?;
         Ok(ShareViewResponse {
             ops: page.ops,
             next_cursor: page.next_cursor,
@@ -485,12 +490,11 @@ impl HttpRelayTransport {
         share_id: &str,
         cursor: i64,
         limit: usize,
+        extra_query: &[(&str, String)],
     ) -> Result<ShareViewResponse, RelayError> {
-        let url = self.share_url(
-            share_id,
-            "/log",
-            &[("since", cursor.to_string()), ("limit", limit.to_string())],
-        );
+        let mut query = vec![("since", cursor.to_string()), ("limit", limit.to_string())];
+        query.extend_from_slice(extra_query);
+        let url = self.share_url(share_id, "/log", &query);
         let wire: WireLogPage = self.json(
             self.agent
                 .get(&url)

@@ -328,6 +328,14 @@ export function createSyncRelayHandler({
         await claimPendingShares(actor.userId);
         const share = shareForRecipient(route.shareId, actor.userId);
         const url = new URL(request.url);
+        const channelWireId = url.searchParams.get("channelWireId");
+        if (
+          channelWireId !== null &&
+          (!isChatChannelSelector(share.selector) ||
+            share.selector.channelWireId !== channelWireId)
+        ) {
+          throw notFound();
+        }
         const since = parseCursor(url.searchParams.get("since"));
         const limit = parseLimit(url.searchParams.get("limit"));
         const page = storage.fetchLogPage({

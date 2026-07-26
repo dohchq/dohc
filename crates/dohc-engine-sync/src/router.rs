@@ -16,6 +16,7 @@ use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, 
 pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
     pub conflicts_opened: i64,
+    pub materialization_changes: Vec<crate::MomentMaterializationChange>,
 }
 
 impl RoutedApply {
@@ -87,6 +88,7 @@ pub fn apply_replication_envelope(
                 RoutedApply {
                     conflict: Some(conflict),
                     conflicts_opened,
+                    ..RoutedApply::default()
                 }
             },
         ),
@@ -97,9 +99,10 @@ pub fn apply_replication_envelope(
             store, envelope, faults,
         )),
         OwnedRoute::Moment => map_applied(
-            crate::apply_moment_envelope(store, envelope, faults),
-            |conflicts_opened| RoutedApply {
-                conflicts_opened,
+            crate::moment_apply::apply_moment_envelope_detailed(store, envelope, faults),
+            |moment| RoutedApply {
+                conflicts_opened: moment.conflicts_opened,
+                materialization_changes: moment.materialization_changes,
                 ..RoutedApply::default()
             },
         ),
