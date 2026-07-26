@@ -9157,6 +9157,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
         SyncPassOutcome::Complete {
             pushed,
             fetched,
+            has_more,
             applied,
             skipped,
             conflicts_opened,
@@ -9167,6 +9168,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "status": "complete",
             "pushed": pushed,
             "fetched": fetched,
+            "hasMore": has_more,
             "applied": applied,
             "skipped": skipped,
             "conflictsOpened": conflicts_opened,
@@ -9228,6 +9230,12 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "fetched": outcome.fetched,
             "applied": outcome.applied,
             "refused": outcome.refused,
+            "rejections": outcome.rejections.iter().map(|rejection| json!({
+                "originId": rejection.origin_id,
+                "originSeq": rejection.origin_seq,
+                "opKind": rejection.op_kind,
+                "reason": rejection.reason,
+            })).collect::<Vec<_>>(),
             "skipped": outcome.skipped,
             "nextCursor": outcome.next_cursor,
         }),
@@ -9699,6 +9707,27 @@ mod tests {
                 "path": "doc.md",
                 "reason": "binary-unhydrated"
             })
+        );
+    }
+
+    #[test]
+    fn sync_outcome_json_surfaces_an_undrained_complete_pass() {
+        let value = sync_outcome_json(SyncPassOutcome::Complete {
+            pushed: 0,
+            fetched: 500,
+            has_more: true,
+            applied: 500,
+            skipped: 0,
+            conflicts_opened: 0,
+            pending_cursor: None,
+            changed_paths: Vec::new(),
+            pending_resolves: Vec::new(),
+        });
+
+        assert_eq!(value["status"], "complete");
+        assert_eq!(
+            value["hasMore"], true,
+            "MUTATION: omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
         );
     }
 

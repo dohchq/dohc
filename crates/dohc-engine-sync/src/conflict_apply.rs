@@ -129,6 +129,28 @@ pub(crate) fn read_replayed_pending_resolve(
     })
 }
 
+pub(crate) fn redelivered_conflicts_opened(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<i64, SyncError> {
+    if envelope.op_kind != "conflict.open" {
+        return Ok(0);
+    }
+    let payload: OpenPayload =
+        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: "conflict.open payload is malformed",
+        })?;
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conflicts \
+             WHERE workspace_id=?1 AND conflict_id=?2)",
+            params![envelope.workspace_id, payload.id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)
+    })
+}
+
 pub(crate) fn persist_pending_resolve(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,

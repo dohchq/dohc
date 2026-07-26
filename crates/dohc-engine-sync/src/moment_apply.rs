@@ -273,6 +273,33 @@ pub(crate) fn redelivered_materialization_changes(
     Ok(changes)
 }
 
+pub(crate) fn redelivered_conflicts_opened(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<i64, SyncError> {
+    if envelope.op_kind != "moment.append" {
+        return Ok(0);
+    }
+    let payload: MomentAppendPayload =
+        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append payload is malformed",
+        })?;
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM conflicts \
+             WHERE workspace_id=?1 AND metadata_origin='sync' \
+               AND incoming_latest_moment_id=?2 AND created_at_ms=?3",
+            params![
+                envelope.workspace_id,
+                payload.moment_id,
+                payload.recorded_at_ms
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)
+    })
+}
+
 fn apply_moment_append(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,

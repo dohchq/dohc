@@ -10,8 +10,6 @@ pub const MAX_BLOB_HAVE_BATCH: usize = 2_000;
 pub const MAX_PAYLOAD_JSON_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_PULL_PAGES_PER_PASS: usize = 16;
 pub(crate) const MAX_PULL_OPS_PER_PASS: usize = MAX_PULL_OPS;
-pub(crate) const MAX_PULL_PAYLOAD_BYTES_PER_PASS: usize =
-    MAX_PULL_OPS_PER_PASS * MAX_PAYLOAD_JSON_BYTES;
 pub(crate) const MAX_IDENTIFIER_BYTES: usize = 512;
 pub(crate) const MAX_OP_KIND_BYTES: usize = 128;
 

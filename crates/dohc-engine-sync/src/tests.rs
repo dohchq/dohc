@@ -6989,6 +6989,7 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
         .expect("bounded first pass");
     let SyncPassOutcome::Complete {
         fetched,
+        has_more,
         pending_cursor: Some(pending),
         ..
     } = first
@@ -6996,6 +6997,10 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
         panic!("first pass must return its completed-page cursor: {first:?}");
     };
     assert_eq!(fetched, crate::model::MAX_PULL_OPS_PER_PASS);
+    assert!(
+        has_more,
+        "the operation ceiling must explicitly report that the relay is not drained"
+    );
     assert_eq!(
         pending.cursor,
         i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS).expect("cursor")
@@ -7055,6 +7060,7 @@ fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
         .expect("page-bounded pull");
     let SyncPassOutcome::Complete {
         fetched: 0,
+        has_more,
         pending_cursor: Some(pending),
         ..
     } = first
@@ -7062,6 +7068,10 @@ fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
         panic!("empty page prefix must complete: {first:?}");
     };
     assert_eq!(pending.cursor, resume_cursor);
+    assert!(
+        has_more,
+        "the page ceiling must explicitly report that the relay is not drained"
+    );
     assert_eq!(
         client.transport().pulls.lock().expect("pull calls").len(),
         crate::model::MAX_PULL_PAGES_PER_PASS
@@ -7069,7 +7079,7 @@ fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
 }
 
 #[test]
-fn recover_origin_rejects_an_advancing_stream_at_the_page_ceiling() {
+fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
     let pages = (0..=crate::model::MAX_PULL_PAGES_PER_PASS)
@@ -7080,21 +7090,23 @@ fn recover_origin_rejects_an_advancing_stream_at_the_page_ceiling() {
                 PullResponse {
                     ops: Vec::new(),
                     next_cursor: cursor + 1,
-                    has_more: true,
+                    has_more: cursor
+                        < i64::try_from(crate::model::MAX_PULL_PAGES_PER_PASS)
+                            .expect("page ceiling"),
                 },
             )
         })
         .collect::<Vec<_>>();
     let client = RelaySyncClient::new(PagedRelay::new(pages));
 
-    assert_eq!(
-        client.recover_origin(&mut engine, "ws", "recovered-origin", &NoFaults),
-        Err(RelayError::InvalidResponse)
-    );
+    let recovered = client
+        .recover_origin(&mut engine, "ws", "recovered-origin", &NoFaults)
+        .expect("recovery must resume through every advancing page");
+    assert_eq!(recovered.shared_prefix_length, 0);
     assert_eq!(
         client.transport().pulls.lock().expect("pull calls").len(),
-        crate::model::MAX_PULL_PAGES_PER_PASS,
-        "MUTATION: removing the recover pass ceiling fetches the next advancing page"
+        crate::model::MAX_PULL_PAGES_PER_PASS + 1,
+        "MUTATION: restoring the recover page ceiling rejects before the terminal page"
     );
 }
 
@@ -7148,6 +7160,110 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
         .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
         .expect("resumed shared-channel page");
     assert_eq!(second.next_cursor, 2);
+}
+
+#[test]
+fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds() {
+    let (_scratch, _path, mut engine) = store();
+    let rejected = ShareReplicationEnvelope {
+        origin_id: "shared-peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "chat.channel.create".to_owned(),
+        payload: json!({
+            "channelId": "outside-channel",
+            "wireId": "outside-wire",
+            "name": "Outside",
+            "slug": "outside",
+            "kind": "channel",
+            "createdAtMs": 10
+        }),
+        recorded_at_ms: 10,
+    };
+    let admitted = ShareReplicationEnvelope {
+        origin_id: "shared-peer".to_owned(),
+        origin_seq: 1,
+        op_kind: "chat.channel.create".to_owned(),
+        payload: json!({
+            "channelId": "inside-channel",
+            "wireId": "channel-wire",
+            "name": "Inside",
+            "slug": "inside",
+            "kind": "channel",
+            "createdAtMs": 20
+        }),
+        recorded_at_ms: 20,
+    };
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [
+            (
+                0,
+                SharedChannelResponse {
+                    ops: vec![rejected],
+                    next_cursor: 1,
+                    has_more: true,
+                    push: None,
+                },
+            ),
+            (
+                1,
+                SharedChannelResponse {
+                    ops: vec![admitted],
+                    next_cursor: 2,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+        ],
+        [],
+    ));
+
+    let first = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("boundary rejection is a reported, acknowledged outcome");
+    assert_eq!(
+        first,
+        SharedChannelPullOutcome {
+            fetched: 1,
+            applied: 0,
+            refused: 1,
+            rejections: vec![SharedChannelRejection {
+                origin_id: "shared-peer".to_owned(),
+                origin_seq: 0,
+                op_kind: "chat.channel.create".to_owned(),
+                reason: "share-boundary-violation".to_owned(),
+            }],
+            skipped: 0,
+            next_cursor: 1,
+        }
+    );
+    assert_eq!(
+        read_share_cursor(&engine, "ws", "share", CursorKind::SharedChannel)
+            .expect("rejected page cursor"),
+        1,
+        "MUTATION: returning ShareOperationRejected before commit leaves this at zero"
+    );
+
+    let second = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("the page after the rejected-only page must remain reachable");
+    assert_eq!(
+        (
+            second.fetched,
+            second.applied,
+            second.refused,
+            second.next_cursor
+        ),
+        (1, 1, 0, 2)
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .shared_pulls
+            .lock()
+            .expect("shared pull calls"),
+        [0, 1],
+        "MUTATION: failing to commit the rejected boundary refetches cursor zero"
+    );
 }
 
 #[test]

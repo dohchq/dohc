@@ -782,6 +782,7 @@ async fn multi_page_pull_rpc_surfaces_conflicts_opened_and_reconstructed_pending
     .await;
     assert_eq!(pull["fetched"], 2);
     assert_eq!(pull["applied"], 2);
+    assert_eq!(pull["hasMore"], false);
     assert_eq!(pull["conflictsOpened"], 1);
     assert_eq!(pull["pendingResolves"].as_array().map(Vec::len), Some(1));
     assert_eq!(pull["pendingResolves"][0]["reason"], "unmatched-target");
@@ -794,7 +795,10 @@ async fn multi_page_pull_rpc_surfaces_conflicts_opened_and_reconstructed_pending
         json!({ "workspaceId": workspace_id }),
     )
     .await;
-    assert_eq!(redelivered["conflictsOpened"], 0);
+    assert_eq!(
+        redelivered["conflictsOpened"], 1,
+        "the skipped conflict.open must reconstruct its original opened count"
+    );
     assert_eq!(
         redelivered["pendingResolves"], pull["pendingResolves"],
         "the skipped resolution on an uncommitted redelivery must reconstruct its pending resolve"
@@ -1334,7 +1338,7 @@ async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shared_channel_stale_selector_does_not_advance_rejected_cursor() {
+async fn shared_channel_stale_selector_reports_refusal_and_advances_cursor() {
     let workspace_id = "rpc-shared-channel-stale-selector";
     let share_id = "stale-selector-share";
     let mut state = RelayState::default();
@@ -1362,21 +1366,26 @@ async fn shared_channel_stale_selector_does_not_advance_rejected_cursor() {
     let mut id = 1;
     seed_main(&transport, &handle, &mut id, workspace_id).await;
 
-    let _ = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "share.channel.pull",
-                Some(handle.clone()),
-                json!({
-                    "workspaceId": workspace_id,
-                    "shareId": share_id,
-                    "channelWireId": "wire-stale",
-                }),
-            ),
-        )
-        .await;
+    let pulled = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.channel.pull",
+        json!({
+            "workspaceId": workspace_id,
+            "shareId": share_id,
+            "channelWireId": "wire-stale",
+        }),
+    )
+    .await;
+    assert_eq!(pulled["applied"], 0);
+    assert_eq!(pulled["refused"], 1);
+    assert_eq!(pulled["rejections"][0]["originId"], "granter");
+    assert_eq!(pulled["rejections"][0]["originSeq"], 0);
+    assert_eq!(
+        pulled["rejections"][0]["reason"],
+        "share-boundary-violation"
+    );
     close(&transport, &handle, &mut id).await;
 
     let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
@@ -1390,8 +1399,9 @@ async fn shared_channel_stale_selector_does_not_advance_rejected_cursor() {
         .optional()
         .expect("read shared channel cursor");
     assert_eq!(
-        cursor, None,
-        "a selector-rejected entry was not consumed and cannot advance the cursor"
+        cursor.as_deref(),
+        Some("1"),
+        "a reported boundary rejection must be consumed so it cannot wedge the stream"
     );
 }
 

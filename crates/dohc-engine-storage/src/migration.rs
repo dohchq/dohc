@@ -2378,9 +2378,14 @@ mod tests {
         )
         .expect("pre-migration shipped head");
 
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..20], &ctx, &NoFaults)
+        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rollback preimage migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(
+            outcome,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_COUNT - 19
+            }
+        );
 
         type Preimage = (
             Option<String>,

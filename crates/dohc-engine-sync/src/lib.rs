@@ -53,8 +53,8 @@ pub use relay::{
     KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
     PushResponse, RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest,
     ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRequest,
-    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
-    SharedChannelResponse, SyncPassOutcome,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;

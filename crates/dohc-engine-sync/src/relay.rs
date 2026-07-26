@@ -201,10 +201,19 @@ pub struct RecoverResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedChannelRejection {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub op_kind: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelPullOutcome {
     pub fetched: usize,
     pub applied: usize,
     pub refused: usize,
+    pub rejections: Vec<SharedChannelRejection>,
     pub skipped: usize,
     pub next_cursor: i64,
 }
@@ -266,6 +275,7 @@ pub enum SyncPassOutcome {
     Complete {
         pushed: usize,
         fetched: usize,
+        has_more: bool,
         applied: usize,
         skipped: usize,
         conflicts_opened: i64,
@@ -414,6 +424,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(SyncPassOutcome::Complete {
             pushed,
             fetched: 0,
+            has_more: false,
             applied: 0,
             skipped: 0,
             conflicts_opened: 0,
@@ -445,16 +456,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         let mut cursor = current.map_or(0, |value| value.cursor);
         let mut fetched = 0_usize;
-        let mut fetched_payload_bytes = 0_usize;
         let mut pages = 0_usize;
         let mut ops = Vec::new();
-        loop {
+        let has_more = loop {
             let remaining = crate::model::MAX_PULL_OPS_PER_PASS
                 .checked_sub(fetched)
                 .ok_or(RelayError::InvalidResponse)?;
-            if remaining == 0 || pages >= crate::model::MAX_PULL_PAGES_PER_PASS {
-                break;
-            }
             let limit = remaining.min(crate::MAX_PULL_OPS);
             let response = self.transport.pull(PullRequest {
                 workspace_id: workspace_id.to_owned(),
@@ -467,30 +474,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             if response.ops.len() > limit {
                 return Err(RelayError::InvalidResponse);
             }
-            let page_payload_bytes = response.ops.iter().try_fold(0_usize, |total, op| {
-                let bytes = serde_json::to_vec(&op.payload)
-                    .map_err(|_| RelayError::InvalidResponse)?
-                    .len();
-                total.checked_add(bytes).ok_or(RelayError::InvalidResponse)
-            })?;
-            fetched_payload_bytes = fetched_payload_bytes
-                .checked_add(page_payload_bytes)
-                .filter(|total| *total <= crate::model::MAX_PULL_PAYLOAD_BYTES_PER_PASS)
-                .ok_or(RelayError::InvalidResponse)?;
             fetched = fetched
                 .checked_add(response.ops.len())
                 .ok_or(RelayError::InvalidResponse)?;
             ops.extend(response.ops);
             cursor = response.next_cursor;
+            let has_more = response.has_more;
             pages = pages.checked_add(1).ok_or(RelayError::InvalidResponse)?;
-            if !response.has_more
+            if !has_more
                 || fetched >= crate::model::MAX_PULL_OPS_PER_PASS
-                || fetched_payload_bytes >= crate::model::MAX_PULL_PAYLOAD_BYTES_PER_PASS
                 || pages >= crate::model::MAX_PULL_PAGES_PER_PASS
             {
-                break;
+                break has_more;
             }
-        }
+        };
 
         preflight_collisions(store, workspace_id, &ops)?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
@@ -521,6 +518,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
                 }
                 ApplyOutcome::Skipped => {
+                    conflicts_opened = conflicts_opened
+                        .checked_add(
+                            crate::router::redelivered_conflicts_opened(store, op)
+                                .map_err(local)?,
+                        )
+                        .ok_or(RelayError::InvalidResponse)?;
                     if let Some(pending) =
                         crate::conflict_apply::read_replayed_pending_resolve(store, op)
                             .map_err(local)?
@@ -576,6 +579,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(SyncPassOutcome::Complete {
             pushed: 0,
             fetched,
+            has_more,
             applied,
             skipped,
             conflicts_opened,
@@ -696,11 +700,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .ok_or(RelayError::InvalidResponse)?;
         let mut shared_prefix_length = 0_i64;
         let mut cursor = 0;
-        let mut pages = 0_usize;
         'pages: loop {
-            if pages >= crate::model::MAX_PULL_PAGES_PER_PASS {
-                return Err(RelayError::InvalidResponse);
-            }
             let page = self.transport.pull(PullRequest {
                 workspace_id: workspace_id.to_owned(),
                 replication_epoch: identity.replication_epoch.clone(),
@@ -708,7 +708,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 cursor,
                 limit: crate::MAX_PULL_OPS,
             })?;
-            pages = pages.checked_add(1).ok_or(RelayError::InvalidResponse)?;
             validate_pull_page(&page, workspace_id, cursor)?;
             for op in page.ops {
                 if op.origin_id != identity.origin_id || op.origin_seq < shared_prefix_length {
@@ -876,9 +875,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             path_prefix: None,
         };
         let mut applied = 0_usize;
-        let refused = 0_usize;
+        let mut refused = 0_usize;
+        let mut rejections = Vec::new();
         let mut skipped = 0_usize;
-        let mut boundary_rejected = false;
         for op in ops {
             if own_echo.as_deref() == Some(op.origin_id.as_str()) {
                 skipped += 1;
@@ -899,17 +898,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     return Err(RelayError::Local("injected-crash".to_owned()));
                 }
                 Err(SyncError::ShareBoundaryViolation) => {
-                    boundary_rejected = true;
-                    skipped += 1;
+                    refused = refused.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+                    rejections.push(SharedChannelRejection {
+                        origin_id: envelope.origin_id,
+                        origin_seq: envelope.origin_seq,
+                        op_kind: envelope.op_kind,
+                        reason: "share-boundary-violation".to_owned(),
+                    });
                 }
                 Err(SyncError::InvalidInput { .. }) => {
                     skipped += 1;
                 }
                 Err(error) => return Err(local(error)),
             }
-        }
-        if boundary_rejected {
-            return Err(RelayError::ShareOperationRejected);
         }
         let committed = crate::commit_share_cursor(
             store,
@@ -929,6 +930,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             fetched,
             applied,
             refused,
+            rejections,
             skipped,
             next_cursor: cursor,
         })
@@ -1098,15 +1100,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(ApplyOutcome::Applied(_)) => {}
+                Ok(ApplyOutcome::Skipped) => {
+                    skipped += 1;
+                    continue;
+                }
+                Ok(ApplyOutcome::Crashed { .. }) => {
+                    return Err(RelayError::Local("injected-crash".to_owned()));
+                }
                 Err(SyncError::ShareBoundaryViolation | SyncError::InvalidInput { .. }) => {
                     skipped += 1;
                     continue;
                 }
                 Err(error) => return Err(local(error)),
-                _ => {
-                    skipped += 1;
-                    continue;
-                }
             }
             let mut replay = ShareViewReplayContext {
                 transport: &self.transport,

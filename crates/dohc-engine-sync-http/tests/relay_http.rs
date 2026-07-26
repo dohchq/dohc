@@ -69,6 +69,14 @@ impl TestResponse {
         }
     }
 
+    fn redirect(location: impl Into<String>) -> Self {
+        Self {
+            status: 302,
+            headers: vec![("location".to_owned(), location.into())],
+            body: Vec::new(),
+        }
+    }
+
     fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_owned(), value.to_owned()));
         self
@@ -193,6 +201,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<TestRequest> {
 fn write_response(stream: &mut TcpStream, response: TestResponse) -> std::io::Result<()> {
     let reason = match response.status {
         200 => "OK",
+        302 => "Found",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -226,6 +235,14 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn transport(server: &FakeServer) -> HttpRelayTransport {
     HttpRelayTransport::new_insecure_loopback_for_tests(&server.base_url, "test-token")
         .expect("HTTP relay transport")
+}
+
+fn probe(transport: &HttpRelayTransport) -> Result<dohc_engine_sync::ProbeResponse, RelayError> {
+    transport.probe(ProbeRequest {
+        workspace_id: "ws".to_owned(),
+        replication_epoch: "epoch".to_owned(),
+        stream_identity: "stream".to_owned(),
+    })
 }
 
 fn store() -> (ScratchDir, std::path::PathBuf, EngineStore) {
@@ -1224,6 +1241,67 @@ fn status_401_404_and_409_remain_distinct() {
             expected
         );
     }
+}
+
+#[test]
+fn redirect_to_plaintext_destination_is_refused_without_following() {
+    let destination_hit = Arc::new(AtomicBool::new(false));
+    let destination_hit_for_handler = Arc::clone(&destination_hit);
+    let destination = FakeServer::start(move |_| {
+        destination_hit_for_handler.store(true, Ordering::SeqCst);
+        log_page(Vec::new(), 0, false)
+    });
+    let location = format!("{}/sync/ws/log", destination.base_url);
+    let source = FakeServer::start(move |_| TestResponse::redirect(location.clone()));
+
+    assert_eq!(
+        probe(&transport(&source)).expect_err("redirect must be refused"),
+        RelayError::BadRequest
+    );
+    assert!(
+        !destination_hit.load(Ordering::SeqCst),
+        "MUTATION: allowing redirects sends the bearer request over plaintext"
+    );
+}
+
+#[test]
+fn redirect_to_link_local_destination_is_refused_before_connection() {
+    let source =
+        FakeServer::start(|_| TestResponse::redirect("http://169.254.169.254/latest/meta-data/"));
+
+    assert_eq!(
+        probe(&transport(&source)).expect_err("link-local redirect must be refused"),
+        RelayError::BadRequest,
+        "MUTATION: following this redirect reintroduces an SSRF host/port oracle"
+    );
+}
+
+#[test]
+fn loopback_opt_in_still_performs_direct_requests() {
+    let server = FakeServer::start(|_| log_page(Vec::new(), 0, false));
+    let response = probe(&transport(&server)).expect("direct loopback request");
+    assert!(!response.has_content);
+}
+
+#[test]
+fn key_envelope_upload_rejects_an_oversized_ack_body() {
+    let server = FakeServer::start(|_| {
+        TestResponse::bytes(vec![b'x'; 64 * 1024 + 1]).with_header("etag", "\"etag\"")
+    });
+    let error = transport(&server)
+        .upload_key_envelope(KeyEnvelopeRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            envelope_json: "{}".to_owned(),
+            if_match: None,
+        })
+        .expect_err("oversized key ack");
+    assert_eq!(
+        error,
+        RelayError::InvalidResponse,
+        "MUTATION: restoring the log-page budget accepts a ~133 MiB key ack"
+    );
 }
 
 #[test]

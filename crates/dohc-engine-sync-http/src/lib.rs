@@ -24,6 +24,7 @@ const MAX_JSON_RESPONSE_BYTES: u64 = (MAX_PULL_OPS
     * (MAX_PAYLOAD_JSON_BYTES + MAX_LOG_ROW_RESPONSE_OVERHEAD_BYTES)
     + MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES) as u64;
 const MAX_ERROR_RESPONSE_BYTES: u64 = 64 * 1024;
+const MAX_KEY_ENVELOPE_ACK_BYTES: u64 = 64 * 1024;
 const MAX_BLOB_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 pub struct HttpRelayTransport {
@@ -55,10 +56,11 @@ impl HttpRelayTransport {
         Self::build(base_url, token, timeout, false)
     }
 
-    /// Explicit debug/test-only opt-in for authenticated loopback HTTP.
+    /// Explicit debug-profile opt-in for authenticated loopback HTTP.
     ///
-    /// This constructor is absent from release builds, so production code
-    /// cannot enable plaintext bearer transport through runtime configuration.
+    /// `debug_assertions` is a build-profile setting, not a security boundary.
+    /// Callers exposing this through runtime configuration must independently
+    /// restrict it to local development and test workflows.
     #[cfg(debug_assertions)]
     pub fn new_insecure_loopback_for_tests(
         base_url: impl Into<String>,
@@ -78,14 +80,10 @@ impl HttpRelayTransport {
         if token.is_empty() || !base_url_is_allowed(&base_url, allow_insecure_loopback) {
             return Err(RelayError::InvalidResponse);
         }
-        let config = Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .http_status_as_error(false)
-            .build();
         Ok(Self {
             base_url,
             token,
-            agent: config.into(),
+            agent: configured_agent(timeout, allow_insecure_loopback, None),
         })
     }
 
@@ -188,6 +186,24 @@ impl HttpRelayTransport {
             .map_err(|_| RelayError::InvalidResponse)?;
         Ok((bytes, etag))
     }
+}
+
+fn configured_agent(
+    timeout: Duration,
+    allow_insecure_loopback: bool,
+    tls_config: Option<ureq::tls::TlsConfig>,
+) -> Agent {
+    let builder = Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .https_only(!allow_insecure_loopback)
+        .max_redirects(0);
+    let builder = if let Some(tls_config) = tls_config {
+        builder.tls_config(tls_config)
+    } else {
+        builder
+    };
+    builder.build().into()
 }
 
 impl RelayTransport for HttpRelayTransport {
@@ -404,7 +420,7 @@ impl RelayTransport for HttpRelayTransport {
         let _: Vec<u8> = response
             .body_mut()
             .with_config()
-            .limit(MAX_JSON_RESPONSE_BYTES)
+            .limit(MAX_KEY_ENVELOPE_ACK_BYTES)
             .read_to_vec()
             .map_err(|_| RelayError::InvalidResponse)?;
         Ok(KeyEnvelopeResponse { etag })
@@ -629,6 +645,7 @@ fn map_http_error(response: &mut Response<Body>, context: RequestContext) -> Rel
         return map_server_code(&code, context);
     }
     match status {
+        300..=399 => RelayError::BadRequest,
         403 => RelayError::Forbidden,
         404 => unavailable(context),
         409 => RelayError::Conflict,
@@ -866,7 +883,19 @@ struct WireOk {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread;
+
+    use base64::Engine as _;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+
     use super::*;
+
+    const TEST_CERT_DER_BASE64: &str = "MIIDJTCCAg2gAwIBAgIUEHQ492IM8Ral38aCrsQtLAty8wAwDQYJKoZIhvcNAQELBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDcyNjIyMzQyNloXDTI2MDcyODIyMzQyNlowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlas3XDBWs7j98PENiunFPUWT5X7I+PKLO7A+HFd3JMBwtYVtWBvxmBsLcZ+2Rx4eVJXtAjR4xxBHekNs3z44Ao9didAx485uOPPO8Ksj+cWNgZ4bAYrJrqF7sWEvhP7dilFLKT/vi0BnG/zrac8CEaHl5LzxpBZDOvsQ0mDY0RWXysq6QV37woJIY6wxJ0zJP93T5fl/a3sHE29WkSPgNIEBz85jVkbmmQBWXPEH4sQ0Ey7dOC2q+qZPOrfkgQrbXMHnPxO6LKrwVwRGnFgjIxqnjaOnBEsxyhVzgxe9oXoAIgooibIx7lZUFg72D+Wo9cRs2wTL3ZLJji8z0HD1JQIDAQABo28wbTAdBgNVHQ4EFgQU91mseAS1pHPttIK0/FAofXtrkIkwHwYDVR0jBBgwFoAU91mseAS1pHPttIK0/FAofXtrkIkwDwYDVR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwDQYJKoZIhvcNAQELBQADggEBAAgv1+SbYGUsfw7FpwATOjt4lLSZYItTel9FtszmWsCnD2l9NaFaOeGLjHN/A/maczv3QGEIDu5ZD9jkNkabsPQeOsV2aR/266AW4OjbCCQ8GujSZxZzdoaUhjTumwI9sIkni6Z7FJuCL0ch8ljGh9YxIvtgmX05E9k1md9wsXOT56pCvQ8jmcdkxROpoGZOkJqyqmJ5P/rEf+bHsnjR9PGv2YqvS/984MaYBKmgZ4BhRd8QksAum7KHSczJ/pZL/YEg8AQowEf6vXgS7reXDjOQfc+Er+Lh9im01E56Fqp78RlnEo5ifGw/sn8vM0FescNxLs9pqZRX6haaYjT5S7o=";
+    const TEST_KEY_DER_BASE64: &str = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCVqzdcMFazuP3w8Q2K6cU9RZPlfsj48os7sD4cV3ckwHC1hW1YG/GYGwtxn7ZHHh5Ule0CNHjHEEd6Q2zfPjgCj12J0DHjzm44887wqyP5xY2BnhsBismuoXuxYS+E/t2KUUspP++LQGcb/OtpzwIRoeXkvPGkFkM6+xDSYNjRFZfKyrpBXfvCgkhjrDEnTMk/3dPl+X9rewcTb1aRI+A0gQHPzmNWRuaZAFZc8QfixDQTLt04Lar6pk86t+SBCttcwec/E7osqvBXBEacWCMjGqeNo6cESzHKFXODF72hegAiCiiJsjHuVlQWDvYP5aj1xGzbBMvdksmOLzPQcPUlAgMBAAECggEAAv3QL/QGL5zRdCWyEkyedOoombKUiSetfiZrv2MSJ9zLnYOXgWZuYdtpUz6Qq2nTMl6cXtBpeS6x0KRIKOTt93ZVG/v0Abkh1w3GEGWWfpei8ewukjPR2L80ITUvkkMKO4lpBqyKX0HZlCO65ggz4uIina7j54mYYDWEPkHR45ZSj5UAxhvTGoY+AdECQy7J96+czeKf2qsciBOtfwQDeivO+BHLFCKWYcgmMb+Dq91eXL4vdWZr29duWpr/7WXLmPfo9/4B6dkZbKxPxDg4PBUOSUsi4B0L2lXOBQY++To0FUdfFB9EiBBNHD9RrAqXHpNvLD77CFd4xsVzCUPScQKBgQDPuDZT2JYchrrdvBue8JS21JrMw2IHzQ5zIhMTWhFcGSNF/YhuLrVSsSFdYrmOFJ1aE5d7NQ1p7G19Pe/OcSoEkxeqMZaMjki1UAxqMoAmdC/lgYSkPsxZYjSw1VqpvHGlbyyg/FNbQC9U2mrYP+oo6lCxrYTwprDpApsbUfSELQKBgQC4dNnxwIL/loKoEXe8SuC7apTqvSfJwvAlBC3QH/hURHgIBpQ4R+ZzpT2+WPY3YY92ZxCSWJfySHaoHj/Dls1Q5wmQdrw5bn/sJ7dNGFSf7fdUoiHoydl0mdHgjhC5ZN76jFqiuAtboOA8MvpCo9xRApuhIVA7qDbPPadTMyx32QKBgQCZKbfFc3qcZiv7u+yR8ct2VKYgPiFWpzj0ZDe0mUEbq916ikvDEuXYp4t2lIlF3qV3+eJEkwXlCNRi+PyOOJtG7D8S26Wq1m9+YhwFYl9j+2Al1q67fSKo9eTsTyWe6rjRx3wc6HF+Y4GDC9qkwdwjd0MxAEV6PS9NYQKFzpSBsQKBgBWpIy7QfJGnCxDRfE4QPPPFQFeQfuuiiLDQHNEj7/V1VOMcYqt5RgaukOGZcNBwFHjDAZ8t6Cn7eHOlmbdOLi4h822Tg+b6ousIfu3+vXFKcJDvuSutCGw44/yKskwTHFwvvzT8h9jqu2pWUi0hMO4ScFQrpVBcIJOVmeCbUc2BAoGBALy89w8VTTKbHZ9EMHthbOF1DLxu939/li1J+q9vHh7Ie7T37CKZ+XZFS2od54g451QSDeaYHCihcC7YR2y/EfefPRRRjio157ULeZ2avB4Gd7tvVntYPv9+HG5pxLXkbgZL7b077vSL4kFi9m32V8Vo5SRsI8J722Npyq7q2spR";
 
     #[test]
     fn response_budget_covers_a_full_maximal_relay_page() {
@@ -911,6 +940,87 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn production_https_agent_refuses_every_redirect_and_requires_https() {
+        let transport =
+            HttpRelayTransport::new("https://relay.example", "token").expect("https transport");
+        assert!(
+            transport.agent.config().https_only(),
+            "MUTATION: disabling https_only permits an HTTPS base to downgrade on redirect"
+        );
+        assert_eq!(
+            transport.agent.config().max_redirects(),
+            0,
+            "MUTATION: restoring ureq's redirect default reaches unvalidated destinations"
+        );
+    }
+
+    #[test]
+    fn https_base_redirect_to_http_is_refused() {
+        let cert = base64::engine::general_purpose::STANDARD
+            .decode(TEST_CERT_DER_BASE64)
+            .expect("test certificate");
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(TEST_KEY_DER_BASE64)
+            .expect("test key");
+        let server = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(cert)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+            )
+            .expect("TLS server config");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("TLS listener");
+        let port = listener.local_addr().expect("TLS address").port();
+        let server = Arc::new(server);
+        let thread = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("TLS accept");
+            let connection = ServerConnection::new(server).expect("TLS connection");
+            let mut stream = StreamOwned::new(connection, stream);
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("TLS request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:9/\r\n\
+                      content-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .expect("TLS redirect");
+            stream.flush().expect("TLS flush");
+        });
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .provider(ureq::tls::TlsProvider::Rustls)
+            .disable_verification(true)
+            .build();
+        let transport = HttpRelayTransport {
+            base_url: format!("https://localhost:{port}"),
+            token: "token".to_owned(),
+            agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+        };
+
+        let error = transport
+            .probe(ProbeRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            })
+            .expect_err("HTTPS downgrade redirect");
+        assert_eq!(
+            error,
+            RelayError::BadRequest,
+            "MUTATION: restoring redirects follows the HTTPS-to-HTTP downgrade"
+        );
+        thread.join().expect("TLS server thread");
+    }
+
+    #[test]
+    fn loopback_opt_in_disables_https_only_but_still_refuses_redirects() {
+        let transport =
+            HttpRelayTransport::new_insecure_loopback_for_tests("http://127.0.0.1:1", "token")
+                .expect("loopback transport");
+        assert!(!transport.agent.config().https_only());
+        assert_eq!(transport.agent.config().max_redirects(), 0);
     }
 
     #[test]

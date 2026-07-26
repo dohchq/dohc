@@ -44,6 +44,17 @@ pub(crate) fn redelivered_materialization_changes(
     }
 }
 
+pub(crate) fn redelivered_conflicts_opened(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<i64, SyncError> {
+    match envelope.op_kind.as_str() {
+        "conflict.open" => crate::conflict_apply::redelivered_conflicts_opened(store, envelope),
+        "moment.append" => crate::moment_apply::redelivered_conflicts_opened(store, envelope),
+        _ => Ok(0),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum OwnedRoute {
     Chat,

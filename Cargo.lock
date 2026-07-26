@@ -450,10 +450,12 @@ dependencies = [
 name = "dohc-engine-sync-http"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "dohc-engine-storage",
  "dohc-engine-sync",
  "dohc-engine-testkit",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "ureq",
