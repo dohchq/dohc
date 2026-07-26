@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "R10 dormant replication substrate: durable journals and cursors, ordered idempotent imported-op application, share scoping, and a trait-seamed relay client boundary. No production HTTP runtime is wired until R13."
+description = "Replication substrate: durable journals and cursors, ordered idempotent imported-op application, share scoping, and a dependency-free relay transport seam."
 
 [features]
 fault-injection = ["dohc-engine-storage/fault-injection"]

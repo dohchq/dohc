@@ -13,7 +13,7 @@ pub enum CursorKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayCursor {
-    pub cursor: String,
+    pub cursor: i64,
     pub replication_epoch: String,
     pub stream_identity: String,
 }
@@ -30,19 +30,29 @@ pub fn read_relay_cursor(
 ) -> Result<Option<RelayCursor>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     store.read_with(|conn| {
-        conn.query_row(
+        let value = conn
+            .query_row(
             "SELECT cursor, replication_epoch, stream_identity FROM sync_relay_cursors WHERE workspace_id = ?1",
             [workspace_id],
             |row| {
-                Ok(RelayCursor {
-                    cursor: row.get(0)?,
-                    replication_epoch: row.get(1)?,
-                    stream_identity: row.get(2)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             },
         )
         .optional()
-        .map_err(SyncError::corrupt)
+        .map_err(SyncError::corrupt)?;
+        value
+            .map(|(cursor, replication_epoch, stream_identity)| {
+                Ok(RelayCursor {
+                    cursor: parse_relay_cursor(&cursor)?,
+                    replication_epoch,
+                    stream_identity,
+                })
+            })
+            .transpose()
     })
 }
 
@@ -53,7 +63,11 @@ pub fn commit_relay_cursor(
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<()>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
-    bounded(&cursor.cursor, "cursor must be non-empty and bounded")?;
+    if !(0..=crate::MAX_WIRE_INTEGER).contains(&cursor.cursor) {
+        return Err(SyncError::InvalidInput {
+            reason: "cursor is outside the wire integer range",
+        });
+    }
     bounded(
         &cursor.replication_epoch,
         "replication_epoch must be non-empty and bounded",
@@ -68,7 +82,12 @@ pub fn commit_relay_cursor(
                 "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
                  VALUES (?1,?2,?3,?4) ON CONFLICT(workspace_id) DO UPDATE SET \
                  cursor=excluded.cursor,replication_epoch=excluded.replication_epoch,stream_identity=excluded.stream_identity",
-                params![workspace_id, cursor.cursor, cursor.replication_epoch, cursor.stream_identity],
+                params![
+                    workspace_id,
+                    cursor.cursor.to_string(),
+                    cursor.replication_epoch,
+                    cursor.stream_identity
+                ],
             )
             .map_err(SyncError::persist)?;
             // A committed cursor means the stream never replays coordinates
@@ -83,6 +102,16 @@ pub fn commit_relay_cursor(
             )
             .map_err(SyncError::persist)?;
             Ok::<(), SyncError>(())
+    })
+}
+
+fn parse_relay_cursor(value: &str) -> Result<i64, SyncError> {
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|cursor| (0..=crate::MAX_WIRE_INTEGER).contains(cursor))
+        .ok_or(SyncError::InvalidInput {
+            reason: "persisted relay cursor is invalid",
         })
 }
 
@@ -110,7 +139,7 @@ pub(crate) fn write_pushed_seq(
     pushed_seq: i64,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<()>, SyncError> {
-    if !(0..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
+    if !(-1..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
         return Err(SyncError::InvalidInput {
             reason: "pushed_seq is outside the wire integer range",
         });
