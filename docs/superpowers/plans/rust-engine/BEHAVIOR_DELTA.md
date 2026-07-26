@@ -626,3 +626,47 @@ Rust returns version-file diffs in byte order via `BTreeSet`/`BTreeMap`; TS sort
 paths by UTF-16 code units. The orders differ only for paths mixing BMP and
 astral-plane code points, so this is an accepted cosmetic ordering delta with no
 data or classification difference.
+
+## 13. RPC-E / #244 (chat replicated-path validation) — deliberate slug-allocation divergence
+
+### 13.1 DELIBERATE DIVERGENCE: replicated channel slug collisions use bounded identity hashes
+
+**TS behavior.** `linkedChatStore` allocates replicated channel slugs by LOCAL
+occupancy: the current slug owner keeps its slug and an incoming collider gets
+`slug-2`, `slug-3`, … (`nextFreeChannelSlug`), so after a two-way collision each
+peer's own local channel keeps the base slug. `syncFolder.test.ts` pins that
+expectation. Slug ownership therefore never converges across peers; the store
+papers over it with a local lookup alias. `createdAtMs` is replicated but unused
+for allocation.
+
+**Rust behavior.** Rust matches the oracle's local-occupancy semantics: an
+incumbent keeps its slug, a colliding newcomer receives a variant, and no
+arrival ever rewrites a row other than the one it is materializing — the one
+permitted self-write being an authoritative `chat.channel.create` re-slugging
+its OWN placeholder row (matched by wire id) at materialization. Local-only,
+DM, well-known, and every bystander row are never touched by another row's
+arrival. Slugs therefore do not converge across peers and carry no
+cross-peer identity meaning; wire ids bind the same replicated channel across
+stores. The deliberate improvement over TS is only the collision variant:
+instead of arrival-ordered `-2`, `-3`, … counters, Rust uses a deterministic,
+bounded SHA-256 suffix derived from the newcomer's own replicated wire identity
+(or its deterministic placeholder identity when no wire id exists). Both base
+and collision variants satisfy the replicated 200-unit slug grammar.
+`createdAtMs` is validated as a timestamp but does not participate in allocation.
+Two further deliberate deltas: (1) Rust derives the allocation base from
+`channel_slug_for_name(payload.name)` and discards the wire `payload.slug`,
+while TS feeds `payload.slug` straight into `nextFreeChannelSlug` — the results
+differ whenever a wire op's name and slug disagree. (2) A placeholder's stored
+`name` is the bounded allocation base (slug grammar, ≤200 units), where TS
+stores the raw `placeholderSlug` unbounded; placeholder rows are hidden from
+list/find and the name is overwritten at materialization, so the delta is not
+user-visible. (3) `set_follow` returns the post-boundary-replay LWW end-state,
+which can differ from the requested state when a parked remote op wins during
+the same boundary replay; TS has no replay boundary in `setFollow` and always
+echoes the local write.
+Regressions include
+`incoming_placeholder_never_displaces_bootstrapped_general_regardless_of_clock`,
+`colliding_newcomer_hash_is_stable_across_local_occupancy_histories`,
+`overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal`,
+`collision_slug_truncation_is_bounded_and_does_not_leave_a_dash_boundary`, and
+`noncolliding_channel_apply_does_not_rewrite_unchanged_slugs`.

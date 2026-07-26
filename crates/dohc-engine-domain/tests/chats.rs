@@ -8,9 +8,9 @@
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
     FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore,
-    NoFaults, SaveBookmark, SendMessage, SetFollow, StartChannelThread,
-    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
-    encode_feed_cursor, linked_chat_projection_path,
+    NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, SaveBookmark, SendMessage, SetFollow,
+    StartChannelThread, base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name,
+    decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -106,6 +106,43 @@ fn create_list_find_channel_round_trip() {
         .find_channel_by_slug(WS, "general-chat")
         .expect("find");
     assert_eq!(found.map(|c| c.channel_id), Some("chan-1".to_owned()));
+}
+
+#[test]
+fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let plan = store
+        .read_with(|conn| {
+            let explain_sql = format!("EXPLAIN QUERY PLAN {PENDING_CHAT_WORKSPACE_EXISTS_SQL}");
+            let mut stmt = conn
+                .prepare(&explain_sql)
+                .map_err(StorageError::corrupt_public)?;
+            let rows = stmt
+                .query_map([WS], |row| row.get::<_, String>(3))
+                .map_err(StorageError::corrupt_public)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(StorageError::corrupt_public)
+        })
+        .expect("pending probe query plan");
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("COVERING INDEX") && detail.contains("workspace_id=?")),
+        "workspace emptiness probe must stay index-backed: {plan:?}"
+    );
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute_batch("DROP TABLE replication_log")
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("remove the table only the full replay query reads");
+
+    let changed = LinkedChatStore::new(&mut store)
+        .fail_pending_for_thread(WS, "no-pending-thread", "not needed", 2, &NO_FAULTS)
+        .expect("empty pending set must bypass the full replay query");
+    assert_eq!(changed, 0);
 }
 
 #[test]

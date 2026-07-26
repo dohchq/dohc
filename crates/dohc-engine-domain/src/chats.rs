@@ -57,6 +57,11 @@ pub const GENERAL_CHANNEL_WIRE_ID: &str = "channel_wire_general_v1";
 pub const AGENT_CHANNEL_NAME: &str = "My agent";
 /// Deterministic cross-machine wire id for the reserved `My agent` channel.
 pub const AGENT_CHANNEL_WIRE_ID: &str = "channel_wire_agent_v1";
+/// Workspace-only emptiness probe used to skip the full pending replay scan.
+pub const PENDING_CHAT_WORKSPACE_EXISTS_SQL: &str = "\
+SELECT EXISTS( \
+  SELECT 1 FROM chat_pending_replication \
+  WHERE workspace_id=?1 LIMIT 1)";
 /// The default linked-chat projection kind (`linkedChatStore.ts:90`).
 pub const LINKED_CHAT_PROJECTION_KIND: &str = "thread";
 
@@ -1110,7 +1115,11 @@ fn is_replicated_channel_slug(value: &str) -> bool {
         })
 }
 
-fn normalize_replicated_chat_id(value: &str, reason: &'static str) -> Result<String, DomainError> {
+/// Normalize a caller-minted id before it becomes a replicated chat identity.
+pub fn normalize_replicated_chat_id(
+    value: &str,
+    reason: &'static str,
+) -> Result<String, DomainError> {
     let normalized = value.trim_matches(is_js_trim_ws);
     if !is_bounded_replicated_chat_id(normalized, MAX_REPLICATED_CHAT_ID_UTF16_UNITS)
         || normalized.len() > MAX_REPLICATED_CHAT_ID_UTF8_BYTES
@@ -1437,7 +1446,8 @@ fn persisted_safe_integer(value: i64) -> bool {
     (-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&value)
 }
 
-fn normalize_feed_identity(value: &str, label: &str) -> Result<String, DomainError> {
+/// Trim and validate an owner or target identity used by feed state.
+pub fn normalize_feed_identity(value: &str, label: &str) -> Result<String, DomainError> {
     let normalized = value.trim_matches(is_js_trim_ws);
     if normalized.is_empty()
         || normalized.encode_utf16().count() > 256
@@ -1569,7 +1579,8 @@ pub fn upsert_chat_search_index_row(
 }
 
 /// `normalizeChannelName`: NFC then trim, 1..=80 chars, no control chars.
-fn normalize_channel_name(name: &str) -> Result<String, DomainError> {
+/// NFC-normalize and validate a channel display name.
+pub fn normalize_channel_name(name: &str) -> Result<String, DomainError> {
     let normalized = nfc(name);
     let normalized = normalized.trim_matches(is_js_trim_ws).to_owned();
     let count = normalized.encode_utf16().count();
@@ -1783,7 +1794,8 @@ fn attachment_fingerprint_bytes(attachments: &[LocalAttachmentInput]) -> Vec<u8>
 }
 
 /// `normalizeDisplayName`: trim, 1..=200 chars.
-fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
+/// Trim and validate a chat sender display name.
+pub fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
     let normalized = display_name.trim_matches(is_js_trim_ws);
     if normalized.is_empty() || normalized.encode_utf16().count() > MAX_DISPLAY_NAME_CHARS {
         return Err(DomainError::chat(
@@ -1795,7 +1807,8 @@ fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
 }
 
 /// `normalizeAuthorUserId`: absent -> None; else trim, 1..=200 chars.
-fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {
+/// Trim and validate an optional opaque relay author identity.
+pub fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {
     match value {
         None => Ok(None),
         Some(v) => {
@@ -1813,7 +1826,8 @@ fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, Domai
 }
 
 /// `normalizeBody`: CRLF/CR -> LF, trimEnd, non-empty, <= 64 KiB UTF-8.
-fn normalize_body(body: &str) -> Result<String, DomainError> {
+/// Normalize line endings, trim the end, and enforce the chat body byte cap.
+pub fn normalize_body(body: &str) -> Result<String, DomainError> {
     let lf = body.replace("\r\n", "\n").replace('\r', "\n");
     let normalized = lf.trim_end_matches(is_js_trim_ws).to_owned();
     if normalized.is_empty() || normalized.len() > MAX_MESSAGE_BODY_BYTES {
@@ -1823,6 +1837,20 @@ fn normalize_body(body: &str) -> Result<String, DomainError> {
         ));
     }
     Ok(normalized)
+}
+
+/// Trim and validate the opaque identity used as a reaction cell key.
+pub fn normalize_reaction_author_id(author_id: &str) -> Result<String, DomainError> {
+    let normalized = author_id.trim_matches(is_js_trim_ws);
+    if normalized.is_empty()
+        || normalized.encode_utf16().count() > MAX_REACTION_AUTHOR_ID_UTF16_UNITS
+    {
+        return Err(DomainError::chat(
+            "invalid-sender",
+            "Reaction author id is invalid.",
+        ));
+    }
+    Ok(normalized.to_owned())
 }
 
 /// The ECMAScript `String.prototype.trimEnd` whitespace set (WhiteSpace +
@@ -2068,6 +2096,20 @@ impl<'a> LinkedChatStore<'a> {
         LinkedChatStore { store }
     }
 
+    fn write_with_pending_chat_replay<T>(
+        &mut self,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        mutation: impl FnOnce(&Transaction<'_>) -> Result<T, DomainError>,
+    ) -> Result<TxnOutcome<T>, DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        self.store.write_with(faults, |tx| {
+            let value = mutation(tx)?;
+            replay_ready_pending_chat_coordinates(tx, &workspace_id)?;
+            Ok(value)
+        })
+    }
+
     // -------------------------------------------------------------- channels
 
     /// Create a channel: reserved-slug rules, per-workspace slug uniqueness, and
@@ -2121,7 +2163,7 @@ impl<'a> LinkedChatStore<'a> {
         let cid = channel_id;
         let slug_c = slug.clone();
         let name_c = name.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             if channel_by_slug(tx, &ws, &slug_c)?.is_some() {
                 return Err(DomainError::chat(
                     "channel-exists",
@@ -2239,7 +2281,7 @@ impl<'a> LinkedChatStore<'a> {
         let slug_c = slug.clone();
         let name_c = name.to_owned();
         let wire = wire_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             if let Some(existing) = channel_by_slug(tx, &ws, &slug_c)? {
                 // Backfill the well-known wire mapping so imported rows converge.
                 record_channel_wire_id(tx, &ws, &wire, &existing.channel_id)?;
@@ -2450,7 +2492,7 @@ impl<'a> LinkedChatStore<'a> {
         let title_c = title.clone();
         let object_id_c = object_id.clone();
         let path_hint_c = path_hint.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             tx.execute(
                 "INSERT INTO chat_threads \
                  (workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
@@ -2586,7 +2628,8 @@ impl<'a> LinkedChatStore<'a> {
         let author_user_c = author_user_id.clone();
         let origin_c = origin.clone();
         let attachments_c = attachments.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome =
+            self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             let channel = require_channel(tx, &input.workspace_id, &input.channel_id)?;
             let channel_wire_id =
                 wire_id_for_channel_id(tx, &input.workspace_id, &channel.channel_id)?;
@@ -2826,7 +2869,8 @@ impl<'a> LinkedChatStore<'a> {
         let body_c = body.clone();
         let parent_c = parent.clone();
         let attachments_c = attachments.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome =
+            self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             require_thread(tx, &input.workspace_id, &input.thread_id)?;
             if let Some(parent_id) = &parent_c
                 && !thread_has_message(tx, &input.workspace_id, &input.thread_id, parent_id)?
@@ -2984,15 +3028,7 @@ impl<'a> LinkedChatStore<'a> {
         let thread_id = normalize_replicated_chat_id(&input.thread_id, "thread id is invalid")?;
         validate_message_id(&input.message_id)?;
         let emoji = normalize_reaction_emoji(&input.emoji)?;
-        let author_id = input.author_id.trim_matches(is_js_trim_ws).to_owned();
-        if author_id.is_empty()
-            || author_id.encode_utf16().count() > MAX_REACTION_AUTHOR_ID_UTF16_UNITS
-        {
-            return Err(DomainError::chat(
-                "invalid-sender",
-                "Reaction author id is invalid.",
-            ));
-        }
+        let author_id = normalize_reaction_author_id(&input.author_id)?;
         let author_display_name = normalize_display_name(&input.author_display_name)?;
         if input.now_ms < 0 {
             return Err(DomainError::chat(
@@ -3033,7 +3069,7 @@ impl<'a> LinkedChatStore<'a> {
         }
 
         let input = input.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             require_thread(tx, &input.workspace_id, &thread_id)?;
             if !thread_has_message(tx, &input.workspace_id, &thread_id, &input.message_id)? {
                 return Err(DomainError::chat(
@@ -3213,7 +3249,7 @@ impl<'a> LinkedChatStore<'a> {
         }
 
         let input = input.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             require_thread(tx, &input.workspace_id, &thread_id)?;
             let current = require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)?;
             if current.state == ChatDecisionState::Resolved {
@@ -3750,7 +3786,7 @@ impl<'a> LinkedChatStore<'a> {
         )?;
         let marker_id = mention_backfill_marker_id(workspace_id);
         let marker_hash = hash_fields(&[b"chat-mention-backfill-v1", workspace_id.as_bytes()]);
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(workspace_id, faults, |tx| {
             let complete: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM engine_requests \
@@ -4052,7 +4088,7 @@ impl<'a> LinkedChatStore<'a> {
         }
         let ws = workspace_id.to_owned();
         let tid = thread_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             require_thread(tx, &ws, &tid)?;
             advance_read_cursor(tx, &ws, &tid, up_to, now_ms, expected_revision)
         })?;
@@ -4102,76 +4138,10 @@ impl<'a> LinkedChatStore<'a> {
         input.owner_user_id = owner_user_id;
         input.replication_owner_user_id = replication_owner_user_id;
         input.target_id = target_id;
-        let outcome = self.store.write_with(faults, |tx| {
-            match input.target_kind {
-                FollowTargetKind::Channel => {
-                    let kind: Option<String> = tx
-                        .query_row(
-                            "SELECT c.kind FROM chat_channel_wire_ids w \
-                             JOIN chat_channels c \
-                               ON c.workspace_id = w.workspace_id AND c.channel_id = w.channel_id \
-                             WHERE w.workspace_id = ?1 AND w.wire_id = ?2",
-                            params![input.workspace_id, input.target_id],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(DomainError::sql_corrupt)?;
-                    if kind.as_deref().is_none_or(|kind| kind == "dm") {
-                        return Err(DomainError::chat(
-                            "invalid-follow-target",
-                            "Channel is not followable.",
-                        ));
-                    }
-                }
-                FollowTargetKind::Thread => {
-                    let thread = require_thread(tx, &input.workspace_id, &input.target_id)
-                        .map_err(|error| match error {
-                            DomainError::Chat { .. } => DomainError::chat(
-                                "invalid-follow-target",
-                                "Chat thread is not followable.",
-                            ),
-                            other => other,
-                        })?;
-                    if let Some(channel_id) = thread.channel_id {
-                        let channel = require_channel(tx, &input.workspace_id, &channel_id)?;
-                        if channel.kind == ChatChannelKind::Dm {
-                            return Err(DomainError::chat(
-                                "invalid-follow-target",
-                                "DM threads are not followable.",
-                            ));
-                        }
-                    }
-                }
-                FollowTargetKind::Person | FollowTargetKind::Agent => {
-                    let author_kind = match input.target_kind {
-                        FollowTargetKind::Agent => "agent",
-                        FollowTargetKind::Person => "human",
-                        _ => unreachable!(),
-                    };
-                    let found: Option<i64> = tx
-                        .query_row(
-                            "SELECT 1 FROM chat_messages m \
-                             JOIN chat_threads t \
-                               ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id \
-                             LEFT JOIN chat_channels c \
-                               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
-                             WHERE m.workspace_id = ?1 AND m.author_user_id = ?2 \
-                               AND m.author_kind = ?3 \
-                               AND (t.channel_id IS NULL OR c.kind <> 'dm') \
-                             LIMIT 1",
-                            params![input.workspace_id, input.target_id, author_kind],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(DomainError::sql_corrupt)?;
-                    if found.is_none() {
-                        return Err(DomainError::chat(
-                            "invalid-follow-target",
-                            "Chat author is not followable.",
-                        ));
-                    }
-                }
-            }
+        // This boundary wrapper is set_follow's only pending-replay cover:
+        // insert_local_replication_op and journal persist logs but do not replay.
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
+            validate_follow_target(tx, &input.workspace_id, input.target_kind, &input.target_id)?;
             let prior_at_ms: Option<i64> = tx
                 .query_row(
                     "SELECT updated_at_ms FROM chat_follows \
@@ -4193,6 +4163,13 @@ impl<'a> LinkedChatStore<'a> {
             let (origin_id, origin_seq) =
                 local_replication_coordinate(tx, &input.workspace_id, at_ms)?;
             upsert_follow_lww(tx, &input, at_ms, &origin_id, origin_seq)?;
+            let payload = serde_json::json!({
+                "ownerUserId": input.owner_user_id,
+                "targetKind": input.target_kind.as_str(),
+                "targetId": input.target_id,
+                "state": input.state.as_str(),
+                "atMs": at_ms,
+            });
             if input.replication_owner_user_id.is_some() {
                 insert_local_replication_op(
                     tx,
@@ -4200,13 +4177,7 @@ impl<'a> LinkedChatStore<'a> {
                     &origin_id,
                     origin_seq,
                     "chat.follow.set",
-                    &serde_json::json!({
-                        "ownerUserId": input.owner_user_id,
-                        "targetKind": input.target_kind.as_str(),
-                        "targetId": input.target_id,
-                        "state": input.state.as_str(),
-                        "atMs": at_ms,
-                    }),
+                    &payload,
                     at_ms,
                 )?;
                 journal(tx, &input.target_id, "chat.follow.set", at_ms)?;
@@ -4219,7 +4190,21 @@ impl<'a> LinkedChatStore<'a> {
                 &input.target_id,
             )
         })?;
-        committed(outcome)
+        committed(outcome)?;
+        // Post-commit read-back is race-free only because this store holds
+        // &mut EngineStore over the connection: no in-process writer can
+        // interleave between the commit and this read. A second process on
+        // the same file would break that assumption — fold the read into the
+        // boundary-replay closure if multi-writer access ever arrives.
+        self.store.read_with(|conn| {
+            require_follow(
+                conn,
+                &input.workspace_id,
+                &input.owner_user_id,
+                input.target_kind,
+                &input.target_id,
+            )
+        })
     }
 
     /// List a follow owner's ACTIVE (following) registers, ordered by
@@ -4276,7 +4261,7 @@ impl<'a> LinkedChatStore<'a> {
     ) -> Result<(), DomainError> {
         let workspace_id = workspace_id.to_owned();
         let owner_user_id = normalize_feed_identity(owner_user_id, "Feed owner")?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             tx.execute(
                 "INSERT OR IGNORE INTO chat_follows \
                  (workspace_id, owner_user_id, target_kind, target_id, state, \
@@ -4322,7 +4307,7 @@ impl<'a> LinkedChatStore<'a> {
         let workspace_id = workspace_id.to_owned();
         let thread_id = thread_id.to_owned();
         let up_to_message_id = up_to_message_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             require_thread(tx, &workspace_id, &thread_id)?;
             let current = agent_read_state_for_thread(tx, &workspace_id, &thread_id)?;
             if expected_revision.is_some_and(|revision| revision != current.revision) {
@@ -4424,7 +4409,7 @@ impl<'a> LinkedChatStore<'a> {
         let owner = owner_user_id;
         let msg = cursor.message_id;
         let last_seen_created_at_ms = cursor.created_at_ms;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             // Receiver-private read state must not be advanced past a coordinate
             // the owner cannot actually see: prove the (created_at_ms, message_id)
             // names a currently-visible feed item under the SAME predicate before
@@ -4750,7 +4735,7 @@ impl<'a> LinkedChatStore<'a> {
         input.target_id = target_id;
         input.destination_path = destination_path;
         let now = input.now_ms;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             // Resolve the thread (+ message) the bookmark targets.
             let (thread_id, message_id) = match input.target_kind {
                 BookmarkTargetKind::Thread => {
@@ -5002,7 +4987,7 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let owner = owner_user_id;
         let bid = bookmark_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             let current = require_bookmark(tx, &ws, &owner, &bid)?;
             if current.state == "active" {
                 tx.execute(
@@ -5050,7 +5035,7 @@ impl<'a> LinkedChatStore<'a> {
             bookmark.generation = generation;
             return Ok(bookmark);
         }
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             require_bookmark(tx, &workspace_id, &owner_user_id, &bookmark_id)?;
             queue_bookmark_generation(tx, &workspace_id, &bookmark_id, now_ms)?;
             let bookmark = require_bookmark(tx, &workspace_id, &owner_user_id, &bookmark_id)?;
@@ -5127,7 +5112,7 @@ impl<'a> LinkedChatStore<'a> {
         let owner = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
         let bid = bookmark_id.to_owned();
         let failure_reason = failure_reason.map(str::to_owned);
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             require_bookmark(tx, &ws, &owner, &bid)?;
             if !(1..=9_007_199_254_740_991).contains(&generation) {
                 return Err(DomainError::chat(
@@ -5225,7 +5210,7 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let owner = owner_user_id;
         let bid = bookmark_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             let current = require_bookmark(tx, &ws, &owner, &bid)?;
             if let Some((projection_object_id, projection_path)) = &projection_identity
                 && current.generation == generation
@@ -5290,7 +5275,7 @@ impl<'a> LinkedChatStore<'a> {
             "workspace_id must not be empty",
         )?;
         let verified_user_id = normalize_verified_user_id(verified_user_id)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(workspace_id, faults, |tx| {
             let prior: Option<i64> = tx
                 .query_row(
                     "SELECT max_created_at_ms FROM chat_dispatch_scan_cursor \
@@ -5365,7 +5350,7 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let trigger = normalize_dispatch_id(trigger_message_id, "Trigger message id is invalid.")?;
         let tid = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             let inserted = tx
                 .execute(
                     "INSERT INTO chat_dispatch_ledger \
@@ -5418,7 +5403,7 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let cmd = normalize_dispatch_command(command)?;
         let log = normalize_optional_dispatch_path(log_path)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             // A response can be lost after commit. Recover that exact durable
             // claim before the workspace-wide single-flight guard rejects it.
             if let Some(existing) = running_dispatch_claim(tx, &ws, &run)? {
@@ -5877,7 +5862,7 @@ impl<'a> LinkedChatStore<'a> {
         let workspace_id = workspace_id.to_owned();
         let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
         let reason = normalize_failure_reason(reason)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let changed = tx
                 .execute(
                     "UPDATE chat_dispatch_ledger SET state = 'failed', failure_reason = ?3, \
@@ -5901,7 +5886,7 @@ impl<'a> LinkedChatStore<'a> {
         let workspace_id = workspace_id.to_owned();
         let message_id = normalize_dispatch_id(message_id, "Message id is invalid.")?;
         let run_id = normalize_dispatch_run_id(run_id)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let runs = run_rows_by_global_id(tx, &run_id)?;
             if runs.len() > 1 {
                 return Err(dispatch_corrupt());
@@ -5958,7 +5943,7 @@ impl<'a> LinkedChatStore<'a> {
         } else {
             None
         };
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             tx.execute(
                 "INSERT INTO chat_dispatch_pause \
                  (workspace_id, thread_id, paused, reason, updated_at_ms) \
@@ -5988,7 +5973,7 @@ impl<'a> LinkedChatStore<'a> {
     ) -> Result<AgentRunRecord, DomainError> {
         let workspace_id = workspace_id.to_owned();
         let run_id = normalize_dispatch_run_id(run_id)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let mut runs = run_rows_by_global_id(tx, &run_id)?;
             if runs.len() > 1 {
                 return Err(dispatch_corrupt());
@@ -6027,7 +6012,7 @@ impl<'a> LinkedChatStore<'a> {
         let trigger_message_id =
             normalize_dispatch_id(trigger_message_id, "Trigger message id is invalid.")?;
         let run_id = normalize_dispatch_run_id(run_id)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let ended_at_ms: Option<Option<i64>> = tx
                 .query_row(
                     "SELECT ended_at_ms FROM agent_run_records \
@@ -6185,7 +6170,7 @@ impl<'a> LinkedChatStore<'a> {
         let run = normalize_dispatch_run_id(run_id)?;
         let workspace_id = workspace_id.to_owned();
         let reason = reason.map(str::to_owned);
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let Some((trigger, ended, ledger_state)) =
                 dispatch_run_context(tx, &workspace_id, &run)?
             else {
@@ -6264,7 +6249,7 @@ impl<'a> LinkedChatStore<'a> {
         faults: &dyn FaultInjector,
     ) -> Result<Vec<String>, DomainError> {
         let ws = workspace_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             // Snapshot the running rows first (can't mutate while iterating).
             let running: Vec<(String, i64, Option<String>)> = {
                 let mut stmt = tx
@@ -6635,16 +6620,49 @@ fn hydrate_message_attachments(
     Ok(())
 }
 
-/// Whether a `(created_at_ms, message_id)` coordinate names a message currently
-/// visible to `owner_user_id` under the personal-feed predicate. Used to gate
-/// `mark_feed_seen` so receiver-private read state can't skip past unseen items.
-fn feed_coordinate_visible(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedCoordinateResolution {
+    Visible,
+    Missing,
+    Disallowed,
+}
+
+/// Resolve a feed coordinate separately from its receiver-private visibility.
+pub fn resolve_feed_coordinate(
     conn: &Connection,
     workspace_id: &str,
     owner_user_id: &str,
     created_at_ms: i64,
     message_id: &str,
-) -> Result<bool, DomainError> {
+) -> Result<FeedCoordinateResolution, DomainError> {
+    let target: Option<(i64, Option<String>, Option<String>, bool)> = conn
+        .query_row(
+            "SELECT m.created_at_ms,t.channel_id,c.kind,EXISTS( \
+               SELECT 1 FROM chat_channel_placeholders p \
+               WHERE p.workspace_id=t.workspace_id AND p.channel_id=t.channel_id) \
+             FROM chat_messages m \
+             JOIN chat_threads t \
+               ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id \
+             LEFT JOIN chat_channels c \
+               ON c.workspace_id=t.workspace_id AND c.channel_id=t.channel_id \
+             WHERE m.workspace_id = ?1 AND m.message_id = ?2",
+            params![workspace_id, message_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((stored_created_at_ms, channel_id, channel_kind, placeholder)) = target else {
+        return Ok(FeedCoordinateResolution::Missing);
+    };
+    if stored_created_at_ms != created_at_ms {
+        return Ok(FeedCoordinateResolution::Disallowed);
+    }
+    if channel_id.is_some() && (channel_kind.is_none() || placeholder) {
+        return Ok(FeedCoordinateResolution::Missing);
+    }
+    if channel_kind.as_deref() == Some("dm") {
+        return Ok(FeedCoordinateResolution::Disallowed);
+    }
     let found: Option<i64> = conn
         .query_row(
             FEED_COORDINATE_VISIBLE_SQL,
@@ -6653,7 +6671,754 @@ fn feed_coordinate_visible(
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    Ok(found.is_some())
+    Ok(if found.is_some() {
+        FeedCoordinateResolution::Visible
+    } else {
+        FeedCoordinateResolution::Missing
+    })
+}
+
+/// Whether a `(created_at_ms, message_id)` coordinate names a message currently
+/// visible to `owner_user_id` under the personal-feed predicate. Used to gate
+/// `mark_feed_seen` so receiver-private state cannot skip past unseen items.
+pub fn feed_coordinate_visible(
+    conn: &Connection,
+    workspace_id: &str,
+    owner_user_id: &str,
+    created_at_ms: i64,
+    message_id: &str,
+) -> Result<bool, DomainError> {
+    Ok(
+        resolve_feed_coordinate(conn, workspace_id, owner_user_id, created_at_ms, message_id)?
+            == FeedCoordinateResolution::Visible,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowTargetResolution {
+    Followable,
+    Missing,
+    Disallowed,
+}
+
+/// Resolve a follow target separately from the local DM-visibility rule.
+pub fn resolve_follow_target(
+    conn: &Connection,
+    workspace_id: &str,
+    target_kind: FollowTargetKind,
+    target_id: &str,
+) -> Result<FollowTargetResolution, DomainError> {
+    match target_kind {
+        FollowTargetKind::Channel => {
+            let target: Option<(String, bool)> = conn
+                .query_row(
+                    "SELECT c.kind, EXISTS( \
+                       SELECT 1 FROM chat_channel_placeholders p \
+                       WHERE p.workspace_id = c.workspace_id AND p.channel_id = c.channel_id) \
+                     FROM chat_channel_wire_ids w \
+                     JOIN chat_channels c \
+                       ON c.workspace_id = w.workspace_id AND c.channel_id = w.channel_id \
+                     WHERE w.workspace_id = ?1 AND w.wire_id = ?2",
+                    params![workspace_id, target_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            match target {
+                None | Some((_, true)) => return Ok(FollowTargetResolution::Missing),
+                Some((kind, false)) if kind == "dm" => {
+                    return Ok(FollowTargetResolution::Disallowed);
+                }
+                Some(_) => {}
+            }
+        }
+        FollowTargetKind::Thread => {
+            let target: Option<(Option<String>, Option<String>, bool)> = conn
+                .query_row(
+                    "SELECT t.channel_id, c.kind, EXISTS( \
+                       SELECT 1 FROM chat_channel_placeholders p \
+                       WHERE p.workspace_id = t.workspace_id AND p.channel_id = t.channel_id) \
+                     FROM chat_threads t \
+                     LEFT JOIN chat_channels c \
+                       ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                     WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
+                    params![workspace_id, target_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            match target {
+                None => return Ok(FollowTargetResolution::Missing),
+                Some((Some(_), None, _)) | Some((Some(_), Some(_), true)) => {
+                    return Ok(FollowTargetResolution::Missing);
+                }
+                Some((Some(_), Some(kind), false)) if kind == "dm" => {
+                    return Ok(FollowTargetResolution::Disallowed);
+                }
+                Some(_) => {}
+            }
+        }
+        FollowTargetKind::Person | FollowTargetKind::Agent => {
+            let author_kind = match target_kind {
+                FollowTargetKind::Agent => "agent",
+                FollowTargetKind::Person => "human",
+                _ => unreachable!(),
+            };
+            let followable: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) \
+                     FROM chat_messages m \
+                     JOIN chat_threads t \
+                       ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id \
+                     LEFT JOIN chat_channels c \
+                       ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                     LEFT JOIN chat_channel_placeholders p \
+                       ON p.workspace_id = t.workspace_id AND p.channel_id = t.channel_id \
+                     WHERE m.workspace_id = ?1 AND m.author_user_id = ?2 \
+                       AND m.author_kind = ?3 \
+                       AND (t.channel_id IS NULL OR \
+                         (c.kind <> 'dm' AND p.channel_id IS NULL))",
+                    params![workspace_id, target_id, author_kind],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if followable > 0 {
+                return Ok(FollowTargetResolution::Followable);
+            }
+            return Ok(FollowTargetResolution::Missing);
+        }
+    }
+    Ok(FollowTargetResolution::Followable)
+}
+
+/// Apply the local follow-target existence and DM-visibility rule.
+pub fn validate_follow_target(
+    conn: &Connection,
+    workspace_id: &str,
+    target_kind: FollowTargetKind,
+    target_id: &str,
+) -> Result<(), DomainError> {
+    if resolve_follow_target(conn, workspace_id, target_kind, target_id)?
+        != FollowTargetResolution::Followable
+    {
+        return Err(DomainError::chat(
+            "invalid-follow-target",
+            "Follow target is not followable.",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingFollowSet {
+    owner_user_id: String,
+    target_kind: String,
+    target_id: String,
+    state: String,
+    at_ms: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingFeedReadSet {
+    owner_user_id: String,
+    last_seen_created_at_ms: i64,
+    last_seen_message_id: String,
+    at_ms: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingAttachmentAdd {
+    attachment_id: String,
+    thread_id: String,
+    message_id: String,
+    object_id: Option<String>,
+    path_hint: Option<String>,
+    heading_text: Option<String>,
+    heading_anchor: Option<String>,
+    heading_occurrence: Option<i64>,
+    created_at_ms: i64,
+}
+
+#[derive(Debug)]
+struct PendingChatOperation {
+    origin_id: String,
+    origin_seq: i64,
+    op_kind: String,
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PendingChatDependency {
+    kind: &'static str,
+    id: String,
+}
+
+enum PendingReplayOutcome {
+    Applied,
+    Deferred,
+    Refused,
+}
+
+/// Replay only parked chat coordinates whose dependency was changed by one
+/// authoritative local or imported mutation.
+pub fn replay_pending_chat_coordinates_for_change(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    op_kind: &str,
+    payload: &serde_json::Value,
+) -> Result<(), DomainError> {
+    let mut dependencies = changed_chat_dependencies(tx, workspace_id, op_kind, payload)?;
+    while let Some(dependency) = dependencies.pop() {
+        let pending = pending_chat_operations(tx, workspace_id, &dependency)?;
+        for operation in pending {
+            tx.execute(
+                "DELETE FROM chat_pending_replication \
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![workspace_id, operation.origin_id, operation.origin_seq],
+            )
+            .map_err(DomainError::sql_persist)?;
+            if matches!(
+                replay_pending_chat_operation(tx, workspace_id, &operation)?,
+                PendingReplayOutcome::Applied
+            ) {
+                dependencies.extend(changed_chat_dependencies(
+                    tx,
+                    workspace_id,
+                    &operation.op_kind,
+                    &operation.payload,
+                )?);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Re-evaluate every parked coordinate in one workspace against the committed
+/// row state visible in the caller's transaction. Domain write boundaries use
+/// this after their mutation, so non-journal writers cannot omit a wake-up.
+pub fn replay_ready_pending_chat_coordinates(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<(), DomainError> {
+    let has_pending: bool = tx
+        .query_row(PENDING_CHAT_WORKSPACE_EXISTS_SQL, [workspace_id], |row| {
+            row.get(0)
+        })
+        .map_err(DomainError::sql_corrupt)?;
+    if !has_pending {
+        return Ok(());
+    }
+
+    loop {
+        let pending = pending_chat_operations_for_workspace(tx, workspace_id)?;
+        let mut applied = false;
+        for operation in pending {
+            match replay_pending_chat_operation(tx, workspace_id, &operation)? {
+                PendingReplayOutcome::Deferred => {}
+                PendingReplayOutcome::Applied => {
+                    delete_pending_chat_operation(tx, workspace_id, &operation)?;
+                    applied = true;
+                }
+                PendingReplayOutcome::Refused => {
+                    delete_pending_chat_operation(tx, workspace_id, &operation)?;
+                }
+            }
+        }
+        if !applied {
+            return Ok(());
+        }
+    }
+}
+
+fn pending_chat_operations_for_workspace(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<Vec<PendingChatOperation>, DomainError> {
+    let mut stmt = tx
+        .prepare(
+            "SELECT log.origin_id,log.origin_seq,log.op_kind,log.payload_json \
+             FROM chat_pending_replication pending \
+             JOIN replication_log log \
+               ON log.workspace_id=pending.workspace_id \
+              AND log.origin_id=pending.origin_id \
+              AND log.origin_seq=pending.origin_seq \
+             WHERE pending.workspace_id=?1 \
+             ORDER BY log.recorded_at_ms,log.origin_id,log.origin_seq",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map([workspace_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(DomainError::sql_corrupt)?;
+    let mut operations = Vec::new();
+    for row in rows {
+        let (origin_id, origin_seq, op_kind, payload_json) =
+            row.map_err(DomainError::sql_corrupt)?;
+        let payload =
+            serde_json::from_str(&payload_json).map_err(|_| DomainError::StateCorrupt {
+                reason: "pending chat replication payload is corrupt",
+            })?;
+        operations.push(PendingChatOperation {
+            origin_id,
+            origin_seq,
+            op_kind,
+            payload,
+        });
+    }
+    Ok(operations)
+}
+
+fn delete_pending_chat_operation(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    operation: &PendingChatOperation,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "DELETE FROM chat_pending_replication \
+         WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+        params![workspace_id, operation.origin_id, operation.origin_seq],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+fn pending_chat_operations(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    dependency: &PendingChatDependency,
+) -> Result<Vec<PendingChatOperation>, DomainError> {
+    let mut stmt = tx
+        .prepare(
+            "SELECT log.origin_id,log.origin_seq,log.op_kind,log.payload_json \
+             FROM chat_pending_replication pending \
+             JOIN replication_log log \
+               ON log.workspace_id=pending.workspace_id \
+              AND log.origin_id=pending.origin_id \
+              AND log.origin_seq=pending.origin_seq \
+             WHERE pending.workspace_id=?1 \
+               AND pending.dependency_kind=?2 AND pending.dependency_id=?3 \
+             ORDER BY log.recorded_at_ms,log.origin_id,log.origin_seq",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, dependency.kind, dependency.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let mut operations = Vec::new();
+    for row in rows {
+        let (origin_id, origin_seq, op_kind, payload_json) =
+            row.map_err(DomainError::sql_corrupt)?;
+        let payload =
+            serde_json::from_str(&payload_json).map_err(|_| DomainError::StateCorrupt {
+                reason: "pending chat replication payload is corrupt",
+            })?;
+        operations.push(PendingChatOperation {
+            origin_id,
+            origin_seq,
+            op_kind,
+            payload,
+        });
+    }
+    Ok(operations)
+}
+
+fn replay_pending_chat_operation(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    operation: &PendingChatOperation,
+) -> Result<PendingReplayOutcome, DomainError> {
+    match operation.op_kind.as_str() {
+        "chat.follow.set" => {
+            let payload: PendingFollowSet = serde_json::from_value(operation.payload.clone())
+                .map_err(|_| DomainError::StateCorrupt {
+                    reason: "pending chat follow payload is corrupt",
+                })?;
+            let target_kind = match payload.target_kind.as_str() {
+                "person" => FollowTargetKind::Person,
+                "agent" => FollowTargetKind::Agent,
+                "channel" => FollowTargetKind::Channel,
+                "thread" => FollowTargetKind::Thread,
+                _ => {
+                    return Ok(PendingReplayOutcome::Refused);
+                }
+            };
+            match resolve_follow_target(tx, workspace_id, target_kind, &payload.target_id)? {
+                FollowTargetResolution::Missing => {
+                    park_pending_chat_operation(
+                        tx,
+                        workspace_id,
+                        operation,
+                        "follow-target",
+                        &payload.target_id,
+                    )?;
+                    Ok(PendingReplayOutcome::Deferred)
+                }
+                FollowTargetResolution::Disallowed => Ok(PendingReplayOutcome::Refused),
+                FollowTargetResolution::Followable => {
+                    tx.execute(
+                        "INSERT INTO chat_follows \
+                         (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8) \
+                         ON CONFLICT(workspace_id,owner_user_id,target_kind,target_id) DO UPDATE SET \
+                           state=excluded.state,updated_at_ms=excluded.updated_at_ms, \
+                           origin_id=excluded.origin_id,origin_seq=excluded.origin_seq \
+                         WHERE (excluded.updated_at_ms, excluded.state, excluded.origin_id, excluded.origin_seq) > \
+                               (updated_at_ms, state, origin_id, origin_seq)",
+                        params![
+                            workspace_id,
+                            payload.owner_user_id,
+                            payload.target_kind,
+                            payload.target_id,
+                            payload.state,
+                            payload.at_ms,
+                            operation.origin_id,
+                            operation.origin_seq
+                        ],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                    Ok(PendingReplayOutcome::Applied)
+                }
+            }
+        }
+        "chat.feed.read.set" => {
+            let payload: PendingFeedReadSet = serde_json::from_value(operation.payload.clone())
+                .map_err(|_| DomainError::StateCorrupt {
+                    reason: "pending chat feed-read payload is corrupt",
+                })?;
+            match resolve_feed_coordinate(
+                tx,
+                workspace_id,
+                &payload.owner_user_id,
+                payload.last_seen_created_at_ms,
+                &payload.last_seen_message_id,
+            )? {
+                FeedCoordinateResolution::Missing => {
+                    park_pending_chat_operation(
+                        tx,
+                        workspace_id,
+                        operation,
+                        "feed-message",
+                        &payload.last_seen_message_id,
+                    )?;
+                    Ok(PendingReplayOutcome::Deferred)
+                }
+                FeedCoordinateResolution::Disallowed => Ok(PendingReplayOutcome::Refused),
+                FeedCoordinateResolution::Visible => {
+                    tx.execute(
+                        "INSERT INTO chat_feed_read_state \
+                         (workspace_id,owner_user_id,last_seen_created_at_ms,last_seen_message_id,updated_at_ms,origin_id,origin_seq) \
+                         VALUES (?1,?2,?3,?4,?5,?6,?7) \
+                         ON CONFLICT(workspace_id,owner_user_id) DO UPDATE SET \
+                           last_seen_created_at_ms=excluded.last_seen_created_at_ms, \
+                           last_seen_message_id=excluded.last_seen_message_id, \
+                           updated_at_ms=excluded.updated_at_ms,origin_id=excluded.origin_id, \
+                           origin_seq=excluded.origin_seq \
+                         WHERE (excluded.last_seen_created_at_ms, excluded.last_seen_message_id, \
+                                excluded.updated_at_ms, excluded.origin_id, excluded.origin_seq) > \
+                               (last_seen_created_at_ms, last_seen_message_id, updated_at_ms, \
+                                origin_id, origin_seq)",
+                        params![
+                            workspace_id,
+                            payload.owner_user_id,
+                            payload.last_seen_created_at_ms,
+                            payload.last_seen_message_id,
+                            payload.at_ms,
+                            operation.origin_id,
+                            operation.origin_seq
+                        ],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                    Ok(PendingReplayOutcome::Applied)
+                }
+            }
+        }
+        "chat.attachment.add" => {
+            let payload: PendingAttachmentAdd = serde_json::from_value(operation.payload.clone())
+                .map_err(|_| DomainError::StateCorrupt {
+                reason: "pending chat attachment payload is corrupt",
+            })?;
+            match resolve_thread_message(tx, workspace_id, &payload.thread_id, &payload.message_id)?
+            {
+                ThreadMessageResolution::Missing => {
+                    park_pending_chat_operation(
+                        tx,
+                        workspace_id,
+                        operation,
+                        "attachment-message",
+                        &payload.message_id,
+                    )?;
+                    Ok(PendingReplayOutcome::Deferred)
+                }
+                ThreadMessageResolution::DifferentThread => Ok(PendingReplayOutcome::Refused),
+                ThreadMessageResolution::Present => {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO chat_attachments \
+                         (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id, \
+                          path_hint,heading_text,heading_anchor,heading_occurrence,created_at_ms) \
+                         VALUES (?1,?2,?3,?4,'file',?5,?6,?7,?8,?9,?10)",
+                        params![
+                            workspace_id,
+                            payload.attachment_id,
+                            payload.thread_id,
+                            payload.message_id,
+                            payload.object_id,
+                            payload.path_hint,
+                            payload.heading_text,
+                            payload.heading_anchor,
+                            payload.heading_occurrence,
+                            payload.created_at_ms
+                        ],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                    mark_live_bookmarks_pending(
+                        tx,
+                        workspace_id,
+                        &payload.thread_id,
+                        payload.created_at_ms,
+                    )?;
+                    Ok(PendingReplayOutcome::Applied)
+                }
+            }
+        }
+        _ => Ok(PendingReplayOutcome::Refused),
+    }
+}
+
+fn park_pending_chat_operation(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    operation: &PendingChatOperation,
+    dependency_kind: &'static str,
+    dependency_id: &str,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO chat_pending_replication \
+         (workspace_id,origin_id,origin_seq,dependency_kind,dependency_id) \
+         VALUES (?1,?2,?3,?4,?5)",
+        params![
+            workspace_id,
+            operation.origin_id,
+            operation.origin_seq,
+            dependency_kind,
+            dependency_id
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+fn changed_chat_dependencies(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    op_kind: &str,
+    payload: &serde_json::Value,
+) -> Result<Vec<PendingChatDependency>, DomainError> {
+    let mut dependencies = Vec::new();
+    match op_kind {
+        "chat.channel.create" => {
+            let wire_id = payload
+                .get("wireId")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| payload.get("channelId").and_then(serde_json::Value::as_str));
+            let Some(wire_id) = wire_id else {
+                return Ok(dependencies);
+            };
+            dependencies.push(PendingChatDependency {
+                kind: "follow-target",
+                id: wire_id.to_owned(),
+            });
+            let channel_id: Option<String> = tx
+                .query_row(
+                    "SELECT channel_id FROM chat_channel_wire_ids \
+                     WHERE workspace_id=?1 AND wire_id=?2",
+                    params![workspace_id, wire_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if let Some(channel_id) = channel_id {
+                collect_dependency_ids(
+                    tx,
+                    "SELECT thread_id FROM chat_threads \
+                     WHERE workspace_id=?1 AND channel_id=?2",
+                    workspace_id,
+                    &channel_id,
+                    "follow-target",
+                    &mut dependencies,
+                )?;
+                collect_dependency_ids(
+                    tx,
+                    "SELECT DISTINCT m.author_user_id FROM chat_messages m \
+                     JOIN chat_threads t \
+                       ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id \
+                     WHERE m.workspace_id=?1 AND t.channel_id=?2 \
+                       AND m.author_user_id IS NOT NULL",
+                    workspace_id,
+                    &channel_id,
+                    "follow-target",
+                    &mut dependencies,
+                )?;
+                collect_dependency_ids(
+                    tx,
+                    "SELECT m.message_id FROM chat_messages m \
+                     JOIN chat_threads t \
+                       ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id \
+                     WHERE m.workspace_id=?1 AND t.channel_id=?2",
+                    workspace_id,
+                    &channel_id,
+                    "feed-message",
+                    &mut dependencies,
+                )?;
+            }
+        }
+        "chat.thread.create" => {
+            if let Some(thread_id) = payload.get("threadId").and_then(serde_json::Value::as_str) {
+                dependencies.push(PendingChatDependency {
+                    kind: "follow-target",
+                    id: thread_id.to_owned(),
+                });
+            }
+        }
+        "chat.message.append" => {
+            if let Some(message_id) = payload.get("messageId").and_then(serde_json::Value::as_str) {
+                for kind in ["feed-message", "attachment-message"] {
+                    dependencies.push(PendingChatDependency {
+                        kind,
+                        id: message_id.to_owned(),
+                    });
+                }
+            }
+            if let Some(author_user_id) = payload
+                .get("authorUserId")
+                .and_then(serde_json::Value::as_str)
+            {
+                dependencies.push(PendingChatDependency {
+                    kind: "follow-target",
+                    id: author_user_id.to_owned(),
+                });
+            }
+        }
+        "chat.follow.set" => {
+            let payload: PendingFollowSet = match serde_json::from_value(payload.clone()) {
+                Ok(payload) => payload,
+                Err(_) => return Ok(dependencies),
+            };
+            let state: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM chat_follows \
+                     WHERE workspace_id=?1 AND owner_user_id=?2 \
+                       AND target_kind=?3 AND target_id=?4",
+                    params![
+                        workspace_id,
+                        payload.owner_user_id,
+                        payload.target_kind,
+                        payload.target_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if state.as_deref() == Some("following") {
+                collect_feed_dependencies_for_follow(
+                    tx,
+                    workspace_id,
+                    &payload,
+                    &mut dependencies,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(dependencies)
+}
+
+fn collect_dependency_ids(
+    tx: &Transaction<'_>,
+    sql: &str,
+    workspace_id: &str,
+    changed_id: &str,
+    dependency_kind: &'static str,
+    dependencies: &mut Vec<PendingChatDependency>,
+) -> Result<(), DomainError> {
+    let mut stmt = tx.prepare(sql).map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(params![workspace_id, changed_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(DomainError::sql_corrupt)?;
+    for row in rows {
+        dependencies.push(PendingChatDependency {
+            kind: dependency_kind,
+            id: row.map_err(DomainError::sql_corrupt)?,
+        });
+    }
+    Ok(())
+}
+
+fn collect_feed_dependencies_for_follow(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    follow: &PendingFollowSet,
+    dependencies: &mut Vec<PendingChatDependency>,
+) -> Result<(), DomainError> {
+    let target_clause = match follow.target_kind.as_str() {
+        "person" => "m.author_kind='human' AND m.author_user_id=?3",
+        "agent" => "m.author_kind='agent' AND m.author_user_id=?3",
+        "thread" => "m.thread_id=?3",
+        "channel" => {
+            "EXISTS (SELECT 1 FROM chat_channel_wire_ids w \
+               WHERE w.workspace_id=m.workspace_id AND w.channel_id=t.channel_id AND w.wire_id=?3) \
+             AND m.message_id=(SELECT first.message_id FROM chat_messages first \
+               WHERE first.workspace_id=m.workspace_id AND first.thread_id=m.thread_id \
+               ORDER BY first.created_at_ms,first.message_id LIMIT 1)"
+        }
+        _ => return Ok(()),
+    };
+    let sql = format!(
+        "SELECT pending.dependency_id \
+         FROM chat_pending_replication pending \
+         JOIN replication_log log \
+           ON log.workspace_id=pending.workspace_id \
+          AND log.origin_id=pending.origin_id AND log.origin_seq=pending.origin_seq \
+         JOIN chat_messages m \
+           ON m.workspace_id=pending.workspace_id AND m.message_id=pending.dependency_id \
+         JOIN chat_threads t \
+           ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id \
+         WHERE pending.workspace_id=?1 AND pending.dependency_kind='feed-message' \
+           AND json_extract(log.payload_json,'$.ownerUserId')=?2 AND {target_clause}"
+    );
+    let mut stmt = tx.prepare(&sql).map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, follow.owner_user_id, follow.target_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    for row in rows {
+        dependencies.push(PendingChatDependency {
+            kind: "feed-message",
+            id: row.map_err(DomainError::sql_corrupt)?,
+        });
+    }
+    Ok(())
 }
 
 fn insert_channel(
@@ -6777,21 +7542,47 @@ fn require_thread(
     .ok_or_else(|| DomainError::chat("thread-not-found", "Chat thread was not found."))
 }
 
-fn thread_has_message(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadMessageResolution {
+    Present,
+    Missing,
+    DifferentThread,
+}
+
+/// Resolve a workspace-scoped message separately from its thread ownership.
+pub fn resolve_thread_message(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> Result<ThreadMessageResolution, DomainError> {
+    let found_thread_id: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM chat_messages \
+             WHERE workspace_id = ?1 AND message_id = ?2",
+            params![workspace_id, message_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(match found_thread_id {
+        None => ThreadMessageResolution::Missing,
+        Some(found_thread_id) if found_thread_id == thread_id => ThreadMessageResolution::Present,
+        Some(_) => ThreadMessageResolution::DifferentThread,
+    })
+}
+
+/// Whether a message belongs to the named workspace-scoped chat thread.
+pub fn thread_has_message(
     conn: &Connection,
     workspace_id: &str,
     thread_id: &str,
     message_id: &str,
 ) -> Result<bool, DomainError> {
-    let found: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
-            params![workspace_id, thread_id, message_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    Ok(found.is_some())
+    Ok(
+        resolve_thread_message(conn, workspace_id, thread_id, message_id)?
+            == ThreadMessageResolution::Present,
+    )
 }
 
 fn next_message_order(
@@ -7199,7 +7990,8 @@ fn journal_local_op_in_tx(
         op_kind,
         payload,
         recorded_at_ms,
-    )
+    )?;
+    replay_pending_chat_coordinates_for_change(tx, workspace_id, op_kind, payload)
 }
 
 fn require_feed_read_state(

@@ -83,6 +83,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "chat_decisions",
     "chat_attachments",
     "chat_pending_message_parents",
+    "chat_pending_replication",
     "chat_agent_read_state",
     "chat_mentions",
     "chat_follows",
