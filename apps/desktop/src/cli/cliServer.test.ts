@@ -249,13 +249,19 @@ describe("CLI socket server", () => {
       const code = typeof error === "object" && error !== null && "code" in error
         ? error.code
         : undefined;
-      if (process.env.CODEX_SANDBOX_NETWORK_DISABLED !== "1" || code !== "EPERM") {
+      const sandboxDenied =
+        process.env.CODEX_SANDBOX_NETWORK_DISABLED === "1" && code === "EPERM";
+      // Node on win32 cannot listen on an AF_UNIX filesystem path (the CLI
+      // server is unix-only; startCliServer guards win32 and the suite forces
+      // platform "linux" to reach the real listener).
+      const win32NoAfUnix = process.platform === "win32" && code === "EACCES";
+      if (!sandboxDenied && !win32NoAfUnix) {
         throw error;
       }
-      // The managed test sandbox forbids every listener, including AF_UNIX.
-      // State/token setup already ran before listen failed. Run requests
-      // through the exact authenticated line handler so command/store
-      // coverage remains live.
+      // No listener is available here (sandbox forbids every listener; win32
+      // lacks AF_UNIX). State/token setup already ran before listen failed.
+      // Run requests through the exact authenticated line handler so
+      // command/store coverage remains live.
       server = null;
       token = "a".repeat(64);
     }

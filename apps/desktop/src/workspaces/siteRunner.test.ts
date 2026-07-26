@@ -209,7 +209,12 @@ describe("startSiteDevServer", () => {
     const elapsed = Date.now() - startedAt;
 
     // Reject waited for the delayed exit; without the fix it fires at ~150ms.
-    expect(elapsed).toBeGreaterThanOrEqual(readyTimeoutMs + sigtermExitDelayMs - 100);
+    // On win32 SIGTERM is forceful termination — the child's delayed-exit
+    // handler never runs, so the delay is unobservable; the pid liveness
+    // check below still verifies the child is down before rejection.
+    if (process.platform !== "win32") {
+      expect(elapsed).toBeGreaterThanOrEqual(readyTimeoutMs + sigtermExitDelayMs - 100);
+    }
 
     // And the child is confirmed down by the time the rejection surfaces.
     const pid = Number((await readFile(pidFile, "utf8")).trim());
