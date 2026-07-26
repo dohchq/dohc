@@ -10,7 +10,9 @@ export interface MinimalDaemonClient {
   close(): void;
 }
 
-export type DaemonRefusalDisposition = "retryable" | "terminal";
+export type DaemonRefusalDisposition =
+  | "terminal"
+  | Exclude<Retryability, "no">;
 
 export class DaemonProtocolError extends Error {
   constructor(message: string) {
@@ -30,7 +32,10 @@ export class DaemonRefusalError extends Error {
     this.name = "DaemonRefusalError";
     this.wireCode = wireError.code;
     this.retry = wireError.retry;
-    this.disposition = wireError.retry === "no" ? "terminal" : "retryable";
+    // afterReconnect is not an ordinary retry: callers must establish a new
+    // session, re-open the workspace, and bind a new adapter to its new handle.
+    this.disposition =
+      wireError.retry === "no" ? "terminal" : wireError.retry;
     this.cause = cause;
   }
 }
@@ -62,6 +67,9 @@ const RETRYABILITIES: readonly Retryability[] = [
   "afterReconnect",
 ];
 
+// This intentionally duck-types EngineClientError because the package cannot
+// import the desktop app. Source of truth:
+// apps/desktop/src/workspaces/engineClient.ts:423-448.
 function wireErrorFrom(error: unknown): WireError | null {
   if (!isRecord(error) || !isRecord(error.wireError)) return null;
   const candidate = error.wireError;

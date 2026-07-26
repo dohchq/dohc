@@ -242,6 +242,24 @@ const bookmark = {
   createdAtMs: 1,
   updatedAtMs: 2,
 };
+const dispatch = {
+  workspaceId: "workspace",
+  triggerMessageId: "trigger",
+  threadId: "thread",
+  state: "pending",
+  attemptCount: 0,
+  createdAtMs: 1,
+  updatedAtMs: 2,
+};
+const run = {
+  workspaceId: "workspace",
+  runId: "run",
+  threadId: "thread",
+  triggerMessageId: "trigger",
+  command: "codex",
+  startedAtMs: 3,
+  failureNotePosted: false,
+};
 
 const NEW_DECODER_CASES: Array<{
   method: ChatsMethod;
@@ -276,12 +294,130 @@ const NEW_DECODER_CASES: Array<{
   { method: CHATS_METHOD.dispatchFail, valid: { failed: true } },
 ];
 
+function renameField(
+  value: { [key: string]: JsonValue | undefined },
+  from: string,
+  to: string,
+): JsonValue {
+  const renamed = { ...value };
+  renamed[to] = renamed[from];
+  delete renamed[from];
+  return renamed;
+}
+
+const STRICT_NEGATIVE_CASES: Array<{
+  method: ChatsMethod;
+  wrongFieldName: JsonValue;
+  wrongEnumSpelling: JsonValue;
+}> = [
+  {
+    method: CHATS_METHOD.channelCreate,
+    wrongFieldName: renameField(channel, "channelId", "channel_id"),
+    wrongEnumSpelling: { ...channel, kind: "Channel" },
+  },
+  {
+    method: CHATS_METHOD.messageSend,
+    wrongFieldName: renameField(message, "createdAtMs", "created_at_ms"),
+    wrongEnumSpelling: {
+      ...message,
+      author: { ...message.author, kind: "Human" },
+    },
+  },
+  {
+    method: CHATS_METHOD.decisionResolve,
+    wrongFieldName: renameField(
+      {
+        threadId: "thread",
+        messageId: "message",
+        state: "resolved",
+        resolvedByMessageId: "reply",
+        atMs: 3,
+      },
+      "resolvedByMessageId",
+      "resolved_by_message_id",
+    ),
+    wrongEnumSpelling: {
+      threadId: "thread",
+      messageId: "message",
+      state: "Resolved",
+      resolvedByMessageId: "reply",
+      atMs: 3,
+    },
+  },
+  {
+    method: CHATS_METHOD.reactionSet,
+    wrongFieldName: renameField(
+      {
+        reactionId: "reaction",
+        threadId: "thread",
+        messageId: "message",
+        emoji: "👍",
+        author: { authorId: "owner", kind: "human", displayName: "Ice" },
+        state: "added",
+        atMs: 3,
+      },
+      "reactionId",
+      "reaction_id",
+    ),
+    wrongEnumSpelling: {
+      reactionId: "reaction",
+      threadId: "thread",
+      messageId: "message",
+      emoji: "👍",
+      author: { authorId: "owner", kind: "human", displayName: "Ice" },
+      state: "Added",
+      atMs: 3,
+    },
+  },
+  {
+    method: CHATS_METHOD.followsSet,
+    wrongFieldName: renameField(follow, "ownerUserId", "owner_user_id"),
+    wrongEnumSpelling: { ...follow, state: "Following" },
+  },
+  {
+    method: CHATS_METHOD.bookmarkSave,
+    wrongFieldName: renameField(
+      bookmark,
+      "projectionState",
+      "projection_state",
+    ),
+    wrongEnumSpelling: { ...bookmark, projectionState: "Pending" },
+  },
+  {
+    method: CHATS_METHOD.dispatchListPending,
+    wrongFieldName: {
+      dispatches: [renameField(dispatch, "attemptCount", "attempt_count")],
+      nextCursor: null,
+    },
+    wrongEnumSpelling: {
+      dispatches: [{ ...dispatch, state: "Pending" }],
+      nextCursor: null,
+    },
+  },
+];
+
 function captureClient(requests: Request[]): MinimalDaemonClient {
   return {
     close: () => undefined,
     async sendRequest(request: Request): Promise<Response> {
       requests.push(request);
       throw SENTINEL;
+    },
+  };
+}
+
+function mockDaemon(
+  requests: Request[],
+  respond: (request: Request, index: number) => JsonValue | Promise<JsonValue>,
+): MinimalDaemonClient {
+  return {
+    close: () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      requests.push(request);
+      return {
+        id: request.id,
+        result: await respond(request, requests.length - 1),
+      };
     },
   };
 }
@@ -314,42 +450,311 @@ describe("ChatsLiveAdapter", () => {
     },
   );
 
-  it("maps retryable and terminal daemon refusals without losing wire metadata", async () => {
-    const refusalClient = (retry: "afterBackoff" | "no"): MinimalDaemonClient => ({
-      close: () => undefined,
-      async sendRequest(): Promise<Response> {
-        throw {
-          wireError: {
-            code: "OVERLOADED",
-            message: "busy",
-            retry,
+  it.each(STRICT_NEGATIVE_CASES)(
+    "rejects wrong field names and enum spellings for $method",
+    ({ method, wrongFieldName, wrongEnumSpelling }) => {
+      expect(() =>
+        decodeChatsResult(method as never, wrongFieldName),
+      ).toThrow(ChatsProtocolShapeError);
+      expect(() =>
+        decodeChatsResult(method as never, wrongEnumSpelling),
+      ).toThrow(ChatsProtocolShapeError);
+    },
+  );
+
+  it("maps thread wire records into store threads, including the documented linked-file substitution", async () => {
+    const requests: Request[] = [];
+    const adapter = new ChatsLiveAdapter(
+      mockDaemon(requests, () => ({
+        threads: [
+          {
+            workspaceId: "workspace",
+            threadId: "linked-thread",
+            title: "Linked",
+            createdAtMs: 11,
+            updatedAtMs: 12,
+            channelId: null,
+            linkedObjectId: "object-1",
           },
-        };
+          {
+            workspaceId: "workspace",
+            threadId: "channel-thread",
+            title: "Channel",
+            createdAtMs: 21,
+            updatedAtMs: 22,
+            channelId: "channel-1",
+            linkedObjectId: null,
+          },
+        ],
+        truncated: false,
+      })),
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+
+    const threads = await adapter.listThreads({ workspaceId: "workspace" });
+    expect(threads).toEqual([
+      {
+        id: "linked-thread",
+        workspaceId: "workspace",
+        title: "Linked",
+        createdAtMs: 11,
+        updatedAtMs: 12,
+        linkedFile: {
+          objectId: "object-1",
+          // thread_json has no linkedAtMs, so the adapter substitutes createdAtMs.
+          linkedAtMs: 11,
+        },
       },
+      {
+        id: "channel-thread",
+        workspaceId: "workspace",
+        title: "Channel",
+        createdAtMs: 21,
+        updatedAtMs: 22,
+        channelId: "channel-1",
+      },
+    ]);
+    expect(requests).toEqual([
+      {
+        id: 1,
+        method: CHATS_METHOD.threadsList,
+        workspace: WORKSPACE,
+        params: {},
+      },
+    ]);
+    expect(threads[0]?.linkedFile).not.toHaveProperty("pathHint");
+  });
+
+  it("attaches stable, per-operation idempotency keys to the two daemon-required methods", async () => {
+    const requests: Request[] = [];
+    let threadSequence = 0;
+    const adapter = new ChatsLiveAdapter(
+      mockDaemon(requests, (request) =>
+        request.method === CHATS_METHOD.threadCreate
+          ? {
+              id: (request.params as { threadId: string }).threadId,
+              workspaceId: "workspace",
+              title: "Thread",
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              linkedFile: { objectId: "object", linkedAtMs: 1 },
+            }
+          : bookmark,
+      ),
+      WORKSPACE,
+      {
+        workspaceId: "workspace",
+        createId: (kind) =>
+          kind === "thread"
+            ? `thread-${++threadSequence}`
+            : `${kind}-unused`,
+      },
+    );
+
+    await adapter.createThread({
+      workspaceId: "workspace",
+      title: "One",
+      linkedFile: { objectId: "object" },
+    });
+    await adapter.createThread({
+      workspaceId: "workspace",
+      title: "Two",
+      linkedFile: { objectId: "object" },
+    });
+    await adapter.markBookmarkPending({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      bookmarkId: "bookmark-1",
+    });
+    await adapter.markBookmarkPending({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      bookmarkId: "bookmark-1",
     });
 
-    await expect(
-      new ChatsLiveAdapter(refusalClient("afterBackoff"), WORKSPACE).request(
-        CHATS_METHOD.channelsList,
-        {},
-      ),
-    ).rejects.toMatchObject({
-      name: "DaemonRefusalError",
-      retry: "afterBackoff",
-      disposition: "retryable",
-      wireCode: "OVERLOADED",
-    } satisfies Partial<DaemonRefusalError>);
-    await expect(
-      new ChatsLiveAdapter(refusalClient("no"), WORKSPACE).request(
-        CHATS_METHOD.channelsList,
-        {},
-      ),
-    ).rejects.toMatchObject({
-      name: "DaemonRefusalError",
-      retry: "no",
-      disposition: "terminal",
-    } satisfies Partial<DaemonRefusalError>);
+    const keys = requests.map((request) => request.idempotencyKey);
+    expect(keys.slice(0, 2)).toEqual(["thread-1", "thread-2"]);
+    expect(keys[2]).toMatch(/^bookmark-1:pending:[0-9a-f-]{36}$/);
+    expect(keys[3]).toMatch(/^bookmark-1:pending:[0-9a-f-]{36}$/);
+    expect(requests[0]?.idempotencyKey).toBe(
+      (requests[0]?.params as { threadId: string }).threadId,
+    );
+    expect(requests[1]?.idempotencyKey).toBe(
+      (requests[1]?.params as { threadId: string }).threadId,
+    );
+    expect(keys[2]?.startsWith(
+      `${(requests[2]?.params as { bookmarkId: string }).bookmarkId}:pending:`,
+    )).toBe(true);
+    expect(keys[3]?.startsWith(
+      `${(requests[3]?.params as { bookmarkId: string }).bookmarkId}:pending:`,
+    )).toBe(true);
+    expect(new Set(keys).size).toBe(keys.length);
   });
+
+  it("assembles cursor pages, threads the cursor, and stops at null", async () => {
+    const requests: Request[] = [];
+    const first = { ...dispatch, triggerMessageId: "trigger-1" };
+    const second = { ...dispatch, triggerMessageId: "trigger-2" };
+    const adapter = new ChatsLiveAdapter(
+      mockDaemon(requests, (_request, index) =>
+        index === 0
+          ? { dispatches: [first], nextCursor: "page-2" }
+          : { dispatches: [second], nextCursor: null },
+      ),
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+
+    await expect(adapter.listPending("workspace")).resolves.toEqual([
+      first,
+      second,
+    ]);
+    expect(requests.map(({ method, params }) => ({ method, params }))).toEqual([
+      {
+        method: CHATS_METHOD.dispatchListPending,
+        params: { pageLimit: 500 },
+      },
+      {
+        method: CHATS_METHOD.dispatchListPending,
+        params: { pageLimit: 500, cursor: "page-2" },
+      },
+    ]);
+    expect(requests).toHaveLength(2);
+  });
+
+  it("fails closed when a cursorless named list is truncated", async () => {
+    const requests: Request[] = [];
+    const adapter = new ChatsLiveAdapter(
+      mockDaemon(requests, () => ({ threads: [], truncated: true })),
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+
+    await expect(
+      adapter.listThreads({ workspaceId: "workspace" }),
+    ).rejects.toThrow(
+      "chats.threads.list was truncated by the daemon and has no continuation cursor.",
+    );
+    expect(requests).toHaveLength(1);
+  });
+
+  it("reconstructs completeRun and failRun with an acknowledgement followed by getRunRecord", async () => {
+    const requests: Request[] = [];
+    const completedRun = { ...run, endedAtMs: 10, exitCode: 0 };
+    const failedRun = {
+      ...run,
+      runId: "failed-run",
+      endedAtMs: 12,
+      exitCode: 1,
+      failureReason: "failed",
+    };
+    const results: JsonValue[] = [
+      { completed: true },
+      completedRun,
+      { failed: true },
+      failedRun,
+    ];
+    const adapter = new ChatsLiveAdapter(
+      mockDaemon(requests, (_request, index) => results[index] ?? null),
+      WORKSPACE,
+    );
+
+    await expect(
+      adapter.completeRun({ runId: "run", exitCode: 0 }),
+    ).resolves.toEqual(completedRun);
+    await expect(
+      adapter.failRun({
+        runId: "failed-run",
+        exitCode: 1,
+        reason: "failed",
+      }),
+    ).resolves.toEqual(failedRun);
+    expect(requests.map(({ method, params }) => ({ method, params }))).toEqual([
+      {
+        method: CHATS_METHOD.dispatchComplete,
+        params: { runId: "run", exitCode: 0 },
+      },
+      {
+        method: CHATS_METHOD.dispatchGetRunRecord,
+        params: { runId: "run" },
+      },
+      {
+        method: CHATS_METHOD.dispatchFail,
+        params: { runId: "failed-run", exitCode: 1, reason: "failed" },
+      },
+      {
+        method: CHATS_METHOD.dispatchGetRunRecord,
+        params: { runId: "failed-run" },
+      },
+    ]);
+  });
+
+  it("passes claimNextPending logPath through verbatim with the generated run ID", async () => {
+    const requests: Request[] = [];
+    const adapter = new ChatsLiveAdapter(
+      mockDaemon(requests, () => null),
+      WORKSPACE,
+      {
+        workspaceId: "workspace",
+        createId: (kind) =>
+          kind === "run" ? "run-claim" : `${kind}-unused`,
+      },
+    );
+
+    // The desktop wrapper substitutes RUN_ID_LOG_TOKEN before calling this
+    // method (desktopAgentDispatchStore.ts:124-139). The call-site shard must
+    // preserve that indirection.
+    await expect(
+      adapter.claimNextPending("workspace", {
+        command: "codex",
+        logPath: "run-logs/{runId}.log",
+      }),
+    ).resolves.toBeNull();
+    expect(requests[0]).toMatchObject({
+      method: CHATS_METHOD.dispatchClaimNextPending,
+      params: {
+        runId: "run-claim",
+        command: "codex",
+        logPath: "run-logs/{runId}.log",
+      },
+    });
+  });
+
+  it.each([
+    ["no", "terminal"],
+    ["immediate", "immediate"],
+    ["afterBackoff", "afterBackoff"],
+    ["afterReconnect", "afterReconnect"],
+  ] as const)(
+    "maps the %s daemon refusal without losing wire metadata",
+    async (retry, disposition) => {
+      const refusalClient: MinimalDaemonClient = {
+        close: () => undefined,
+        async sendRequest(): Promise<Response> {
+          throw {
+            wireError: {
+              code: "OVERLOADED",
+              message: "busy",
+              retry,
+            },
+          };
+        },
+      };
+
+      await expect(
+        new ChatsLiveAdapter(refusalClient, WORKSPACE).request(
+          CHATS_METHOD.channelsList,
+          {},
+        ),
+      ).rejects.toMatchObject({
+        name: "DaemonRefusalError",
+        retry,
+        disposition,
+        wireCode: "OVERLOADED",
+      } satisfies Partial<DaemonRefusalError>);
+    },
+  );
 
   it("decodes loopback answers through the live adapter for an existing RPC path", async () => {
     const loopback = new ChatsLoopbackEngine();
@@ -361,10 +766,14 @@ describe("ChatsLiveAdapter", () => {
     const adapter = new ChatsLiveAdapter(
       { sendRequest: (request) => loopback.sendRequest(request), close: () => undefined },
       WORKSPACE,
+      { workspaceId: "workspace" },
     );
 
     await expect(
-      adapter.request(CHATS_METHOD.channelGetWireId, { channelId: "channel" }),
-    ).resolves.toEqual({ wireId: "channel" });
+      adapter.getChannelWireId({
+        workspaceId: "workspace",
+        channelId: "channel",
+      }),
+    ).resolves.toBe("channel");
   });
 });

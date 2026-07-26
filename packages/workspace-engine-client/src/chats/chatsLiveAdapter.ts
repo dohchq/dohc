@@ -693,7 +693,9 @@ export class ChatsLiveAdapter {
         ownerUserId: input.ownerUserId,
         bookmarkId: input.bookmarkId,
       },
-      { idempotencyKey: `${input.bookmarkId}:pending` },
+      {
+        idempotencyKey: `${input.bookmarkId}:pending:${randomUUID()}`,
+      },
     );
   }
 

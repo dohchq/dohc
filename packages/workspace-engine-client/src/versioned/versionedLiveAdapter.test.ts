@@ -362,7 +362,7 @@ describe("VersionedLiveAdapter", () => {
     ).rejects.toMatchObject({
       name: "DaemonRefusalError",
       retry: "afterReconnect",
-      disposition: "retryable",
+      disposition: "afterReconnect",
       wireCode: "SESSION_EXPIRED",
     } satisfies Partial<DaemonRefusalError>);
   });
