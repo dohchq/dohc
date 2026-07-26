@@ -4175,12 +4175,6 @@ impl<'a> LinkedChatStore<'a> {
                 )?;
                 journal(tx, &input.target_id, "chat.follow.set", at_ms)?;
             }
-            replay_pending_chat_coordinates_for_change(
-                tx,
-                &input.workspace_id,
-                "chat.follow.set",
-                &payload,
-            )?;
             require_follow(
                 tx,
                 &input.workspace_id,
@@ -6888,6 +6882,19 @@ pub fn replay_ready_pending_chat_coordinates(
     tx: &Transaction<'_>,
     workspace_id: &str,
 ) -> Result<(), DomainError> {
+    let has_pending: bool = tx
+        .query_row(
+            "SELECT EXISTS( \
+               SELECT 1 FROM chat_pending_replication \
+               WHERE workspace_id=?1 LIMIT 1)",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if !has_pending {
+        return Ok(());
+    }
+
     loop {
         let pending = pending_chat_operations_for_workspace(tx, workspace_id)?;
         let mut applied = false;

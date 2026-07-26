@@ -400,8 +400,14 @@ fn apply_channel(
             )
             .map_err(SyncError::corrupt)?;
         if placeholder {
-            let slug =
-                deterministic_channel_slug(tx, &op.workspace_id, &requested_slug, &channel_id)?;
+            let slug = deterministic_channel_slug(
+                tx,
+                &op.workspace_id,
+                &requested_slug,
+                &channel_id,
+                &wire_id,
+                payload.created_at_ms,
+            )?;
             tx.execute(
                 "UPDATE chat_channels SET name = ?3, slug = ?4, kind = ?5, created_at_ms = ?6, updated_at_ms = ?6 \
                  WHERE workspace_id = ?1 AND channel_id = ?2",
@@ -416,7 +422,14 @@ fn apply_channel(
         }
         return Ok(());
     }
-    let slug = deterministic_channel_slug(tx, &op.workspace_id, &requested_slug, &channel_id)?;
+    let slug = deterministic_channel_slug(
+        tx,
+        &op.workspace_id,
+        &requested_slug,
+        &channel_id,
+        &wire_id,
+        payload.created_at_ms,
+    )?;
     tx.execute(
         "INSERT OR IGNORE INTO chat_channels \
          (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
@@ -444,30 +457,36 @@ fn deterministic_channel_slug(
     workspace_id: &str,
     requested: &str,
     channel_id: &str,
+    allocation_identity: &str,
+    created_at_ms: i64,
 ) -> Result<String, SyncError> {
-    rebalance_channel_slugs(tx, workspace_id, requested, channel_id)
+    rebalance_channel_slugs(
+        tx,
+        workspace_id,
+        requested,
+        channel_id,
+        allocation_identity,
+        created_at_ms,
+    )
 }
 
-fn deterministic_placeholder_slug(
-    tx: &Transaction<'_>,
-    workspace_id: &str,
-    requested: &str,
-    channel_id: &str,
-) -> Result<String, SyncError> {
-    rebalance_channel_slugs(tx, workspace_id, requested, channel_id)
-}
-
-fn channel_collision_slug(requested: &str, channel_id: &str) -> String {
+fn channel_collision_slug(requested: &str, allocation_identity: &str, attempt: u64) -> String {
     let mut hasher = Sha256::new();
     hasher.update(requested.as_bytes());
     hasher.update([0]);
-    hasher.update(channel_id.as_bytes());
+    hasher.update(allocation_identity.as_bytes());
+    if attempt > 0 {
+        hasher.update([0]);
+        hasher.update(attempt.to_be_bytes());
+    }
     let suffix = hasher
         .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    format!("{requested}-{suffix}")
+    const MAX_COLLISION_BASE_BYTES: usize = 200 - 1 - 64;
+    let bounded_requested = &requested[..requested.len().min(MAX_COLLISION_BASE_BYTES)];
+    format!("{bounded_requested}-{suffix}")
 }
 
 fn rebalance_channel_slugs(
@@ -475,21 +494,39 @@ fn rebalance_channel_slugs(
     workspace_id: &str,
     requested: &str,
     channel_id: &str,
+    target_allocation_identity: &str,
+    target_created_at_ms: i64,
 ) -> Result<String, SyncError> {
+    // A well-known-channel backfill may add a local-only alias. Prefer the
+    // replicated creation wire so the allocation key stays peer-stable.
     let mut stmt = tx
         .prepare(
-            "SELECT rowid,channel_id,name FROM chat_channels \
-             WHERE workspace_id=?1 ORDER BY channel_id",
+            "SELECT c.rowid,c.channel_id,c.name,c.slug,c.created_at_ms, \
+                    COALESCE((SELECT MIN(w.wire_id) FROM chat_channel_wire_ids w \
+                              WHERE w.workspace_id=c.workspace_id \
+                                AND w.channel_id=c.channel_id \
+                                AND w.wire_id NOT IN (?2,?3)), \
+                             (SELECT MIN(w.wire_id) FROM chat_channel_wire_ids w \
+                              WHERE w.workspace_id=c.workspace_id \
+                                AND w.channel_id=c.channel_id), \
+                             c.channel_id) \
+             FROM chat_channels c WHERE c.workspace_id=?1",
         )
         .map_err(SyncError::corrupt)?;
     let rows = stmt
-        .query_map([workspace_id], |row| {
-            Ok((
-                Some(row.get::<_, i64>(0)?),
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
+        .query_map(
+            params![workspace_id, GENERAL_CHANNEL_WIRE_ID, AGENT_CHANNEL_WIRE_ID],
+            |row| {
+                Ok((
+                    Some(row.get::<_, i64>(0)?),
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    Some(row.get::<_, String>(3)?),
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
         .map_err(SyncError::corrupt)?;
     let mut channels = rows
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -497,39 +534,62 @@ fn rebalance_channel_slugs(
     drop(stmt);
 
     let mut target_present = false;
-    for (_, existing_id, name) in &mut channels {
+    for (_, existing_id, name, _, created_at_ms, allocation_identity) in &mut channels {
         if existing_id == channel_id {
             *name = requested.to_owned();
+            *created_at_ms = target_created_at_ms;
+            *allocation_identity = target_allocation_identity.to_owned();
             target_present = true;
             break;
         }
     }
     if !target_present {
-        channels.push((None, channel_id.to_owned(), requested.to_owned()));
+        channels.push((
+            None,
+            channel_id.to_owned(),
+            requested.to_owned(),
+            None,
+            target_created_at_ms,
+            target_allocation_identity.to_owned(),
+        ));
     }
-    channels.sort_by(|left, right| left.1.cmp(&right.1));
+    // Creation time is replicated; wire identity breaks equal-time ties.
+    channels.sort_by(|left, right| {
+        left.4
+            .cmp(&right.4)
+            .then_with(|| left.5.cmp(&right.5))
+            .then_with(|| left.1.cmp(&right.1))
+    });
 
     let mut used = HashSet::with_capacity(channels.len());
     let mut allocations = Vec::with_capacity(channels.len());
     let mut target_slug = None;
-    for (rowid, id, name) in channels {
+    for (rowid, id, name, stored_slug, _, allocation_identity) in channels {
         let base = channel_allocation_base(&name);
         let mut candidate = base.clone();
+        let mut attempt = 0;
         if used.contains(&candidate) {
-            candidate = channel_collision_slug(&base, &id);
             while used.contains(&candidate) {
-                candidate.push_str("-x");
+                candidate = channel_collision_slug(&base, &allocation_identity, attempt);
+                attempt = attempt.saturating_add(1);
             }
         }
         used.insert(candidate.clone());
         if id == channel_id {
             target_slug = Some(candidate.clone());
         }
-        allocations.push((rowid, candidate));
+        allocations.push((rowid, stored_slug, candidate));
     }
 
-    for (rowid, _) in allocations.iter().filter(|(rowid, _)| rowid.is_some()) {
-        let rowid = rowid.expect("filtered present channel rowid");
+    let changed = allocations
+        .into_iter()
+        .filter_map(|(rowid, stored_slug, slug)| {
+            rowid
+                .filter(|_| stored_slug.as_ref() != Some(&slug))
+                .map(|rowid| (rowid, slug))
+        })
+        .collect::<Vec<_>>();
+    for (rowid, _) in &changed {
         tx.execute(
             "UPDATE chat_channels SET slug=?3 WHERE workspace_id=?1 AND rowid=?2",
             params![
@@ -540,16 +600,18 @@ fn rebalance_channel_slugs(
         )
         .map_err(SyncError::persist)?;
     }
-    for (rowid, slug) in allocations {
-        if let Some(rowid) = rowid {
-            tx.execute(
-                "UPDATE chat_channels SET slug=?3 WHERE workspace_id=?1 AND rowid=?2",
-                params![workspace_id, rowid, slug],
-            )
-            .map_err(SyncError::persist)?;
-        }
+    for (rowid, slug) in changed {
+        tx.execute(
+            "UPDATE chat_channels SET slug=?3 WHERE workspace_id=?1 AND rowid=?2",
+            params![workspace_id, rowid, slug],
+        )
+        .map_err(SyncError::persist)?;
     }
-    target_slug.ok_or(SyncError::CoordinateDiverged)
+    require_allocated_channel_slug(target_slug)
+}
+
+fn require_allocated_channel_slug(target_slug: Option<String>) -> Result<String, SyncError> {
+    target_slug.ok_or_else(|| SyncError::corrupt(rusqlite::Error::QueryReturnedNoRows))
 }
 
 fn channel_allocation_base(name: &str) -> String {
@@ -760,7 +822,14 @@ fn resolve_or_create_placeholder(
     let slug = if agent_placeholder {
         canonical_agent_slug
     } else {
-        deterministic_placeholder_slug(tx, &op.workspace_id, requested_slug, &channel_id)?
+        deterministic_channel_slug(
+            tx,
+            &op.workspace_id,
+            requested_slug,
+            &channel_id,
+            identity,
+            payload.created_at_ms,
+        )?
     };
     let name = if agent_placeholder {
         AGENT_CHANNEL_NAME
@@ -1226,4 +1295,17 @@ fn mark_live_bookmarks_pending(
     )
     .map_err(SyncError::persist)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn missing_target_slug_is_classified_as_storage_corruption() {
+        let error =
+            require_allocated_channel_slug(None).expect_err("missing allocation must fail closed");
+        assert!(matches!(error, SyncError::Storage(_)));
+        assert_eq!(error.code(), "state-corrupt");
+    }
 }

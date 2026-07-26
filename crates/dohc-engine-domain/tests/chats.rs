@@ -109,6 +109,46 @@ fn create_list_find_channel_round_trip() {
 }
 
 #[test]
+fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let plan = store
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN SELECT EXISTS( \
+                       SELECT 1 FROM chat_pending_replication \
+                       WHERE workspace_id=?1 LIMIT 1)",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let rows = stmt
+                .query_map([WS], |row| row.get::<_, String>(3))
+                .map_err(StorageError::corrupt_public)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(StorageError::corrupt_public)
+        })
+        .expect("pending probe query plan");
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("COVERING INDEX") && detail.contains("workspace_id=?")),
+        "workspace emptiness probe must stay index-backed: {plan:?}"
+    );
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute_batch("DROP TABLE replication_log")
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("remove the table only the full replay query reads");
+
+    let changed = LinkedChatStore::new(&mut store)
+        .fail_pending_for_thread(WS, "no-pending-thread", "not needed", 2, &NO_FAULTS)
+        .expect("empty pending set must bypass the full replay query");
+    assert_eq!(changed, 0);
+}
+
+#[test]
 fn reserved_channel_ids_refuse_and_wire_mapping_is_first_writer_wins() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");

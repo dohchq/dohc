@@ -1473,9 +1473,129 @@ fn authoritative_placeholder_slug_collision_converges_across_peers() {
             })
             .expect("authoritative slug");
         assert_ne!(slug, owner_slug);
+        assert_eq!(
+            owner_slug, "shared-name",
+            "the earlier-created channel must retain the base slug"
+        );
         peers.push((scratch, slug));
     }
     assert_eq!(peers[0].1, peers[1].1);
+}
+
+#[test]
+fn replicated_creation_order_determines_channel_slug_precedence() {
+    let earlier = envelope(
+        "creation-order-earlier",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "channel-z",
+            "name": "Same name",
+            "slug": "same-name",
+            "kind": "channel",
+            "createdAtMs": 10,
+            "wireId": "wire-z"
+        }),
+    );
+    let later = envelope(
+        "creation-order-later",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "channel-a",
+            "name": "Same_name",
+            "slug": "same-name",
+            "kind": "channel",
+            "createdAtMs": 20,
+            "wireId": "wire-a"
+        }),
+    );
+
+    let mut peers = Vec::new();
+    for operations in [[&earlier, &later], [&later, &earlier]] {
+        let (scratch, _path, mut engine) = store();
+        for operation in operations {
+            apply_chat_envelope(&mut engine, operation, &NoFaults)
+                .expect("collision-safe channel apply");
+        }
+        let slugs: Vec<(String, String)> = engine
+            .read_with(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT channel_id,slug FROM chat_channels \
+                         WHERE workspace_id='ws' ORDER BY channel_id",
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("peer channel slugs");
+        assert_eq!(
+            slugs
+                .iter()
+                .find(|(channel_id, _)| channel_id == "channel-z")
+                .map(|(_, slug)| slug.as_str()),
+            Some("same-name"),
+            "the earlier-created channel keeps the base even when its id sorts later"
+        );
+        peers.push((scratch, slugs));
+    }
+    assert_eq!(peers[0].1, peers[1].1);
+}
+
+#[test]
+fn noncolliding_channel_apply_does_not_rewrite_unchanged_slugs() {
+    let (_scratch, _path, mut engine) = store();
+    let first = envelope(
+        "no-op-slug-first",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "no-op-channel-first",
+            "name": "First",
+            "slug": "first",
+            "kind": "channel",
+            "createdAtMs": 10
+        }),
+    );
+    apply_chat_envelope(&mut engine, &first, &NoFaults).expect("first channel");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "CREATE TABLE channel_slug_update_log (channel_id TEXT NOT NULL); \
+                 CREATE TRIGGER channel_slug_update_probe AFTER UPDATE OF slug ON chat_channels \
+                 BEGIN INSERT INTO channel_slug_update_log(channel_id) VALUES (OLD.channel_id); END;",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("slug update probe");
+
+    let second = envelope(
+        "no-op-slug-second",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "no-op-channel-second",
+            "name": "Second",
+            "slug": "second",
+            "kind": "channel",
+            "createdAtMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &second, &NoFaults).expect("second channel");
+    let updates: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM channel_slug_update_log", [], |row| {
+                row.get(0)
+            })
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("slug update count");
+    assert_eq!(updates, 0, "unchanged channel rows must not be updated");
 }
 
 #[test]
@@ -1643,6 +1763,54 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
     assert_eq!(pending_chat_coordinate_count(&engine), 0);
 }
 
+#[test]
+fn local_follow_write_replays_a_parked_remote_feed_read_at_the_domain_boundary() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "local-follow-fixture");
+    let feed_read = envelope(
+        "local-follow-feed-read",
+        0,
+        "chat.feed.read.set",
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 20,
+            "lastSeenMessageId": "message-imported",
+            "atMs": 30
+        }),
+    );
+    apply_chat_envelope(&mut engine, &feed_read, &NoFaults).expect("park feed read");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    LinkedChatStore::new(&mut engine)
+        .set_follow(
+            &SetFollow {
+                workspace_id: "ws".to_owned(),
+                owner_user_id: "owner".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Thread,
+                target_id: "thread-imported".to_owned(),
+                state: FollowState::Following,
+                now_ms: 40,
+            },
+            &NoFaults,
+        )
+        .expect("local follow");
+
+    let coordinate: (i64, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_seen_created_at_ms,last_seen_message_id \
+                 FROM chat_feed_read_state WHERE workspace_id='ws' AND owner_user_id='owner'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed feed read");
+    assert_eq!(coordinate, (20, "message-imported".to_owned()));
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
 fn collision_slug_for_test(requested: &str, channel_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(requested.as_bytes());
@@ -1673,7 +1841,7 @@ fn preoccupied_channel_fallback_converges_across_peers() {
             0,
             "chat.channel.create",
             json!({
-                "channelId": "channel-b",
+                "channelId": "channel-a",
                 "name": requested,
                 "slug": requested,
                 "kind": "channel",
@@ -1685,7 +1853,7 @@ fn preoccupied_channel_fallback_converges_across_peers() {
             0,
             "chat.channel.create",
             json!({
-                "channelId": "channel-a",
+                "channelId": "channel-b",
                 "name": requested,
                 "slug": requested,
                 "kind": "channel",
@@ -1718,6 +1886,18 @@ fn preoccupied_channel_fallback_converges_across_peers() {
             .expect("peer channel slugs");
         assert_eq!(slugs.len(), 3);
         assert_eq!(slugs[0], ("channel-a".to_owned(), requested.to_owned()));
+        assert_eq!(
+            slugs[2],
+            ("channel-z".to_owned(), occupied_fallback.clone()),
+            "the pre-existing collision candidate must remain occupied"
+        );
+        assert_ne!(slugs[1].1, occupied_fallback);
+        assert!(
+            slugs
+                .iter()
+                .all(|(_, slug)| slug.encode_utf16().count() <= 200),
+            "retry-generated slugs must remain inside the replicated slug bound"
+        );
         assert_eq!(
             slugs
                 .iter()
