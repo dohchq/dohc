@@ -165,6 +165,11 @@ function capture(root: string, options: {
 function mockLiveSessions(
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
+  captureFlushResult: () => {
+    settled: boolean;
+    running: boolean;
+    degraded: boolean;
+  } = () => ({ settled: true, running: true, degraded: false }),
 ) {
   const client = {
     close: () => undefined,
@@ -183,7 +188,7 @@ function mockLiveSessions(
       if (request.method === "capture.flush") {
         return {
           id: request.id,
-          result: { settled: true, running: true, degraded: false },
+          result: captureFlushResult(),
         };
       }
       if (request.method === "capture.setAuthor") {
@@ -2246,6 +2251,42 @@ describe("workspaceEngineCapture agent attribution", () => {
       author: { kind: "agent", ...run },
     });
     expect(authorRequests[2]?.params).toEqual({ author: null });
+    await engine.stop();
+  });
+
+  it("mutation proof: an unsettled flush refuses to clear daemon authorship", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const loopback = new VersionedLoopbackEngine();
+    let settled = false;
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        settled,
+        running: true,
+        degraded: !settled,
+      })),
+      daemonOwnsCapture: true,
+    });
+
+    await engine.setActiveAgentRun(run);
+    await expect(engine.setActiveAgentRun(null)).rejects.toThrow("did not settle");
+    expect(
+      requests
+        .filter(
+          (request) =>
+            request.method === "capture.flush" ||
+            request.method === "capture.setAuthor",
+        )
+        .map((request) => request.method),
+    ).toEqual(["capture.setAuthor", "capture.flush"]);
+
+    settled = true;
+    await engine.setActiveAgentRun(null);
+    expect(
+      requests.filter((request) => request.method === "capture.setAuthor").at(-1)
+        ?.params,
+    ).toEqual({ author: null });
     await engine.stop();
   });
 

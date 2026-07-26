@@ -10,6 +10,7 @@ import type {
 import {
   VERSIONED_METHOD,
   WORKSPACE_METHOD,
+  type AgentAuthor,
   type ConflictRecord,
   type Request,
   type Response,
@@ -24,11 +25,13 @@ const SENTINEL = new Error("sentinel");
 function sessionsFor(
   client: EngineDaemonClient,
   optionsSeen: Array<EngineWorkspaceRunOptions | undefined> = [],
+  captureAuthorsSeen: Array<AgentAuthor | null> = [],
 ): EngineWorkspaceSessions {
   const binding: EngineWorkspaceBinding = {
     client,
     workspace: WORKSPACE_HANDLE,
   };
+  let captureAuthor: AgentAuthor | null = null;
   return {
     async run<T>(
       _workspace: EngineWorkspace,
@@ -36,7 +39,11 @@ function sessionsFor(
       options?: EngineWorkspaceRunOptions,
     ): Promise<T> {
       optionsSeen.push(options);
+      captureAuthorsSeen.push(captureAuthor);
       return await operation(binding);
+    },
+    rememberCaptureAuthor(_workspaceId: string, author: AgentAuthor | null) {
+      captureAuthor = author;
     },
     async closeWorkspace() {},
   } as unknown as EngineWorkspaceSessions;
@@ -127,6 +134,45 @@ function conflict(status: "open" | "resolved" = "open"): ConflictRecord {
 }
 
 describe("createCaptureLiveStores", () => {
+  it("mutation proof: remembers capture authorship across later session generations", async () => {
+    const captureAuthorsSeen: Array<AgentAuthor | null> = [];
+    const client = clientFor(async (request) => ({
+      id: request.id,
+      result:
+        request.method === WORKSPACE_METHOD.captureFlush
+          ? { settled: true, running: true, degraded: false }
+          : { updated: true },
+    }));
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client, [], captureAuthorsSeen),
+    );
+    const author = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "run",
+    };
+
+    await store.setCaptureAuthor?.(author);
+    await store.flushCapture?.();
+
+    expect(captureAuthorsSeen).toEqual([author, author]);
+  });
+
+  it("mutation proof: rejects an unsettled daemon capture flush", async () => {
+    const client = clientFor(async (request) => ({
+      id: request.id,
+      result: { settled: false, running: true, degraded: true },
+    }));
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
+  });
+
   it("retries transport failures for reads but not mutations", async () => {
     const optionsSeen: Array<EngineWorkspaceRunOptions | undefined> = [];
     const requests: Request[] = [];

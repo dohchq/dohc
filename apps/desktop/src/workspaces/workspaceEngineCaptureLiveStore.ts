@@ -415,6 +415,7 @@ export function createCaptureLiveStores(
   sessions: EngineWorkspaceSessions,
 ): CaptureLiveStores {
   const adapters = new WeakMap<object, Map<string, VersionedLiveAdapter>>();
+  sessions.rememberCaptureAuthor(workspace.workspaceId, null);
 
   function adapterFor(binding: EngineWorkspaceBinding): VersionedLiveAdapter {
     const clientKey = binding.client as object;
@@ -884,15 +885,20 @@ export function createCaptureLiveStores(
 
     async flushCapture() {
       await runRead(async (adapter) => {
-        await adapter.flushCapture();
+        const outcome = await adapter.flushCapture();
+        if (!outcome.settled) {
+          throw new Error(
+            `Engine capture for ${workspace.workspaceId} did not settle.`,
+          );
+        }
       });
     },
 
     async setCaptureAuthor(author: MomentAuthor | null) {
+      const desired = author === null ? null : adapterAuthor(author);
+      sessions.rememberCaptureAuthor(workspace.workspaceId, desired);
       await runMutation(async (adapter) => {
-        await adapter.setCaptureAuthor(
-          author === null ? null : adapterAuthor(author),
-        );
+        await adapter.setCaptureAuthor(desired);
       });
     },
 

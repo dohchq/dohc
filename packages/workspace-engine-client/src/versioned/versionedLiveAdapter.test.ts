@@ -824,17 +824,28 @@ describe("VersionedLiveAdapter", () => {
     }
   });
 
-  it("encodes workspace.open and all seven bound workspace-family methods", async () => {
+  it("encodes workspace.open and all eight bound workspace-family methods", async () => {
     const openRequests: Request[] = [];
+    const captureAuthor = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "run",
+    };
     await expect(
       VersionedLiveAdapter.openWorkspace(captureClient(openRequests), {
         rootDir: "C:/shadow",
         workspaceId: WORKSPACE,
+        captureAuthor,
       }),
     ).rejects.toBe(SENTINEL);
     expect(openRequests[0]).toMatchObject({
       method: WORKSPACE_METHOD.open,
-      params: { rootDir: "C:/shadow", workspaceId: WORKSPACE },
+      params: {
+        rootDir: "C:/shadow",
+        workspaceId: WORKSPACE,
+        captureAuthor,
+      },
     });
     expect(openRequests[0]?.workspace).toBeUndefined();
 

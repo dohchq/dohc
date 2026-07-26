@@ -27,7 +27,18 @@ async function waitForPathMoments(
   count: number,
 ) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    await capture.flush();
+    try {
+      await capture.flush();
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.endsWith(" did not settle.")
+      ) {
+        throw error;
+      }
+      await delay(25);
+      continue;
+    }
     const page = await capture.listMoments({ limit: 100 });
     const matching = page.moments.filter((moment) => moment.path === path);
     if (matching.length >= count) return matching;

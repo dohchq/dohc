@@ -1038,7 +1038,15 @@ impl EngineService {
         ctx: &RequestContext,
         params: Value,
     ) -> Result<Value, WireError> {
+        let capture_author_supplied = params
+            .as_object()
+            .is_some_and(|object| object.contains_key("captureAuthor"));
         let params: WorkspaceOpenParams = parse(params)?;
+        let capture_author_json = if capture_author_supplied {
+            Some(validated_author(params.capture_author.as_ref(), None)?)
+        } else {
+            None
+        };
         let cancellation = OperationCancellation::new(ctx);
         let _open_serial = tokio::select! {
             biased;
@@ -1070,6 +1078,25 @@ impl EngineService {
             // Same workspace: short-circuit only on a LIVE binding. A bound-but-
             // closed actor (its worker died) is stale — drop it and reopen fresh.
             if open.actor.lifecycle() != LifecycleState::Closed {
+                if let Some(author_json) = capture_author_json.clone() {
+                    let _apply = tokio::select! {
+                        biased;
+                        () = cancellation.token.cancelled() => {
+                            return Err(cancellation.interruption(
+                                "workspace open (capture author)"
+                            ));
+                        }
+                        guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+                    };
+                    let capture = lock(&open.capture);
+                    let driver = capture.as_ref().ok_or_else(|| {
+                        wire(
+                            ErrorCode::WorkspaceUnavailable,
+                            "capture driver unavailable",
+                        )
+                    })?;
+                    driver.set_author_json(author_json);
+                }
                 return Ok(json!({ "workspace": handle }));
             }
             lock(&self.handles).remove(&handle);
@@ -1162,6 +1189,7 @@ impl EngineService {
             params.workspace_id.clone(),
             self.self_writes.scoped(&root),
             Arc::clone(&capture_apply_gate),
+            capture_author_json.flatten(),
             #[cfg(feature = "harness")]
             self.capture_apply_probe.clone(),
         );
@@ -6850,6 +6878,8 @@ impl Drop for OperationCancellation {
 struct WorkspaceOpenParams {
     root_dir: String,
     workspace_id: String,
+    #[serde(default)]
+    capture_author: Option<Value>,
 }
 
 #[derive(Deserialize)]

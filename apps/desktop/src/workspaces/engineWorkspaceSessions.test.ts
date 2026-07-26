@@ -213,4 +213,68 @@ describe("EngineWorkspaceSessions", () => {
     ).rejects.toThrow("must not be a symlink");
     expect(opens).toBe(1);
   });
+
+  it("mutation proof: restores capture authorship in every generation's open", async () => {
+    const rootPath = await tempRoot();
+    const requestsByGeneration: Array<Array<{ method: string; params: unknown }>> = [
+      [],
+      [],
+    ];
+    let generation = 0;
+    const clients = requestsByGeneration.map(
+      (requests, index): EngineDaemonClient => ({
+        close: () => undefined,
+        async sendRequest(request) {
+          requests.push({ method: request.method, params: request.params });
+          return {
+            id: request.id,
+            result: { workspace: `workspace-handle-${index + 1}` },
+          };
+        },
+      }),
+    );
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => clients[generation]!,
+    });
+    const author = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "run",
+    };
+    sessions.rememberCaptureAuthor("workspace", author);
+
+    await sessions.run(
+      { workspaceId: "workspace", rootPath },
+      async (binding) => binding.workspace,
+    );
+    generation = 1;
+    await sessions.run(
+      { workspaceId: "workspace", rootPath },
+      async (binding) => binding.workspace,
+    );
+
+    expect(requestsByGeneration).toEqual([
+      [
+        {
+          method: "workspace.open",
+          params: {
+            rootDir: rootPath,
+            workspaceId: "workspace",
+            captureAuthor: author,
+          },
+        },
+      ],
+      [
+        {
+          method: "workspace.open",
+          params: {
+            rootDir: rootPath,
+            workspaceId: "workspace",
+            captureAuthor: author,
+          },
+        },
+      ],
+    ]);
+  });
 });

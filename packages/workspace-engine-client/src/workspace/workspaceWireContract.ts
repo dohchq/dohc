@@ -21,6 +21,14 @@ export type WorkspaceJsonObject = {
 export type WorkspaceOpenParams = WorkspaceJsonObject & {
   rootDir: string;
   workspaceId: string;
+  captureAuthor?:
+    | (WorkspaceJsonObject & {
+        kind: "agent";
+        agentId: string;
+        onBehalfOf: string;
+        agentRunId?: string;
+      })
+    | null;
 };
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type ConflictListParams = WorkspaceJsonObject & {

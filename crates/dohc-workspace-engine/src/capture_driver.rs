@@ -1540,11 +1540,12 @@ impl CaptureDriver {
         workspace_id: String,
         self_writes: SelfWriteSuppression,
         apply_gate: ApplyGate,
+        initial_author_json: Option<String>,
         #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
     ) -> CaptureDriver {
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
-        let author_json = Arc::new(Mutex::new(None));
+        let author_json = Arc::new(Mutex::new(initial_author_json));
         let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));

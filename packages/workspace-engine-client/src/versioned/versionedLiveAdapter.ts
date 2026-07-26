@@ -23,6 +23,7 @@ import {
   type WorkspaceMethod,
   type WorkspaceMethodParamsMap,
   type WorkspaceMethodResultMap,
+  type WorkspaceOpenParams,
 } from "../workspace/workspaceWireContract";
 import {
   VERSIONED_METHOD,
@@ -113,7 +114,7 @@ export class VersionedLiveAdapter {
 
   static async openWorkspace(
     client: MinimalDaemonClient,
-    input: { rootDir: string; workspaceId: string },
+    input: WorkspaceOpenParams,
     options: Omit<VersionedLiveAdapterOptions, "workspaceId"> = {},
   ): Promise<VersionedLiveAdapter> {
     const requester = new WorkspaceDaemonRequester(client);

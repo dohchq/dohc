@@ -3,6 +3,7 @@ import {
   WORKSPACE_METHOD,
   WorkspaceDaemonRequester,
   decodeWorkspaceResult,
+  type AgentAuthor,
   type WorkspaceHandle,
 } from "@dohc/workspace-engine-client";
 import { randomBytes } from "node:crypto";
@@ -92,6 +93,7 @@ async function defaultSleep(ms: number): Promise<void> {
 export class EngineWorkspaceSessions {
   private readonly entries = new Map<string, SessionEntry>();
   private readonly preparations = new Map<string, Promise<void>>();
+  private readonly captureAuthors = new Map<string, AgentAuthor | null>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
 
@@ -166,7 +168,12 @@ export class EngineWorkspaceSessions {
     throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
   }
 
+  rememberCaptureAuthor(workspaceId: string, author: AgentAuthor | null): void {
+    this.captureAuthors.set(workspaceId, author);
+  }
+
   async closeWorkspace(workspaceId: string): Promise<void> {
+    this.captureAuthors.delete(workspaceId);
     const entry = this.entries.get(workspaceId);
     if (!entry) return;
     this.entries.delete(workspaceId);
@@ -229,9 +236,13 @@ export class EngineWorkspaceSessions {
   ): Promise<EngineWorkspaceBinding> {
     await this.prepareWorkspace(workspace.rootPath);
     const requester = new WorkspaceDaemonRequester(client);
+    const hasCaptureAuthor = this.captureAuthors.has(workspace.workspaceId);
     const raw = await requester.request(WORKSPACE_METHOD.open, {
       rootDir: workspace.rootPath,
       workspaceId: workspace.workspaceId,
+      ...(hasCaptureAuthor
+        ? { captureAuthor: this.captureAuthors.get(workspace.workspaceId) ?? null }
+        : {}),
     });
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
     return { client, workspace: opened.workspace };
