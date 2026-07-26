@@ -55,7 +55,7 @@ pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
 pub use limits::{
     ENGINE_BUILD, ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS,
     ENGINE_STORAGE_PROTOCOL_VERSION, MAX_BLOB_BYTES, MAX_DOCUMENT_BODY_BYTES, MAX_IDENTIFIER_BYTES,
-    MAX_MATERIALIZE_BYTES, MAX_REPLACE_ATTEMPTS,
+    MAX_MATERIALIZE_BYTES, MAX_REPLACE_ATTEMPTS, SQLITE_DATABASE_HEADER_BYTES,
 };
 pub use materialize::{
     JobStatus, MaterializationJob, MaterializationJobSpec, MaterializationOperation, Preimage,
