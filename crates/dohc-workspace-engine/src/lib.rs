@@ -638,6 +638,10 @@ impl EngineService {
                 self.search_query(&ctx, request.workspace, request.params)
                     .await?
             }
+            "search.queryChatMessagesGranular" => {
+                self.search_query_chat_messages_granular(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "search.ensureIndex" => {
                 self.search_ensure_index(&ctx, request.workspace, request.params)
                     .await?
@@ -836,6 +840,14 @@ impl EngineService {
             "chats.readState.get" => {
                 self.chats_read_state_get(&ctx, request.workspace, request.params)
                     .await?
+            }
+            "chats.readState.listUnreadFileThreads" => {
+                self.chats_read_state_list_unread_file_threads(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
             }
             "chats.agentReadState.listUnreadThreads" => {
                 self.chats_agent_read_state_list_unread_threads(
@@ -4405,6 +4417,35 @@ impl EngineService {
         Ok(read_state_json(&state))
     }
 
+    async fn chats_read_state_list_unread_file_threads(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let _: EmptyParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.readState.listUnreadFileThreads",
+            open.actor
+                .chat_read_state_list_unread_file_threads(open.workspace_id),
+        )
+        .await?;
+        Ok(Value::Array(
+            rows.into_iter()
+                .map(|row| {
+                    json!({
+                        "threadId": row.thread_id,
+                        "messageCount": row.message_count,
+                        "lastReadSequence": row.last_read_sequence,
+                    })
+                })
+                .collect(),
+        ))
+    }
+
     async fn chats_agent_read_state_list_unread_threads(
         &self,
         ctx: &RequestContext,
@@ -6308,6 +6349,38 @@ impl EngineService {
         ))
     }
 
+    async fn search_query_chat_messages_granular(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SearchChatMessagesGranularParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "search.queryChatMessagesGranular",
+            open.actor.search_query_chat_messages_granular(
+                open.workspace_id,
+                params.query,
+                params.limit,
+            ),
+        )
+        .await?;
+        Ok(Value::Array(
+            rows.into_iter()
+                .map(|row| {
+                    json!({
+                        "threadId": row.thread_id,
+                        "messageId": row.message_id,
+                        "text": row.text,
+                    })
+                })
+                .collect(),
+        ))
+    }
+
     async fn search_ensure_index(
         &self,
         ctx: &RequestContext,
@@ -7161,6 +7234,13 @@ struct SearchParams {
     query: String,
     limit: Option<i64>,
     now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SearchChatMessagesGranularParams {
+    query: String,
+    limit: i64,
 }
 
 #[derive(Deserialize)]

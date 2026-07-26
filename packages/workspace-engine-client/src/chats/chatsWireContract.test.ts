@@ -153,6 +153,9 @@ describe("B2 chats wire contract and loopback", () => {
         upToSequence: 1,
       })).lastReadSequence,
     ).toBe(1);
+    expect(
+      await roundTrip(CHATS_METHOD.readStateListUnreadFileThreads, {}),
+    ).toEqual([]);
 
     expect(
       (await roundTrip(CHATS_METHOD.threadsListForFile, {

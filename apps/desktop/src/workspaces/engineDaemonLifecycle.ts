@@ -177,6 +177,58 @@ export class EngineDaemonLifecycle {
     return await this.smokeWorkspaceWithClient(client, rootDir, workspaceId);
   }
 
+  async requestWorkspace(
+    rootDir: string,
+    workspaceId: string,
+    method: string,
+    params: Request["params"],
+  ): Promise<JsonValue> {
+    const client = this.requireClient();
+    const opened = resultObject(
+      await this.sendSmokeRequest(
+        client,
+        {
+          id: this.requestId(),
+          method: "workspace.open",
+          params: { rootDir, workspaceId },
+        },
+        "workspace.open",
+      ),
+      "workspace.open",
+    );
+    if (typeof opened.workspace !== "string" || opened.workspace.length === 0) {
+      throw new EngineDaemonUnavailableError(
+        "Rust engine workspace.open returned no workspace handle.",
+      );
+    }
+    const workspace = opened.workspace as WorkspaceHandle;
+    try {
+      return (
+        await this.sendSmokeRequest(
+          client,
+          {
+            id: this.requestId(),
+            method,
+            workspace,
+            params,
+          },
+          method,
+        )
+      ).result;
+    } finally {
+      await this.sendSmokeRequest(
+        client,
+        {
+          id: this.requestId(),
+          method: "workspace.close",
+          workspace,
+          params: {},
+        },
+        "workspace.close",
+      );
+    }
+  }
+
   async stop(): Promise<void> {
     if (!this.stopPromise) this.stopPromise = this.stopOnce();
     await this.stopPromise;

@@ -7,6 +7,7 @@ export const WORKSPACE_METHOD = {
   conflictsOpen: "conflicts.open",
   conflictsResolve: "conflicts.resolve",
   searchQuery: "search.query",
+  searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
   captureFlush: "capture.flush",
 } as const;
@@ -38,6 +39,10 @@ export type SearchQueryParams = WorkspaceJsonObject & {
   query: string;
   limit?: number;
   nowMs?: number;
+};
+export type SearchQueryChatMessagesGranularParams = WorkspaceJsonObject & {
+  query: string;
+  limit: number;
 };
 
 export type WorkspaceOpenResult = WorkspaceJsonObject & {
@@ -140,6 +145,11 @@ export type SearchResult = WorkspaceJsonObject & {
   threadId: string | null;
   objectId: string | null;
 };
+export type GranularChatMessageSearchResult = WorkspaceJsonObject & {
+  threadId: string;
+  messageId: string | null;
+  text: string;
+};
 
 export type WatcherStatusResult = WorkspaceJsonObject & {
   running: boolean;
@@ -159,6 +169,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenParams;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveParams;
   [WORKSPACE_METHOD.searchQuery]: SearchQueryParams;
+  [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
 };
@@ -170,6 +181,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
   [WORKSPACE_METHOD.searchQuery]: SearchResult[];
+  [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResult[];
   [WORKSPACE_METHOD.watcherStatus]: WatcherStatusResult;
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResult;
 };
@@ -193,6 +205,20 @@ function objectValue(
     if (!keys.includes(key)) {
       throw new WorkspaceProtocolShapeError(`${label}.${key} is not allowed.`);
     }
+  }
+  return value;
+}
+
+function nonEmptyStringValue(
+  object: WorkspaceJsonObject,
+  key: string,
+  label: string,
+): string {
+  const value = stringValue(object, key, label);
+  if (value.length === 0) {
+    throw new WorkspaceProtocolShapeError(
+      `${label}.${key} must not be empty.`,
+    );
   }
   return value;
 }
@@ -498,6 +524,34 @@ function decodeSearchResult(value: JsonValue, label: string): SearchResult {
   };
 }
 
+export function decodeGranularChatMessageSearchResults(
+  value: JsonValue,
+  label = `${WORKSPACE_METHOD.searchQueryChatMessagesGranular} result`,
+): GranularChatMessageSearchResult[] {
+  if (!Array.isArray(value)) {
+    throw new WorkspaceProtocolShapeError(`${label} must be an array.`);
+  }
+  return value.map((entry, index) => {
+    const entryLabel = `${label}[${index}]`;
+    const object = objectValue(entry, entryLabel, [
+      "threadId",
+      "messageId",
+      "text",
+    ]);
+    const messageId = nullableString(object, "messageId", entryLabel);
+    if (messageId === "") {
+      throw new WorkspaceProtocolShapeError(
+        `${entryLabel}.messageId must not be empty.`,
+      );
+    }
+    return {
+      threadId: nonEmptyStringValue(object, "threadId", entryLabel),
+      messageId,
+      text: stringValue(object, "text", entryLabel),
+    };
+  });
+}
+
 export function decodeWorkspaceResult<M extends WorkspaceMethod>(
   method: M,
   value: JsonValue,
@@ -555,6 +609,9 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
       result = value.map((entry, index) =>
         decodeSearchResult(entry, `${label}[${index}]`),
       );
+      break;
+    case WORKSPACE_METHOD.searchQueryChatMessagesGranular:
+      result = decodeGranularChatMessageSearchResults(value, label);
       break;
     case WORKSPACE_METHOD.watcherStatus: {
       const object = objectValue(value, label, [

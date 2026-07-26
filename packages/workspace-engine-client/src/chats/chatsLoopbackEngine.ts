@@ -694,6 +694,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.channelFindBySlug: return ["slug"];
     case CHATS_METHOD.channelsList:
     case CHATS_METHOD.threadsList:
+    case CHATS_METHOD.readStateListUnreadFileThreads:
       return [];
     case CHATS_METHOD.channelGetWireId: return ["channelId"];
     case CHATS_METHOD.threadStart:
@@ -952,6 +953,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.readStateGet(state, workspace, params);
       case CHATS_METHOD.readStateMarkThreadRead:
         return this.readStateMark(state, workspace, params);
+      case CHATS_METHOD.readStateListUnreadFileThreads:
+        return this.listUnreadFileThreads(state);
       case CHATS_METHOD.decisionResolve:
         return this.replay(request, workspace, params, true, () =>
           this.decisionResolve(state, params));
@@ -1502,6 +1505,21 @@ export class ChatsLoopbackEngine implements EngineTransport {
     state.humanReads.set(threadId, upTo);
     state.humanReadStates.set(threadId, result);
     return jsonResult(result);
+  }
+
+  private listUnreadFileThreads(state: WorkspaceState): JsonValue {
+    return jsonResult(
+      [...state.threads.values()]
+        .filter((thread) => thread.channelId === undefined && thread.linkedFile !== undefined)
+        .flatMap((thread) => {
+          const messageCount = threadMessages(state, thread.id).length;
+          const lastReadSequence =
+            state.humanReadStates.get(thread.id)?.lastReadSequence ?? 0;
+          return messageCount > Math.min(lastReadSequence, messageCount)
+            ? [{ threadId: thread.id, messageCount, lastReadSequence }]
+            : [];
+        }),
+    );
   }
 
   private insertMessage(

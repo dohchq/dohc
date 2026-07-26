@@ -388,6 +388,51 @@ describe("Rust engine daemon lifecycle", () => {
     await lifecycle.stop();
   });
 
+  it("opens, binds, and closes a workspace around an injected CLI read", async () => {
+    const client = new FakeClient((request) => {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "cli-handle" } };
+      }
+      if (request.method === "search.queryChatMessagesGranular") {
+        return {
+          id: request.id,
+          result: [{
+            threadId: "thread",
+            messageId: null,
+            text: "needle",
+          }],
+        };
+      }
+      return { id: request.id, result: {} };
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      launch: async () => client,
+    });
+    await lifecycle.start();
+    client.requests.length = 0;
+
+    await expect(
+      lifecycle.requestWorkspace(
+        "C:\\workspace",
+        "workspace",
+        "search.queryChatMessagesGranular",
+        { query: "needle", limit: 50_000 },
+      ),
+    ).resolves.toEqual([{
+      threadId: "thread",
+      messageId: null,
+      text: "needle",
+    }]);
+    expect(client.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "search.queryChatMessagesGranular",
+      "workspace.close",
+    ]);
+    expect(client.requests[1]?.workspace).toBe("cli-handle");
+    await lifecycle.stop();
+  });
+
   it("fails initial generation health within the request bound after helloAck", async () => {
     const client = new FakeClient(
       () =>

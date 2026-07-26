@@ -18,6 +18,7 @@ export const CHATS_METHOD = {
   messagesList: "chats.messages.list",
   readStateGet: "chats.readState.get",
   readStateMarkThreadRead: "chats.readState.markThreadRead",
+  readStateListUnreadFileThreads: "chats.readState.listUnreadFileThreads",
   decisionResolve: "chats.decisions.resolve",
   decisionsListForThread: "chats.decisions.listForThread",
   reactionSet: "chats.reactions.set",
@@ -242,6 +243,11 @@ export type ChatThreadReadState = ChatsJsonObject & {
   lastReadSequence: number;
   revision: number;
   updatedAtMs: number;
+};
+export type ChatUnreadFileThread = ChatsJsonObject & {
+  threadId: string;
+  messageCount: number;
+  lastReadSequence: number;
 };
 export type ChatFollow = ChatsJsonObject & {
   workspaceId: string;
@@ -599,6 +605,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.messagesList]: ChatMessagesListParams;
   [CHATS_METHOD.readStateGet]: ChatThreadParams;
   [CHATS_METHOD.readStateMarkThreadRead]: ChatReadStateMarkParams;
+  [CHATS_METHOD.readStateListUnreadFileThreads]: ChatEmptyParams;
   [CHATS_METHOD.decisionResolve]: ChatDecisionResolveParams;
   [CHATS_METHOD.decisionsListForThread]: ChatThreadPageParams;
   [CHATS_METHOD.reactionSet]: ChatReactionSetParams;
@@ -662,6 +669,7 @@ export type ChatsMethodResultMap = {
   [CHATS_METHOD.messagesList]: ChatMessagesListResult;
   [CHATS_METHOD.readStateGet]: ChatThreadReadState;
   [CHATS_METHOD.readStateMarkThreadRead]: ChatThreadReadState;
+  [CHATS_METHOD.readStateListUnreadFileThreads]: ChatUnreadFileThread[];
   [CHATS_METHOD.decisionResolve]: ChatDecision;
   [CHATS_METHOD.decisionsListForThread]: ChatDecisionsPage;
   [CHATS_METHOD.reactionSet]: ChatReaction;
@@ -732,6 +740,18 @@ function stringValue(object: ChatsJsonObject, key: string, label: string): strin
   const value = object[key];
   if (typeof value !== "string") {
     throw new ChatsProtocolShapeError(`${label}.${key} must be a string.`);
+  }
+  return value;
+}
+
+function nonEmptyString(
+  object: ChatsJsonObject,
+  key: string,
+  label: string,
+): string {
+  const value = stringValue(object, key, label);
+  if (value.length === 0) {
+    throw new ChatsProtocolShapeError(`${label}.${key} must not be empty.`);
   }
   return value;
 }
@@ -1144,6 +1164,28 @@ function decodeReadState(value: JsonValue, label: string): ChatThreadReadState {
   };
 }
 
+export function decodeUnreadFileThreads(
+  value: JsonValue,
+  label = `${CHATS_METHOD.readStateListUnreadFileThreads} result`,
+): ChatUnreadFileThread[] {
+  if (!Array.isArray(value)) {
+    throw new ChatsProtocolShapeError(`${label} must be an array.`);
+  }
+  return value.map((entry, index) => {
+    const entryLabel = `${label}[${index}]`;
+    const object = objectValue(entry, entryLabel, [
+      "threadId",
+      "messageCount",
+      "lastReadSequence",
+    ]);
+    return {
+      threadId: nonEmptyString(object, "threadId", entryLabel),
+      messageCount: safeInteger(object, "messageCount", entryLabel),
+      lastReadSequence: safeInteger(object, "lastReadSequence", entryLabel),
+    };
+  });
+}
+
 function decodeFollow(value: JsonValue, label: string): ChatFollow {
   const object = objectValue(value, label, [
     "workspaceId",
@@ -1425,6 +1467,9 @@ export function decodeChatsResult<M extends ChatsMethod>(
     case CHATS_METHOD.readStateGet:
     case CHATS_METHOD.readStateMarkThreadRead:
       result = decodeReadState(value, label);
+      break;
+    case CHATS_METHOD.readStateListUnreadFileThreads:
+      result = decodeUnreadFileThreads(value, label);
       break;
     case CHATS_METHOD.decisionResolve:
       result = decodeChatDecision(value, label);

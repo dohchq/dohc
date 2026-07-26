@@ -25,6 +25,10 @@ import {
   type ChatThread,
   type LinkedChatStore,
 } from "@dohc/workspace-engine";
+import type {
+  ChatUnreadFileThread,
+  GranularChatMessageSearchResult,
+} from "@dohc/workspace-engine-client";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
 import { createServer, type Server, type Socket } from "node:net";
@@ -95,6 +99,15 @@ interface SqliteModule {
   ) => EngineSqliteDb;
 }
 
+type CliGranularChatMessageSearchResult = Pick<
+  GranularChatMessageSearchResult,
+  "threadId" | "messageId" | "text"
+>;
+type CliUnreadFileThread = Pick<
+  ChatUnreadFileThread,
+  "threadId" | "messageCount" | "lastReadSequence"
+>;
+
 export interface CliRegistryWorkspace {
   workspaceId: string;
   rootPath: string;
@@ -107,6 +120,13 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   readOnly: boolean;
   fileObjectIdForPath(path: string): Promise<string | null>;
   assertWritable(target: { channelId: string } | { threadId: string }): Promise<void>;
+  daemonReads?: {
+    queryChatMessagesGranular(input: {
+      query: string;
+      limit: number;
+    }): Promise<CliGranularChatMessageSearchResult[]>;
+    listUnreadFileThreads(): Promise<CliUnreadFileThread[]>;
+  };
 }
 
 export interface CliMainIdentity {
@@ -655,23 +675,31 @@ async function regexMatchesForTexts(
   });
 }
 
-function queryFtsCandidates(
+async function queryFtsCandidates(
   context: CliWorkspaceContext,
   query: string,
-): { threadIds: Set<string>; messageIds: Set<string> } | null {
+): Promise<{ threadIds: Set<string>; messageIds: Set<string> } | null> {
   if ([...query.trim()].length < 3) return null;
-  const { DatabaseSync } = nodeSqlite();
+  let rows: CliGranularChatMessageSearchResult[];
   let db: EngineSqliteDb | null = null;
   try {
-    db = new DatabaseSync(
-      join(context.rootPath, LINKED_CHAT_STORE_RELATIVE_PATH),
-      { readOnly: true },
-    );
-    const rows = queryChatMessagesGranular(db, {
-      workspaceId: context.workspaceId,
-      query,
-      limit: MAX_FTS_CANDIDATES,
-    });
+    if (context.daemonReads) {
+      rows = await context.daemonReads.queryChatMessagesGranular({
+        query,
+        limit: MAX_FTS_CANDIDATES,
+      });
+    } else {
+      const { DatabaseSync } = nodeSqlite();
+      db = new DatabaseSync(
+        join(context.rootPath, LINKED_CHAT_STORE_RELATIVE_PATH),
+        { readOnly: true },
+      );
+      rows = queryChatMessagesGranular(db, {
+        workspaceId: context.workspaceId,
+        query,
+        limit: MAX_FTS_CANDIDATES,
+      });
+    }
     // A saturated prefilter is not exhaustive. Fall back to the full body scan
     // below so the optimization can never change grep's results at scale.
     if (rows.length === MAX_FTS_CANDIDATES) return null;
@@ -689,7 +717,13 @@ function queryFtsCandidates(
   }
 }
 
-function humanUnreadFileThreadIds(context: CliWorkspaceContext): Set<string> {
+async function humanUnreadFileThreadIds(
+  context: CliWorkspaceContext,
+): Promise<Set<string>> {
+  if (context.daemonReads) {
+    const rows = await context.daemonReads.listUnreadFileThreads();
+    return new Set(rows.map((row) => row.threadId));
+  }
   const { DatabaseSync } = nodeSqlite();
   let db: EngineSqliteDb | null = null;
   try {
@@ -844,7 +878,7 @@ async function dispatch(
               channel: channel.cli,
             })),
         );
-        const unreadFileIds = humanUnreadFileThreadIds(context);
+        const unreadFileIds = await humanUnreadFileThreadIds(context);
         const fileThreads = (await loadThreads(context, channels)).filter((thread) =>
           thread.thread.linkedFile && unreadFileIds.has(thread.thread.id));
         const messagesByThread = await loadMessagesByThread(context, fileThreads);
@@ -1161,7 +1195,7 @@ async function dispatch(
       // deadline-bounded full scan.
       const fts = request.args.regex
         ? null
-        : queryFtsCandidates(context, request.args.pattern);
+        : await queryFtsCandidates(context, request.args.pattern);
       const scanThreads = !request.args.regex && fts
         ? selected.filter((thread) => fts.threadIds.has(thread.thread.id))
         : selected;

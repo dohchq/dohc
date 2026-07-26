@@ -60,6 +60,10 @@ pub const MAX_QUERY_CHARS: usize = 4096;
 /// DoS ceiling on the caller-facing result limit.
 pub const MAX_RESULT_LIMIT: usize = 1000;
 
+/// The CLI's exhaustive chat-message prefilter cap. Returning exactly this
+/// many rows means saturation, so the caller falls back to a full scan.
+pub const MAX_GRANULAR_CHAT_RESULT_LIMIT: usize = 50_000;
+
 /// DoS ceiling on a single FTS over-fetch (the `limit * multiplier` fetch is
 /// clamped to this).
 pub const MAX_FTS_FETCH: usize = 20_000;

@@ -20,8 +20,8 @@
 
 use crate::search::policy::{path_is_search_indexed, read_engine_search_policy};
 use crate::search::{
-    MAX_FTS_FETCH, MAX_QUERY_CHARS, MAX_RESULT_LIMIT, MIN_TRIGRAM_QUERY_CHARS, SearchError,
-    THREAD_HEADER_MESSAGE_ID,
+    MAX_FTS_FETCH, MAX_GRANULAR_CHAT_RESULT_LIMIT, MAX_QUERY_CHARS, MAX_RESULT_LIMIT,
+    MIN_TRIGRAM_QUERY_CHARS, SearchError, THREAD_HEADER_MESSAGE_ID,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
@@ -103,12 +103,12 @@ fn classify_query(query: &str) -> QueryTerm {
 
 /// Clamp an incoming result limit to the DoS ceiling. A non-positive limit
 /// yields `None` (no work).
-fn clamp_limit(limit: i64) -> Option<usize> {
+fn clamp_limit(limit: i64, maximum: usize) -> Option<usize> {
     if limit <= 0 {
         return None;
     }
-    let limit = usize::try_from(limit).unwrap_or(MAX_RESULT_LIMIT);
-    Some(limit.min(MAX_RESULT_LIMIT))
+    let limit = usize::try_from(limit).unwrap_or(maximum);
+    Some(limit.min(maximum))
 }
 
 /// The bounded FTS fetch size for an over-fetch multiplier.
@@ -148,7 +148,7 @@ pub fn query_search_index(
             None
         }
     };
-    let Some(limit) = clamp_limit(limit) else {
+    let Some(limit) = clamp_limit(limit, MAX_RESULT_LIMIT) else {
         return Ok(fallback_or_empty());
     };
     let match_expr = match classify_query(query) {
@@ -237,7 +237,7 @@ pub fn query_chat_messages_granular(
     query: &str,
     limit: i64,
 ) -> Result<Vec<GranularChatMessageSearchResult>, SearchError> {
-    let Some(limit) = clamp_limit(limit) else {
+    let Some(limit) = clamp_limit(limit, MAX_GRANULAR_CHAT_RESULT_LIMIT) else {
         return Ok(Vec::new());
     };
     let QueryTerm::Match(match_expr) = classify_query(query) else {
@@ -295,9 +295,16 @@ mod tests {
 
     #[test]
     fn limit_clamped() {
-        assert_eq!(clamp_limit(0), None);
-        assert_eq!(clamp_limit(-5), None);
-        assert_eq!(clamp_limit(10), Some(10));
-        assert_eq!(clamp_limit(i64::MAX), Some(MAX_RESULT_LIMIT));
+        assert_eq!(clamp_limit(0, MAX_RESULT_LIMIT), None);
+        assert_eq!(clamp_limit(-5, MAX_RESULT_LIMIT), None);
+        assert_eq!(clamp_limit(10, MAX_RESULT_LIMIT), Some(10));
+        assert_eq!(
+            clamp_limit(i64::MAX, MAX_RESULT_LIMIT),
+            Some(MAX_RESULT_LIMIT)
+        );
+        assert_eq!(
+            clamp_limit(50_000, MAX_GRANULAR_CHAT_RESULT_LIMIT),
+            Some(50_000)
+        );
     }
 }

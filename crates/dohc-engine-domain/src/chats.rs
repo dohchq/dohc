@@ -374,6 +374,15 @@ pub struct ChatThreadReadState {
     pub updated_at_ms: i64,
 }
 
+/// A channel-less file thread whose message aggregate is ahead of the human
+/// read cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadFileThread {
+    pub thread_id: String,
+    pub message_count: i64,
+    pub last_read_sequence: i64,
+}
+
 /// The agent's message-coordinate read cursor (separate from the human
 /// sequence cursor above).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4104,6 +4113,62 @@ impl<'a> LinkedChatStore<'a> {
     ) -> Result<ChatThreadReadState, DomainError> {
         self.store
             .read_with(|conn| read_state_for_thread(conn, workspace_id, thread_id))
+    }
+
+    /// Workspace-wide human unread state for channel-less, file-linked threads.
+    /// This is the CLI aggregate: absent read state coalesces to zero, and any
+    /// row that cannot be represented as a JavaScript safe integer fails closed.
+    pub fn list_unread_file_threads(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<UnreadFileThread>, DomainError> {
+        const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+        self.store.read_with(|conn| {
+            let mut statement = conn
+                .prepare_cached(
+                    "SELECT t.thread_id, \
+                        (SELECT COUNT(*) FROM chat_messages m \
+                         WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id) \
+                           AS message_count, \
+                        COALESCE((SELECT rs.last_read_sequence FROM chat_thread_read_state rs \
+                                  WHERE rs.workspace_id = t.workspace_id AND rs.thread_id = t.thread_id), 0) \
+                           AS last_read_sequence \
+                 FROM chat_threads t \
+                 WHERE t.workspace_id = ?1 \
+                   AND t.channel_id IS NULL \
+                   AND t.linked_object_id IS NOT NULL",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = statement
+                .query_map(params![workspace_id], |row| {
+                    Ok(UnreadFileThread {
+                        thread_id: row.get(0)?,
+                        message_count: row.get(1)?,
+                        last_read_sequence: row.get(2)?,
+                    })
+                })
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = rows
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DomainError::sql_corrupt)?;
+            let mut unread = Vec::new();
+            for row in rows {
+                if row.thread_id.is_empty()
+                    || !(0..=MAX_SAFE_INTEGER).contains(&row.message_count)
+                    || !(0..=MAX_SAFE_INTEGER).contains(&row.last_read_sequence)
+                {
+                    return Err(DomainError::chat(
+                        "state-corrupt",
+                        "Chat store contains invalid read state.",
+                    ));
+                }
+                if row.message_count > row.last_read_sequence.min(row.message_count) {
+                    unread.push(row);
+                }
+            }
+            Ok(unread)
+        })
     }
 
     // ---------------------------------------------------------- follows/feed

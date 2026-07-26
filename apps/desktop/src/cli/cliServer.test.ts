@@ -872,6 +872,133 @@ describe("CLI socket server", () => {
     expect(loadedThreadIds).toHaveLength(1);
   });
 
+  it("uses daemon candidates for substring grep and falls back when they saturate", async () => {
+    const matching = await post({
+      actor: "human",
+      title: "Daemon candidate",
+      body: "The daemon-prefilter-needle lives here",
+    });
+    await post({
+      actor: "human",
+      title: "Daemon unrelated",
+      body: "Nothing relevant in this thread",
+    });
+    if (!store) throw new Error("Store is not available");
+    const matchingThread = (await store.listThreads({ workspaceId: WORKSPACE_ID }))
+      .find((thread) => cliThreadId(thread.id) === matching.threadId);
+    if (!matchingThread) throw new Error("Matching thread is unavailable");
+    const matchingMessage = (
+      await store.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: matchingThread.id,
+      })
+    )[0];
+    if (!matchingMessage) throw new Error("Matching message is unavailable");
+
+    let saturated = false;
+    let daemonCalls = 0;
+    context.daemonReads = {
+      async queryChatMessagesGranular() {
+        daemonCalls += 1;
+        const row = {
+          threadId: matchingThread.id,
+          messageId: matchingMessage.id,
+          text: matchingMessage.body,
+        };
+        return saturated ? Array.from({ length: 50_000 }, () => row) : [row];
+      },
+      async listUnreadFileThreads() {
+        return [];
+      },
+    };
+
+    const loadedThreadIds: string[] = [];
+    const originalListMessages = store.listMessages;
+    store.listMessages = async (input) => {
+      loadedThreadIds.push(input.threadId);
+      return originalListMessages(input);
+    };
+    try {
+      const filtered = await invoke("grep", {
+        cwd: workspaceRoot,
+        actor: "human",
+        pattern: "daemon-prefilter-needle",
+        ignoreCase: true,
+        filesWithMatches: false,
+        context: 0,
+        limit: 20,
+        regex: false,
+      });
+      expect("matches" in filtered && filtered.matches).toHaveLength(1);
+      expect(loadedThreadIds).toEqual([matchingThread.id]);
+
+      loadedThreadIds.length = 0;
+      saturated = true;
+      const fallback = await invoke("grep", {
+        cwd: workspaceRoot,
+        actor: "human",
+        pattern: "daemon-prefilter-needle",
+        ignoreCase: true,
+        filesWithMatches: false,
+        context: 0,
+        limit: 20,
+        regex: false,
+      });
+      expect("matches" in fallback && fallback.matches).toHaveLength(1);
+      expect(new Set(loadedThreadIds).size).toBe(2);
+      expect(daemonCalls).toBe(2);
+    } finally {
+      store.listMessages = originalListMessages;
+      delete context.daemonReads;
+    }
+  });
+
+  it("uses the daemon unread-file aggregate for the human inbox", async () => {
+    if (!store) throw new Error("Store is not available");
+    const fileThread = await store.createThread({
+      workspaceId: WORKSPACE_ID,
+      title: "Daemon unread file discussion",
+      linkedFile: { objectId: "object_tracked", pathHint: "tracked.md" },
+    });
+    await store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: fileThread.id,
+      author: { kind: "agent", displayName: "Ice" },
+      body: "Unread through the daemon aggregate",
+    });
+    let unread = true;
+    let unreadCalls = 0;
+    context.daemonReads = {
+      async queryChatMessagesGranular() {
+        return [];
+      },
+      async listUnreadFileThreads() {
+        unreadCalls += 1;
+        return unread
+          ? [{
+              threadId: fileThread.id,
+              messageCount: 1,
+              lastReadSequence: 0,
+            }]
+          : [];
+      },
+    };
+    try {
+      expect((await invoke("inbox", {
+        cwd: workspaceRoot,
+        actor: "human",
+      })).threads.map((thread) => thread.id)).toContain(cliThreadId(fileThread.id));
+      unread = false;
+      expect((await invoke("inbox", {
+        cwd: workspaceRoot,
+        actor: "human",
+      })).threads.map((thread) => thread.id)).not.toContain(cliThreadId(fileThread.id));
+      expect(unreadCalls).toBe(2);
+    } finally {
+      delete context.daemonReads;
+    }
+  });
+
   it("searches with surrounding messages and exports canonical markdown", async () => {
     const opened = await post({
       actor: "human",

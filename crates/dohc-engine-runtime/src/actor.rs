@@ -29,7 +29,8 @@
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::{
-    SearchResult, delete_file_search_index, ensure_search_index_for_version, search_workspace,
+    GranularChatMessageSearchResult, SearchResult, delete_file_search_index,
+    ensure_search_index_for_version, query_chat_messages_granular, search_workspace,
     upsert_file_search_index,
 };
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
@@ -54,16 +55,17 @@ use dohc_engine_domain::{
     SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretRestoreResult,
     SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotContent,
     SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict, TextSnapshot,
-    ThreadDispatchPause, VersionFileChangePage, VersionRecord, VersionedTextComparison,
-    VersionedTextStore, WriteBinary, WriteResult, WriteText, apply_secret_file_from_version,
-    binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
-    capture_manifest_seed, capture_secret_retire, compare_secret_files_page_keyless,
-    delete_secret_file_keyless, derive_capture_object_id, enqueue_binary_delete,
-    enqueue_binary_rename, enqueue_write, fork_version_keyless, get_secret_moment_keyless,
-    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_page_keyless, restore_secret_file_verbatim,
-    secret_file_len_keyless, select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
-    write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
+    ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
+    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
+    apply_secret_file_from_version, binary_delete_job_id, binary_rename_delete_job_id,
+    binary_rename_write_job_id, capture_manifest_seed, capture_secret_retire,
+    compare_secret_files_page_keyless, delete_secret_file_keyless, derive_capture_object_id,
+    enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless,
+    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
+    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_page_keyless,
+    restore_secret_file_verbatim, secret_file_len_keyless, select_snapshot_by_path_in_tx,
+    validate_addressable_plaintext_path, write_binary_in_tx, write_projected_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, ProjectionTargetKind, ProjectionTargetState, StdBackoff,
@@ -678,6 +680,12 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<Vec<SearchResult>, RuntimeError>>,
     },
+    SearchQueryChatMessagesGranular {
+        workspace_id: String,
+        query: String,
+        limit: i64,
+        reply: oneshot::Sender<Result<Vec<GranularChatMessageSearchResult>, RuntimeError>>,
+    },
     EnsureSearchIndex {
         root_dir: PathBuf,
         workspace_id: String,
@@ -847,6 +855,10 @@ enum Command {
         workspace_id: String,
         thread_id: String,
         reply: oneshot::Sender<Result<ChatThreadReadState, RuntimeError>>,
+    },
+    ChatReadStateListUnreadFileThreads {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<Vec<UnreadFileThread>, RuntimeError>>,
     },
     ChatAgentUnreadThreads {
         workspace_id: String,
@@ -2843,6 +2855,25 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn search_query_chat_messages_granular(
+        &self,
+        workspace_id: String,
+        query: String,
+        limit: i64,
+    ) -> Result<Vec<GranularChatMessageSearchResult>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::SearchQueryChatMessagesGranular {
+                workspace_id,
+                query,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     pub async fn ensure_search_index(
         &self,
         root_dir: PathBuf,
@@ -3366,6 +3397,21 @@ impl ActorHandle {
             .send(Command::ChatReadStateGet {
                 workspace_id,
                 thread_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn chat_read_state_list_unread_file_threads(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<UnreadFileThread>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatReadStateListUnreadFileThreads {
+                workspace_id,
                 reply,
             })
             .await
@@ -6373,6 +6419,15 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
+            Command::ChatReadStateListUnreadFileThreads {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = LinkedChatStore::new(&mut store)
+                    .list_unread_file_threads(&workspace_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
             Command::ChatAgentUnreadThreads {
                 workspace_id,
                 after,
@@ -7006,6 +7061,19 @@ fn worker_main(
                         })
                         .map_err(RuntimeError::from)
                 };
+                let _ = reply.send(outcome);
+            }
+            Command::SearchQueryChatMessagesGranular {
+                workspace_id,
+                query,
+                limit,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| {
+                        query_chat_messages_granular(conn, &workspace_id, &query, limit)
+                    })
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::EnsureSearchIndex {

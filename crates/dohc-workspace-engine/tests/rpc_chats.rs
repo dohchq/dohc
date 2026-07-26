@@ -3982,3 +3982,274 @@ async fn thread_projection_read_only_notice_and_access_line_presence() {
     .await;
     assert_eq!(null_access.code, ErrorCode::InvalidParams);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn granular_chat_search_arm_preserves_header_mapping_and_cli_saturation() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-cli-granular-search").await;
+    let mut id = 10;
+
+    let mut conn =
+        rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+            .expect("open database");
+    let tx = conn.transaction().expect("begin FTS seed");
+    {
+        let mut insert = tx
+            .prepare(
+                "INSERT INTO engine_search_chat_messages_fts \
+                 (workspace_id, thread_id, message_id, text) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .expect("prepare FTS seed");
+        insert
+            .execute(rusqlite::params![
+                "rpc-cli-granular-search",
+                "thread-header",
+                "__thread__",
+                "needle header"
+            ])
+            .expect("insert header");
+        for index in 0..50_000 {
+            insert
+                .execute(rusqlite::params![
+                    "rpc-cli-granular-search",
+                    format!("thread-{index}"),
+                    format!("message-{index}"),
+                    "needle"
+                ])
+                .expect("insert candidate");
+        }
+    }
+    tx.commit().expect("commit FTS seed");
+    drop(conn);
+
+    let header = call(
+        &transport,
+        &handle,
+        &mut id,
+        "search.queryChatMessagesGranular",
+        json!({ "query": "needle header", "limit": 10 }),
+    )
+    .await;
+    assert_eq!(
+        header,
+        json!([{
+            "threadId": "thread-header",
+            "messageId": null,
+            "text": "needle header",
+        }])
+    );
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "search.queryChatMessagesGranular",
+            json!({ "query": "ne", "limit": 50_000 }),
+        )
+        .await,
+        json!([])
+    );
+
+    let saturated = call(
+        &transport,
+        &handle,
+        &mut id,
+        "search.queryChatMessagesGranular",
+        json!({ "query": "needle", "limit": 50_000 }),
+    )
+    .await;
+    // MUTATION: reuse the ordinary 1,000-result clamp -> the CLI never sees
+    // exactly 50,000 and incorrectly treats a truncated prefilter as exhaustive.
+    assert_eq!(saturated.as_array().expect("candidate array").len(), 50_000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unread_file_thread_arm_coalesces_missing_state_and_tracks_mutations() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-cli-unread-files").await;
+    let mut id = 10;
+
+    for (thread_id, object_id) in [
+        ("unread-file", "object-unread"),
+        ("empty-file", "object-empty"),
+    ] {
+        call_with_idempotency(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.threads.create",
+            thread_id,
+            json!({
+                "threadId": thread_id,
+                "title": thread_id,
+                "linkedFile": { "objectId": object_id },
+                "nowMs": 10,
+            }),
+        )
+        .await;
+    }
+    for (message_id, now_ms) in [("message-1", 20), ("message-2", 30)] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.messages.send",
+            json!({
+                "threadId": "unread-file",
+                "messageId": message_id,
+                "authorKind": "agent",
+                "authorDisplayName": "Agent",
+                "body": message_id,
+                "nowMs": now_ms,
+            }),
+        )
+        .await;
+    }
+
+    let absent_state = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.readState.listUnreadFileThreads",
+        json!({}),
+    )
+    .await;
+    // MUTATION: use an inner read-state join or omit COALESCE(..., 0) -> this
+    // unread thread with no read-state row disappears.
+    assert_eq!(
+        absent_state,
+        json!([{
+            "threadId": "unread-file",
+            "messageCount": 2,
+            "lastReadSequence": 0,
+        }])
+    );
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.readState.markThreadRead",
+        json!({
+            "threadId": "unread-file",
+            "upToSequence": 1,
+            "nowMs": 40,
+        }),
+    )
+    .await;
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.readState.listUnreadFileThreads",
+            json!({}),
+        )
+        .await,
+        json!([{
+            "threadId": "unread-file",
+            "messageCount": 2,
+            "lastReadSequence": 1,
+        }])
+    );
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.readState.markThreadRead",
+        json!({
+            "threadId": "unread-file",
+            "upToSequence": 2,
+            "nowMs": 50,
+        }),
+    )
+    .await;
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.readState.listUnreadFileThreads",
+            json!({}),
+        )
+        .await,
+        json!([])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unread_file_thread_arm_fails_closed_on_non_safe_read_state() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-cli-unread-corrupt").await;
+    let mut id = 10;
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.create",
+        "corrupt-file-thread",
+        json!({
+            "threadId": "corrupt-file-thread",
+            "title": "Corrupt",
+            "linkedFile": { "objectId": "object-corrupt" },
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "corrupt-file-thread",
+            "messageId": "message",
+            "authorKind": "agent",
+            "authorDisplayName": "Agent",
+            "body": "message",
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.readState.markThreadRead",
+        json!({
+            "threadId": "corrupt-file-thread",
+            "upToSequence": 1,
+            "nowMs": 30,
+        }),
+    )
+    .await;
+
+    let conn = rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+        .expect("open database");
+    conn.execute(
+        "UPDATE chat_thread_read_state SET last_read_sequence = ?1 \
+         WHERE workspace_id = ?2 AND thread_id = ?3",
+        rusqlite::params![
+            9_007_199_254_740_992_i64,
+            "rpc-cli-unread-corrupt",
+            "corrupt-file-thread"
+        ],
+    )
+    .expect("corrupt read state");
+    drop(conn);
+
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.readState.listUnreadFileThreads",
+        json!({}),
+    )
+    .await;
+    assert_eq!(error.code, ErrorCode::Internal);
+    assert_eq!(error.message, "state-corrupt");
+}
