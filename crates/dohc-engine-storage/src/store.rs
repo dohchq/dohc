@@ -12,7 +12,7 @@ use crate::schema::open_engine_db;
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Whether a string is a safe bare SQL identifier (ASCII alnum + underscore,
 /// non-empty). Used to guard the one place a table name is interpolated rather
@@ -29,6 +29,7 @@ fn is_safe_identifier(name: &str) -> bool {
 pub struct EngineStore {
     conn: Connection,
     freshly_created: bool,
+    database_path: PathBuf,
 }
 
 /// Inputs to one compound write. A faithful minimal analog of the engine's
@@ -178,6 +179,7 @@ impl EngineStore {
         Ok(EngineStore {
             conn: opened.conn,
             freshly_created: opened.freshly_created,
+            database_path: path.to_path_buf(),
         })
     }
 
@@ -185,6 +187,13 @@ impl EngineStore {
     /// existing v2 store.
     pub fn was_freshly_created(&self) -> bool {
         self.freshly_created
+    }
+
+    /// The path used to open this store. Higher layers use the canonical
+    /// `.dohc/engine/engine.db` location to recover the workspace root for
+    /// filesystem-backed policy reads.
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
     }
 
     /// Bind a fresh store to a shadow marker, or verify an existing binding.

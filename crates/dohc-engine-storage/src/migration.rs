@@ -1582,6 +1582,20 @@ CREATE INDEX chat_pending_replication_by_dependency
 /// The `id` of the deferred chat-coordinate migration.
 pub(crate) const CHAT_PENDING_REPLICATION_MIGRATION_ID: &str = "v1-chat-pending-replication";
 
+/// Ordinal 17. Completes the write-metadata tuple on plaintext moments and
+/// snapshots. The TypeScript schema stores origin, summary, and correlationId
+/// together; the first Rust schema slice retained only origin.
+const V1_MOMENT_METADATA_DDL: &str = "\
+ALTER TABLE moments ADD COLUMN metadata_summary TEXT;
+ALTER TABLE moments ADD COLUMN metadata_correlation_id TEXT;
+ALTER TABLE snapshots ADD COLUMN metadata_summary TEXT;
+ALTER TABLE snapshots ADD COLUMN metadata_correlation_id TEXT;
+ALTER TABLE fork_base_snapshots ADD COLUMN metadata_summary TEXT;
+ALTER TABLE fork_base_snapshots ADD COLUMN metadata_correlation_id TEXT;
+";
+
+pub(crate) const MOMENT_METADATA_MIGRATION_ID: &str = "v1-moment-metadata";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1711,6 +1725,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: CHAT_PENDING_REPLICATION_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_CHAT_PENDING_REPLICATION_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        // Ordinal 17 is taken by v1-chat-pending-replication (#244). Schema
+        // shards serialize through this list; this one appends at 18.
+        ordinal: 18,
+        id: MOMENT_METADATA_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_MOMENT_METADATA_DDL,
         sets_user_version: None,
     },
 ];

@@ -6646,6 +6646,62 @@ fn router_preserves_a_deferred_conflict_resolve_instead_of_flattening_it() {
 }
 
 #[test]
+fn router_counts_only_newly_inserted_replicated_open_conflicts() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let side = |path: &str| {
+        json!({
+            "exists": false,
+            "path": path,
+            "contentKind": "text"
+        })
+    };
+    let payload = json!({
+        "id": "router-open-conflict",
+        "workspaceId": "ws",
+        "path": "doc.md",
+        "targetVersionId": "main",
+        "sourceVersionId": "peer",
+        "createdAtMs": 2_000,
+        "updatedAtMs": 2_000,
+        "base": side("doc.md"),
+        "current": side("doc.md"),
+        "incoming": side("doc.md"),
+        "status": "open",
+        "chosenFrom": "current",
+        "metadata": {"origin": "sync"}
+    });
+
+    let first = envelope("router-open-a", 0, "conflict.open", payload.clone());
+    let ApplyOutcome::Applied(first) =
+        apply_replication_envelope(&mut engine, &first, &NoFaults, &NoLiveLeases)
+            .expect("first routed open")
+    else {
+        panic!("first conflict.open did not apply");
+    };
+    assert_eq!(
+        first.conflict.as_ref().and_then(|row| row.inserted),
+        Some(true)
+    );
+    assert_eq!(first.conflicts_opened, 1);
+
+    let duplicate = envelope("router-open-b", 0, "conflict.open", payload);
+    let ApplyOutcome::Applied(duplicate) =
+        apply_replication_envelope(&mut engine, &duplicate, &NoFaults, &NoLiveLeases)
+            .expect("idempotent routed open")
+    else {
+        panic!("duplicate conflict.open did not apply");
+    };
+    assert_eq!(
+        duplicate.conflict.as_ref().and_then(|row| row.inserted),
+        Some(false)
+    );
+    // MUTATION: flattening the structured result yields 0 for the first
+    // assertion; hardcoding every conflict.open as one breaks this assertion.
+    assert_eq!(duplicate.conflicts_opened, 0);
+}
+
+#[test]
 fn malformed_moment_append_router_error_never_acks() {
     let (_scratch, _path, mut engine) = store();
     let operation = envelope("moment-peer", 0, "moment.append", json!({}));

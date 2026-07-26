@@ -1,6 +1,10 @@
 use std::cmp::Ordering;
+use std::path::Path;
 
-use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
+use dohc_engine_files::{
+    PathClassification, classify_engine_file_path_normalized,
+    search_policy::{SearchPolicySnapshot, path_is_search_indexed, read_engine_search_policy},
+};
 use dohc_engine_storage::{EngineStore, FaultInjector, get_binary_blob, hex_sha256};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -169,12 +173,17 @@ pub fn apply_moment_envelope(
     if envelope.op_kind != "moment.append" {
         return Err(SyncError::UnsupportedOperation);
     }
-    apply_envelope_with(store, envelope, faults, apply_moment_append)
+    let search_policy =
+        workspace_root_from_database(store.database_path()).map(read_engine_search_policy);
+    apply_envelope_with(store, envelope, faults, |tx, envelope| {
+        apply_moment_append(tx, envelope, search_policy.as_ref())
+    })
 }
 
 fn apply_moment_append(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
+    search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<i64, SyncError> {
     let payload: MomentAppendPayload =
         serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
@@ -263,13 +272,16 @@ fn apply_moment_append(
         ensure_file_object(tx, &envelope.workspace_id, &payload)?;
         insert_moment(tx, &envelope.workspace_id, &payload, &adopted_before, false)?;
         if payload.operation == "delete" {
+            let alias_path = local
+                .as_ref()
+                .map_or(payload.path.as_str(), |snapshot| snapshot.path.as_str());
             tx.execute(
                 "DELETE FROM path_aliases \
                  WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND object_id=?4",
                 params![
                     envelope.workspace_id,
                     payload.version_id,
-                    payload.path,
+                    alias_path,
                     payload.object_id
                 ],
             )
@@ -337,6 +349,7 @@ fn apply_moment_append(
             &payload,
             after_kind,
             after_text.as_deref().unwrap_or(""),
+            search_policy,
         )?;
         return Ok(0);
     }
@@ -426,14 +439,20 @@ fn apply_moment_append(
 }
 
 fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
+    crate::model::bounded(
+        &payload.moment_id,
+        "moment.append moment id must be non-empty and bounded",
+    )?;
+    crate::model::bounded(
+        &payload.object_id,
+        "moment.append object id must be non-empty and bounded",
+    )?;
     if !matches!(payload.operation.as_str(), "write" | "rename" | "delete")
         || !matches!(
             payload.before_present.as_str(),
             "absent" | "null" | "present"
         )
-        || payload.moment_id.is_empty()
         || payload.version_id.is_empty()
-        || payload.object_id.is_empty()
         || payload.path.is_empty()
         || payload.payload_after_path.is_empty()
         || payload.metadata.origin.is_empty()
@@ -447,6 +466,18 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
         return Err(SyncError::InvalidInput {
             reason: "moment.append payload is invalid",
         });
+    }
+    match (
+        payload.payload_before_path.as_deref(),
+        payload.payload_before_blob_sha256.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(path), Some(sha)) if !path.is_empty() && !sha.is_empty() => {}
+        _ => {
+            return Err(SyncError::InvalidInput {
+                reason: "moment.append payload-before path and digest must appear together",
+            });
+        }
     }
     validate_every_path_field(payload)?;
     Ok(())
@@ -528,12 +559,10 @@ fn validate_payload_sides(
     tx: &Transaction<'_>,
     payload: &MomentAppendPayload,
 ) -> Result<(), SyncError> {
-    if let (Some(sha), Some(path)) = (
+    if let (Some(sha), Some(_path)) = (
         payload.payload_before_blob_sha256.as_deref(),
         payload.payload_before_path.as_deref(),
-    ) && !sha.is_empty()
-        && !path.is_empty()
-    {
+    ) {
         hydrate_wire_side(
             tx,
             sha,
@@ -667,7 +696,8 @@ fn select_snapshot_by_object(
     tx.query_row(
         "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
                 s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
-                s.updated_at_ms,s.latest_moment_id,s.metadata_origin \
+                s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
+                s.metadata_summary,s.metadata_correlation_id \
          FROM snapshots s \
          LEFT JOIN blobs b ON b.sha256=s.blob_sha256 AND COALESCE(s.content_kind,'text')='text' \
          LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 AND COALESCE(s.content_kind,'text')='binary' \
@@ -690,7 +720,8 @@ fn select_snapshot_by_path(
         .query_row(
             "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
                     s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
-                    s.updated_at_ms,s.latest_moment_id,s.metadata_origin \
+                    s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
+                    s.metadata_summary,s.metadata_correlation_id \
              FROM path_aliases a \
              JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id \
              LEFT JOIN blobs b ON b.sha256=s.blob_sha256 AND COALESCE(s.content_kind,'text')='text' \
@@ -712,7 +743,8 @@ fn select_snapshot_by_path(
         .prepare(
             "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
                     s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
-                    s.updated_at_ms,s.latest_moment_id,s.metadata_origin \
+                    s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
+                    s.metadata_summary,s.metadata_correlation_id \
              FROM snapshots s \
              LEFT JOIN blobs b ON b.sha256=s.blob_sha256 AND COALESCE(s.content_kind,'text')='text' \
              LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 AND COALESCE(s.content_kind,'text')='binary' \
@@ -767,8 +799,8 @@ fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Snapsho
         latest_moment_id: row.get(9)?,
         metadata: Metadata {
             origin: row.get(10)?,
-            summary: None,
-            correlation_id: None,
+            summary: row.get(11)?,
+            correlation_id: row.get(12)?,
         },
     }))
 }
@@ -855,12 +887,13 @@ fn insert_moment(
         "INSERT INTO moments (
            workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,
            operation,after_blob_sha256,before_present,before_blob_sha256,
-           before_latest_moment_id,metadata_origin,author_json,sync_record_only,
+           before_latest_moment_id,metadata_origin,metadata_summary,
+           metadata_correlation_id,author_json,sync_record_only,
            after_content_kind,after_binary_sha256,before_content_kind,before_binary_sha256,
            payload_before_path,payload_before_content_kind,payload_before_blob_sha256,
            payload_after_path,payload_after_content_kind,payload_after_blob_sha256
          ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,
-                   ?20,?21,?22,?23,?24,?25)",
+                   ?20,?21,?22,?23,?24,?25,?26,?27)",
         params![
             workspace_id,
             order,
@@ -875,6 +908,8 @@ fn insert_moment(
             before_text_sha,
             before_latest,
             payload.metadata.origin,
+            payload.metadata.summary,
+            payload.metadata.correlation_id,
             author_json,
             record_only.then_some(1_i64),
             after_kind.as_str(),
@@ -907,12 +942,16 @@ fn upsert_snapshot(
     tx.execute(
         "INSERT INTO snapshots (
            workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,
-           latest_moment_id,metadata_origin,content_kind,binary_sha256
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+           latest_moment_id,metadata_origin,metadata_summary,
+           metadata_correlation_id,content_kind,binary_sha256
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
          ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET
            path=excluded.path,blob_sha256=excluded.blob_sha256,
            updated_at_ms=excluded.updated_at_ms,latest_moment_id=excluded.latest_moment_id,
-           metadata_origin=excluded.metadata_origin,content_kind=excluded.content_kind,
+           metadata_origin=excluded.metadata_origin,
+           metadata_summary=excluded.metadata_summary,
+           metadata_correlation_id=excluded.metadata_correlation_id,
+           content_kind=excluded.content_kind,
            binary_sha256=excluded.binary_sha256",
         params![
             workspace_id,
@@ -923,6 +962,8 @@ fn upsert_snapshot(
             payload.recorded_at_ms,
             payload.moment_id,
             payload.metadata.origin,
+            payload.metadata.summary,
+            payload.metadata.correlation_id,
             kind.as_str(),
             binary_sha
         ],
@@ -952,9 +993,19 @@ fn upsert_search_row(
     payload: &MomentAppendPayload,
     kind: ContentKind,
     text: &str,
+    policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
+    let Some(policy) = policy.filter(|policy| !policy.is_degraded()) else {
+        tx.execute(
+            "UPDATE engine_search_index_state SET file_policy_degraded=1 \
+             WHERE workspace_id=?1 AND version_id=?2",
+            params![workspace_id, payload.version_id],
+        )
+        .map_err(SyncError::persist)?;
+        return Ok(());
+    };
     delete_search_row(tx, workspace_id, &payload.version_id, &payload.object_id)?;
-    if kind == ContentKind::Text {
+    if kind == ContentKind::Text && path_is_search_indexed(policy, &payload.payload_after_path) {
         tx.execute(
             "INSERT INTO engine_search_files_fts (workspace_id,version_id,object_id,path,text) \
              VALUES (?1,?2,?3,?4,?5)",
@@ -969,6 +1020,18 @@ fn upsert_search_row(
         .map_err(SyncError::persist)?;
     }
     Ok(())
+}
+
+fn workspace_root_from_database(database_path: &Path) -> Option<&Path> {
+    let engine_dir = database_path.parent()?;
+    let dohc_dir = engine_dir.parent()?;
+    if database_path.file_name()? != "engine.db"
+        || engine_dir.file_name()? != "engine"
+        || dohc_dir.file_name()? != ".dohc"
+    {
+        return None;
+    }
+    dohc_dir.parent()
 }
 
 fn side_from_snapshot(snapshot: &Snapshot) -> ConflictSide {

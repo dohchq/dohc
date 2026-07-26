@@ -1213,7 +1213,11 @@ fn moment_append_persists_full_wire_payload_provenance() {
         "payloadAfterPath": "docs/new.md",
         "payloadAfterContentKind": "text",
         "payloadAfterByteLength": "agreed".len(),
-        "metadata": {"origin": "sync"},
+        "metadata": {
+            "origin": "sync",
+            "summary": "adopted from peer",
+            "correlationId": "correlation-remote-adopted"
+        },
         "beforePresent": "present",
         "beforeObjectId": "object",
         "beforeVersionId": "main",
@@ -1263,6 +1267,232 @@ fn moment_append_persists_full_wire_payload_provenance() {
             Some(after_sha),
         )
     );
+
+    let metadata = store
+        .read_with(|conn| {
+            let moment = conn.query_row(
+                "SELECT metadata_origin,metadata_summary,metadata_correlation_id \
+                 FROM moments WHERE workspace_id='ws' AND moment_id='remote-adopted'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )?;
+            let snapshot = conn.query_row(
+                "SELECT metadata_origin,metadata_summary,metadata_correlation_id \
+                 FROM snapshots WHERE workspace_id='ws' AND object_id='object'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )?;
+            Ok::<_, rusqlite::Error>((moment, snapshot))
+        })
+        .expect("replicated metadata");
+    let expected = (
+        "sync".to_owned(),
+        Some("adopted from peer".to_owned()),
+        Some("correlation-remote-adopted".to_owned()),
+    );
+    // MUTATION: dropping either optional field from the moment or snapshot
+    // insert makes one side of this round trip differ.
+    assert_eq!(metadata, (expected.clone(), expected));
+}
+
+#[test]
+fn moment_append_search_index_respects_files_and_visibility_policy() {
+    let (scratch, mut store) = test_store();
+    std::fs::write(
+        scratch.path().join(".dohc/files.toml"),
+        "[[rule]]\npath = \"private/**\"\nsearchable = false\n",
+    )
+    .expect("files policy");
+    std::fs::write(
+        scratch.path().join(".dohc/visibility.toml"),
+        "[[rule]]\npath = \"hidden/**\"\nvisibility = \"hidden\"\n",
+    )
+    .expect("visibility policy");
+    hydrate_texts(
+        &mut store,
+        &["private needle", "hidden needle", "public needle"],
+    );
+
+    for (origin, moment_id, object_id, path, text) in [
+        (
+            "private-peer",
+            "private-moment",
+            "private-object",
+            "private/doc.md",
+            "private needle",
+        ),
+        (
+            "hidden-peer",
+            "hidden-moment",
+            "hidden-object",
+            "hidden/doc.md",
+            "hidden needle",
+        ),
+        (
+            "public-peer",
+            "public-moment",
+            "public-object",
+            "public/doc.md",
+            "public needle",
+        ),
+    ] {
+        let op = envelope(
+            origin,
+            0,
+            "ws",
+            absent_text_payload(moment_id, object_id, path, text),
+        );
+        assert_eq!(
+            apply_moment_envelope(&mut store, &op, &NoFaults).expect("policy-aware apply"),
+            ApplyOutcome::Applied(0)
+        );
+    }
+
+    // MUTATION: removing or inverting either policy predicate indexes one of
+    // the excluded rows; skipping the healthy insert loses the public row.
+    assert!(indexed(&store, "private-object").is_empty());
+    assert!(indexed(&store, "hidden-object").is_empty());
+    assert_eq!(
+        indexed(&store, "public-object"),
+        [("public/doc.md".to_owned(), "public needle".to_owned())]
+    );
+}
+
+#[test]
+fn moment_append_rejects_each_incomplete_payload_before_tuple_without_ack() {
+    for (case, before_path, before_sha) in [
+        ("path only", Some("doc.md"), None),
+        ("digest only", None, Some(text_sha("before"))),
+    ] {
+        let (_scratch, mut store) = test_store();
+        hydrate_texts(&mut store, &["before", "after"]);
+        let mut payload = absent_text_payload("tuple-moment", "tuple-object", "doc.md", "after");
+        payload["payloadBeforePath"] = before_path.map_or(Value::Null, |path| json!(path));
+        payload["payloadBeforeBlobSha256"] = before_sha.map_or(Value::Null, |sha| json!(sha));
+        let op = envelope("tuple-peer", 0, "ws", payload);
+
+        assert!(
+            matches!(
+                apply_moment_envelope(&mut store, &op, &NoFaults),
+                Err(SyncError::InvalidInput { .. })
+            ),
+            "{case} must be rejected"
+        );
+        let rows: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' \
+                     AND object_id='tuple-object'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("moment count");
+        assert_eq!(rows, 0, "{case} mutated moment history");
+        assert_eq!(
+            read_replication_acked_seq(&store, "ws", "tuple-peer").expect("ack"),
+            -1,
+            "{case} advanced the peer ack"
+        );
+    }
+}
+
+#[test]
+fn replicated_delete_after_path_divergent_rename_removes_the_live_alias() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["same"]);
+    seed_text_moment(
+        &mut store,
+        "rename-delete-object",
+        "old.md",
+        "same",
+        "local-head",
+        None,
+        true,
+    );
+    let rename = envelope(
+        "rename-delete-peer",
+        0,
+        "ws",
+        present_text_payload(
+            "remote-rename",
+            "rename-delete-object",
+            "rename",
+            "old.md",
+            "new.md",
+            "same",
+            "local-head",
+            "same",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &rename, &NoFaults).expect("rename"),
+        ApplyOutcome::Applied(0)
+    );
+    assert_eq!(
+        aliases(&store, "rename-delete-object"),
+        ["new.md".to_owned()]
+    );
+
+    let delete = envelope(
+        "rename-delete-peer",
+        1,
+        "ws",
+        present_text_payload(
+            "remote-delete",
+            "rename-delete-object",
+            "delete",
+            "old.md",
+            "old.md",
+            "same",
+            "remote-rename",
+            "same",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &delete, &NoFaults).expect("delete"),
+        ApplyOutcome::Applied(0)
+    );
+    // MUTATION: deleting by the remote payload path leaves `new.md` behind.
+    assert!(aliases(&store, "rename-delete-object").is_empty());
+    assert_eq!(snapshot(&store, "rename-delete-object"), None);
+}
+
+#[test]
+fn moment_append_rejects_overlong_moment_and_object_ids_without_ack() {
+    for (case, field) in [("moment id", "momentId"), ("object id", "objectId")] {
+        let (_scratch, mut store) = test_store();
+        hydrate_texts(&mut store, &["content"]);
+        let mut payload =
+            absent_text_payload("bounded-moment", "bounded-object", "doc.md", "content");
+        payload[field] = json!("x".repeat(crate::model::MAX_IDENTIFIER_BYTES + 1));
+        let op = envelope("bounded-peer", 0, "ws", payload);
+
+        assert!(
+            matches!(
+                apply_moment_envelope(&mut store, &op, &NoFaults),
+                Err(SyncError::InvalidInput { .. })
+            ),
+            "overlong {case} must be rejected"
+        );
+        assert_eq!(
+            read_replication_acked_seq(&store, "ws", "bounded-peer").expect("ack"),
+            -1,
+            "overlong {case} advanced the peer ack"
+        );
+    }
 }
 
 #[test]

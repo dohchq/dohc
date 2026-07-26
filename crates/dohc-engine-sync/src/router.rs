@@ -82,9 +82,12 @@ pub fn apply_replication_envelope(
         ),
         OwnedRoute::Conflict => map_applied(
             crate::apply_conflict_envelope(store, envelope, faults),
-            |conflict| RoutedApply {
-                conflict: Some(conflict),
-                ..RoutedApply::default()
+            |conflict| {
+                let conflicts_opened = i64::from(conflict.inserted == Some(true));
+                RoutedApply {
+                    conflict: Some(conflict),
+                    conflicts_opened,
+                }
             },
         ),
         OwnedRoute::Workspace => plain(crate::version_apply::apply_workspace_envelope(
