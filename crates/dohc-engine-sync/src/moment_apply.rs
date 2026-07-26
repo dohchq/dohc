@@ -194,13 +194,17 @@ fn apply_moment_append(
 
     let duplicate: bool = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2)",
+            "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2) \
+                 OR EXISTS(SELECT 1 FROM secret_moments \
+                           WHERE workspace_id=?1 AND moment_id=?2)",
             params![envelope.workspace_id, payload.moment_id],
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
     if duplicate {
-        return Ok(0);
+        return Err(SyncError::InvalidInput {
+            reason: "replicated plaintext moment id collides with existing history",
+        });
     }
 
     let local = select_snapshot_by_object(
@@ -300,20 +304,24 @@ fn apply_moment_append(
             return Ok(0);
         }
 
-        if payload.operation == "rename"
-            && let Some(before_path) = payload.payload_before_path.as_deref()
-        {
-            tx.execute(
-                "DELETE FROM path_aliases \
+        if payload.operation == "rename" {
+            let before_path = local.as_ref().map_or_else(
+                || payload.payload_before_path.as_deref(),
+                |snapshot| Some(snapshot.path.as_str()),
+            );
+            if let Some(before_path) = before_path {
+                tx.execute(
+                    "DELETE FROM path_aliases \
                  WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND object_id=?4",
-                params![
-                    envelope.workspace_id,
-                    payload.version_id,
-                    before_path,
-                    payload.object_id
-                ],
-            )
-            .map_err(SyncError::persist)?;
+                    params![
+                        envelope.workspace_id,
+                        payload.version_id,
+                        before_path,
+                        payload.object_id
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+            }
         }
         tx.execute(
             "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
@@ -455,7 +463,11 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
         || payload.version_id.is_empty()
         || payload.path.is_empty()
         || payload.payload_after_path.is_empty()
-        || payload.metadata.origin.is_empty()
+        || !valid_replicated_origin(&payload.metadata.origin)
+        || payload
+            .before_metadata
+            .as_ref()
+            .is_some_and(|metadata| !valid_replicated_origin(&metadata.origin))
         || payload.author.as_ref().is_some_and(|author| {
             author.kind != "agent"
                 || author.agent_id.is_empty()
@@ -481,6 +493,13 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
     }
     validate_every_path_field(payload)?;
     Ok(())
+}
+
+fn valid_replicated_origin(origin: &str) -> bool {
+    matches!(
+        origin,
+        "api" | "local-file" | "restore" | "sync" | "unknown"
+    )
 }
 
 fn validate_every_path_field(payload: &MomentAppendPayload) -> Result<(), SyncError> {

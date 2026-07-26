@@ -412,7 +412,7 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
             "remote-rename",
             "object-rename",
             "rename",
-            "old.md",
+            "peer-old.md",
             "new.md",
             "same",
             "local-rename-head",
@@ -423,6 +423,8 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
         apply_moment_envelope(&mut rename_store, &rename, &NoFaults).expect("rename"),
         ApplyOutcome::Applied(0)
     );
+    // MUTATION: deleting the payloadBeforePath alias instead of the matched
+    // local head path leaves old.md behind beside the new live alias.
     assert_eq!(aliases(&rename_store, "object-rename"), ["new.md"]);
     assert_eq!(
         snapshot(&rename_store, "object-rename").unwrap().0,
@@ -935,7 +937,7 @@ fn moment_append_record_only_divergence_is_not_a_head_and_cannot_be_rolled_back(
 }
 
 #[test]
-fn moment_append_duplicate_moment_id_is_applied_and_acked_but_duplicate_envelope_is_skipped() {
+fn moment_append_first_delivery_rejects_plaintext_id_collision_but_redelivery_skips() {
     let (_scratch, mut store) = test_store();
     hydrate_texts(&mut store, &["first"]);
     let first = envelope(
@@ -948,6 +950,10 @@ fn moment_append_duplicate_moment_id_is_applied_and_acked_but_duplicate_envelope
         apply_moment_envelope(&mut store, &first, &NoFaults).expect("first"),
         ApplyOutcome::Applied(0)
     );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &first, &NoFaults).expect("redelivery"),
+        ApplyOutcome::Skipped
+    );
     let duplicate_id = envelope(
         "second-peer",
         0,
@@ -959,17 +965,18 @@ fn moment_append_duplicate_moment_id_is_applied_and_acked_but_duplicate_envelope
             "missing blob is never hydrated",
         ),
     );
-    assert_eq!(
-        apply_moment_envelope(&mut store, &duplicate_id, &NoFaults).expect("duplicate id"),
-        ApplyOutcome::Applied(0)
-    );
+    // MUTATION: treating a same-table ID hit as idempotence acks this unrelated
+    // first-delivery coordinate; true replay was already skipped above by the
+    // replication coordinate before entering the moment applier.
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &duplicate_id, &NoFaults),
+        Err(SyncError::InvalidInput {
+            reason: "replicated plaintext moment id collides with existing history"
+        })
+    ));
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "second-peer").expect("ack"),
-        0
-    );
-    assert_eq!(
-        apply_moment_envelope(&mut store, &duplicate_id, &NoFaults).expect("duplicate envelope"),
-        ApplyOutcome::Skipped
+        -1
     );
     let journal_count: i64 = store
         .read_with(|conn| {
@@ -981,7 +988,143 @@ fn moment_append_duplicate_moment_id_is_applied_and_acked_but_duplicate_envelope
             )
         })
         .expect("journal count");
-    assert_eq!(journal_count, 2);
+    assert_eq!(journal_count, 1);
+}
+
+#[test]
+fn moment_append_rejects_id_collision_with_secret_history() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["incoming"]);
+    store
+        .read_with(|tx| {
+            tx.execute(
+                "INSERT INTO secret_moments \
+                 (workspace_id,moment_order,moment_id,version_id,path,recorded_at_ms, \
+                  operation,metadata_origin,after_present) \
+                 VALUES ('ws',1,'protected-id','main','app.env',100,'delete','api',0)",
+                [],
+            )
+        })
+        .expect("seed protected collision");
+    let op = envelope(
+        "plaintext-collision-peer",
+        0,
+        "ws",
+        absent_text_payload("protected-id", "plaintext-object", "doc.md", "incoming"),
+    );
+
+    // MUTATION: removing the secret_moments arm lets two unrelated histories
+    // claim the same workspace-wide moment identity.
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &op, &NoFaults),
+        Err(SyncError::InvalidInput {
+            reason: "replicated plaintext moment id collides with existing history"
+        })
+    ));
+    let rows: (i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments \
+                     WHERE workspace_id='ws' AND moment_id='protected-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM secret_moments \
+                     WHERE workspace_id='ws' AND moment_id='protected-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("collision state");
+    assert_eq!(rows, (0, 1));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "plaintext-collision-peer").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn moment_append_accepts_only_oracle_metadata_origins_without_ack_on_rejection() {
+    let (_scratch, mut accepted_store) = test_store();
+    hydrate_texts(&mut accepted_store, &["accepted"]);
+    for (index, origin) in ["api", "local-file", "restore", "sync", "unknown"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut payload = absent_text_payload(
+            &format!("accepted-{index}"),
+            &format!("accepted-object-{index}"),
+            &format!("accepted-{index}.md"),
+            "accepted",
+        );
+        payload["metadata"]["origin"] = json!(origin);
+        let op = envelope(&format!("accepted-peer-{index}"), 0, "ws", payload);
+        assert_eq!(
+            apply_moment_envelope(&mut accepted_store, &op, &NoFaults)
+                .expect("oracle origin must apply"),
+            ApplyOutcome::Applied(0),
+            "{origin}"
+        );
+    }
+
+    for (field, reserved) in [
+        ("metadata", "capture"),
+        ("metadata", "ydoc"),
+        ("beforeMetadata", "capture"),
+        ("beforeMetadata", "ydoc"),
+    ] {
+        let (_scratch, mut store) = test_store();
+        hydrate_texts(&mut store, &["before", "after"]);
+        let mut payload = present_text_payload(
+            "reserved-origin",
+            "reserved-object",
+            "write",
+            "reserved.md",
+            "reserved.md",
+            "before",
+            "remote-before",
+            "after",
+        );
+        payload[field]["origin"] = json!(reserved);
+        let peer = format!("{field}-{reserved}-peer");
+        let op = envelope(&peer, 0, "ws", payload);
+
+        // MUTATION: an empty-only check accepts capture/ydoc ownership markers
+        // and can make the local capture reconciler claim replicated content.
+        assert!(matches!(
+            apply_moment_envelope(&mut store, &op, &NoFaults),
+            Err(SyncError::InvalidInput {
+                reason: "moment.append payload is invalid"
+            })
+        ));
+        let persisted: (i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM moments \
+                         WHERE workspace_id='ws' AND moment_id='reserved-origin'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM snapshots \
+                         WHERE workspace_id='ws' AND object_id='reserved-object'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("reserved origin state");
+        assert_eq!(persisted, (0, 0), "{field}={reserved}");
+        assert_eq!(
+            read_replication_acked_seq(&store, "ws", &peer).expect("ack"),
+            -1,
+            "{field}={reserved}"
+        );
+    }
 }
 
 #[test]

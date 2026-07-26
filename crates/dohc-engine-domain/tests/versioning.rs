@@ -592,6 +592,19 @@ fn create_named_version_forks_and_isolates() {
 
     vt.write_text(&write("main", "a.md", "v1", "m1", "o1", 10), &NO_FAULTS)
         .expect("write main");
+    drop(vt);
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE snapshots \
+                 SET metadata_summary='imported summary', \
+                     metadata_correlation_id='imported correlation' \
+                 WHERE workspace_id=?1 AND version_id='main' AND object_id='o1'",
+                [WS],
+            )
+        })
+        .expect("seed complete source metadata");
+    let mut vt = VersionedTextStore::new(&mut store);
 
     let fork = vt
         .create_named_version(
@@ -618,6 +631,41 @@ fn create_named_version_forks_and_isolates() {
     let snaps = vt.list_snapshots(WS, "feat").expect("snaps");
     assert_eq!(snaps.len(), 1);
     assert_eq!(snaps[0].object_id, "o1");
+    drop(vt);
+    let copied_metadata = store
+        .read_with(|conn| {
+            let read = |table: &str| {
+                conn.query_row(
+                    &format!(
+                        "SELECT metadata_origin,metadata_summary,metadata_correlation_id \
+                         FROM {table} \
+                         WHERE workspace_id=?1 AND version_id='feat' AND object_id='o1'"
+                    ),
+                    [WS],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+            };
+            Ok::<_, rusqlite::Error>((read("snapshots")?, read("fork_base_snapshots")?))
+        })
+        .expect("copied metadata");
+    let expected_metadata = (
+        "user".to_owned(),
+        Some("imported summary".to_owned()),
+        Some("imported correlation".to_owned()),
+    );
+    // MUTATION: omitting either ordinal-17 column from either INSERT...SELECT
+    // loses provenance from the live fork or its frozen comparison base.
+    assert_eq!(
+        copied_metadata,
+        (expected_metadata.clone(), expected_metadata)
+    );
+    let mut vt = VersionedTextStore::new(&mut store);
 
     // Writing to the fork updates the shared object in the fork only.
     vt.write_text(&write("feat", "a.md", "v2", "m2", "o1", 30), &NO_FAULTS)

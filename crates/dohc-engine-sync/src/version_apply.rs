@@ -33,8 +33,11 @@ struct ForkSnapshot {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SnapshotMetadata {
     origin: String,
+    summary: Option<String>,
+    correlation_id: Option<String>,
 }
 
 pub fn apply_workspace_envelope(
@@ -177,8 +180,8 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
 
     tx.execute(
         "INSERT INTO snapshots \
-         (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256) \
-         SELECT workspace_id,?2,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256 \
+         (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
+         SELECT workspace_id,?2,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256 \
          FROM snapshots WHERE workspace_id=?1 AND version_id=?3",
         params![op.workspace_id, payload.version_id, source],
     )
@@ -192,8 +195,8 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
     .map_err(SyncError::persist)?;
     tx.execute(
         "INSERT INTO fork_base_snapshots \
-         (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256) \
-         SELECT workspace_id,?2,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256 \
+         (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
+         SELECT workspace_id,?2,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256 \
          FROM snapshots WHERE workspace_id=?1 AND version_id=?3",
         params![op.workspace_id, payload.version_id, source],
     )
@@ -306,8 +309,8 @@ fn insert_shipped_snapshot(
     for table in ["snapshots", "fork_base_snapshots"] {
         let sql = format!(
             "INSERT INTO {table} \
-             (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
+             (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"
         );
         tx.execute(
             &sql,
@@ -320,6 +323,8 @@ fn insert_shipped_snapshot(
                 snapshot.updated_at_ms,
                 snapshot.latest_moment_id,
                 snapshot.metadata.origin,
+                snapshot.metadata.summary,
+                snapshot.metadata.correlation_id,
                 content_kind,
                 binary_sha
             ],

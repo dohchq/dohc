@@ -1554,9 +1554,11 @@ impl<'a> VersionedTextStore<'a> {
             tx.execute(
                 "INSERT INTO snapshots \
                   (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-                   latest_moment_id, metadata_origin, content_kind, binary_sha256) \
+                   latest_moment_id, metadata_origin, metadata_summary, \
+                   metadata_correlation_id, content_kind, binary_sha256) \
                   SELECT workspace_id, ?2, object_id, path, blob_sha256, updated_at_ms, \
-                   latest_moment_id, metadata_origin, content_kind, binary_sha256 FROM snapshots \
+                   latest_moment_id, metadata_origin, metadata_summary, \
+                   metadata_correlation_id, content_kind, binary_sha256 FROM snapshots \
                  WHERE workspace_id = ?1 AND version_id = ?3",
                 params![ws, input.new_version_id, input.from_version_id],
             )
@@ -1564,9 +1566,11 @@ impl<'a> VersionedTextStore<'a> {
             tx.execute(
                 "INSERT INTO fork_base_snapshots \
                   (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-                   latest_moment_id, metadata_origin, content_kind, binary_sha256) \
+                   latest_moment_id, metadata_origin, metadata_summary, \
+                   metadata_correlation_id, content_kind, binary_sha256) \
                   SELECT workspace_id, ?2, object_id, path, blob_sha256, updated_at_ms, \
-                   latest_moment_id, metadata_origin, content_kind, binary_sha256 FROM snapshots \
+                   latest_moment_id, metadata_origin, metadata_summary, \
+                   metadata_correlation_id, content_kind, binary_sha256 FROM snapshots \
                  WHERE workspace_id = ?1 AND version_id = ?3",
                 params![ws, input.new_version_id, input.from_version_id],
             )

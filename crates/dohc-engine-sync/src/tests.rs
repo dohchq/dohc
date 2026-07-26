@@ -4922,11 +4922,21 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
-    type CopiedSnapshot = (String, String, String, Option<String>, Option<String>);
+    type CopiedSnapshot = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    );
     let copied: Vec<CopiedSnapshot> = engine
         .read_with(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT s.path,s.object_id,s.content_kind,s.blob_sha256,s.binary_sha256 \
+                "SELECT s.path,s.object_id,s.content_kind,s.blob_sha256,s.binary_sha256, \
+                        s.metadata_origin,s.metadata_summary,s.metadata_correlation_id \
                  FROM snapshots s WHERE s.workspace_id='ws' AND s.version_id='feature' \
                  ORDER BY s.path",
             )?;
@@ -4937,6 +4947,9 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()
@@ -4950,15 +4963,48 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
                 "origin-binary-object".into(),
                 "binary".into(),
                 None,
-                Some(shipped_binary_sha)
+                Some(shipped_binary_sha),
+                "sync".into(),
+                None,
+                Some("fork".into()),
             ),
             (
                 "origin.md".into(),
                 "origin-text-object".into(),
                 "text".into(),
                 Some(shipped_text_sha),
-                None
+                None,
+                "sync".into(),
+                Some("origin".into()),
+                None,
             )
+        ]
+    );
+    let fork_base_metadata: Vec<(String, String, Option<String>, Option<String>)> = engine
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT path,metadata_origin,metadata_summary,metadata_correlation_id \
+                 FROM fork_base_snapshots \
+                 WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
+            )?
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect()
+        })
+        .expect("shipped fork-base metadata");
+    // MUTATION: the dynamic shipped-snapshot insert runs for both destination
+    // tables; dropping either optional metadata binding changes these rows.
+    assert_eq!(
+        fork_base_metadata,
+        vec![
+            ("asset.bin".into(), "sync".into(), None, Some("fork".into())),
+            (
+                "origin.md".into(),
+                "sync".into(),
+                Some("origin".into()),
+                None
+            ),
         ]
     );
     let counts: (i64, i64, i64) = engine
@@ -5411,8 +5457,10 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
             .map_err(SyncError::persist)?;
             tx.execute(
                 "INSERT INTO snapshots \
-                 (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256) \
-                 VALUES ('ws','main','legacy-object','legacy.md',?1,2,'legacy-moment','sync','text',NULL)",
+                 (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id, \
+                  metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
+                 VALUES ('ws','main','legacy-object','legacy.md',?1,2,'legacy-moment', \
+                         'sync','legacy summary','legacy correlation','text',NULL)",
                 [&source_sha],
             )
             .map_err(SyncError::persist)?;
@@ -5490,6 +5538,34 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
         })
         .expect("legacy copied rows");
     assert_eq!(counts, (1, 1, 1));
+    type Metadata = (String, Option<String>, Option<String>);
+    let copied_metadata: (Metadata, Metadata) = engine
+        .read_with(|conn| {
+            let read = |table: &str| {
+                conn.query_row(
+                    &format!(
+                        "SELECT metadata_origin,metadata_summary,metadata_correlation_id \
+                         FROM {table} WHERE workspace_id='ws' \
+                         AND version_id='legacy-feature' AND object_id='legacy-object'"
+                    ),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            };
+            Ok::<_, rusqlite::Error>((read("snapshots")?, read("fork_base_snapshots")?))
+        })
+        .expect("legacy copied metadata");
+    let expected_metadata = (
+        "sync".to_owned(),
+        Some("legacy summary".to_owned()),
+        Some("legacy correlation".to_owned()),
+    );
+    // MUTATION: either legacy INSERT...SELECT dropping an ordinal-17 column
+    // changes one half of this complete-tuple assertion.
+    assert_eq!(
+        copied_metadata,
+        (expected_metadata.clone(), expected_metadata)
+    );
     let foreign_destination_rows: (i64, i64, i64) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -6138,6 +6214,101 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "collision-peer").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn secret_put_rejects_synthesized_moment_id_owned_by_plaintext_history() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let plaintext_sha = dohc_engine_storage::hex_sha256(b"plaintext owner");
+    engine
+        .write_with(&NoFaults, |tx| -> Result<(), SyncError> {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) \
+                 VALUES (?1,15,'plaintext owner')",
+                [&plaintext_sha],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws','plaintext-owner',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO moments \
+                 (workspace_id,moment_order,moment_id,version_id,object_id,path, \
+                  recorded_at_ms,operation,after_blob_sha256,before_present, \
+                  metadata_origin,after_content_kind) \
+                 VALUES ('ws',1,'secret-sync-plaintext-collision-peer-0','main', \
+                         'plaintext-owner','owner.md',100,'write',?1,1,'api','text')",
+                [&plaintext_sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok(())
+        })
+        .expect("seed colliding plaintext moment");
+    let ciphertext = b"cross-table-secret-ciphertext";
+    let ciphertext_sha = engine
+        .put_binary_blob(ciphertext)
+        .expect("secret ciphertext blob");
+    let operation = envelope(
+        "plaintext-collision-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "main",
+            "path": "target.env",
+            "metadata": {"origin": "sync"},
+            "ivBase64": STANDARD.encode([1_u8; SECRET_IV_BYTES]),
+            "authTagBase64": STANDARD.encode([2_u8; SECRET_TAG_BYTES]),
+            "ciphertextSha256": ciphertext_sha,
+            "byteLength": ciphertext.len()
+        }),
+    );
+
+    // MUTATION: checking only secret_moments permits the synthesized secret ID
+    // to alias an unrelated plaintext row in the shared identity namespace.
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Err(SyncError::InvalidInput {
+            reason: "replicated secret moment id collides with existing history"
+        })
+    ));
+    let state: (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments \
+                     WHERE workspace_id='ws' \
+                       AND moment_id='secret-sync-plaintext-collision-peer-0'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM secret_moments \
+                     WHERE workspace_id='ws' \
+                       AND moment_id='secret-sync-plaintext-collision-peer-0'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM secret_files \
+                     WHERE workspace_id='ws' AND version_id='main' AND path='target.env'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("cross-table collision state");
+    assert_eq!(state, (1, 0, 0));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "plaintext-collision-peer").expect("ack"),
         -1
     );
 }
