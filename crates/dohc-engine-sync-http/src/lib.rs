@@ -442,7 +442,7 @@ impl RelayTransport for HttpRelayTransport {
         let page = self.read_share_log(
             &req.share_id,
             req.cursor,
-            500,
+            MAX_PULL_OPS,
             &[("channelWireId", req.channel_wire_id)],
         )?;
         Ok(SharedChannelResponse {

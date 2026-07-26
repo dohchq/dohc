@@ -696,7 +696,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .ok_or(RelayError::InvalidResponse)?;
         let mut shared_prefix_length = 0_i64;
         let mut cursor = 0;
+        let mut pages = 0_usize;
         'pages: loop {
+            if pages >= crate::model::MAX_PULL_PAGES_PER_PASS {
+                return Err(RelayError::InvalidResponse);
+            }
             let page = self.transport.pull(PullRequest {
                 workspace_id: workspace_id.to_owned(),
                 replication_epoch: identity.replication_epoch.clone(),
@@ -704,6 +708,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 cursor,
                 limit: crate::MAX_PULL_OPS,
             })?;
+            pages = pages.checked_add(1).ok_or(RelayError::InvalidResponse)?;
             validate_pull_page(&page, workspace_id, cursor)?;
             for op in page.ops {
                 if op.origin_id != identity.origin_id || op.origin_seq < shared_prefix_length {
@@ -940,8 +945,22 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
-        let scanned = read_shared_push_state(store, workspace_id, share_id)?;
-        let mut dense_seq = -1_i64;
+        let state = read_shared_push_state(store, workspace_id, share_id)?;
+        let scanned = state.scanned_seq;
+        let mut dense_seq = match state.dense_seq {
+            Some(dense_seq) => dense_seq,
+            None => {
+                let dense_seq = shared_dense_seq_through(
+                    store,
+                    workspace_id,
+                    &identity.origin_id,
+                    channel_wire_id,
+                    scanned,
+                )?;
+                write_shared_push_state(store, workspace_id, share_id, scanned, dense_seq, faults)?;
+                dense_seq
+            }
+        };
         let mut pending = Vec::with_capacity(crate::MAX_PUSH_OPS_PER_BATCH);
         let mut last_scanned = scanned;
         let mut pushed = 0_usize;
@@ -961,7 +980,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             Ok(push.inserted)
         };
-        let mut after = -1_i64;
+        let mut after = scanned;
         loop {
             let page = list_replication_ops(
                 store,
@@ -1007,6 +1026,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         workspace_id,
                         share_id,
                         pending.last().ok_or(RelayError::InvalidResponse)?.0,
+                        dense_seq,
                         faults,
                     )?;
                     pending.clear();
@@ -1023,10 +1043,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 workspace_id,
                 share_id,
                 pending.last().ok_or(RelayError::InvalidResponse)?.0,
+                dense_seq,
                 faults,
             )?;
         }
-        write_shared_push_state(store, workspace_id, share_id, last_scanned, faults)?;
+        write_shared_push_state(
+            store,
+            workspace_id,
+            share_id,
+            last_scanned,
+            dense_seq,
+            faults,
+        )?;
         Ok(SharedChannelPushOutcome { pushed })
     }
 
@@ -1717,21 +1745,37 @@ fn share_envelope(
     Ok(envelope)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SharedPushState {
+    scanned_seq: i64,
+    dense_seq: Option<i64>,
+}
+
 fn read_shared_push_state(
     store: &EngineStore,
     workspace_id: &str,
     share_id: &str,
-) -> Result<i64, RelayError> {
+) -> Result<SharedPushState, RelayError> {
     store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT pushed_seq FROM shared_channel_push_state \
+                "SELECT pushed_seq,dense_seq FROM shared_channel_push_state \
                  WHERE workspace_id=?1 AND share_id=?2",
                 params![workspace_id, share_id],
-                |row| row.get(0),
+                |row| {
+                    Ok(SharedPushState {
+                        scanned_seq: row.get(0)?,
+                        dense_seq: row.get(1)?,
+                    })
+                },
             )
             .optional()
-            .map(|value| value.unwrap_or(-1))
+            .map(|value| {
+                value.unwrap_or(SharedPushState {
+                    scanned_seq: -1,
+                    dense_seq: Some(-1),
+                })
+            })
             .map_err(SyncError::corrupt)
         })
         .map_err(local)
@@ -1741,19 +1785,23 @@ fn write_shared_push_state(
     store: &mut EngineStore,
     workspace_id: &str,
     share_id: &str,
-    pushed_seq: i64,
+    scanned_seq: i64,
+    dense_seq: i64,
     faults: &dyn FaultInjector,
 ) -> Result<(), RelayError> {
-    if !(-1..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
+    if !(-1..=crate::MAX_WIRE_INTEGER).contains(&scanned_seq)
+        || !(-1..=crate::MAX_WIRE_INTEGER).contains(&dense_seq)
+    {
         return Err(RelayError::InvalidResponse);
     }
     let outcome = store
         .write_with(faults, |tx| {
             tx.execute(
-                "INSERT INTO shared_channel_push_state (workspace_id,share_id,pushed_seq) \
-                 VALUES (?1,?2,?3) ON CONFLICT(workspace_id,share_id) DO UPDATE SET \
-                 pushed_seq=excluded.pushed_seq",
-                params![workspace_id, share_id, pushed_seq],
+                "INSERT INTO shared_channel_push_state \
+                 (workspace_id,share_id,pushed_seq,dense_seq) VALUES (?1,?2,?3,?4) \
+                 ON CONFLICT(workspace_id,share_id) DO UPDATE SET \
+                 pushed_seq=excluded.pushed_seq,dense_seq=excluded.dense_seq",
+                params![workspace_id, share_id, scanned_seq, dense_seq],
             )
             .map_err(SyncError::persist)?;
             Ok::<(), SyncError>(())
@@ -1763,6 +1811,36 @@ fn write_shared_push_state(
         return Err(RelayError::Local("injected-crash".to_owned()));
     }
     Ok(())
+}
+
+fn shared_dense_seq_through(
+    store: &EngineStore,
+    workspace_id: &str,
+    origin_id: &str,
+    channel_wire_id: &str,
+    scanned_seq: i64,
+) -> Result<i64, RelayError> {
+    let mut dense_seq = -1_i64;
+    let mut after = -1_i64;
+    while after < scanned_seq {
+        let page = list_replication_ops(store, workspace_id, origin_id, after, crate::MAX_PULL_OPS)
+            .map_err(local)?;
+        let Some(page_last) = page.last().map(|op| op.origin_seq) else {
+            break;
+        };
+        for op in page {
+            if op.origin_seq > scanned_seq {
+                return Ok(dense_seq);
+            }
+            if shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)? {
+                dense_seq = dense_seq
+                    .checked_add(1)
+                    .ok_or(RelayError::InvalidResponse)?;
+            }
+        }
+        after = page_last;
+    }
+    Ok(dense_seq)
 }
 
 fn shared_channel_op_allowed(

@@ -4587,6 +4587,10 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<RelayOperationOutcome, RuntimeError> {
         let transport = DeferredRelayTransport::default();
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        let http_transport = Arc::new(build_http_transport(configuration)?);
         loop {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
@@ -4610,10 +4614,10 @@ impl ActorHandle {
                     let request = transport
                         .take_pending()
                         .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
-                    let io_configuration = configuration.clone();
+                    let http_transport = Arc::clone(&http_transport);
                     let io_request = request.clone();
                     let task = tokio::task::spawn_blocking(move || {
-                        execute_http_request(io_configuration, io_request)
+                        execute_http_request(&http_transport, io_request)
                     });
                     let result = tokio::select! {
                         result = task => result
@@ -5547,21 +5551,28 @@ fn switch_active_version_on_store(
     Ok(target)
 }
 
-fn execute_http_request(
+fn build_http_transport(
     configuration: RelayConfiguration,
-    request: RelayIoRequest,
-) -> Result<RelayIoResponse, RelayError> {
+) -> Result<HttpRelayTransport, RelayError> {
     #[cfg(debug_assertions)]
-    let transport = if configuration.allow_insecure_loopback_for_tests {
+    if configuration.allow_insecure_loopback_for_tests {
         HttpRelayTransport::new_insecure_loopback_for_tests(
             configuration.base_url,
             configuration.bearer_token,
-        )?
+        )
     } else {
-        HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)?
-    };
+        HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)
+    }
     #[cfg(not(debug_assertions))]
-    let transport = HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)?;
+    {
+        HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)
+    }
+}
+
+fn execute_http_request(
+    transport: &HttpRelayTransport,
+    request: RelayIoRequest,
+) -> Result<RelayIoResponse, RelayError> {
     match request {
         RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
         RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),

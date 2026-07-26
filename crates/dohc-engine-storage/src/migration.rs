@@ -1686,6 +1686,16 @@ UPDATE moments SET
 
 pub(crate) const MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID: &str = "v1-moment-rollback-preimage";
 
+/// Ordinal 20. Shared-channel pushes previously retained only the last physical
+/// journal coordinate. New writes pair it with the corresponding dense shared
+/// coordinate; existing rows remain NULL and bootstrap once on their next push.
+const V1_SHARED_CHANNEL_DENSE_PUSH_DDL: &str = "\
+ALTER TABLE shared_channel_push_state ADD COLUMN dense_seq INTEGER
+    CHECK (dense_seq IS NULL OR dense_seq >= -1);
+";
+
+pub(crate) const SHARED_CHANNEL_DENSE_PUSH_MIGRATION_ID: &str = "v1-shared-channel-dense-push";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1831,6 +1841,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MOMENT_ROLLBACK_PREIMAGE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 20,
+        id: SHARED_CHANNEL_DENSE_PUSH_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SHARED_CHANNEL_DENSE_PUSH_DDL,
         sets_user_version: None,
     },
 ];
@@ -2361,7 +2378,7 @@ mod tests {
         )
         .expect("pre-migration shipped head");
 
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..20], &ctx, &NoFaults)
             .expect("rollback preimage migration");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
 

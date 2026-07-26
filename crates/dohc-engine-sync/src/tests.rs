@@ -4103,6 +4103,7 @@ struct PagedShareRelay {
     shared_pages: BTreeMap<i64, SharedChannelResponse>,
     view_pages: BTreeMap<i64, ShareViewResponse>,
     shared_pulls: Mutex<Vec<i64>>,
+    shared_pushes: Mutex<Vec<SharedChannelRequest>>,
     view_pulls: Mutex<Vec<(i64, usize)>>,
 }
 
@@ -4115,6 +4116,7 @@ impl PagedShareRelay {
             shared_pages: shared_pages.into_iter().collect(),
             view_pages: view_pages.into_iter().collect(),
             shared_pulls: Mutex::new(Vec::new()),
+            shared_pushes: Mutex::new(Vec::new()),
             view_pulls: Mutex::new(Vec::new()),
         }
     }
@@ -4183,9 +4185,25 @@ impl RelayTransport for PagedShareRelay {
 
     fn shared_channel_push(
         &self,
-        _req: SharedChannelRequest,
+        req: SharedChannelRequest,
     ) -> Result<SharedChannelResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
+        let accepted = req.ops.len();
+        let current_max_origin_seq = req.ops.last().map_or(-1, |op| op.origin_seq);
+        self.shared_pushes
+            .lock()
+            .expect("shared push calls")
+            .push(req);
+        Ok(SharedChannelResponse {
+            ops: Vec::new(),
+            next_cursor: 0,
+            has_more: false,
+            push: Some(PushResponse {
+                accepted,
+                inserted: accepted,
+                skipped: 0,
+                current_max_origin_seq,
+            }),
+        })
     }
 
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
@@ -4291,6 +4309,27 @@ fn journal_rejects_payloads_above_the_relay_contract() {
             reason: "payload exceeds the relay limit"
         })
     ));
+}
+
+#[test]
+fn canonical_json_matches_javascript_number_boundaries() {
+    let cases = [
+        (json!(1e21), "1e+21"),
+        (json!(1e-6), "0.000001"),
+        (json!(1e-7), "1e-7"),
+        (json!(-0.0), "0"),
+        (
+            serde_json::from_str("9007199254740993").expect("integer above 2^53"),
+            "9007199254740992",
+        ),
+    ];
+    for (value, expected) in cases {
+        assert_eq!(
+            crate::relay::canonical_json_bytes(&value).expect("canonical number"),
+            expected.as_bytes(),
+            "JavaScript stableJsonStringify parity for {value}"
+        );
+    }
 }
 
 #[test]
@@ -7030,6 +7069,36 @@ fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
 }
 
 #[test]
+fn recover_origin_rejects_an_advancing_stream_at_the_page_ceiling() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let pages = (0..=crate::model::MAX_PULL_PAGES_PER_PASS)
+        .map(|cursor| {
+            let cursor = i64::try_from(cursor).expect("cursor");
+            (
+                cursor,
+                PullResponse {
+                    ops: Vec::new(),
+                    next_cursor: cursor + 1,
+                    has_more: true,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let client = RelaySyncClient::new(PagedRelay::new(pages));
+
+    assert_eq!(
+        client.recover_origin(&mut engine, "ws", "recovered-origin", &NoFaults),
+        Err(RelayError::InvalidResponse)
+    );
+    assert_eq!(
+        client.transport().pulls.lock().expect("pull calls").len(),
+        crate::model::MAX_PULL_PAGES_PER_PASS,
+        "MUTATION: removing the recover pass ceiling fetches the next advancing page"
+    );
+}
+
+#[test]
 fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor() {
     let (_scratch, _path, mut engine) = store();
     let client = RelaySyncClient::new(PagedShareRelay::new(
@@ -7079,6 +7148,184 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
         .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
         .expect("resumed shared-channel page");
     assert_eq!(second.next_cursor, 2);
+}
+
+#[test]
+fn shared_channel_push_resumes_from_durable_physical_and_dense_positions() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                 VALUES ('ws','channel','Channel','channel','channel',1,1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_channel_wire_ids (workspace_id,wire_id,channel_id) \
+                 VALUES ('ws','channel-wire','channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                 VALUES ('ws','thread','Thread',1,1,'channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("shared channel fixture");
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.message.append",
+            &json!({"threadId": "thread"}),
+            1_001,
+            &NoFaults,
+        )
+        .expect("journal first eligible op"),
+        TxnOutcome::Committed(1)
+    );
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    assert_eq!(
+        client
+            .push_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+            .expect("first shared push")
+            .pushed,
+        1
+    );
+
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM chat_threads WHERE workspace_id='ws' AND thread_id='thread'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("remove historical eligibility fixture");
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.channel.create",
+            &json!({"wireId": "channel-wire"}),
+            1_002,
+            &NoFaults,
+        )
+        .expect("journal next eligible op"),
+        TxnOutcome::Committed(2)
+    );
+    assert_eq!(
+        client
+            .push_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+            .expect("incremental shared push")
+            .pushed,
+        1
+    );
+
+    let pushes = client
+        .transport()
+        .shared_pushes
+        .lock()
+        .expect("shared push calls");
+    assert_eq!(pushes.len(), 2);
+    assert_eq!(pushes[0].ops[0].origin_seq, 0);
+    assert_eq!(
+        pushes[1].ops[0].origin_seq, 1,
+        "MUTATION: rescanning from -1 recomputes the removed op as ineligible and reuses dense zero"
+    );
+    drop(pushes);
+    let state: (i64, Option<i64>) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT pushed_seq,dense_seq FROM shared_channel_push_state \
+                 WHERE workspace_id='ws' AND share_id='share'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("durable shared push state");
+    assert_eq!(state, (2, Some(1)));
+}
+
+#[test]
+fn shared_channel_push_bootstraps_legacy_state_without_a_dense_position() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.channel.create",
+            &json!({"wireId": "channel-wire"}),
+            1_001,
+            &NoFaults,
+        )
+        .expect("journal legacy eligible op"),
+        TxnOutcome::Committed(1)
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO shared_channel_push_state \
+                 (workspace_id,share_id,pushed_seq,dense_seq) \
+                 VALUES ('ws','share',1,NULL)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("legacy shared push state");
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.channel.create",
+            &json!({"wireId": "channel-wire"}),
+            1_002,
+            &NoFaults,
+        )
+        .expect("journal post-migration op"),
+        TxnOutcome::Committed(2)
+    );
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+
+    assert_eq!(
+        client
+            .push_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+            .expect("bootstrap shared push")
+            .pushed,
+        1
+    );
+    let pushes = client
+        .transport()
+        .shared_pushes
+        .lock()
+        .expect("shared push calls");
+    assert_eq!(pushes.len(), 1);
+    assert_eq!(
+        pushes[0].ops[0].origin_seq, 1,
+        "the migrated physical cursor must bootstrap its matching dense coordinate"
+    );
 }
 
 #[test]
