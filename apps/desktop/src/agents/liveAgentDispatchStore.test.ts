@@ -4,6 +4,7 @@ import type {
   Response,
 } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AGENT_DISPATCH_RPC_DEADLINE_MS } from "./awaitableAgentDispatchStore";
 import {
   EngineWorkspaceRebindError,
   EngineWorkspaceSessions,
@@ -242,7 +243,12 @@ describe("live agent dispatch store", () => {
       client.requests.find(
         ({ method }) => method === "chats.dispatch.claimNextPending",
       )?.deadlineMs,
-    ).toBe(TERMINAL_DISPATCH_DEADLINE_MS);
+    ).toBe(AGENT_DISPATCH_RPC_DEADLINE_MS);
+    expect(
+      client.requests.find(
+        ({ method }) => method === "chats.dispatch.listAppQuitRecoveries",
+      )?.deadlineMs,
+    ).toBe(AGENT_DISPATCH_RPC_DEADLINE_MS);
     expect(
       client.requests.find(
         ({ method }) => method === "chats.dispatch.claimNextPending",
@@ -400,9 +406,9 @@ describe("live agent dispatch store", () => {
       "logs/run-fixed.log",
     ]);
     expect(claims.map(({ deadlineMs }) => deadlineMs)).toEqual([
-      TERMINAL_DISPATCH_DEADLINE_MS,
-      TERMINAL_DISPATCH_DEADLINE_MS,
-      TERMINAL_DISPATCH_DEADLINE_MS,
+      AGENT_DISPATCH_RPC_DEADLINE_MS,
+      AGENT_DISPATCH_RPC_DEADLINE_MS,
+      AGENT_DISPATCH_RPC_DEADLINE_MS,
     ]);
   });
 

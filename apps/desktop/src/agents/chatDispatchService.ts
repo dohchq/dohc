@@ -34,6 +34,7 @@ export const RUNNER_SELF_TEST_TIMEOUT_MS = 120_000;
 export const RUNNER_KILL_GRACE_MS = 10_000;
 export const APP_QUIT_KILL_GRACE_MS = 1_500;
 export const CHAT_DISPATCH_RECOVERY_BACKOFF_MS = 1_000;
+export const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
 export const RUN_ID_LOG_TOKEN = "{runId}";
 export const APP_QUIT_EXIT_CODE = 143;
 
@@ -341,6 +342,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     string,
     ReturnType<typeof setTimeout>
   >();
+  const recoveryAttempts = new Map<string, number>();
   const pendingNoReplyChecks = new Map<
     string,
     { workspace: ChatDispatchWorkspace; run: AgentRunRecord }
@@ -393,14 +395,27 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
 
   function scheduleRecoveryScan(workspaceId: string): void {
     if (stopped || recoveryTimers.has(workspaceId)) return;
+    const attempt = (recoveryAttempts.get(workspaceId) ?? 0) + 1;
+    recoveryAttempts.set(workspaceId, attempt);
+    const delay = Math.min(
+      CHAT_DISPATCH_RECOVERY_BACKOFF_MS * 2 ** (attempt - 1),
+      CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS,
+    );
     const timer = setTimeout(() => {
       recoveryTimers.delete(workspaceId);
       if (stopped) return;
-      void scanWorkspace(workspaceId).catch((error) => {
-        reportError(error);
-        scheduleRecoveryScan(workspaceId);
-      });
-    }, CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+      void scanWorkspace(workspaceId).then(
+        () => {
+          if (!recoveryTimers.has(workspaceId)) {
+            recoveryAttempts.delete(workspaceId);
+          }
+        },
+        (error: unknown) => {
+          reportError(error);
+          scheduleRecoveryScan(workspaceId);
+        },
+      );
+    }, delay);
     recoveryTimers.set(workspaceId, timer);
   }
 
@@ -855,6 +870,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       notifyRunUpdated(live.workspace.workspaceId);
     } catch (error) {
       reportError(error);
+      scheduleRecoveryScan(live.workspace.workspaceId);
     }
   }
 
@@ -1048,13 +1064,22 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       return;
     }
     const pending = await dispatch.listPending(workspace.workspaceId);
+    const pauseStates = new Map(
+      await Promise.all(
+        [...new Set(pending.map(({ threadId }) => threadId))].map(
+          async (threadId) =>
+            [
+              threadId,
+              await dispatch.getThreadDispatchPauseState(
+                workspace.workspaceId,
+                threadId,
+              ),
+            ] as const,
+        ),
+      ),
+    );
     for (const candidate of pending) {
-      if (
-        await dispatch.threadDispatchPaused(
-          workspace.workspaceId,
-          candidate.threadId,
-        )
-      ) {
+      if (pauseStates.get(candidate.threadId)?.paused === true) {
         continue;
       }
       const bypassKey = threadKey(workspace.workspaceId, candidate.threadId);
@@ -1683,6 +1708,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     pumpTimer = null;
     for (const timer of recoveryTimers.values()) clearTimeout(timer);
     recoveryTimers.clear();
+    recoveryAttempts.clear();
     const pumpAtStop = pumpInFlight;
     const appQuitRuns: LiveRun[] = [];
     const runWorkspacesToRelease: LiveRun[] = [];

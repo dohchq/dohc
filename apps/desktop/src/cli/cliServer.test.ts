@@ -315,19 +315,24 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
-  it("rejects an older CLI before opening a workspace", async () => {
-    const response = await rawRequest({
-      token,
-      protocolVersion: CLI_PROTOCOL_VERSION - 1,
-      verb: "channels",
-      args: { cwd: workspaceRoot, actor: "human" },
-    });
+  it("rejects older and newer CLIs before opening a workspace", async () => {
+    for (const protocolVersion of [
+      CLI_PROTOCOL_VERSION - 1,
+      CLI_PROTOCOL_VERSION + 1,
+    ]) {
+      const response = await rawRequest({
+        token,
+        protocolVersion,
+        verb: "channels",
+        args: { cwd: workspaceRoot, actor: "human" },
+      });
 
-    expect(response).toEqual({
-      protocolVersion: CLI_PROTOCOL_VERSION,
-      ok: false,
-      error: "dohc: CLI/app version mismatch — restart the app",
-    });
+      expect(response).toEqual({
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        ok: false,
+        error: "dohc: CLI/app version mismatch — restart the app",
+      });
+    }
     expect(calls.openWorkspace).toBe(0);
   });
 

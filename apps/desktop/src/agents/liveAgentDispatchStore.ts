@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import {
   CHATS_METHOD,
   ChatsLiveAdapter,
+  type ChatDispatch,
+  type ChatDispatchClaim,
   type ChatRecoveriesPage,
   type ChatRunMessagesPage,
 } from "@dohc/workspace-engine-client";
@@ -37,6 +39,18 @@ export interface LiveAgentDispatchStoreHandle {
 }
 
 export const TERMINAL_DISPATCH_DEADLINE_MS = AGENT_DISPATCH_RPC_DEADLINE_MS;
+
+function toAgentDispatchRecords(
+  records: ChatDispatch[],
+): AgentDispatchRecord[] {
+  return records;
+}
+
+function toAgentDispatchClaims(
+  claims: ChatDispatchClaim[],
+): AgentDispatchClaim[] {
+  return claims;
+}
 
 export function createLiveAgentDispatchStore(
   workspace: EngineWorkspace,
@@ -161,9 +175,13 @@ export function createLiveAgentDispatchStore(
         { retryTransportErrors: true },
       ),
     listPending: async (workspaceId) =>
-      (await invoke(async (adapter) => await adapter.listPending(workspaceId))) as AgentDispatchRecord[],
+      toAgentDispatchRecords(
+        await invoke(async (adapter) => await adapter.listPending(workspaceId)),
+      ),
     openRuns: async (workspaceId) =>
-      (await invoke(async (adapter) => await adapter.openRuns(workspaceId))) as AgentDispatchClaim[],
+      toAgentDispatchClaims(
+        await invoke(async (adapter) => await adapter.openRuns(workspaceId)),
+      ),
     markFailureNotePosted: async (
       runId,
       requestOptions?: AgentDispatchRequestOptions,
@@ -290,22 +308,26 @@ export function createLiveAgentDispatchStore(
           `Workspace ${workspaceId} does not match this dispatch store.`,
         );
       }
-      return await invoke(async (adapter) => {
-        const recoveries: ChatDispatchRecovery[] = [];
-        let cursor: string | undefined;
-        do {
-          const page: ChatRecoveriesPage = await adapter.request(
-            CHATS_METHOD.dispatchListAppQuitRecoveries,
-            {
-              pageLimit: 500,
-              ...(cursor !== undefined ? { cursor } : {}),
-            },
-          );
-          recoveries.push(...page.recoveries);
-          cursor = page.nextCursor ?? undefined;
-        } while (cursor !== undefined);
-        return recoveries;
-      });
+      return await invoke(
+        async (adapter) => {
+          const recoveries: ChatDispatchRecovery[] = [];
+          let cursor: string | undefined;
+          do {
+            const page: ChatRecoveriesPage = await adapter.request(
+              CHATS_METHOD.dispatchListAppQuitRecoveries,
+              {
+                pageLimit: 500,
+                ...(cursor !== undefined ? { cursor } : {}),
+              },
+              { deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS },
+            );
+            recoveries.push(...page.recoveries);
+            cursor = page.nextCursor ?? undefined;
+          } while (cursor !== undefined);
+          return recoveries;
+        },
+        { retryTransportErrors: true },
+      );
     },
     close: async () => await sessions.closeWorkspace(workspace.workspaceId),
   };

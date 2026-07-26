@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ChatsLiveAdapter } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
 import {
@@ -13,7 +14,12 @@ import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 
 const REAL_ENGINE_BINARY =
   process.env.DOHC_TEST_ENGINE_BINARY ??
-  "C:/w/_targets/rpcs1/debug/dohc-workspace-engine.exe";
+  fileURLToPath(
+    new URL(
+      `../../../../target/debug/dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`,
+      import.meta.url,
+    ),
+  );
 const hasRealEngine = existsSync(REAL_ENGINE_BINARY);
 
 describe("live agent dispatch store real daemon", () => {

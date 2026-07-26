@@ -38,7 +38,10 @@ import {
   type RunnerSpawnOptions,
   type SpawnRunner,
 } from "./chatDispatchService";
-import { AGENT_DISPATCH_RPC_DEADLINE_MS } from "./awaitableAgentDispatchStore";
+import {
+  AGENT_DISPATCH_RPC_DEADLINE_MS,
+  type AwaitableAgentDispatchStore,
+} from "./awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 
 const WORKSPACE_ID = "workspace-chat-dispatch";
@@ -259,7 +262,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       });
 
   let closeDispatch: () => Promise<void> = async () => undefined;
-  let serviceDispatch = dispatch;
+  let serviceDispatch: AwaitableAgentDispatchStore = dispatch;
   let liveRequeue:
     | ReturnType<typeof createLiveAgentDispatchStore>["requeueFailedTrigger"]
     | undefined;
@@ -348,6 +351,12 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
             break;
           case "chats.dispatch.isThreadPaused":
             result = dispatch.threadDispatchPaused(
+              WORKSPACE_ID,
+              String(params.threadId),
+            );
+            break;
+          case "chats.dispatch.getThreadPauseState":
+            result = dispatch.getThreadDispatchPauseState(
               WORKSPACE_ID,
               String(params.threadId),
             );
@@ -494,7 +503,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     const live = createLiveAgentDispatchStore(workspace, sessions, {
       createRunId: () => `run_${(nextRunId += 1)}`,
     });
-    serviceDispatch = live.store as AgentDispatchStore;
+    serviceDispatch = live.store;
     liveRequeue = live.requeueFailedTrigger;
     liveRecoveries = live.listAppQuitRecoveries;
     closeDispatch = live.close;
@@ -1365,6 +1374,65 @@ describe("chatDispatchService", () => {
     expect(fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
   });
 
+  it("loads pause state once per pending thread on the live backend", async () => {
+    // MUTATION: restore the per-candidate pause query -> the two dispatches in
+    // the paused thread produce a third daemon round-trip.
+    const fixture = await createFixture({ dispatchBackend: "live" });
+    const paused = await createAgentThread(fixture, {
+      body: "Keep this thread paused.",
+      authorUserId: "user_local",
+    });
+    const pausedFollowUp = await fixture.chat.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: paused.threadId,
+      author: { kind: "human", displayName: "Ice" },
+      authorUserId: "user_local",
+      body: "This second trigger is paused too.",
+    });
+    const runnable = await createAgentThread(fixture, {
+      body: "Run after skipping the paused thread.",
+      authorUserId: "user_local",
+    });
+    fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: paused.messageId,
+      threadId: paused.threadId,
+    });
+    fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: pausedFollowUp.id,
+      threadId: paused.threadId,
+    });
+    fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: runnable.messageId,
+      threadId: runnable.threadId,
+    });
+    fixture.dispatch.setThreadDispatchPaused({
+      workspaceId: WORKSPACE_ID,
+      threadId: paused.threadId,
+      paused: true,
+    });
+
+    await activate(fixture);
+
+    const pauseRequests = fixture.dispatchRequests.filter(
+      ({ method }) => method === "chats.dispatch.getThreadPauseState",
+    );
+    expect(pauseRequests).toHaveLength(2);
+    expect(
+      new Set(
+        pauseRequests.map(({ params }) =>
+          String((params as { threadId: JsonValue }).threadId),
+        ),
+      ),
+    ).toEqual(new Set([paused.threadId, runnable.threadId]));
+    expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(
+      runnable.threadId,
+    );
+  });
+
   it("pauses a thread at the ten-run rolling dispatch budget and posts one note", async () => {
     const fixture = await createFixture();
     const pending = await createAgentThread(fixture, {
@@ -1461,7 +1529,6 @@ describe("chatDispatchService", () => {
       authorUserId: "user_local",
     });
     await activate(fixture);
-    fixture.dispatchRequests.length = 0;
 
     fixture.spawnCalls[0]!.process.emitExit(7);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
@@ -1471,6 +1538,7 @@ describe("chatDispatchService", () => {
       "chats.dispatch.getRunRecord",
       "chats.dispatch.recordRunMessage",
       "chats.dispatch.markFailureNotePosted",
+      "chats.dispatch.listAppQuitRecoveries",
     ]);
     const requests = fixture.dispatchRequests.filter(({ method }) =>
       methods.has(method),
@@ -1720,6 +1788,40 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
     await flushMicrotasks();
 
+    expect(fixture.spawnCalls).toHaveLength(1);
+  });
+
+  it("backs off repeated local-only recovery scan failures", async () => {
+    // MUTATION: keep recovery retries at a flat delay -> the third scan runs
+    // after one second instead of waiting for the doubled second delay.
+    vi.useFakeTimers();
+    const fixture = await createFixture({
+      recordEligibleTriggerFailures: [
+        new Error("daemon unavailable"),
+        new Error("daemon still unavailable"),
+      ],
+    });
+    await createAgentThread(fixture, {
+      body: "Dispatch after escalating recovery backoff.",
+      authorUserId: "user_local",
+    });
+
+    fixture.service.start();
+    await expect(
+      fixture.service.scanWorkspace(WORKSPACE_ID),
+    ).rejects.toThrow("daemon unavailable");
+
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+    await flushMicrotasks();
+    expect(fixture.spawnCalls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(
+      CHAT_DISPATCH_RECOVERY_BACKOFF_MS * 2 - 1,
+    );
+    expect(fixture.spawnCalls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
     expect(fixture.spawnCalls).toHaveLength(1);
   });
 
@@ -2018,6 +2120,54 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(queued.threadId);
+  });
+
+  it("retries timeout persistence for a local-only live workspace", async () => {
+    // MUTATION: omit scheduleRecoveryScan from the timeout catch -> the open
+    // claim remains running while the timed-out child is still unresponsive.
+    vi.useFakeTimers();
+    const fixture = await createFixture({
+      dispatchBackend: "live",
+      runner: { timeoutMinutes: 1 },
+    });
+    await createAgentThread(fixture, {
+      body: "Persist this timeout after the daemon recovers.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!claim || !fixture.rejectFailRuns) {
+      throw new Error("Expected a live run and injectable failure persistence errors.");
+    }
+    fixture.rejectFailRuns(
+      Array.from(
+        { length: 6 },
+        () =>
+          new EngineClientError(
+            "transport-error",
+            "sidecar unavailable during timeout persistence",
+          ),
+      ),
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushMicrotasks(100);
+
+    expect(fixture.failRunRequests).toBe(6);
+    expect(fixture.dispatch.getRunRecord(claim.run.runId)).not.toHaveProperty(
+      "endedAtMs",
+    );
+
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+    await flushMicrotasks(100);
+
+    expect(fixture.failRunRequests).toBe(7);
+    expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
+      endedAtMs: fixture.now.value,
+      exitCode: 124,
+      failureReason: "timed out after 1m",
+    });
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
   });
 
   it("finalizes a user-stopped run and dispatches queued work after that child exits", async () => {
