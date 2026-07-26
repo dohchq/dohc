@@ -56,8 +56,17 @@ the inventory's no-data-loss proof. The harness records the complete list and
 counts of skipped roots/files in `REHEARSAL_EVIDENCE.json`. Skipped directories
 remain omitted from the clone, but their complete descendant path/metadata/byte
 state is hashed read-only into the source-unchanged proof. Any alias or special
-file outside a skipped root, and any hard-linked file that would lose alias
-topology during copying, remains a fail-closed error.
+file outside a skipped root remains a fail-closed error.
+
+A hard-linked **source file is not a byte-clone alias hazard**. Copying its
+bytes creates an independent regular file with a new file identity, so neither
+the in-clone reset nor a mutation of the clone can reach any source twin. The
+harness verifies every copied destination is a regular, non-reparse,
+single-link file. It records every copied hard-linked source file's link count,
+counts its twins inside and outside the source tree, and includes bounded path
+samples with explicit sample limits and omitted counts. Nothing is silently
+truncated. An outside-source twin is informational for clone safety but is
+prominently flagged because it is material to the later real cutover reset.
 
 `run_rehearsal`'s own `capture_proofs` still proves the reset machinery's
 filesystem preservation. The harness adds the missing cutover property after
@@ -80,9 +89,10 @@ recovery paths within source, and requires scratch and recovery to be separate
 non-nested directories. Scratch, recovery, and the clone root are tightened to
 owner-only access before workspace bytes are copied (0700 on Unix, protected
 current-user ACL on Windows). Outside explicitly recorded floor skips, it
-refuses aliases, special files, and hard links instead of silently changing
-their semantics. It never writes markers, databases, state, or evidence under
-`--source`.
+refuses symlinks, junctions, mount/reparse points, and special files whose
+traversal or reproduction cannot be proven safe. Hard-linked regular files are
+byte-copied and verified independent. It never writes markers, databases,
+state, or evidence under `--source`.
 
 The source-untouched assertion runs even when clone preparation or the
 rehearsal fails. A changed path, byte hash, size, or mtime is a hard failure,
@@ -113,6 +123,9 @@ On success, `<recovery>/REHEARSAL_EVIDENCE.json` contains:
 - floor-filtered clone-input, initial byte-clone, and final clone counts;
 - every floor-skipped root/file, its source-root mtime, content digest, kind,
   and counts;
+- hard-link topology totals, per-file link counts, inside/outside-source twin
+  classification, explicit sample/omission counts, and the real-cutover flag
+  for outside-source twins;
 - the recapture comparison: expected and recaptured path/record counts,
   verified content-identity count, flush attempts, mismatch inventory diff,
   projection-settled state, and total verdict;
