@@ -3,13 +3,15 @@
 //! `open_engine_db` is the **only** place pragmas are set (`PORTING.md` §9). It
 //! is ordered so the **fingerprint fence never mutates a rejected database**:
 //!
-//! 1. Open the connection.
-//! 2. Apply *session-scoped* pragmas only (`busy_timeout`, `foreign_keys`) —
+//! 1. Reject a non-empty file too small to hold a SQLite header, before the
+//!    connection is opened at all ([`reject_undersized_database`]).
+//! 2. Open the connection.
+//! 3. Apply *session-scoped* pragmas only (`busy_timeout`, `foreign_keys`) —
 //!    these live on the connection, not the file.
-//! 3. Classify the fingerprint from read-only queries (`user_version`, table
+//! 4. Classify the fingerprint from read-only queries (`user_version`, table
 //!    presence). A v1/foreign store is rejected here, before any byte of the
 //!    file is touched.
-//! 4. Only for an accepted (fresh or v2) store: apply the *persistent* pragmas
+//! 5. Only for an accepted (fresh or v2) store: apply the *persistent* pragmas
 //!    (`journal_mode = WAL`, `synchronous = NORMAL`), then run the **ordered
 //!    migration ledger** (`migration.rs`) — which on a fresh store assembles the
 //!    day-one v2 schema and stamps the fingerprint, and on an existing v2 store
@@ -21,7 +23,9 @@
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, NoFaults};
-use crate::limits::{ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS};
+use crate::limits::{
+    ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS, SQLITE_DATABASE_HEADER_BYTES,
+};
 use crate::migration::{
     BASELINE_MIGRATION_ID, BASELINE_MIGRATIONS, MigrationContext, MigrationOutcome, run_migrations,
 };
@@ -136,6 +140,9 @@ pub(crate) struct OpenedEngineDb {
 }
 
 pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb, StorageError> {
+    // Step 1: "is this file empty?" is our question, not the VFS's.
+    reject_undersized_database(path)?;
+
     let mut conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
@@ -174,6 +181,38 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
         conn,
         freshly_created: disposition == Disposition::Fresh,
     })
+}
+
+/// Reject an existing, non-empty file that is too small to hold a SQLite
+/// header, before the connection is opened (so the rejected file is left
+/// byte-unchanged).
+///
+/// SQLite's unix VFS reports a file size of exactly 1 byte as 0 — a deliberate
+/// adjustment for the OS-X msdos `findInodeInfo` workaround (`unixFileSize`,
+/// ticket #3260). An `engine.db` truncated to one byte is therefore handed to
+/// us as a brand-new empty database, classified `Fresh`, and silently
+/// initialized over. The win32 VFS makes no such adjustment, which is why the
+/// gap escaped only on POSIX hosts. Answering the size question ourselves keeps
+/// the fence's contract — never re-initialize over a damaged store — VFS
+/// independent.
+///
+/// One byte is genuinely ambiguous: on a macOS msdos volume `findInodeInfo`
+/// writes an ASCII `S` into a zero-size file, which is also the first byte of
+/// every SQLite header, so a crash sentinel and a database truncated to its
+/// first byte are indistinguishable. We resolve that fail-closed — an
+/// unrecoverable workspace reported as corrupt costs a manual delete; the other
+/// way round costs the workspace.
+fn reject_undersized_database(path: &Path) -> Result<(), StorageError> {
+    let size = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        // Absent is the create path; any other stat failure surfaces as the
+        // connection open's own typed error below.
+        Err(_) => return Ok(()),
+    };
+    if size > 0 && size < SQLITE_DATABASE_HEADER_BYTES {
+        return Err(StorageError::StateCorrupt { source: None });
+    }
+    Ok(())
 }
 
 fn apply_session_pragmas(conn: &Connection) -> Result<(), StorageError> {

@@ -19,6 +19,13 @@ pub const MAX_IDENTIFIER_BYTES: usize = 512;
 /// auto-migrated.
 pub const ENGINE_SCHEMA_VERSION: i64 = 2;
 
+/// The length of the SQLite database file header (SQLite file format §1.3). A
+/// database file is either empty or at least this large, so a shorter non-empty
+/// `engine.db` cannot be one — see `schema::reject_undersized_database`, which
+/// answers the "is this file empty?" question itself rather than delegating it
+/// to a VFS.
+pub const SQLITE_DATABASE_HEADER_BYTES: u64 = 100;
+
 /// `busy_timeout` applied to the writer connection, in milliseconds. Matches
 /// the TS engine's `ENGINE_SQLITE_BUSY_TIMEOUT_MS` (`engineDbSchema.ts:15`) so
 /// external-process contention waits rather than failing instantly.
