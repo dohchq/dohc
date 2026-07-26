@@ -493,3 +493,38 @@ stack converts every mutation `InvalidInput` into refuse-and-ack
 (journaled, acked, rolled back), which unwedges the stream and surfaces
 the refusal; a #245 regression test for exactly this contentKind case is
 owed at its rebase (recorded in the integrator notes).
+
+## UPDATE — 2026-07-26: post RPC-B2/RPC-D2 dispatch inventory
+
+This section supersedes the stale counts and missing-method statements above
+without rewriting the historical record. The Rust daemon now dispatches **105
+RPC methods**, not eight or the intermediate family counts captured while
+RPC-A through RPC-D were landing.
+
+RPC-B2 (#225) and RPC-D2 (#227) are merged. The following methods therefore
+exist and must not be described as missing:
+
+- `chats.attachments.listForThread`
+- `chats.attachments.listFileMentions`
+- `chats.threads.listForFile`
+- `chats.threads.getProjection`
+- `chats.mentions.listForHandle`
+- `versionedBinary.readBlob`
+- `versions.createNamed`
+- `secrets.fork`
+- `search.ensureIndex`
+
+Three areas previously grouped with missing domain work are now narrower:
+`queryChatMessagesGranular`, path classification, and policy parse/resolve all
+have complete Rust domain implementations. Their remaining gap is dispatch
+arms and wire exposure only.
+
+After the merged RPC-B2/RPC-D2 surface, the missing-family list is:
+
+- relay sync;
+- share push/pull;
+- key envelope, pending the custody decision; and
+- the CLI unread-file-threads aggregate.
+
+Individual dispatch-only seams may still be tracked by their owning shard, but
+they are not missing domain families and should not be added back to this list.
