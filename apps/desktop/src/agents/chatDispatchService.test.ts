@@ -9,6 +9,7 @@ import {
   type LinkedChatStore,
 } from "@dohc/workspace-engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveSpawnCommand } from "../process/windowsSpawn";
 import type { RunnerSettings } from "../settings/userSettings";
 import { nativeTmpdir } from "../workspaces/testTemp";
 import {
@@ -611,7 +612,12 @@ describe("chatDispatchService", () => {
     ]);
 
     const firstSpawn = fixture.spawnCalls[0]!;
-    expect(firstSpawn.command).toBe("claude");
+    // The service resolves the parsed binary through resolveSpawnCommand, so
+    // on win32 this is an absolute .EXE/.CMD path when claude is installed.
+    // Computing the expectation with the same resolver keeps the parsing
+    // contract under test ("claude", not the whole configured line) on every
+    // platform and machine.
+    expect(firstSpawn.command).toBe(resolveSpawnCommand("claude", []).command);
     expect(firstSpawn.args.slice(0, -1)).toEqual(["-p", "--allowedTools", "Bash(dohc chat:*)"]);
     const prompt = firstSpawn.args.at(-1);
     expect(prompt).toContain("# Launch review");
