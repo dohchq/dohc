@@ -1829,7 +1829,8 @@ fn capture_ingest_in_tx(
         // and later disk-driven retires would be refused.
         if input.claim_foreign_head && before.metadata_origin != input.metadata_origin {
             tx.execute(
-                "UPDATE snapshots SET metadata_origin = ?1 \
+                "UPDATE snapshots SET metadata_origin = ?1, \
+                 metadata_summary = NULL, metadata_correlation_id = NULL \
                  WHERE workspace_id = ?2 AND version_id = ?3 AND object_id = ?4",
                 params![
                     input.metadata_origin,
@@ -3940,6 +3941,83 @@ fn inherited_object_moment(
     inherited_object_moment(conn, workspace_id, &parent_id, object_id, seen)
 }
 
+struct RollbackPreimageIdentity {
+    object_id: String,
+    version_id: String,
+    path: String,
+    updated_at_ms: i64,
+    latest_moment_id: String,
+    metadata_origin: String,
+    metadata_summary: Option<String>,
+    metadata_correlation_id: Option<String>,
+}
+
+fn persisted_rollback_preimage_identity(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: &MomentRecord,
+) -> Result<Option<RollbackPreimageIdentity>, DomainError> {
+    type StoredIdentity = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let stored: StoredIdentity = conn
+        .query_row(
+            "SELECT before_object_id, before_version_id, before_path, \
+             before_updated_at_ms, before_metadata_origin, before_metadata_summary, \
+             before_metadata_correlation_id FROM moments \
+             WHERE workspace_id = ?1 AND moment_id = ?2",
+            params![workspace_id, moment.moment_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let (object_id, version_id, path, updated_at_ms, metadata_origin, summary, correlation_id) =
+        stored;
+    if path.is_none() && updated_at_ms.is_none() && metadata_origin.is_none() {
+        return Ok(None);
+    }
+    let identity = RollbackPreimageIdentity {
+        object_id: object_id.ok_or(DomainError::StateCorrupt {
+            reason: "stored moment preimage is missing its object",
+        })?,
+        version_id: version_id.ok_or(DomainError::StateCorrupt {
+            reason: "stored moment preimage is missing its version",
+        })?,
+        path: path.ok_or(DomainError::StateCorrupt {
+            reason: "stored moment preimage is missing its path",
+        })?,
+        updated_at_ms: updated_at_ms.ok_or(DomainError::StateCorrupt {
+            reason: "stored moment preimage is missing its timestamp",
+        })?,
+        latest_moment_id: moment.before_latest_moment_id.clone().ok_or(
+            DomainError::StateCorrupt {
+                reason: "stored moment preimage is missing its head",
+            },
+        )?,
+        metadata_origin: metadata_origin.ok_or(DomainError::StateCorrupt {
+            reason: "stored moment preimage is missing its metadata origin",
+        })?,
+        metadata_summary: summary,
+        metadata_correlation_id: correlation_id,
+    };
+    Ok(Some(identity))
+}
+
 fn resolve_rollback_before(
     conn: &Connection,
     input: &RollbackTextFileMutation,
@@ -3947,23 +4025,43 @@ fn resolve_rollback_before(
     before_state: MomentBeforeState,
 ) -> Result<Option<SnapshotRecord>, DomainError> {
     if before_state == MomentBeforeState::Present {
-        let producer = match &moment.before_latest_moment_id {
-            Some(before_latest_moment_id) => {
-                get_moment(conn, &input.workspace_id, before_latest_moment_id)?.ok_or(
-                    DomainError::StateCorrupt {
-                        reason: "moment preimage producer is missing",
-                    },
-                )?
-            }
-            None => previous_object_moment_for_rollback(conn, input, moment)?.ok_or(
-                DomainError::StateCorrupt {
-                    reason: "moment preimage is missing its producer",
-                },
-            )?,
-        };
-        if producer.object_id != moment.object_id {
+        let identity =
+            match persisted_rollback_preimage_identity(conn, &input.workspace_id, moment)? {
+                Some(identity) => identity,
+                None => {
+                    let producer =
+                        match &moment.before_latest_moment_id {
+                            Some(before_latest_moment_id) => {
+                                get_moment(conn, &input.workspace_id, before_latest_moment_id)?
+                                    .ok_or(DomainError::StateCorrupt {
+                                        reason: "moment preimage producer is missing",
+                                    })?
+                            }
+                            None => previous_object_moment_for_rollback(conn, input, moment)?
+                                .ok_or(DomainError::StateCorrupt {
+                                    reason: "moment preimage is missing its producer",
+                                })?,
+                        };
+                    RollbackPreimageIdentity {
+                        object_id: producer.object_id,
+                        version_id: input.version_id.clone(),
+                        path: producer.path,
+                        updated_at_ms: producer.recorded_at_ms,
+                        latest_moment_id: producer.moment_id,
+                        metadata_origin: producer.metadata_origin,
+                        metadata_summary: producer.metadata_summary,
+                        metadata_correlation_id: producer.metadata_correlation_id,
+                    }
+                }
+            };
+        if identity.object_id != moment.object_id {
             return Err(DomainError::StateCorrupt {
                 reason: "moment preimage producer belongs to another object",
+            });
+        }
+        if identity.version_id != input.version_id {
+            return Err(DomainError::StateCorrupt {
+                reason: "moment preimage belongs to another version",
             });
         }
         let (text, blob_sha256, binary_sha256) = match moment.before_content_kind.as_str() {
@@ -4011,16 +4109,16 @@ fn resolve_rollback_before(
             workspace_id: input.workspace_id.clone(),
             version_id: input.version_id.clone(),
             object_id: moment.object_id.clone(),
-            path: producer.path,
+            path: identity.path,
             text,
             blob_sha256,
             content_kind: moment.before_content_kind.clone(),
             binary_sha256,
-            updated_at_ms: producer.recorded_at_ms,
-            latest_moment_id: producer.moment_id,
-            metadata_origin: producer.metadata_origin,
-            metadata_summary: producer.metadata_summary,
-            metadata_correlation_id: producer.metadata_correlation_id,
+            updated_at_ms: identity.updated_at_ms,
+            latest_moment_id: identity.latest_moment_id,
+            metadata_origin: identity.metadata_origin,
+            metadata_summary: identity.metadata_summary,
+            metadata_correlation_id: identity.metadata_correlation_id,
         }));
     }
     if before_state == MomentBeforeState::Absent {

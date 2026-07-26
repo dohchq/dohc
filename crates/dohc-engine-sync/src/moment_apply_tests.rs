@@ -939,6 +939,148 @@ fn moment_append_record_only_divergence_is_not_a_head_and_cannot_be_rolled_back(
 }
 
 #[test]
+fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
+    let (scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["shipped", "remote edit"]);
+    let shipped_sha = text_sha("shipped");
+    let version = ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: "version-peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({
+            "versionId": "feature",
+            "name": "Feature",
+            "kind": "named",
+            "forkVersionId": "main",
+            "forkMomentId": "fork-point",
+            "createdAtMs": 1_500,
+            "forkSnapshots": [{
+                "objectId": "shipped-object",
+                "objectCreatedAtMs": 1_100,
+                "path": "shipped.md",
+                "blobSha256": shipped_sha,
+                "updatedAtMs": 1_200,
+                "latestMomentId": "shipped-head",
+                "metadata": {
+                    "origin": "sync",
+                    "summary": "shipped summary",
+                    "correlationId": "shipped correlation"
+                }
+            }]
+        }),
+        recorded_at_ms: 1_500,
+    };
+    apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases)
+        .expect("materialize shipped fork");
+
+    let mut payload = present_text_payload(
+        "remote-after-shipped",
+        "shipped-object",
+        "write",
+        "shipped.md",
+        "shipped.md",
+        "shipped",
+        "shipped-head",
+        "remote edit",
+    );
+    payload["versionId"] = json!("feature");
+    payload["beforeVersionId"] = json!("feature");
+    payload["beforeUpdatedAtMs"] = json!(1_200);
+    payload["beforeMetadata"] = json!({
+        "origin": "sync",
+        "summary": "shipped summary",
+        "correlationId": "shipped correlation"
+    });
+    let append = envelope("moment-peer", 0, "ws", payload);
+    assert_eq!(
+        apply_moment_envelope(&mut store, &append, &NoFaults).expect("append after shipped head"),
+        ApplyOutcome::Applied(0)
+    );
+    type StoredPreimage = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let stored_preimage: StoredPreimage = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT before_object_id, before_version_id, before_path,
+                        before_updated_at_ms, before_metadata_origin,
+                        before_metadata_summary, before_metadata_correlation_id
+                   FROM moments
+                  WHERE workspace_id = 'ws' AND moment_id = 'remote-after-shipped'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+        })
+        .expect("stored rollback preimage");
+    // MUTATION: omit any identity/metadata binding from insert_moment and the
+    // durable preimage tuple no longer matches the shipped snapshot.
+    assert_eq!(
+        stored_preimage,
+        (
+            Some("shipped-object".to_owned()),
+            Some("feature".to_owned()),
+            Some("shipped.md".to_owned()),
+            Some(1_200),
+            Some("sync".to_owned()),
+            Some("shipped summary".to_owned()),
+            Some("shipped correlation".to_owned()),
+        )
+    );
+
+    let database_path = scratch.engine_db_path().expect("database path");
+    drop(store);
+    let mut reopened = EngineStore::open(&database_path, 3_000).expect("reopen");
+    VersionedTextStore::new(&mut reopened)
+        .rollback_text_file_mutation(
+            &RollbackTextFileMutation {
+                workspace_id: "ws".to_owned(),
+                version_id: "feature".to_owned(),
+                path: "shipped.md".to_owned(),
+                mutation_moment_id: "remote-after-shipped".to_owned(),
+                request_id: None,
+                legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
+            },
+            &NoFaults,
+        )
+        .expect("rollback after reopen");
+    let restored = VersionedTextStore::new(&mut reopened)
+        .read_text("ws", "feature", "shipped.md")
+        .expect("read restored head")
+        .expect("restored head");
+    assert_eq!(restored.text, "shipped");
+    assert_eq!(restored.latest_moment_id, "shipped-head");
+    assert_eq!(restored.updated_at_ms, 1_200);
+    assert_eq!(restored.metadata_origin, "sync");
+    assert_eq!(
+        restored.metadata_summary.as_deref(),
+        Some("shipped summary")
+    );
+    assert_eq!(
+        restored.metadata_correlation_id.as_deref(),
+        Some("shipped correlation")
+    );
+}
+
+#[test]
 fn moment_append_first_delivery_rejects_plaintext_id_collision_but_redelivery_skips() {
     let (_scratch, mut store) = test_store();
     hydrate_texts(&mut store, &["first"]);

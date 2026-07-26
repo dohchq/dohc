@@ -910,6 +910,16 @@ fn a_claimed_dedupe_transfers_ownership_to_capture() {
             &NO_FAULTS,
         )
         .expect("foreign write");
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE snapshots SET metadata_summary = 'peer summary', \
+                 metadata_correlation_id = 'peer correlation' \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = 'obj-shared'",
+                [WS, VERSION],
+            )
+        })
+        .expect("seed imported metadata");
 
     // Capture OBSERVES the same bytes on disk (a claimed capture that
     // dedupes). Ownership must transfer, or later disk-driven retires stay
@@ -920,18 +930,22 @@ fn a_claimed_dedupe_transfers_ownership_to_capture() {
         .capture_ingest(&claimed, &NO_FAULTS)
         .expect("claimed dedupe");
 
-    let origin: String = store
+    let metadata: (String, Option<String>, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT metadata_origin FROM snapshots WHERE workspace_id = ?1 AND path = ?2",
+                "SELECT metadata_origin, metadata_summary, metadata_correlation_id \
+                 FROM snapshots WHERE workspace_id = ?1 AND path = ?2",
                 [WS, "shared.md"],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
         })
-        .expect("head origin");
+        .expect("head metadata");
+    // MUTATION: retaining either imported optional column in the ownership
+    // transfer makes this tuple disagree with capture's local provenance.
     assert_eq!(
-        origin, "capture-test",
-        "a claimed dedupe must transfer ownership to the claiming writer"
+        metadata,
+        ("capture-test".to_owned(), None, None),
+        "a claimed dedupe must replace the complete metadata tuple"
     );
 }
 

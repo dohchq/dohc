@@ -890,6 +890,26 @@ fn insert_moment(
                 ),
             },
         };
+    let (
+        before_object_id,
+        before_version_id,
+        before_path,
+        before_updated_at_ms,
+        before_metadata_origin,
+        before_metadata_summary,
+        before_metadata_correlation_id,
+    ) = match before {
+        MomentBefore::Present(snapshot) => (
+            Some(snapshot.object_id.as_str()),
+            Some(payload.version_id.as_str()),
+            Some(snapshot.path.as_str()),
+            Some(snapshot.updated_at_ms),
+            Some(snapshot.metadata.origin.as_str()),
+            snapshot.metadata.summary.as_deref(),
+            snapshot.metadata.correlation_id.as_deref(),
+        ),
+        MomentBefore::Absent | MomentBefore::Null => (None, None, None, None, None, None, None),
+    };
     let author_json = payload
         .author
         .as_ref()
@@ -910,9 +930,11 @@ fn insert_moment(
            metadata_correlation_id,author_json,sync_record_only,
            after_content_kind,after_binary_sha256,before_content_kind,before_binary_sha256,
            payload_before_path,payload_before_content_kind,payload_before_blob_sha256,
-           payload_after_path,payload_after_content_kind,payload_after_blob_sha256
+           payload_after_path,payload_after_content_kind,payload_after_blob_sha256,
+           before_object_id,before_version_id,before_path,before_updated_at_ms,
+           before_metadata_origin,before_metadata_summary,before_metadata_correlation_id
          ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,
-                   ?20,?21,?22,?23,?24,?25,?26,?27)",
+                   ?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)",
         params![
             workspace_id,
             order,
@@ -941,6 +963,13 @@ fn insert_moment(
             payload.payload_after_path,
             after_kind.as_str(),
             payload.payload_after_blob_sha256,
+            before_object_id,
+            before_version_id,
+            before_path,
+            before_updated_at_ms,
+            before_metadata_origin,
+            before_metadata_summary,
+            before_metadata_correlation_id,
         ],
     )
     .map_err(SyncError::persist)?;

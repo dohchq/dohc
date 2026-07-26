@@ -1596,6 +1596,96 @@ ALTER TABLE fork_base_snapshots ADD COLUMN metadata_correlation_id TEXT;
 
 pub(crate) const MOMENT_METADATA_MIGRATION_ID: &str = "v1-moment-metadata";
 
+/// Ordinal 19. Completes the durable rollback preimage on plaintext moments.
+/// The content digest and producer id alone cannot restore a shipped fork
+/// snapshot because `version.create` deliberately materializes that head
+/// without importing its producing moment.
+const V1_MOMENT_ROLLBACK_PREIMAGE_DDL: &str = "\
+ALTER TABLE moments ADD COLUMN before_object_id TEXT;
+ALTER TABLE moments ADD COLUMN before_version_id TEXT;
+ALTER TABLE moments ADD COLUMN before_path TEXT;
+ALTER TABLE moments ADD COLUMN before_updated_at_ms INTEGER;
+ALTER TABLE moments ADD COLUMN before_metadata_origin TEXT;
+ALTER TABLE moments ADD COLUMN before_metadata_summary TEXT;
+ALTER TABLE moments ADD COLUMN before_metadata_correlation_id TEXT;
+
+-- Existing materialized moments normally resolve through their producer. A
+-- shipped fork head has no producer row, so recover its frozen identity from
+-- the fork base when upgrading a store that already applied its first edit.
+UPDATE moments SET
+    before_object_id = object_id,
+    before_version_id = version_id,
+    before_path = COALESCE(
+        (SELECT producer.path FROM moments producer
+          WHERE producer.workspace_id = moments.workspace_id
+            AND producer.moment_id = moments.before_latest_moment_id),
+        (SELECT fork.path FROM fork_base_snapshots fork
+          WHERE fork.workspace_id = moments.workspace_id
+            AND fork.version_id = moments.version_id
+            AND fork.object_id = moments.object_id
+            AND fork.latest_moment_id = moments.before_latest_moment_id)
+    ),
+    before_updated_at_ms = COALESCE(
+        (SELECT producer.recorded_at_ms FROM moments producer
+          WHERE producer.workspace_id = moments.workspace_id
+            AND producer.moment_id = moments.before_latest_moment_id),
+        (SELECT fork.updated_at_ms FROM fork_base_snapshots fork
+          WHERE fork.workspace_id = moments.workspace_id
+            AND fork.version_id = moments.version_id
+            AND fork.object_id = moments.object_id
+            AND fork.latest_moment_id = moments.before_latest_moment_id)
+    ),
+    before_metadata_origin = COALESCE(
+        (SELECT producer.metadata_origin FROM moments producer
+          WHERE producer.workspace_id = moments.workspace_id
+            AND producer.moment_id = moments.before_latest_moment_id),
+        (SELECT fork.metadata_origin FROM fork_base_snapshots fork
+          WHERE fork.workspace_id = moments.workspace_id
+            AND fork.version_id = moments.version_id
+            AND fork.object_id = moments.object_id
+            AND fork.latest_moment_id = moments.before_latest_moment_id)
+    ),
+    before_metadata_summary = CASE
+        WHEN EXISTS (
+            SELECT 1 FROM moments producer
+             WHERE producer.workspace_id = moments.workspace_id
+               AND producer.moment_id = moments.before_latest_moment_id
+        ) THEN (
+            SELECT producer.metadata_summary FROM moments producer
+             WHERE producer.workspace_id = moments.workspace_id
+               AND producer.moment_id = moments.before_latest_moment_id
+        )
+        ELSE (
+            SELECT fork.metadata_summary FROM fork_base_snapshots fork
+             WHERE fork.workspace_id = moments.workspace_id
+               AND fork.version_id = moments.version_id
+               AND fork.object_id = moments.object_id
+               AND fork.latest_moment_id = moments.before_latest_moment_id
+        )
+    END,
+    before_metadata_correlation_id = CASE
+        WHEN EXISTS (
+            SELECT 1 FROM moments producer
+             WHERE producer.workspace_id = moments.workspace_id
+               AND producer.moment_id = moments.before_latest_moment_id
+        ) THEN (
+            SELECT producer.metadata_correlation_id FROM moments producer
+             WHERE producer.workspace_id = moments.workspace_id
+               AND producer.moment_id = moments.before_latest_moment_id
+        )
+        ELSE (
+            SELECT fork.metadata_correlation_id FROM fork_base_snapshots fork
+             WHERE fork.workspace_id = moments.workspace_id
+               AND fork.version_id = moments.version_id
+               AND fork.object_id = moments.object_id
+               AND fork.latest_moment_id = moments.before_latest_moment_id
+        )
+    END
+ WHERE before_present = 2;
+";
+
+pub(crate) const MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID: &str = "v1-moment-rollback-preimage";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1734,6 +1824,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MOMENT_METADATA_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MOMENT_METADATA_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 19,
+        id: MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_MOMENT_ROLLBACK_PREIMAGE_DDL,
         sets_user_version: None,
     },
 ];
@@ -2220,6 +2317,96 @@ mod tests {
             after("m4"),
             (some("binary"), some("bin-one")),
             "a binary moment backfills its BINARY digest, not the text one"
+        );
+    }
+
+    #[test]
+    fn rollback_preimage_migration_backfills_a_shipped_fork_head() {
+        let dir = tempdir();
+        let path = dir.join("rollback-preimage.db");
+        let ctx = MigrationContext::current(1_500);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..19], &ctx, &NoFaults)
+            .expect("pre-rollback-preimage migrations");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions
+                 (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'main', 'main', 1);
+             INSERT INTO versions
+                 (workspace_id, version_id, name, kind, created_at_ms,
+                  fork_version_id, fork_moment_id)
+                 VALUES ('ws', 'feature', 'feature', 'named', 2, 'main', 'fork');
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+                 VALUES ('ws', 'obj', 1);
+             INSERT INTO blobs (sha256, byte_length, text) VALUES
+                 ('before-sha', 6, 'before'),
+                 ('after-sha', 5, 'after');
+             INSERT INTO fork_base_snapshots
+                 (workspace_id, version_id, object_id, path, blob_sha256,
+                  updated_at_ms, latest_moment_id, metadata_origin,
+                  metadata_summary, metadata_correlation_id)
+                 VALUES ('ws', 'feature', 'obj', 'a.md', 'before-sha',
+                         20, 'shipped-head', 'sync', 'shipped summary',
+                         'shipped correlation');
+             INSERT INTO moments
+                 (workspace_id, moment_order, moment_id, version_id, object_id,
+                  path, recorded_at_ms, operation, after_blob_sha256,
+                  before_present, before_blob_sha256, before_latest_moment_id,
+                  metadata_origin)
+                 VALUES ('ws', 0, 'remote-edit', 'feature', 'obj', 'a.md', 30,
+                         'write', 'after-sha', 2, 'before-sha', 'shipped-head',
+                         'sync');",
+        )
+        .expect("pre-migration shipped head");
+
+        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("rollback preimage migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+
+        type Preimage = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let preimage: Preimage = conn
+            .query_row(
+                "SELECT before_object_id, before_version_id, before_path,
+                        before_updated_at_ms, before_metadata_origin,
+                        before_metadata_summary, before_metadata_correlation_id
+                   FROM moments WHERE workspace_id = 'ws' AND moment_id = 'remote-edit'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .expect("backfilled rollback preimage");
+        // MUTATION: remove the fork-base fallback from the ordinal-19 copier
+        // and the shipped identity can no longer be reconstructed.
+        assert_eq!(
+            preimage,
+            (
+                Some("obj".to_owned()),
+                Some("feature".to_owned()),
+                Some("a.md".to_owned()),
+                Some(20),
+                Some("sync".to_owned()),
+                Some("shipped summary".to_owned()),
+                Some("shipped correlation".to_owned()),
+            )
         );
     }
 
