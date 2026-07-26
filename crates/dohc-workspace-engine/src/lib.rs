@@ -1166,20 +1166,23 @@ impl EngineService {
         // armed above the startup replay closes the actor on an early drop
         // and is disarmed once the handle is inserted; `CaptureDriver`'s own
         // Drop cancels the files layer.
-        // Cancellation-aware like every other actor wait in this flow: a
-        // caller abort stops WAITING promptly (the actor still finishes the
-        // reclaim it already accepted — it is idempotent on the next open)
-        // and the open_guard above closes the actor on early drop.
-        Self::read_under_ctx(
-            &cancellation,
-            "workspace.open (dispatch reclaim)",
-            actor.chat_dispatch_reclaim_running(
-                params.workspace_id.clone(),
-                CHAT_DISPATCH_MAX_ATTEMPTS,
-                now_ms,
-            ),
-        )
-        .await?;
+        // Desktop rebinds opt out because their runner processes outlive the daemon.
+        if actor_open.created_actor && params.recover_running_dispatches.unwrap_or(true) {
+            // Cancellation-aware like every other actor wait in this flow:
+            // a caller abort stops WAITING promptly (the actor still finishes
+            // the reclaim it already accepted — it is idempotent on the next
+            // open) and the open_guard above closes the actor on early drop.
+            Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (dispatch reclaim)",
+                actor.chat_dispatch_reclaim_running(
+                    params.workspace_id.clone(),
+                    CHAT_DISPATCH_MAX_ATTEMPTS,
+                    now_ms,
+                ),
+            )
+            .await?;
+        }
         capture.wait_for_baseline().await;
         open_guard.disarm();
         lock(&self.handles).insert(
@@ -6655,6 +6658,8 @@ impl Drop for OperationCancellation {
 struct WorkspaceOpenParams {
     root_dir: String,
     workspace_id: String,
+    #[serde(default)]
+    recover_running_dispatches: Option<bool>,
 }
 
 #[derive(Deserialize)]

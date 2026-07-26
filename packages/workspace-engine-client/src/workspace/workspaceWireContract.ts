@@ -20,6 +20,7 @@ export type WorkspaceJsonObject = {
 export type WorkspaceOpenParams = WorkspaceJsonObject & {
   rootDir: string;
   workspaceId: string;
+  recoverRunningDispatches?: boolean;
 };
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type ConflictListParams = WorkspaceJsonObject & {

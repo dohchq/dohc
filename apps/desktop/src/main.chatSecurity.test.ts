@@ -13,6 +13,22 @@ function handlerSource(channel: string): string {
 }
 
 describe("main-process chat authorization", () => {
+  it("routes every main chat acquisition through the Rust-aware factory", () => {
+    const factoryStart = mainSource.indexOf("function linkedChatStoreFor(");
+    const factoryEnd = mainSource.indexOf(
+      "\nconst agentDispatchStoreHandles",
+      factoryStart,
+    );
+    const factory = mainSource.slice(factoryStart, factoryEnd);
+
+    expect(factory).toContain("createDesktopLinkedChatStore(workspace, {");
+    expect(factory).toContain(
+      "rustEngineEnabled: isRustEngineAdapterEnabled()",
+    );
+    expect(factory).toContain("sessions: rustEngineWorkspaceSessions");
+    expect(factory).not.toContain("createLinkedChatStore(");
+  });
+
   it("guards every renderer chat mutation with the workspace read-only boundary", () => {
     const guardedMutations = [
       "saveChatBookmark",
