@@ -6,9 +6,14 @@ pub const MAX_WIRE_INTEGER: i64 = (1_i64 << 53) - 1;
 pub const MAX_PUSH_OPS_PER_BATCH: usize = 500;
 pub const MAX_PULL_OPS: usize = 500;
 pub const MAX_BLOB_HAVE_BATCH: usize = 2_000;
+/// Matches `services/sync-relay`'s per-operation canonical JSON limit.
+pub const MAX_PAYLOAD_JSON_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_PULL_PAGES_PER_PASS: usize = 16;
+pub(crate) const MAX_PULL_OPS_PER_PASS: usize = MAX_PULL_OPS;
+pub(crate) const MAX_PULL_PAYLOAD_BYTES_PER_PASS: usize =
+    MAX_PULL_OPS_PER_PASS * MAX_PAYLOAD_JSON_BYTES;
 pub(crate) const MAX_IDENTIFIER_BYTES: usize = 512;
 pub(crate) const MAX_OP_KIND_BYTES: usize = 128;
-pub(crate) const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 /// One coordinate-addressed replication operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +48,7 @@ impl ReplicationEnvelope {
             serde_json::to_vec(&self.payload).map_err(|_| crate::SyncError::InvalidInput {
                 reason: "payload is not valid JSON",
             })?;
-        if encoded.len() > MAX_PAYLOAD_BYTES {
+        if encoded.len() > MAX_PAYLOAD_JSON_BYTES {
             return Err(crate::SyncError::InvalidInput {
                 reason: "payload exceeds the relay limit",
             });

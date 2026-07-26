@@ -41,8 +41,8 @@ pub use journal::{
     list_replication_ops, read_replication_acked_seq, read_sync_identity,
 };
 pub use model::{
-    MAX_BLOB_HAVE_BATCH, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH, MAX_WIRE_INTEGER,
-    ReplicationEnvelope,
+    MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
+    MAX_WIRE_INTEGER, ReplicationEnvelope,
 };
 pub use moment_apply::{MomentMaterializationChange, apply_moment_envelope};
 pub use path_policy::{PathClass, classify_share_path};

@@ -163,6 +163,29 @@ pub(crate) fn write_pushed_seq(
         })
 }
 
+pub(crate) fn rewind_pushed_seq(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    origin_id: &str,
+    pushed_seq: i64,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<()>, SyncError> {
+    if !(-1..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
+        return Err(SyncError::InvalidInput {
+            reason: "pushed_seq is outside the wire integer range",
+        });
+    }
+    store.write_with(faults, |tx| {
+        tx.execute(
+            "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES (?1,?2,?3) \
+             ON CONFLICT(workspace_id,origin_id) DO UPDATE SET pushed_seq=excluded.pushed_seq",
+            params![workspace_id, origin_id, pushed_seq],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<(), SyncError>(())
+    })
+}
+
 pub fn read_shared_peer_position(
     store: &EngineStore,
     workspace_id: &str,

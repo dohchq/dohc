@@ -5,7 +5,9 @@ use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, he
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
-use crate::cursor::{RelayCursor, commit_relay_cursor, read_pushed_seq, write_pushed_seq};
+use crate::cursor::{
+    RelayCursor, commit_relay_cursor, read_pushed_seq, rewind_pushed_seq, write_pushed_seq,
+};
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::{
     ApplyOutcome, BlobContent, BlobHydration, RelayError, ReplicationEnvelope, SyncError,
@@ -390,7 +392,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 {
                     return Err(RelayError::OriginDiverged);
                 }
-                match write_pushed_seq(
+                match rewind_pushed_seq(
                     store,
                     workspace_id,
                     &origin_id,
@@ -443,34 +445,49 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         let mut cursor = current.map_or(0, |value| value.cursor);
         let mut fetched = 0_usize;
+        let mut fetched_payload_bytes = 0_usize;
+        let mut pages = 0_usize;
         let mut ops = Vec::new();
         loop {
+            let remaining = crate::model::MAX_PULL_OPS_PER_PASS
+                .checked_sub(fetched)
+                .ok_or(RelayError::InvalidResponse)?;
+            if remaining == 0 || pages >= crate::model::MAX_PULL_PAGES_PER_PASS {
+                break;
+            }
+            let limit = remaining.min(crate::MAX_PULL_OPS);
             let response = self.transport.pull(PullRequest {
                 workspace_id: workspace_id.to_owned(),
                 replication_epoch: identity.replication_epoch.clone(),
                 stream_identity: identity.stream_identity.clone(),
                 cursor,
-                limit: crate::MAX_PULL_OPS,
+                limit,
             })?;
-            if response.ops.len() > crate::MAX_PULL_OPS
-                || !(0..=crate::MAX_WIRE_INTEGER).contains(&response.next_cursor)
-            {
+            validate_pull_page(&response, workspace_id, cursor)?;
+            if response.ops.len() > limit {
                 return Err(RelayError::InvalidResponse);
             }
-            for op in &response.ops {
-                if op.workspace_id != workspace_id {
-                    return Err(RelayError::InvalidResponse);
-                }
-            }
+            let page_payload_bytes = response.ops.iter().try_fold(0_usize, |total, op| {
+                let bytes = serde_json::to_vec(&op.payload)
+                    .map_err(|_| RelayError::InvalidResponse)?
+                    .len();
+                total.checked_add(bytes).ok_or(RelayError::InvalidResponse)
+            })?;
+            fetched_payload_bytes = fetched_payload_bytes
+                .checked_add(page_payload_bytes)
+                .filter(|total| *total <= crate::model::MAX_PULL_PAYLOAD_BYTES_PER_PASS)
+                .ok_or(RelayError::InvalidResponse)?;
             fetched = fetched
                 .checked_add(response.ops.len())
                 .ok_or(RelayError::InvalidResponse)?;
             ops.extend(response.ops);
-            if response.has_more && response.next_cursor <= cursor {
-                return Err(RelayError::NoProgress);
-            }
             cursor = response.next_cursor;
-            if !response.has_more {
+            pages = pages.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+            if !response.has_more
+                || fetched >= crate::model::MAX_PULL_OPS_PER_PASS
+                || fetched_payload_bytes >= crate::model::MAX_PULL_PAYLOAD_BYTES_PER_PASS
+                || pages >= crate::model::MAX_PULL_PAGES_PER_PASS
+            {
                 break;
             }
         }
@@ -1117,9 +1134,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 if !requested.contains(&sha256) || !seen.insert(sha256.clone()) {
                     return Err(RelayError::InvalidResponse);
                 }
-                let kind = refs.get(&sha256).ok_or(RelayError::InvalidResponse)?;
-                let bytes =
-                    local_blob_bytes(store, &sha256, *kind)?.ok_or(RelayError::BlobInvalid)?;
+                let kinds = refs.get(&sha256).ok_or(RelayError::InvalidResponse)?;
+                let mut bytes = None;
+                for kind in kinds {
+                    if let Some(local) = local_blob_bytes(store, &sha256, *kind)? {
+                        bytes = Some(local);
+                        break;
+                    }
+                }
+                let bytes = bytes.ok_or(RelayError::BlobInvalid)?;
                 self.transport.upload_blob(BlobUploadRequest {
                     workspace_id: workspace_id.to_owned(),
                     replication_epoch: identity.replication_epoch.clone(),
@@ -1140,8 +1163,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         ops: &[ReplicationEnvelope],
         faults: &dyn FaultInjector,
     ) -> Result<(), RelayError> {
-        for (sha256, kind) in collect_blob_refs(ops)? {
-            if local_blob_bytes(store, &sha256, kind)?.is_some() {
+        for (sha256, kinds) in collect_blob_refs(ops)? {
+            let mut missing = Vec::new();
+            for kind in kinds {
+                if local_blob_bytes(store, &sha256, kind)?.is_none() {
+                    missing.push(kind);
+                }
+            }
+            if missing.is_empty() {
                 continue;
             }
             let response = self.transport.download_blob(BlobDownloadRequest {
@@ -1153,24 +1182,32 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             if hex_sha256(&response.bytes) != sha256 {
                 return Err(RelayError::BlobInvalid);
             }
-            let content = match kind {
-                BlobKind::Text => String::from_utf8(response.bytes)
-                    .map(BlobContent::Text)
-                    .map_err(|_| RelayError::BlobInvalid)?,
-                BlobKind::Binary => BlobContent::Binary(response.bytes),
-            };
-            match hydrate_blob_content(store, &BlobHydration { sha256, content }, faults).map_err(
-                |error| {
+            for kind in missing {
+                let content = match kind {
+                    BlobKind::Text => String::from_utf8(response.bytes.clone())
+                        .map(BlobContent::Text)
+                        .map_err(|_| RelayError::BlobInvalid)?,
+                    BlobKind::Binary => BlobContent::Binary(response.bytes.clone()),
+                };
+                match hydrate_blob_content(
+                    store,
+                    &BlobHydration {
+                        sha256: sha256.clone(),
+                        content,
+                    },
+                    faults,
+                )
+                .map_err(|error| {
                     if matches!(error, SyncError::BlobInvalid) {
                         RelayError::BlobInvalid
                     } else {
                         local(error)
                     }
-                },
-            )? {
-                TxnOutcome::Committed(()) => {}
-                TxnOutcome::Crashed { .. } => {
-                    return Err(RelayError::Local("injected-crash".to_owned()));
+                })? {
+                    TxnOutcome::Committed(()) => {}
+                    TxnOutcome::Crashed { .. } => {
+                        return Err(RelayError::Local("injected-crash".to_owned()));
+                    }
                 }
             }
         }
@@ -1186,7 +1223,7 @@ enum BlobKind {
 
 fn collect_blob_refs(
     ops: &[ReplicationEnvelope],
-) -> Result<BTreeMap<String, BlobKind>, RelayError> {
+) -> Result<BTreeMap<String, BTreeSet<BlobKind>>, RelayError> {
     let mut refs = BTreeMap::new();
     for op in ops {
         match op.op_kind.as_str() {
@@ -1274,7 +1311,7 @@ fn content_kind(value: Option<&serde_json::Value>) -> BlobKind {
 }
 
 fn insert_optional_ref(
-    refs: &mut BTreeMap<String, BlobKind>,
+    refs: &mut BTreeMap<String, BTreeSet<BlobKind>>,
     value: Option<&serde_json::Value>,
     kind: BlobKind,
 ) -> Result<(), RelayError> {
@@ -1287,13 +1324,7 @@ fn insert_optional_ref(
     if !valid_sha256(sha256) {
         return Err(RelayError::BlobInvalid);
     }
-    refs.entry(sha256.to_owned())
-        .and_modify(|present| {
-            if kind == BlobKind::Binary {
-                *present = kind;
-            }
-        })
-        .or_insert(kind);
+    refs.entry(sha256.to_owned()).or_default().insert(kind);
     Ok(())
 }
 
@@ -1409,27 +1440,117 @@ fn preflight_collisions(
         })
 }
 
-fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {
-    fn canonical(value: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {
+    fn write_canonical(value: &serde_json::Value, output: &mut String) -> Result<(), SyncError> {
         match value {
             serde_json::Value::Array(values) => {
-                serde_json::Value::Array(values.iter().map(canonical).collect())
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    write_canonical(value, output)?;
+                }
+                output.push(']');
             }
             serde_json::Value::Object(object) => {
                 let mut entries = object.iter().collect::<Vec<_>>();
                 entries.sort_by_key(|(key, _)| *key);
-                serde_json::Value::Object(
-                    entries
-                        .into_iter()
-                        .map(|(key, value)| (key.clone(), canonical(value)))
-                        .collect(),
-                )
+                output.push('{');
+                for (index, (key, value)) in entries.into_iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    output.push_str(
+                        &serde_json::to_string(key).map_err(|_| SyncError::CoordinateDiverged)?,
+                    );
+                    output.push(':');
+                    write_canonical(value, output)?;
+                }
+                output.push('}');
             }
-            scalar => scalar.clone(),
+            serde_json::Value::Number(number) => {
+                output.push_str(&javascript_number(number)?);
+            }
+            scalar => {
+                output.push_str(
+                    &serde_json::to_string(scalar).map_err(|_| SyncError::CoordinateDiverged)?,
+                );
+            }
         }
+        Ok(())
     }
 
-    serde_json::to_vec(&canonical(value)).map_err(|_| SyncError::CoordinateDiverged)
+    let mut output = String::new();
+    write_canonical(value, &mut output)?;
+    Ok(output.into_bytes())
+}
+
+fn javascript_number(number: &serde_json::Number) -> Result<String, SyncError> {
+    let value = number.as_f64().ok_or(SyncError::CoordinateDiverged)?;
+    if !value.is_finite() {
+        return Err(SyncError::CoordinateDiverged);
+    }
+    if value == 0.0 {
+        return Ok("0".to_owned());
+    }
+
+    let negative = value.is_sign_negative();
+    let fixed = value.abs().to_string();
+    let (integer, fractional) = fixed.split_once('.').unwrap_or((&fixed, ""));
+    let mut raw = String::with_capacity(integer.len() + fractional.len());
+    raw.push_str(integer);
+    raw.push_str(fractional);
+    let leading = raw.bytes().take_while(|byte| *byte == b'0').count();
+    let decimal_position =
+        i32::try_from(integer.len()).map_err(|_| SyncError::CoordinateDiverged)?;
+    let leading = i32::try_from(leading).map_err(|_| SyncError::CoordinateDiverged)?;
+    let exponent_position = decimal_position
+        .checked_sub(leading)
+        .ok_or(SyncError::CoordinateDiverged)?;
+    let digits = raw[usize::try_from(leading).map_err(|_| SyncError::CoordinateDiverged)?..]
+        .trim_end_matches('0');
+    if digits.is_empty() {
+        return Ok("0".to_owned());
+    }
+
+    let mut output = String::new();
+    if negative {
+        output.push('-');
+    }
+    if exponent_position > 0 && exponent_position <= 21 {
+        let split =
+            usize::try_from(exponent_position).map_err(|_| SyncError::CoordinateDiverged)?;
+        if split >= digits.len() {
+            output.push_str(digits);
+            output.extend(std::iter::repeat_n('0', split - digits.len()));
+        } else {
+            output.push_str(&digits[..split]);
+            output.push('.');
+            output.push_str(&digits[split..]);
+        }
+    } else if exponent_position <= 0 && exponent_position > -6 {
+        output.push_str("0.");
+        let zeros =
+            usize::try_from(-exponent_position).map_err(|_| SyncError::CoordinateDiverged)?;
+        output.extend(std::iter::repeat_n('0', zeros));
+        output.push_str(digits);
+    } else {
+        output.push(char::from(digits.as_bytes()[0]));
+        if digits.len() > 1 {
+            output.push('.');
+            output.push_str(&digits[1..]);
+        }
+        let exponent = exponent_position
+            .checked_sub(1)
+            .ok_or(SyncError::CoordinateDiverged)?;
+        output.push('e');
+        if exponent >= 0 {
+            output.push('+');
+        }
+        output.push_str(&exponent.to_string());
+    }
+    Ok(output)
 }
 
 fn merge_by_origin(ops: Vec<ReplicationEnvelope>) -> Vec<ReplicationEnvelope> {
@@ -1542,10 +1663,12 @@ fn validate_pull_page(
 ) -> Result<(), RelayError> {
     if response.ops.len() > crate::MAX_PULL_OPS
         || !(0..=crate::MAX_WIRE_INTEGER).contains(&response.next_cursor)
-        || response.next_cursor < cursor
-        || (response.has_more && response.next_cursor <= cursor)
+        || (!response.has_more && response.next_cursor < cursor)
     {
         return Err(RelayError::InvalidResponse);
+    }
+    if response.has_more && response.next_cursor <= cursor {
+        return Err(RelayError::NoProgress);
     }
     for op in &response.ops {
         if op.workspace_id != workspace_id || op.validate().is_err() {

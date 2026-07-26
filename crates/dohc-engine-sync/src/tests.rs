@@ -4003,6 +4003,7 @@ impl RelayTransport for FakeRelay {
 struct PagedRelay {
     pages: BTreeMap<i64, PullResponse>,
     blobs: BTreeMap<String, Vec<u8>>,
+    pulls: Mutex<Vec<(i64, usize)>>,
 }
 
 impl PagedRelay {
@@ -4010,6 +4011,7 @@ impl PagedRelay {
         Self {
             pages: pages.into_iter().collect(),
             blobs: BTreeMap::new(),
+            pulls: Mutex::new(Vec::new()),
         }
     }
 }
@@ -4020,6 +4022,10 @@ impl RelayTransport for PagedRelay {
     }
 
     fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError> {
+        self.pulls
+            .lock()
+            .expect("pull calls")
+            .push((req.cursor, req.limit));
         self.pages
             .get(&req.cursor)
             .cloned()
@@ -4135,6 +4141,51 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
         0
     );
     assert_eq!(*client.transport().pushes.lock().expect("calls"), 2);
+}
+
+#[test]
+fn journal_rejects_payloads_above_the_relay_contract() {
+    // MUTATION: restoring the former 10 MiB journal limit accepts `oversized`.
+    let (_scratch, _path, mut engine) = store();
+    let overhead = br#"{"data":""}"#.len();
+    let exact = json!({"data": "x".repeat(MAX_PAYLOAD_JSON_BYTES - overhead)});
+    assert_eq!(
+        serde_json::to_vec(&exact).expect("exact payload").len(),
+        MAX_PAYLOAD_JSON_BYTES
+    );
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "probe.local",
+            &exact,
+            1_000,
+            &NoFaults,
+        )
+        .expect("exact-limit payload"),
+        TxnOutcome::Committed(0)
+    );
+
+    let oversized = json!({"data": "x".repeat(MAX_PAYLOAD_JSON_BYTES - overhead + 1)});
+    assert!(matches!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "probe.local",
+            &oversized,
+            1_001,
+            &NoFaults,
+        ),
+        Err(SyncError::InvalidInput {
+            reason: "payload exceeds the relay limit"
+        })
+    ));
 }
 
 #[test]
@@ -6659,6 +6710,145 @@ fn relay_multi_page_pull_preserves_page_one_pending_resolve() {
         }],
         "page-one pending resolves must survive later page fetches"
     );
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "multi-page-resolve-peer").expect("resolve peer push state"),
+        0
+    );
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "multi-page-normal-peer").expect("normal peer push state"),
+        0
+    );
+}
+
+#[test]
+fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
+    // MUTATION: removing the pass ceiling fetches cursor 500 in the first call
+    // and advances the returned prefix through the second page.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let first_page = (0..crate::model::MAX_PULL_OPS_PER_PASS)
+        .map(|seq| {
+            envelope(
+                "bounded-pull-peer",
+                i64::try_from(seq).expect("sequence"),
+                "chat.reaction.set",
+                reaction_payload(
+                    "added",
+                    "🧱",
+                    i64::try_from(seq).expect("timestamp"),
+                    &format!("bounded-{seq}"),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let second_page = envelope(
+        "bounded-pull-second-peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "▶️", 1_000, "bounded-second"),
+    );
+    let client = RelaySyncClient::new(PagedRelay::new([
+        (
+            0,
+            PullResponse {
+                ops: first_page,
+                next_cursor: i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS).expect("cursor"),
+                has_more: true,
+            },
+        ),
+        (
+            i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS).expect("cursor"),
+            PullResponse {
+                ops: vec![second_page],
+                next_cursor: i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS + 1)
+                    .expect("cursor"),
+                has_more: false,
+            },
+        ),
+    ]));
+
+    let first = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("bounded first pass");
+    let SyncPassOutcome::Complete {
+        fetched,
+        pending_cursor: Some(pending),
+        ..
+    } = first
+    else {
+        panic!("first pass must return its completed-page cursor: {first:?}");
+    };
+    assert_eq!(fetched, crate::model::MAX_PULL_OPS_PER_PASS);
+    assert_eq!(
+        pending.cursor,
+        i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS).expect("cursor")
+    );
+    assert_eq!(
+        *client.transport().pulls.lock().expect("pull calls"),
+        [(0, crate::model::MAX_PULL_OPS_PER_PASS)]
+    );
+    client
+        .commit_pull_cursor(&mut engine, "ws", &pending, &NoFaults)
+        .expect("commit bounded prefix");
+
+    let second = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("resume after bounded prefix");
+    assert!(matches!(
+        second,
+        SyncPassOutcome::Complete {
+            fetched: 1,
+            applied: 1,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
+    // MUTATION: removing the page ceiling walks the unbounded advancing stream.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let mut pages = Vec::new();
+    for cursor in 0..crate::model::MAX_PULL_PAGES_PER_PASS {
+        let cursor = i64::try_from(cursor).expect("cursor");
+        pages.push((
+            cursor,
+            PullResponse {
+                ops: Vec::new(),
+                next_cursor: cursor + 1,
+                has_more: true,
+            },
+        ));
+    }
+    let resume_cursor =
+        i64::try_from(crate::model::MAX_PULL_PAGES_PER_PASS).expect("resume cursor");
+    pages.push((
+        resume_cursor,
+        PullResponse {
+            ops: Vec::new(),
+            next_cursor: resume_cursor + 1,
+            has_more: false,
+        },
+    ));
+    let client = RelaySyncClient::new(PagedRelay::new(pages));
+
+    let first = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("page-bounded pull");
+    let SyncPassOutcome::Complete {
+        fetched: 0,
+        pending_cursor: Some(pending),
+        ..
+    } = first
+    else {
+        panic!("empty page prefix must complete: {first:?}");
+    };
+    assert_eq!(pending.cursor, resume_cursor);
+    assert_eq!(
+        client.transport().pulls.lock().expect("pull calls").len(),
+        crate::model::MAX_PULL_PAGES_PER_PASS
+    );
 }
 
 #[test]
@@ -6775,6 +6965,76 @@ fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
         read_replication_acked_seq(&engine, "ws", "hydrate-order-missing-peer")
             .expect("missing ack"),
         -1
+    );
+}
+
+#[test]
+fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
+    // MUTATION: collapsing the digest to one BlobKind leaves one count at zero.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let bytes = b"shared".to_vec();
+    let sha256 = dohc_engine_storage::hex_sha256(&bytes);
+    let text = version_create_with_shipped_snapshots(
+        "a-dual-kind-text-peer",
+        "dual-kind-version",
+        vec![json!({
+            "objectId": "dual-kind-object",
+            "objectCreatedAtMs": 1_100,
+            "path": "dual-kind.md",
+            "blobSha256": sha256,
+            "byteLength": bytes.len(),
+            "updatedAtMs": 1_200,
+            "latestMomentId": "dual-kind-moment",
+            "metadata": {"origin": "sync"}
+        })],
+    );
+    let binary = envelope(
+        "z-dual-kind-binary-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "dual-kind-version",
+            "objectId": "dual-kind-object",
+            "path": "dual-kind.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha256,
+            "isBaseState": false
+        }),
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![text, binary],
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256.clone(), bytes);
+    let client = RelaySyncClient::new(relay);
+
+    let _ = client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases);
+    let rows = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM blobs WHERE sha256=?1",
+                    [&sha256],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM binary_blobs WHERE sha256=?1",
+                    [&sha256],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            ))
+        })
+        .expect("dual-kind blob rows");
+    assert_eq!(
+        rows,
+        (1, 1),
+        "one digest referenced by both kinds must hydrate both physical stores"
     );
 }
 

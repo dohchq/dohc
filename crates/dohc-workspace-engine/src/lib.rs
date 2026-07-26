@@ -7115,6 +7115,9 @@ struct WorkspaceOpenParams {
 struct RelayOpenParams {
     base_url: String,
     bearer_token: String,
+    #[cfg(debug_assertions)]
+    #[serde(default)]
+    allow_insecure_loopback_for_tests: bool,
 }
 
 impl RelayOpenParams {
@@ -7122,6 +7125,8 @@ impl RelayOpenParams {
         RelayConfiguration {
             base_url: self.base_url.clone(),
             bearer_token: self.bearer_token.clone(),
+            #[cfg(debug_assertions)]
+            allow_insecure_loopback_for_tests: self.allow_insecure_loopback_for_tests,
         }
     }
 }

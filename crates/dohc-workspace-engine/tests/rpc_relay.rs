@@ -385,6 +385,7 @@ async fn open_workspace(
                     "relay": {
                         "baseUrl": relay.base_url,
                         "bearerToken": BEARER,
+                        "allowInsecureLoopbackForTests": true,
                     },
                 }),
             ),

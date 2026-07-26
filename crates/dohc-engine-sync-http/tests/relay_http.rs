@@ -127,7 +127,10 @@ impl Drop for FakeServer {
             .expect("fake relay URL");
         let _ = TcpStream::connect(address);
         if let Some(thread) = self.thread.take() {
-            thread.join().expect("join fake relay");
+            let joined = thread.join();
+            if !std::thread::panicking() {
+                joined.expect("join fake relay");
+            }
         }
     }
 }
@@ -221,7 +224,8 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn transport(server: &FakeServer) -> HttpRelayTransport {
-    HttpRelayTransport::new(&server.base_url, "test-token").expect("HTTP relay transport")
+    HttpRelayTransport::new_insecure_loopback_for_tests(&server.base_url, "test-token")
+        .expect("HTTP relay transport")
 }
 
 fn store() -> (ScratchDir, std::path::PathBuf, EngineStore) {
@@ -498,6 +502,75 @@ fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
 }
 
 #[test]
+fn push_rewind_is_durable_before_a_failed_retry() {
+    // MUTATION: using the monotonic cursor helper for the rewind leaves 0
+    // persisted after the retry fails instead of the relay's probed -1.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine, &json!({"index": 0}));
+    journal_local_replication_op(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "probe.local",
+        &json!({"index": 1}),
+        1_001,
+        &NoFaults,
+    )
+    .expect("second op");
+    engine
+        .write_with(&NoFaults, |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                     VALUES ('ws','local',0)",
+                    [],
+                )
+                .map_err(StorageError::persist_public)?;
+            Ok::<(), StorageError>(())
+        })
+        .expect("seed pushed cursor");
+    let calls = Arc::new(Mutex::new(0_usize));
+    let handler_calls = Arc::clone(&calls);
+    let server = FakeServer::start(move |request| {
+        let call = {
+            let mut calls = handler_calls.lock().expect("calls");
+            *calls += 1;
+            *calls
+        };
+        match call {
+            1 => TestResponse::json(409, json!({"ok": false, "code": "conflict"})),
+            2 => TestResponse::json(
+                200,
+                json!({
+                    "ok": true,
+                    "accepted": 0,
+                    "inserted": 0,
+                    "skipped": 0,
+                    "currentMaxOriginSeq": -1
+                }),
+            ),
+            3 => {
+                assert_eq!(request.json()["ops"].as_array().expect("ops").len(), 2);
+                TestResponse::json(500, json!({"ok": false, "code": "internal_error"}))
+            }
+            _ => panic!("unexpected retry"),
+        }
+    });
+
+    assert_eq!(
+        RelaySyncClient::new(transport(&server)).push_workspace(&mut engine, "ws", &NoFaults),
+        Err(RelayError::ServerInternal)
+    );
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "local").expect("rewound state"),
+        -1,
+        "the lower probe result must survive a process stop before retry success"
+    );
+}
+
+#[test]
 fn pull_aborts_when_has_more_cursor_does_not_advance() {
     // MUTATION: removing the forward-progress guard makes this fake page loop
     // until the test process is killed instead of returning NoProgress.
@@ -542,6 +615,100 @@ fn pull_rejects_byte_different_coordinate_collision_before_apply() {
         .expect_err("different coordinate bytes must diverge");
     assert_eq!(error, RelayError::OriginDiverged);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
+}
+
+#[test]
+fn pull_accepts_the_relays_integral_float_normalization() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine, &json!({}));
+    engine
+        .write_with(&NoFaults, |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO replication_log \
+                     (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                     VALUES ('ws','peer',0,'workspace.init','{\"value\":1.0}',2000,1)",
+                    [],
+                )
+                .map_err(StorageError::persist_public)?;
+            Ok::<(), StorageError>(())
+        })
+        .expect("seed normalized coordinate");
+    let server = FakeServer::start(|_| {
+        log_page(
+            vec![remote_row("peer", 0, "workspace.init", json!({"value": 1}))],
+            1,
+            false,
+        )
+    });
+
+    let outcome = RelaySyncClient::new(transport(&server))
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("semantically identical number");
+    assert!(matches!(
+        outcome,
+        SyncPassOutcome::Complete {
+            applied: 0,
+            skipped: 1,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn pull_deserializes_rows_without_the_discarded_relay_sequence() {
+    let server = FakeServer::start(|_| {
+        log_page(
+            vec![json!({
+                "workspaceId": "ws",
+                "originId": "peer",
+                "originSeq": 0,
+                "opKind": "workspace.init",
+                "payload": {},
+                "recordedAtMs": 1
+            })],
+            1,
+            false,
+        )
+    });
+    let response = transport(&server)
+        .pull(PullRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            cursor: 0,
+            limit: 1,
+        })
+        .expect("relaySeq is not part of the client contract");
+    assert_eq!(response.ops.len(), 1);
+}
+
+#[test]
+fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
+    // MUTATION: restoring the core's former 10 MiB allowance reaches the fake
+    // network with a row the relay's 256 KiB contract can never accept.
+    let server = FakeServer::start(|_| panic!("oversized payload reached the network"));
+    let overhead = br#"{"data":""}"#.len();
+    let payload =
+        json!({"data": "x".repeat(dohc_engine_sync::MAX_PAYLOAD_JSON_BYTES - overhead + 1)});
+    let error = transport(&server)
+        .push(dohc_engine_sync::PushRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            origin_id: "local".to_owned(),
+            after_seq: -1,
+            ops: vec![ReplicationEnvelope {
+                workspace_id: "ws".to_owned(),
+                origin_id: "local".to_owned(),
+                origin_seq: 0,
+                op_kind: "workspace.init".to_owned(),
+                payload,
+                recorded_at_ms: 1,
+            }],
+        })
+        .expect_err("relay-oversized payload");
+    assert_eq!(error, RelayError::PayloadTooLarge);
 }
 
 #[test]

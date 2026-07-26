@@ -2,22 +2,27 @@
 
 #![forbid(unsafe_code)]
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use dohc_engine_sync::{
     BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
     BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RelayError, RelayTransport, ReplicationEnvelope, ShareBlobRequest,
-    ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse, SharedChannelRequest,
-    SharedChannelResponse,
+    KeyEnvelopeResponse, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ProbeRequest, ProbeResponse,
+    PullRequest, PullResponse, PushRequest, PushResponse, RelayError, RelayTransport,
+    ReplicationEnvelope, ShareBlobRequest, ShareReplicationEnvelope, ShareViewRequest,
+    ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use ureq::http::Response;
+use ureq::http::{Response, Uri};
 use ureq::{Agent, Body};
 
-const MAX_JSON_RESPONSE_BYTES: u64 = 11 * 1024 * 1024;
+const MAX_LOG_ROW_RESPONSE_OVERHEAD_BYTES: usize = 16 * 1024;
+const MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES: usize = 64 * 1024;
+const MAX_JSON_RESPONSE_BYTES: u64 = (MAX_PULL_OPS
+    * (MAX_PAYLOAD_JSON_BYTES + MAX_LOG_ROW_RESPONSE_OVERHEAD_BYTES)
+    + MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES) as u64;
 const MAX_ERROR_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_BLOB_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -47,11 +52,30 @@ impl HttpRelayTransport {
         token: impl Into<String>,
         timeout: Duration,
     ) -> Result<Self, RelayError> {
+        Self::build(base_url, token, timeout, false)
+    }
+
+    /// Explicit debug/test-only opt-in for authenticated loopback HTTP.
+    ///
+    /// This constructor is absent from release builds, so production code
+    /// cannot enable plaintext bearer transport through runtime configuration.
+    #[cfg(debug_assertions)]
+    pub fn new_insecure_loopback_for_tests(
+        base_url: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Result<Self, RelayError> {
+        Self::build(base_url, token, Duration::from_secs(30), true)
+    }
+
+    fn build(
+        base_url: impl Into<String>,
+        token: impl Into<String>,
+        timeout: Duration,
+        allow_insecure_loopback: bool,
+    ) -> Result<Self, RelayError> {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
         let token = token.into();
-        if !(base_url.starts_with("http://") || base_url.starts_with("https://"))
-            || token.is_empty()
-        {
+        if token.is_empty() || !base_url_is_allowed(&base_url, allow_insecure_loopback) {
             return Err(RelayError::InvalidResponse);
         }
         let config = Agent::config_builder()
@@ -168,6 +192,7 @@ impl HttpRelayTransport {
 
 impl RelayTransport for HttpRelayTransport {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WirePushRequest {
             replication_epoch: &req.replication_epoch,
             stream_identity: &req.stream_identity,
@@ -432,6 +457,7 @@ impl RelayTransport for HttpRelayTransport {
         &self,
         req: SharedChannelRequest,
     ) -> Result<SharedChannelResponse, RelayError> {
+        validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WireSharePushRequest {
             origin_id: &req.origin_id,
             ops: req.ops.iter().map(WireShareLogInput::from).collect(),
@@ -527,8 +553,64 @@ struct ErrorBody {
     code: Option<String>,
 }
 
-fn map_transport_error(_error: ureq::Error) -> RelayError {
-    RelayError::Partitioned
+fn base_url_is_allowed(base_url: &str, allow_insecure_loopback: bool) -> bool {
+    let Ok(uri) = base_url.parse::<Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    match uri.scheme_str() {
+        Some("https") => true,
+        Some("http") if allow_insecure_loopback => {
+            let host = host.trim_matches(['[', ']']);
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        }
+        _ => false,
+    }
+}
+
+fn validate_outbound_payloads<'a>(
+    payloads: impl IntoIterator<Item = &'a serde_json::Value>,
+) -> Result<(), RelayError> {
+    for payload in payloads {
+        let encoded = serde_json::to_vec(payload).map_err(|_| RelayError::InvalidResponse)?;
+        if encoded.len() > MAX_PAYLOAD_JSON_BYTES {
+            return Err(RelayError::PayloadTooLarge);
+        }
+    }
+    Ok(())
+}
+
+fn map_transport_error(error: ureq::Error) -> RelayError {
+    match error {
+        ureq::Error::Io(_)
+        | ureq::Error::Timeout(_)
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::Other(_) => RelayError::Partitioned,
+        ureq::Error::StatusCode(status) => RelayError::HttpStatus(status),
+        ureq::Error::BadUri(_)
+        | ureq::Error::Http(_)
+        | ureq::Error::HostNotFound
+        | ureq::Error::RedirectFailed
+        | ureq::Error::InvalidProxyUrl
+        | ureq::Error::TooManyRedirects
+        | ureq::Error::Tls(_)
+        | ureq::Error::Pem(_)
+        | ureq::Error::Rustls(_)
+        | ureq::Error::RequireHttpsOnly(_)
+        | ureq::Error::ConnectProxyFailed(_)
+        | ureq::Error::TlsRequired => RelayError::BadRequest,
+        ureq::Error::Protocol(_)
+        | ureq::Error::BodyExceedsLimit(_)
+        | ureq::Error::LargeResponseHeader(_, _)
+        | ureq::Error::Json(_)
+        | ureq::Error::BodyStalled => RelayError::InvalidResponse,
+        _ => RelayError::InvalidResponse,
+    }
 }
 
 fn map_http_error(response: &mut Response<Body>, context: RequestContext) -> RelayError {
@@ -730,8 +812,8 @@ struct WireLogPage {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireLogRow {
-    #[serde(rename = "relaySeq")]
-    _relay_seq: i64,
+    #[serde(rename = "relaySeq", default)]
+    _relay_seq: Option<i64>,
     workspace_id: Option<String>,
     origin_id: String,
     origin_seq: i64,
@@ -780,4 +862,67 @@ struct WireBlobHaveResponse {
 struct WireOk {
     #[serde(rename = "ok")]
     _ok: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_budget_covers_a_full_maximal_relay_page() {
+        // MUTATION: restoring the old 11 MiB budget fails this against the
+        // relay's 500 × 256 KiB legal page.
+        let required = MAX_PULL_OPS
+            * (MAX_PAYLOAD_JSON_BYTES + MAX_LOG_ROW_RESPONSE_OVERHEAD_BYTES)
+            + MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES;
+        assert!(
+            usize::try_from(MAX_JSON_RESPONSE_BYTES).is_ok_and(|budget| budget >= required),
+            "a legal 500-row page must fit the configured response budget"
+        );
+    }
+
+    #[test]
+    fn plaintext_bearer_transport_requires_the_debug_loopback_opt_in() {
+        // MUTATION: accepting `http://` in the normal constructor makes the
+        // first two assertions expose a bearer token over plaintext.
+        assert!(HttpRelayTransport::new("http://127.0.0.1:1", "token").is_err());
+        assert!(HttpRelayTransport::new("http://localhost:1", "token").is_err());
+        assert!(HttpRelayTransport::new("http://example.com", "token").is_err());
+        assert!(HttpRelayTransport::new("https://example.com", "token").is_ok());
+
+        #[cfg(debug_assertions)]
+        {
+            assert!(
+                HttpRelayTransport::new_insecure_loopback_for_tests("http://127.0.0.1:1", "token")
+                    .is_ok()
+            );
+            assert!(
+                HttpRelayTransport::new_insecure_loopback_for_tests(
+                    "http://localhost.evil.example:1",
+                    "token"
+                )
+                .is_err()
+            );
+            assert!(
+                HttpRelayTransport::new_insecure_loopback_for_tests(
+                    "http://example.com:1",
+                    "token"
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_transport_failures_are_not_classified_as_partitions() {
+        for error in [
+            ureq::Error::BadUri("bad".to_owned()),
+            ureq::Error::HostNotFound,
+            ureq::Error::InvalidProxyUrl,
+            ureq::Error::Tls("certificate"),
+            ureq::Error::ConnectProxyFailed("proxy".to_owned()),
+        ] {
+            assert_eq!(map_transport_error(error), RelayError::BadRequest);
+        }
+    }
 }

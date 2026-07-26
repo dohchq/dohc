@@ -40,14 +40,12 @@ pub fn apply_envelope_with<T>(
 ) -> Result<ApplyOutcome<T>, SyncError> {
     envelope.validate()?;
     let payload_json = envelope.payload_json()?;
+    let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
     let result = store.write_with(faults, |tx| {
         let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
         if envelope.origin_seq <= acked {
-            // A redelivered coordinate at or below the ack. It must byte-match
-            // the row already journaled; a divergent replay (same coordinate,
-            // different payload/kind) is a misbehaving origin and fails closed
-            // rather than silently advancing the cursor over the divergence —
-            // the same check the acked+1 redelivery path below makes.
+            // A redelivered coordinate at or below the ack must match the row
+            // already journaled after relay-compatible JSON canonicalization.
             let existing: Option<(String, String, i64)> = tx
                 .query_row(
                     "SELECT op_kind, payload_json, recorded_at_ms FROM replication_log \
@@ -58,7 +56,7 @@ pub fn apply_envelope_with<T>(
                 .optional()
                 .map_err(SyncError::corrupt)?;
             if let Some(row) = existing
-                && row != (envelope.op_kind.clone(), payload_json.clone(), envelope.recorded_at_ms)
+                && !coordinate_matches(&row, envelope, &canonical_payload)?
             {
                 return Err(SyncError::CoordinateDiverged);
             }
@@ -78,7 +76,7 @@ pub fn apply_envelope_with<T>(
             .optional()
             .map_err(SyncError::corrupt)?;
         if let Some(row) = existing {
-            if row != (envelope.op_kind.clone(), payload_json.clone(), envelope.recorded_at_ms) {
+            if !coordinate_matches(&row, envelope, &canonical_payload)? {
                 return Err(SyncError::CoordinateDiverged);
             }
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
@@ -112,6 +110,19 @@ pub fn apply_envelope_with<T>(
         Err(SyncError::FaultCrash) => Ok(ApplyOutcome::Crashed { committed: false }),
         Err(err) => Err(err),
     }
+}
+
+fn coordinate_matches(
+    existing: &(String, String, i64),
+    envelope: &ReplicationEnvelope,
+    canonical_payload: &[u8],
+) -> Result<bool, SyncError> {
+    if existing.0 != envelope.op_kind || existing.2 != envelope.recorded_at_ms {
+        return Ok(false);
+    }
+    let existing_payload: serde_json::Value =
+        serde_json::from_str(&existing.1).map_err(|_| SyncError::CoordinateDiverged)?;
+    Ok(crate::relay::canonical_json_bytes(&existing_payload)? == canonical_payload)
 }
 
 /// R10's built-in `chat.*` receiver apply dispatch. Structural rows use

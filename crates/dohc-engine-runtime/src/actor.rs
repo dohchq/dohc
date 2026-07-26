@@ -233,6 +233,8 @@ pub struct YdocSettlement {
 pub struct RelayConfiguration {
     pub base_url: String,
     pub bearer_token: String,
+    #[cfg(debug_assertions)]
+    pub allow_insecure_loopback_for_tests: bool,
 }
 
 impl std::fmt::Debug for RelayConfiguration {
@@ -5496,6 +5498,16 @@ fn execute_http_request(
     configuration: RelayConfiguration,
     request: RelayIoRequest,
 ) -> Result<RelayIoResponse, RelayError> {
+    #[cfg(debug_assertions)]
+    let transport = if configuration.allow_insecure_loopback_for_tests {
+        HttpRelayTransport::new_insecure_loopback_for_tests(
+            configuration.base_url,
+            configuration.bearer_token,
+        )?
+    } else {
+        HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)?
+    };
+    #[cfg(not(debug_assertions))]
     let transport = HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)?;
     match request {
         RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
