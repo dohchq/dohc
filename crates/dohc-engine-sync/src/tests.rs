@@ -4206,6 +4206,59 @@ fn relay_retry_surfaces_pending_resolve_acked_before_later_error() {
     );
 }
 
+/// The pending-resolve reason vocabulary is written three times: the Rust
+/// enum→string map, the string→enum parse, and the DDL CHECK constraint. If
+/// they ever drift, `persist_pending_resolve` hits the CHECK, the envelope
+/// rolls back unacked, and the pull wedges permanently on a resolve that used
+/// to succeed — so every variant must round-trip through all three.
+#[test]
+fn every_pending_resolve_reason_round_trips_through_persist_and_read() {
+    use crate::conflict_apply::{PendingResolveReason, persist_pending_resolve};
+
+    let (_scratch, _path, mut engine) = store();
+    let reasons = [
+        PendingResolveReason::PathChange,
+        PendingResolveReason::Merged,
+        PendingResolveReason::StaleHead,
+        PendingResolveReason::BinaryUnhydrated,
+        PendingResolveReason::BinaryApplyFailed,
+        PendingResolveReason::TextApplyRejected,
+        PendingResolveReason::UnmatchedTarget,
+    ];
+    for (seq, reason) in reasons.into_iter().enumerate() {
+        let op = envelope(
+            "roundtrip-peer",
+            seq as i64,
+            "conflict.resolve",
+            json!({ "conflictId": format!("c-{seq}") }),
+        );
+        let pending = PendingResolve {
+            remote_conflict_id: format!("c-{seq}"),
+            local_conflict_id: None,
+            path: Some(format!("notes/{seq}.md")),
+            reason,
+        };
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO replication_log \
+                     (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \
+                     VALUES (?1, ?2, ?3, 'conflict.resolve', '{}', 0, 1)",
+                    params![op.workspace_id, op.origin_id, op.origin_seq],
+                )
+                .map_err(SyncError::persist)?;
+                persist_pending_resolve(tx, &op, &pending)
+            })
+            .unwrap_or_else(|error| {
+                panic!("persist must satisfy the DDL CHECK for {reason:?}: {error}")
+            });
+        let read = crate::conflict_apply::read_replayed_pending_resolve(&engine, &op)
+            .expect("read back")
+            .unwrap_or_else(|| panic!("a persisted decision must parse back for {reason:?}"));
+        assert_eq!(read, pending, "round-trip must be lossless for {reason:?}");
+    }
+}
+
 /// Persisted pending-resolve decisions exist only so a failed pull's retry can
 /// re-surface them. Once the caller commits the pull cursor the stream never
 /// replays those coordinates, so the rows are dead — and without the sweep in

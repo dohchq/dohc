@@ -129,7 +129,7 @@ pub(crate) fn read_replayed_pending_resolve(
     })
 }
 
-fn persist_pending_resolve(
+pub(crate) fn persist_pending_resolve(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     pending: &PendingResolve,

@@ -2250,7 +2250,10 @@ next round caught. The compounding lesson became structure:
   - Migration ledger AT PACKET ASSEMBLY: 14 migrations, ordinals 0-13,
     monotone (12 = v1-ydoc-deferred-updates, 13 = v1-engine-request-kind).
     **CORRECTED 2026-07-25:** ordinal 14 is consumed by R15-1a / #233 (merged)
-    and ordinal 15 by R15-1b / #236 (in review). NEXT ORDINAL = **16**.
+    and ordinal 15 by R15-1b / #236 (in review).
+    **CORRECTED 2026-07-26:** ordinal 16 is consumed by RPC-E-1 / #242
+    (replication_pending_resolves); #244's chat migration must renumber to 17
+    at its rebase. NEXT ORDINAL = **17**.
     Schema-touching shards serialize through the append one at a time; two
     concurrent migration appends must never claim the same next ordinal.
   - Gate discipline: full-workspace gate on EVERY pushed head program-wide; every
