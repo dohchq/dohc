@@ -7,6 +7,8 @@ pub mod capture_sink;
 pub mod cutover_rehearse;
 pub mod shadow_fence;
 
+#[cfg(feature = "harness")]
+pub use capture_driver::CaptureApplyProbe;
 pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 
 use base64::Engine as _;
@@ -266,6 +268,11 @@ struct OpenWorkspace {
     /// loop), spawned only after the shadow binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
+    /// Held by every capture reconcile+apply and by versions.setActive across
+    /// its forced full scan plus switch transaction. This drains an in-flight
+    /// apply and prevents a new one from resolving the destination version
+    /// across the active-version boundary.
+    capture_apply_gate: capture_driver::ApplyGate,
 }
 
 struct YdocSession {
@@ -332,6 +339,8 @@ pub struct EngineService {
     /// lifetime's ledger rows (hash-mismatch refusals or false dedupes).
     session_epoch: String,
     self_writes: SelfWriteSuppression,
+    #[cfg(feature = "harness")]
+    capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
     /// PER-EngineService by design. Production runs exactly ONE EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
@@ -396,8 +405,17 @@ impl EngineService {
                     std::sync::LazyLock::new(SelfWriteSuppression::default);
                 GLOBAL_SELF_WRITES.clone()
             },
+            #[cfg(feature = "harness")]
+            capture_apply_probe: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
+    }
+
+    #[cfg(feature = "harness")]
+    pub fn with_capture_apply_probe_for_harness(probe: CaptureApplyProbe) -> Self {
+        let mut service = Self::new();
+        service.capture_apply_probe = Some(probe);
+        service
     }
 
     async fn dispatch(
@@ -1007,11 +1025,15 @@ impl EngineService {
         // The files layer spawns ONLY here — after the shadow binding
         // succeeded — so an unmarked or mismatched root can never grow a
         // watcher or files actor (the shadow-scope dormancy invariant).
+        let capture_apply_gate = Arc::new(tokio::sync::Mutex::new(()));
         let capture = capture_driver::CaptureDriver::spawn(
             root.clone(),
             actor.clone(),
             params.workspace_id.clone(),
             self.self_writes.scoped(&root),
+            Arc::clone(&capture_apply_gate),
+            #[cfg(feature = "harness")]
+            self.capture_apply_probe.clone(),
         );
         // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
         // disk state) must apply before the handle is handed out, or a
@@ -1049,6 +1071,7 @@ impl EngineService {
                 workspace_id: params.workspace_id,
                 actor,
                 capture: Arc::new(Mutex::new(Some(capture))),
+                capture_apply_gate,
             },
         );
         Ok(json!({ "workspace": handle }))
@@ -1966,6 +1989,101 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        // THE Y.Doc admission gate. Every session mutation, including open,
+        // owns `session_ops`; retaining it through the sweep, full scan, and
+        // active-version transaction makes an open between sweep and commit
+        // impossible.
+        let _session_barrier = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("versions.setActive (ydoc barrier)"));
+            }
+            serial = self.session_ops.lock() => serial,
+        };
+        // Oracle ordering: reject an unknown target, and return a true no-op
+        // for the already-active version, before disturbing live sessions.
+        let versions = Self::read_under_ctx(
+            &cancellation,
+            "versions.setActive (target validation)",
+            open.actor.list_versions(open.workspace_id.clone()),
+        )
+        .await?;
+        let target = versions
+            .into_iter()
+            .find(|version| version.version_id == params.version_id)
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "version-not-found"))?;
+        let active = Self::read_under_ctx(
+            &cancellation,
+            "versions.setActive (active version)",
+            open.actor.active_version(open.workspace_id.clone()),
+        )
+        .await?;
+        if active.version_id == target.version_id {
+            return Ok(version_record_json(&target));
+        }
+
+        let session_ids: Vec<String> = lock(&self.sessions)
+            .iter()
+            .filter(|(_, session)| session.workspace == handle)
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in session_ids {
+            self.ydoc_close_inner(
+                &cancellation,
+                Some(&handle),
+                YdocCloseParams {
+                    session_id,
+                    settle: None,
+                    summary: Some("Saved latest edits before switching versions".to_owned()),
+                },
+            )
+            .await?;
+        }
+
+        // Drain an in-flight capture reconcile+apply, then prevent new ones
+        // until the forced full scan has applied into the version being left
+        // and the active-version transaction has committed.
+        let _capture_barrier = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("versions.setActive (capture barrier)"));
+            }
+            barrier = Arc::clone(&open.capture_apply_gate).lock_owned() => barrier,
+        };
+        let capture_status = lock(&open.capture)
+            .as_ref()
+            .map(|driver| Arc::clone(driver.status()))
+            .ok_or_else(|| {
+                wire(
+                    ErrorCode::WorkspaceUnavailable,
+                    "capture driver unavailable",
+                )
+            })?;
+        capture_driver::reconcile_full_for_switch(
+            &open.root,
+            &open.actor,
+            &open.workspace_id,
+            &capture_status,
+            &self.self_writes.scoped(&open.root),
+            cancellation.token(),
+        )
+        .await
+        .map_err(|error| match error {
+            capture_driver::SwitchReconcileError::Cancelled => {
+                cancellation.interruption("versions.setActive (full scan)")
+            }
+            capture_driver::SwitchReconcileError::Degraded => {
+                wire(ErrorCode::Internal, "pre-switch-scan-degraded")
+            }
+            capture_driver::SwitchReconcileError::Unavailable => wire(
+                ErrorCode::WorkspaceUnavailable,
+                "capture driver unavailable",
+            ),
+            capture_driver::SwitchReconcileError::ApplyFailed => {
+                wire(ErrorCode::Internal, "pre-switch-reconcile-failed")
+            }
+        })?;
         let version = open
             .actor
             .set_active_version(
@@ -5462,12 +5580,26 @@ impl EngineService {
             }
             serial = self.session_ops.lock() => serial,
         };
+        self.ydoc_close_inner(&cancellation, handle.as_ref(), params)
+            .await
+    }
+
+    /// Close one session while the caller already owns `session_ops`.
+    /// `versions.setActive` uses the same primitive for its all-session sweep,
+    /// so manual close and switch-time close have identical settle/retry/prune
+    /// behavior.
+    async fn ydoc_close_inner(
+        &self,
+        cancellation: &OperationCancellation,
+        handle: Option<&WorkspaceHandle>,
+        params: YdocCloseParams,
+    ) -> Result<Value, WireError> {
         // Missing `settle` means SETTLE — the TS driver treats close() as
         // settle-unless-explicitly-false, and defaulting to false here would
         // fail dirty local-only closes (UnsettledClose) and let a replicated
         // close compact while the markdown projection is stale.
         let default_settle = {
-            let (_open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+            let (_open, session) = self.ydoc_session(handle, &params.session_id)?;
             // Richdoc settle is a C1 refusal on the EXPLICIT ydoc.settle RPC;
             // a default close must not inherit that error — it skips the
             // markdown settle and the close below persists the closed CRDT
@@ -5481,8 +5613,8 @@ impl EngineService {
         if params.settle.unwrap_or(default_settle) {
             let settled = self
                 .ydoc_settle_inner(
-                    &cancellation,
-                    handle.as_ref(),
+                    cancellation,
+                    handle,
                     &params.session_id,
                     params.summary.as_deref(),
                 )
@@ -5499,8 +5631,8 @@ impl EngineService {
                 // caller manually resyncs or closes the workspace.
                 Err(error) if error.message == "ydoc-remote-updates-pending" => {
                     self.ydoc_settle_inner(
-                        &cancellation,
-                        handle.as_ref(),
+                        cancellation,
+                        handle,
                         &params.session_id,
                         params.summary.as_deref(),
                     )
@@ -5509,7 +5641,7 @@ impl EngineService {
                 Err(error) => return Err(error),
             }
         }
-        let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        let (open, session) = self.ydoc_session(handle, &params.session_id)?;
         // The close command carries a FRESH token: once the settle above has
         // materialized, honoring a caller cancel here would leave the
         // session/lease held, and the retried close would re-settle over the

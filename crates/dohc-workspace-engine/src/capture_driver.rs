@@ -24,14 +24,88 @@
 
 use crate::capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 use dohc_engine_files::{
-    CancellationToken, CaptureApplyResult, FilesActor, FilesError, ManifestEntry, NativeWatcher,
-    ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest, apply_reconcile_plan,
+    CancellationToken, CaptureApplyResult, FilesActor, FilesError, FilesHandle, ManifestEntry,
+    NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest,
+    apply_reconcile_plan,
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Serializes every capture reconcile+apply with an active-version switch.
+/// A switch owns this mutex from before its forced full scan until after the
+/// active-version transaction, so no apply can resolve its destination on the
+/// opposite side of that transaction.
+pub(crate) type ApplyGate = Arc<tokio::sync::Mutex<()>>;
+
+/// Deterministic integration-test seam for proving a switch drains an apply
+/// that has already prepared a reconcile plan. Production builds do not
+/// compile the seam.
+#[cfg(feature = "harness")]
+#[derive(Clone, Default)]
+pub struct CaptureApplyProbe {
+    inner: Arc<CaptureApplyProbeInner>,
+}
+
+#[cfg(feature = "harness")]
+struct CaptureApplyProbeInner {
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+#[cfg(feature = "harness")]
+impl Default for CaptureApplyProbeInner {
+    fn default() -> Self {
+        Self {
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "harness")]
+impl CaptureApplyProbe {
+    pub fn pause_next_apply(&self) {
+        self.inner.armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_paused(&self) {
+        self.inner
+            .entered
+            .acquire()
+            .await
+            .expect("capture apply probe remains open")
+            .forget();
+    }
+
+    pub fn release(&self) {
+        self.inner.release.add_permits(1);
+    }
+
+    async fn pause_if_armed(&self) {
+        if self.inner.armed.swap(false, Ordering::AcqRel) {
+            self.inner.entered.add_permits(1);
+            self.inner
+                .release
+                .acquire()
+                .await
+                .expect("capture apply probe remains open")
+                .forget();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwitchReconcileError {
+    Cancelled,
+    Unavailable,
+    Degraded,
+    ApplyFailed,
+}
 
 /// How often the driver polls the dirty flag. Cheap when converged (one
 /// actor round-trip returning `Converged` without touching the filesystem);
@@ -1320,6 +1394,8 @@ impl CaptureDriver {
         actor: ActorHandle,
         workspace_id: String,
         self_writes: SelfWriteSuppression,
+        apply_gate: ApplyGate,
+        #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
     ) -> CaptureDriver {
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
@@ -1334,6 +1410,9 @@ impl CaptureDriver {
             Arc::clone(&status),
             baseline_tx,
             flush_rx,
+            apply_gate,
+            #[cfg(feature = "harness")]
+            apply_probe,
         ));
         CaptureDriver {
             cancel,
@@ -1493,20 +1572,19 @@ async fn manifest_seed(
     root: &Path,
     actor: &ActorHandle,
     workspace_id: &str,
-) -> Option<(ScanManifest, ScanGeneration)> {
+) -> Result<Option<(ScanManifest, ScanGeneration)>, RuntimeError> {
     let version_id = match actor.active_version_id(workspace_id.to_owned()).await {
         Ok(version_id) => version_id,
         Err(RuntimeError::Domain(dohc_engine_domain::DomainError::WorkspaceNotFound)) => {
-            return None;
+            return Ok(None);
         }
-        Err(_) => return None,
+        Err(error) => return Err(error),
     };
     let entries = actor
         .capture_manifest_seed(workspace_id.to_owned(), version_id)
-        .await
-        .ok()?;
+        .await?;
     if entries.is_empty() {
-        return None;
+        return Ok(None);
     }
     // EVERY capture-owned entry is seeded — including paths the CURRENT
     // policy narrows out, but with a SENTINEL hash. That single choice
@@ -1545,7 +1623,7 @@ async fn manifest_seed(
             },
         )
     }));
-    Some((manifest, ScanGeneration(1)))
+    Ok(Some((manifest, ScanGeneration(1))))
 }
 
 /// Never a valid hex digest, so a seeded entry carrying it always re-offers.
@@ -2003,6 +2081,9 @@ struct RealEnv {
     workspace_id: String,
     status: Arc<DriverStatus>,
     self_writes: SelfWriteSuppression,
+    apply_gate: ApplyGate,
+    #[cfg(feature = "harness")]
+    apply_probe: Option<CaptureApplyProbe>,
 }
 
 impl RealEnv {}
@@ -2024,6 +2105,7 @@ impl DriverEnv for RealEnv {
     }
 
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<FilesLayer, ()> {
+        let _apply_guard = self.apply_gate.lock().await;
         // REHYDRATE the scan manifest from the domain's captured state:
         // against an EMPTY baseline a file deleted while the daemon was down
         // could never emit a Retire and its stale head would stay readable
@@ -2038,7 +2120,10 @@ impl DriverEnv for RealEnv {
         // would swallow the edit (the seed reflects old policy while the
         // layer claims to be current).
         let fingerprint_before_seed = policy_fingerprint(&self.root);
-        let seed = manifest_seed(&self.root, &self.actor, &self.workspace_id).await;
+        let seed = manifest_seed(&self.root, &self.actor, &self.workspace_id)
+            .await
+            .ok()
+            .flatten();
         let (fresh, initial) =
             FilesLayer::start_with_fingerprint(&self.root, cancel, seed, fingerprint_before_seed)
                 .await
@@ -2092,12 +2177,19 @@ impl DriverEnv for RealEnv {
     }
 
     async fn tick(&mut self, layer: &FilesLayer, cancel: &CancellationToken) -> TickIo {
-        match layer
+        let _apply_guard = self.apply_gate.lock().await;
+        let run = layer
             .files
             .handle()
             .reconcile_if_dirty(cancel.child_token())
-            .await
+            .await;
+        #[cfg(feature = "harness")]
+        if matches!(run, Ok(ReconcileRun::Completed(_)))
+            && let Some(probe) = &self.apply_probe
         {
+            probe.pause_if_armed().await;
+        }
+        match run {
             // Converged means at quiescence — EXCEPT with a NON-EMPTY
             // quarantine: the controller
             // parks persistently failing paths on its own degraded-rescan
@@ -2178,6 +2270,8 @@ async fn drive(
     status: Arc<DriverStatus>,
     baseline_tx: tokio::sync::watch::Sender<bool>,
     flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
+    apply_gate: ApplyGate,
+    #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
 ) {
     let mut env = RealEnv {
         root,
@@ -2185,8 +2279,61 @@ async fn drive(
         workspace_id,
         status: Arc::clone(&status),
         self_writes,
+        apply_gate,
+        #[cfg(feature = "harness")]
+        apply_probe,
     };
     drive_loop(&mut env, cancel, status, baseline_tx, flush_rx).await;
+}
+
+/// Force the oracle-equivalent pre-switch full scan while the caller owns the
+/// workspace's [`ApplyGate`]. A fresh files actor is seeded from the active
+/// version so deletions are visible, but no watcher is attached: the normal
+/// driver remains alive and simply waits at the gate. Degraded listings fail
+/// before any safe-subset apply, matching the TypeScript switch path.
+pub(crate) async fn reconcile_full_for_switch(
+    root: &Path,
+    actor: &ActorHandle,
+    workspace_id: &str,
+    status: &Arc<DriverStatus>,
+    self_writes: &SelfWriteSuppression,
+    token: CancellationToken,
+) -> Result<(), SwitchReconcileError> {
+    if token.is_cancelled() {
+        return Err(SwitchReconcileError::Cancelled);
+    }
+    let seed = manifest_seed(root, actor, workspace_id)
+        .await
+        .map_err(|_| SwitchReconcileError::Unavailable)?;
+    let mut files =
+        FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
+            .await
+            .map_err(|_| SwitchReconcileError::Unavailable)?;
+    let handle = files.handle();
+    let run = handle
+        .reconcile(token.clone())
+        .await
+        .map_err(|_| SwitchReconcileError::Unavailable);
+    let result = match run {
+        Err(error) => Err(error),
+        Ok(ReconcileRun::Cancelled) => Err(SwitchReconcileError::Cancelled),
+        Ok(ReconcileRun::Converged) => Err(SwitchReconcileError::Unavailable),
+        Ok(ReconcileRun::Completed(plan)) if plan.degraded => {
+            status.mark_degraded();
+            Err(SwitchReconcileError::Degraded)
+        }
+        Ok(run) => {
+            if apply_run_with_handle(root, actor, workspace_id, &handle, run, status, self_writes)
+                .await
+            {
+                Ok(())
+            } else {
+                Err(SwitchReconcileError::ApplyFailed)
+            }
+        }
+    };
+    let _ = tokio::task::spawn_blocking(move || files.close()).await;
+    result
 }
 
 /// Apply one reconcile run through the capture sink and acknowledge it.
@@ -2202,6 +2349,27 @@ async fn apply_run(
     actor: &ActorHandle,
     workspace_id: &str,
     layer: &FilesLayer,
+    run: ReconcileRun,
+    status: &Arc<DriverStatus>,
+    self_writes: &SelfWriteSuppression,
+) -> bool {
+    apply_run_with_handle(
+        root,
+        actor,
+        workspace_id,
+        &layer.files.handle(),
+        run,
+        status,
+        self_writes,
+    )
+    .await
+}
+
+async fn apply_run_with_handle(
+    root: &Path,
+    actor: &ActorHandle,
+    workspace_id: &str,
+    files: &FilesHandle,
     run: ReconcileRun,
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
@@ -2222,7 +2390,7 @@ async fn apply_run(
         )) => "main".to_owned(),
         Err(_) => {
             status.mark_degraded();
-            ack_all_failed(layer, plan, status).await;
+            ack_all_failed(files, plan, status).await;
             return false;
         }
     };
@@ -2268,7 +2436,7 @@ async fn apply_run(
     let Some((plan, mut result, sink_policy_held)) = applied else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
         status.mark_degraded();
-        ack_all_failed(layer, plan, status).await;
+        ack_all_failed(files, plan, status).await;
         return false;
     };
     // OVER-CAP + NARROWED: a path in the scanner's retained-over-cap set
@@ -2356,14 +2524,7 @@ async fn apply_run(
         status.arm_policy_hold();
     }
     let clean = result.failed_applies.is_empty() && !result.degraded;
-    if result.completed()
-        && layer
-            .files
-            .handle()
-            .acknowledge_capture(plan, result)
-            .await
-            .is_err()
-    {
+    if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();
         return false;
     }
@@ -2373,7 +2534,7 @@ async fn apply_run(
 /// Resolve a prepared plan whose apply never ran: acknowledge with EVERY op
 /// marked failed, clearing the controller's `outstanding` latch while keeping
 /// the paths dirty for the next cycle's retry.
-async fn ack_all_failed(layer: &FilesLayer, plan: ReconcilePlan, status: &Arc<DriverStatus>) {
+async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<DriverStatus>) {
     let failed: Vec<String> = plan.ops.iter().map(|op| op.path().to_owned()).collect();
     let receipt = CaptureApplyResult {
         applied_paths: Vec::new(),
@@ -2383,13 +2544,7 @@ async fn ack_all_failed(layer: &FilesLayer, plan: ReconcilePlan, status: &Arc<Dr
         crashed_after_apply: None,
         degraded: true,
     };
-    if layer
-        .files
-        .handle()
-        .acknowledge_capture(plan, receipt)
-        .await
-        .is_err()
-    {
+    if files.acknowledge_capture(plan, receipt).await.is_err() {
         status.mark_degraded();
     }
 }
