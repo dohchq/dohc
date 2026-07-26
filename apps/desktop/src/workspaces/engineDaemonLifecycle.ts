@@ -138,6 +138,7 @@ export class EngineDaemonLifecycle {
   private readonly exitedGenerations = new Set<number>();
   private readonly inFlightLaunches = new Set<InFlightLaunch>();
   private readonly launchingClients = new Set<EngineDaemonClient>();
+  private readonly workspaceRequestTails = new Map<string, Promise<void>>();
 
   constructor(options: EngineDaemonLifecycleOptions) {
     this.options = options;
@@ -183,6 +184,38 @@ export class EngineDaemonLifecycle {
     method: string,
     params: Request["params"],
   ): Promise<JsonValue> {
+    const previous = this.workspaceRequestTails.get(rootDir) ?? Promise.resolve();
+    const request = previous
+      .catch(() => undefined)
+      .then(
+        async () =>
+          await this.requestWorkspaceOnce(
+            rootDir,
+            workspaceId,
+            method,
+            params,
+          ),
+      );
+    const tail = request.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.workspaceRequestTails.set(rootDir, tail);
+    try {
+      return await request;
+    } finally {
+      if (this.workspaceRequestTails.get(rootDir) === tail) {
+        this.workspaceRequestTails.delete(rootDir);
+      }
+    }
+  }
+
+  private async requestWorkspaceOnce(
+    rootDir: string,
+    workspaceId: string,
+    method: string,
+    params: Request["params"],
+  ): Promise<JsonValue> {
     const client = this.requireClient();
     const opened = resultObject(
       await this.sendSmokeRequest(
@@ -190,7 +223,11 @@ export class EngineDaemonLifecycle {
         {
           id: this.requestId(),
           method: "workspace.open",
-          params: { rootDir, workspaceId },
+          params: {
+            rootDir,
+            workspaceId,
+            recoverRunningDispatches: false,
+          },
         },
         "workspace.open",
       ),

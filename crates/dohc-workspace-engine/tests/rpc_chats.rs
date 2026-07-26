@@ -4033,11 +4033,14 @@ async fn granular_chat_search_arm_preserves_header_mapping_and_cli_saturation() 
     .await;
     assert_eq!(
         header,
-        json!([{
-            "threadId": "thread-header",
-            "messageId": null,
-            "text": "needle header",
-        }])
+        json!({
+            "results": [{
+                "threadId": "thread-header",
+                "messageId": null,
+                "text": "needle header",
+            }],
+            "saturated": false,
+        })
     );
     assert_eq!(
         call(
@@ -4048,7 +4051,10 @@ async fn granular_chat_search_arm_preserves_header_mapping_and_cli_saturation() 
             json!({ "query": "ne", "limit": 50_000 }),
         )
         .await,
-        json!([])
+        json!({
+            "results": [],
+            "saturated": false,
+        })
     );
 
     let saturated = call(
@@ -4059,9 +4065,18 @@ async fn granular_chat_search_arm_preserves_header_mapping_and_cli_saturation() 
         json!({ "query": "needle", "limit": 50_000 }),
     )
     .await;
-    // MUTATION: reuse the ordinary 1,000-result clamp -> the CLI never sees
-    // exactly 50,000 and incorrectly treats a truncated prefilter as exhaustive.
-    assert_eq!(saturated.as_array().expect("candidate array").len(), 50_000);
+    // MUTATION: return the 50,000 queried rows directly -> the response exceeds
+    // the control-frame contract instead of telling the CLI to full-scan.
+    assert_eq!(saturated["saturated"], json!(true));
+    let results = saturated["results"].as_array().expect("candidate array");
+    assert!(!results.is_empty());
+    assert!(results.len() < 50_000);
+    assert!(
+        serde_json::to_vec(&saturated)
+            .expect("serialize granular response")
+            .len()
+            < 1024 * 1024
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

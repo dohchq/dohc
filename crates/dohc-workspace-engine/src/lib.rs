@@ -154,6 +154,7 @@ const SINGLE_ROW_HARD_CAP_BYTES: usize = 700 * 1024;
 /// Approximate serialized-bytes budget for one chat list/messages page —
 /// the same measured discipline as every other list family.
 const CHAT_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+const GRANULAR_CHAT_RESPONSE_BYTE_BUDGET: usize = 256 * 1024;
 
 const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
 const CHAT_PAGE_LIMIT_MAX: i64 = 500;
@@ -1178,20 +1179,22 @@ impl EngineService {
         // armed above the startup replay closes the actor on an early drop
         // and is disarmed once the handle is inserted; `CaptureDriver`'s own
         // Drop cancels the files layer.
-        // Cancellation-aware like every other actor wait in this flow: a
-        // caller abort stops WAITING promptly (the actor still finishes the
-        // reclaim it already accepted — it is idempotent on the next open)
-        // and the open_guard above closes the actor on early drop.
-        Self::read_under_ctx(
-            &cancellation,
-            "workspace.open (dispatch reclaim)",
-            actor.chat_dispatch_reclaim_running(
-                params.workspace_id.clone(),
-                CHAT_DISPATCH_MAX_ATTEMPTS,
-                now_ms,
-            ),
-        )
-        .await?;
+        if params.recover_running_dispatches.unwrap_or(true) {
+            // Cancellation-aware like every other actor wait in this flow:
+            // a caller abort stops WAITING promptly (the actor still finishes
+            // the reclaim it already accepted — it is idempotent on the next
+            // open) and the open_guard above closes the actor on early drop.
+            Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (dispatch reclaim)",
+                actor.chat_dispatch_reclaim_running(
+                    params.workspace_id.clone(),
+                    CHAT_DISPATCH_MAX_ATTEMPTS,
+                    now_ms,
+                ),
+            )
+            .await?;
+        }
         capture.wait_for_baseline().await;
         open_guard.disarm();
         lock(&self.handles).insert(
@@ -6356,6 +6359,9 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: SearchChatMessagesGranularParams = parse(params)?;
+        let effective_limit = usize::try_from(params.limit)
+            .unwrap_or(dohc_engine_runtime::search::MAX_GRANULAR_CHAT_RESULT_LIMIT)
+            .min(dohc_engine_runtime::search::MAX_GRANULAR_CHAT_RESULT_LIMIT);
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let rows = Self::read_under_ctx(
@@ -6368,17 +6374,28 @@ impl EngineService {
             ),
         )
         .await?;
-        Ok(Value::Array(
-            rows.into_iter()
-                .map(|row| {
-                    json!({
-                        "threadId": row.thread_id,
-                        "messageId": row.message_id,
-                        "text": row.text,
-                    })
+        let saturated_by_limit = params.limit > 0 && rows.len() == effective_limit;
+        let row_values: Vec<Value> = rows
+            .into_iter()
+            .map(|row| {
+                json!({
+                    "threadId": row.thread_id,
+                    "messageId": row.message_id,
+                    "text": row.text,
                 })
-                .collect(),
-        ))
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, GRANULAR_CHAT_RESPONSE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "granular-chat-row-exceeds-wire-limit",
+            ));
+        }
+        Ok(json!({
+            "results": &row_values[..included],
+            "saturated": saturated_by_limit || included < row_values.len(),
+        }))
     }
 
     async fn search_ensure_index(
@@ -6728,6 +6745,8 @@ impl Drop for OperationCancellation {
 struct WorkspaceOpenParams {
     root_dir: String,
     workspace_id: String,
+    #[serde(default)]
+    recover_running_dispatches: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -9029,6 +9048,93 @@ mod tests {
         // through the catch-all to Internal.
         let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_open_can_preserve_a_dispatch_owned_by_the_desktop() {
+        // MUTATION: ignore recoverRunningDispatches=false on the second open ->
+        // the live desktop claim is reclaimed before its runner can complete.
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let first_service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "desktop-runner-survives-daemon";
+        let opened = first_service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            )
+            .await
+            .expect("initial workspace open");
+        let first_handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        first_service
+            .chats_dispatch_enqueue(
+                &RequestContext::unbounded(),
+                Some(first_handle.clone()),
+                json!({
+                    "triggerMessageId": "trigger-survives",
+                    "threadId": "thread-survives",
+                    "nowMs": 10,
+                }),
+            )
+            .await
+            .expect("enqueue dispatch");
+        let claim = first_service
+            .chats_dispatch_claim_next_pending(
+                &RequestContext::unbounded(),
+                Some(first_handle.clone()),
+                json!({
+                    "runId": "run-survives",
+                    "command": "agent",
+                    "nowMs": 20,
+                }),
+            )
+            .await
+            .expect("claim dispatch");
+        assert_eq!(claim["run"]["runId"], json!("run-survives"));
+
+        first_service
+            .workspace_close(Some(first_handle))
+            .await
+            .expect("simulate daemon teardown");
+
+        let rebound_service = EngineService::with_supervisor(supervisor);
+        let rebound = rebound_service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                    "recoverRunningDispatches": false,
+                }),
+            )
+            .await
+            .expect("daemon-only CLI rebind");
+        let rebound_handle: WorkspaceHandle =
+            serde_json::from_value(rebound["workspace"].clone()).expect("rebound handle");
+        let open_runs = rebound_service
+            .chats_dispatch_open_runs(
+                &RequestContext::unbounded(),
+                Some(rebound_handle.clone()),
+                json!({}),
+            )
+            .await
+            .expect("list open runs");
+        assert_eq!(
+            open_runs["claims"][0]["run"]["runId"],
+            json!("run-survives")
+        );
+
+        rebound_service
+            .workspace_close(Some(rebound_handle))
+            .await
+            .expect("workspace close");
     }
 
     #[tokio::test]

@@ -2,63 +2,84 @@ import { describe, expect, it } from "vitest";
 import {
   ChatsProtocolShapeError,
   WorkspaceProtocolShapeError,
-  decodeGranularChatMessageSearchResults,
+  decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
 } from "./index";
 
 describe("CLI daemon read decoders", () => {
   it("decodes granular chat candidates including the null thread-header id", () => {
     expect(
-      decodeGranularChatMessageSearchResults([
-        {
-          threadId: "thread-1",
-          messageId: null,
-          text: "Thread title",
-        },
+      decodeGranularChatMessageSearchResponse({
+        results: [
+          {
+            threadId: "thread-1",
+            messageId: null,
+            text: "Thread title",
+          },
+          {
+            threadId: "thread-1",
+            messageId: "message-1",
+            text: "Message body",
+          },
+        ],
+        saturated: false,
+      }),
+    ).toEqual({
+      results: [
+        { threadId: "thread-1", messageId: null, text: "Thread title" },
         {
           threadId: "thread-1",
           messageId: "message-1",
           text: "Message body",
         },
-      ]),
-    ).toEqual([
-      { threadId: "thread-1", messageId: null, text: "Thread title" },
-      {
-        threadId: "thread-1",
-        messageId: "message-1",
-        text: "Message body",
-      },
-    ]);
+      ],
+      saturated: false,
+    });
   });
 
   it("fails granular candidates closed on unknown or malformed fields", () => {
     expect(() =>
-      decodeGranularChatMessageSearchResults([
-        {
-          threadId: "thread-1",
-          messageId: 1,
-          text: "bad",
-        },
-      ]),
+      decodeGranularChatMessageSearchResponse({
+        results: [
+          {
+            threadId: "thread-1",
+            messageId: 1,
+            text: "bad",
+          },
+        ],
+        saturated: false,
+      }),
     ).toThrow(WorkspaceProtocolShapeError);
     expect(() =>
-      decodeGranularChatMessageSearchResults([
-        {
-          threadId: "",
-          messageId: null,
-          text: "bad",
-        },
-      ]),
+      decodeGranularChatMessageSearchResponse({
+        results: [
+          {
+            threadId: "",
+            messageId: null,
+            text: "bad",
+          },
+        ],
+        saturated: false,
+      }),
     ).toThrow(WorkspaceProtocolShapeError);
     expect(() =>
-      decodeGranularChatMessageSearchResults([
-        {
-          threadId: "thread-1",
-          messageId: null,
-          text: "bad",
-          extra: true,
-        },
-      ]),
+      decodeGranularChatMessageSearchResponse({
+        results: [
+          {
+            threadId: "thread-1",
+            messageId: null,
+            text: "bad",
+            extra: true,
+          },
+        ],
+        saturated: false,
+      }),
+    ).toThrow(WorkspaceProtocolShapeError);
+    expect(() =>
+      decodeGranularChatMessageSearchResponse({
+        results: [],
+        saturated: "yes",
+      }),
     ).toThrow(WorkspaceProtocolShapeError);
   });
 

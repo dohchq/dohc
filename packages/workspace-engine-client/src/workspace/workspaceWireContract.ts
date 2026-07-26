@@ -21,6 +21,7 @@ export type WorkspaceJsonObject = {
 export type WorkspaceOpenParams = WorkspaceJsonObject & {
   rootDir: string;
   workspaceId: string;
+  recoverRunningDispatches?: boolean;
 };
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type ConflictListParams = WorkspaceJsonObject & {
@@ -44,6 +45,8 @@ export type SearchQueryChatMessagesGranularParams = WorkspaceJsonObject & {
   query: string;
   limit: number;
 };
+
+export const MAX_GRANULAR_CHAT_QUERY_CHARS = 4096;
 
 export type WorkspaceOpenResult = WorkspaceJsonObject & {
   workspace: string;
@@ -150,6 +153,10 @@ export type GranularChatMessageSearchResult = WorkspaceJsonObject & {
   messageId: string | null;
   text: string;
 };
+export type GranularChatMessageSearchResponse = WorkspaceJsonObject & {
+  results: GranularChatMessageSearchResult[];
+  saturated: boolean;
+};
 
 export type WatcherStatusResult = WorkspaceJsonObject & {
   running: boolean;
@@ -181,7 +188,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
   [WORKSPACE_METHOD.searchQuery]: SearchResult[];
-  [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResult[];
+  [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResponse;
   [WORKSPACE_METHOD.watcherStatus]: WatcherStatusResult;
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResult;
 };
@@ -524,9 +531,9 @@ function decodeSearchResult(value: JsonValue, label: string): SearchResult {
   };
 }
 
-export function decodeGranularChatMessageSearchResults(
+function decodeGranularChatMessageSearchResults(
   value: JsonValue,
-  label = `${WORKSPACE_METHOD.searchQueryChatMessagesGranular} result`,
+  label: string,
 ): GranularChatMessageSearchResult[] {
   if (!Array.isArray(value)) {
     throw new WorkspaceProtocolShapeError(`${label} must be an array.`);
@@ -550,6 +557,20 @@ export function decodeGranularChatMessageSearchResults(
       text: stringValue(object, "text", entryLabel),
     };
   });
+}
+
+export function decodeGranularChatMessageSearchResponse(
+  value: JsonValue,
+  label = `${WORKSPACE_METHOD.searchQueryChatMessagesGranular} result`,
+): GranularChatMessageSearchResponse {
+  const object = objectValue(value, label, ["results", "saturated"]);
+  return {
+    results: decodeGranularChatMessageSearchResults(
+      object.results ?? null,
+      `${label}.results`,
+    ),
+    saturated: booleanValue(object, "saturated", label),
+  };
 }
 
 export function decodeWorkspaceResult<M extends WorkspaceMethod>(
@@ -611,7 +632,7 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
       );
       break;
     case WORKSPACE_METHOD.searchQueryChatMessagesGranular:
-      result = decodeGranularChatMessageSearchResults(value, label);
+      result = decodeGranularChatMessageSearchResponse(value, label);
       break;
     case WORKSPACE_METHOD.watcherStatus: {
       const object = objectValue(value, label, [

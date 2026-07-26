@@ -25,9 +25,11 @@ import {
   type ChatThread,
   type LinkedChatStore,
 } from "@dohc/workspace-engine";
-import type {
-  ChatUnreadFileThread,
-  GranularChatMessageSearchResult,
+import {
+  MAX_GRANULAR_CHAT_QUERY_CHARS,
+  type ChatUnreadFileThread,
+  type GranularChatMessageSearchResponse,
+  type GranularChatMessageSearchResult,
 } from "@dohc/workspace-engine-client";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
@@ -103,6 +105,12 @@ type CliGranularChatMessageSearchResult = Pick<
   GranularChatMessageSearchResult,
   "threadId" | "messageId" | "text"
 >;
+type CliGranularChatMessageSearchResponse = Pick<
+  GranularChatMessageSearchResponse,
+  "saturated"
+> & {
+  results: CliGranularChatMessageSearchResult[];
+};
 type CliUnreadFileThread = Pick<
   ChatUnreadFileThread,
   "threadId" | "messageCount" | "lastReadSequence"
@@ -124,7 +132,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
     queryChatMessagesGranular(input: {
       query: string;
       limit: number;
-    }): Promise<CliGranularChatMessageSearchResult[]>;
+    }): Promise<CliGranularChatMessageSearchResponse>;
     listUnreadFileThreads(): Promise<CliUnreadFileThread[]>;
   };
 }
@@ -680,11 +688,17 @@ async function queryFtsCandidates(
   query: string,
 ): Promise<{ threadIds: Set<string>; messageIds: Set<string> } | null> {
   if ([...query.trim()].length < 3) return null;
-  let rows: CliGranularChatMessageSearchResult[];
+  if (
+    context.daemonReads &&
+    [...query.trim()].length > MAX_GRANULAR_CHAT_QUERY_CHARS
+  ) {
+    return null;
+  }
+  let response: CliGranularChatMessageSearchResponse;
   let db: EngineSqliteDb | null = null;
   try {
     if (context.daemonReads) {
-      rows = await context.daemonReads.queryChatMessagesGranular({
+      response = await context.daemonReads.queryChatMessagesGranular({
         query,
         limit: MAX_FTS_CANDIDATES,
       });
@@ -694,18 +708,22 @@ async function queryFtsCandidates(
         join(context.rootPath, LINKED_CHAT_STORE_RELATIVE_PATH),
         { readOnly: true },
       );
-      rows = queryChatMessagesGranular(db, {
+      const results = queryChatMessagesGranular(db, {
         workspaceId: context.workspaceId,
         query,
         limit: MAX_FTS_CANDIDATES,
       });
+      response = {
+        results,
+        saturated: results.length === MAX_FTS_CANDIDATES,
+      };
     }
     // A saturated prefilter is not exhaustive. Fall back to the full body scan
     // below so the optimization can never change grep's results at scale.
-    if (rows.length === MAX_FTS_CANDIDATES) return null;
+    if (response.saturated) return null;
     const threadIds = new Set<string>();
     const messageIds = new Set<string>();
-    for (const row of rows) {
+    for (const row of response.results) {
       threadIds.add(row.threadId);
       if (row.messageId) messageIds.add(row.messageId);
     }

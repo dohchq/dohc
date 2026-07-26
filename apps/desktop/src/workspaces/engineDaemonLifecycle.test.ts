@@ -396,11 +396,14 @@ describe("Rust engine daemon lifecycle", () => {
       if (request.method === "search.queryChatMessagesGranular") {
         return {
           id: request.id,
-          result: [{
-            threadId: "thread",
-            messageId: null,
-            text: "needle",
-          }],
+          result: {
+            results: [{
+              threadId: "thread",
+              messageId: null,
+              text: "needle",
+            }],
+            saturated: false,
+          },
         };
       }
       return { id: request.id, result: {} };
@@ -419,17 +422,87 @@ describe("Rust engine daemon lifecycle", () => {
         "search.queryChatMessagesGranular",
         { query: "needle", limit: 50_000 },
       ),
-    ).resolves.toEqual([{
-      threadId: "thread",
-      messageId: null,
-      text: "needle",
-    }]);
+    ).resolves.toEqual({
+      results: [{
+        threadId: "thread",
+        messageId: null,
+        text: "needle",
+      }],
+      saturated: false,
+    });
     expect(client.requests.map((request) => request.method)).toEqual([
       "workspace.open",
       "search.queryChatMessagesGranular",
       "workspace.close",
     ]);
+    expect(client.requests[0]?.params).toEqual({
+      rootDir: "C:\\workspace",
+      workspaceId: "workspace",
+      recoverRunningDispatches: false,
+    });
     expect(client.requests[1]?.workspace).toBe("cli-handle");
+    await lifecycle.stop();
+  });
+
+  it("serializes concurrent CLI reads that share a workspace handle", async () => {
+    let releaseFirst!: (response: Response) => void;
+    let readCount = 0;
+    const client = new FakeClient((request) => {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "shared-handle" } };
+      }
+      if (request.method === "search.queryChatMessagesGranular") {
+        readCount += 1;
+        if (readCount === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return { id: request.id, result: { results: [], saturated: false } };
+      }
+      return { id: request.id, result: {} };
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      launch: async () => client,
+    });
+    await lifecycle.start();
+    client.requests.length = 0;
+
+    const first = lifecycle.requestWorkspace(
+      "C:\\workspace",
+      "workspace",
+      "search.queryChatMessagesGranular",
+      { query: "first", limit: 50_000 },
+    );
+    await vi.waitFor(() => expect(client.requests).toHaveLength(2));
+    const second = lifecycle.requestWorkspace(
+      "C:\\workspace",
+      "workspace",
+      "search.queryChatMessagesGranular",
+      { query: "second", limit: 50_000 },
+    );
+    await Promise.resolve();
+    expect(client.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "search.queryChatMessagesGranular",
+    ]);
+
+    const firstRequest = client.requests[1];
+    if (!firstRequest) throw new Error("First read was not sent");
+    releaseFirst({
+      id: firstRequest.id,
+      result: { results: [], saturated: false },
+    });
+    await Promise.all([first, second]);
+    expect(client.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "search.queryChatMessagesGranular",
+      "workspace.close",
+      "workspace.open",
+      "search.queryChatMessagesGranular",
+      "workspace.close",
+    ]);
     await lifecycle.stop();
   });
 

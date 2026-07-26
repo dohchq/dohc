@@ -7,7 +7,7 @@ import {
 import {
   CHATS_METHOD,
   WORKSPACE_METHOD,
-  decodeGranularChatMessageSearchResults,
+  decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
 } from "@dohc/workspace-engine-client";
 import {
@@ -2086,7 +2086,7 @@ async function openCliWorkspace(
               query: string;
               limit: number;
             }) {
-              return decodeGranularChatMessageSearchResults(
+              return decodeGranularChatMessageSearchResponse(
                 await daemon.requestWorkspace(
                   workspace.rootPath,
                   workspace.workspaceId,

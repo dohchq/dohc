@@ -905,7 +905,7 @@ describe("CLI socket server", () => {
           messageId: matchingMessage.id,
           text: matchingMessage.body,
         };
-        return saturated ? Array.from({ length: 50_000 }, () => row) : [row];
+        return { results: [row], saturated };
       },
       async listUnreadFileThreads() {
         return [];
@@ -953,6 +953,47 @@ describe("CLI socket server", () => {
     }
   });
 
+  it("full-scans overlong daemon FTS queries without asking the daemon", async () => {
+    const pattern = "z".repeat(4_097);
+    const matching = await post({
+      actor: "human",
+      title: "Overlong daemon query",
+      body: `before-${pattern}-after`,
+    });
+    await post({
+      actor: "human",
+      title: "Overlong daemon unrelated",
+      body: "Nothing relevant in this thread",
+    });
+    let daemonCalls = 0;
+    context.daemonReads = {
+      async queryChatMessagesGranular() {
+        daemonCalls += 1;
+        return { results: [], saturated: false };
+      },
+      async listUnreadFileThreads() {
+        return [];
+      },
+    };
+    try {
+      const result = await invoke("grep", {
+        cwd: workspaceRoot,
+        actor: "human",
+        pattern,
+        ignoreCase: false,
+        filesWithMatches: false,
+        context: 0,
+        limit: 20,
+        regex: false,
+      });
+      expect("matches" in result && result.matches.map((row) => row.threadId))
+        .toEqual([matching.threadId]);
+      expect(daemonCalls).toBe(0);
+    } finally {
+      delete context.daemonReads;
+    }
+  });
+
   it("uses the daemon unread-file aggregate for the human inbox", async () => {
     if (!store) throw new Error("Store is not available");
     const fileThread = await store.createThread({
@@ -970,7 +1011,7 @@ describe("CLI socket server", () => {
     let unreadCalls = 0;
     context.daemonReads = {
       async queryChatMessagesGranular() {
-        return [];
+        return { results: [], saturated: false };
       },
       async listUnreadFileThreads() {
         unreadCalls += 1;
