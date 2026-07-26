@@ -1,5 +1,6 @@
 import type {
   ActorNeutralWriteMetadata,
+  FileObjectRecord,
   MomentAuthor,
   SecretFileMoment,
   SecretFileStore,
@@ -16,6 +17,7 @@ import {
   type ConflictRecord,
   type MomentRecord,
   type SecretMomentRecord,
+  type VersionedComparisonRecord,
   type VersionedTextListEntry,
   type VersionedTextReadValue,
 } from "@dohc/workspace-engine-client";
@@ -41,6 +43,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     workspaceId: string;
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
+  flushCapture?(): Promise<void>;
 };
 
 export interface CaptureLiveStores {
@@ -133,6 +136,16 @@ function payloadSnapshot(
     ? moment.beforeContentKind
     : moment.afterContentKind;
   const text = before ? moment.beforeText : moment.afterText;
+  if (contentKind === "text" && text === null) {
+    const limit = before
+      ? moment.beforeInbandLimitBytes
+      : moment.afterInbandLimitBytes;
+    throw new Error(
+      `Engine moment text for ${moment.path} exceeds the RPC in-band limit${
+        limit === undefined ? "" : ` (${limit} bytes)`
+      }.`,
+    );
+  }
   const sha256 =
     contentKind === "binary"
       ? before
@@ -147,7 +160,7 @@ function payloadSnapshot(
     contentKind,
     ...(sha256 !== null ? { sha256 } : {}),
     ...(byteLength !== null ? { byteLength } : {}),
-    text: text ?? "",
+    text: contentKind === "binary" ? "" : (text ?? ""),
   };
 }
 
@@ -300,6 +313,70 @@ function secretMomentFromWire(moment: SecretMomentRecord): SecretFileMoment {
   };
 }
 
+function comparisonFromWire(
+  comparison: VersionedComparisonRecord,
+) {
+  const state = (
+    value: VersionedTextReadValue | null,
+  ): VersionedTextFileState => {
+    if (value === null) return { exists: false, path: comparison.path };
+    if (value.contentKind === "text" && value.text === null) {
+      throw new Error(
+        `Engine comparison text for ${value.path} exceeds the RPC in-band limit.`,
+      );
+    }
+    return {
+      exists: true,
+      path: value.path,
+      objectId: value.objectId,
+      contentKind: value.contentKind,
+      ...(value.sha256 !== null ? { sha256: value.sha256 } : {}),
+      ...(value.byteLength !== null ? { byteLength: value.byteLength } : {}),
+      text: value.text ?? "",
+      updatedAtMs: value.updatedAtMs,
+      latestMomentId: value.latestMomentId,
+      metadata: metadataFromOrigin(value.metadataOrigin, {
+        origin: publicOrigin(value.metadataOrigin),
+        ...(value.metadataSummary != null
+          ? { summary: value.metadataSummary }
+          : {}),
+        ...(value.metadataCorrelationId != null
+          ? { correlationId: value.metadataCorrelationId }
+          : {}),
+      }),
+    };
+  };
+  return {
+    workspaceId: comparison.workspaceId,
+    path: comparison.path,
+    targetVersionId: comparison.targetVersionId,
+    sourceVersionId: comparison.sourceVersionId,
+    base: state(comparison.base),
+    current: state(comparison.current),
+    incoming: state(comparison.incoming),
+    status: comparison.status,
+  };
+}
+
+function fileObjectFromWire(value: unknown): FileObjectRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Engine mutation returned an invalid file object.");
+  }
+  const object = value as Record<string, unknown>;
+  if (
+    typeof object.id !== "string" ||
+    typeof object.workspaceId !== "string" ||
+    typeof object.createdAtMs !== "number"
+  ) {
+    throw new Error("Engine mutation returned an invalid file object.");
+  }
+  return {
+    id: object.id,
+    workspaceId: object.workspaceId,
+    createdAtMs: object.createdAtMs,
+  };
+}
+
 function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
   return {
     origin: metadata.origin,
@@ -401,7 +478,7 @@ export function createCaptureLiveStores(
         objectId: row.objectId,
         contentKind: row.contentKind,
         byteLength: row.byteLength,
-        sha256: row.binarySha256,
+        sha256: row.sha256,
         updatedAtMs: row.updatedAtMs,
         latestMomentId: row.latestMomentId,
       }));
@@ -598,7 +675,7 @@ export function createCaptureLiveStores(
       const result = await runRead(
         async (adapter) => await adapter.compareTextFileVersions(input),
       );
-      return { ...result, ...input };
+      return comparisonFromWire(result);
     },
 
     async listTextConflicts(input: {
@@ -630,15 +707,13 @@ export function createCaptureLiveStores(
             metadata: adapterMetadata(input.metadata),
           }),
       );
-      const comparison = {
-        workspaceId: input.workspaceId,
-        path: input.path,
-        targetVersionId: input.targetVersionId,
-        sourceVersionId: input.sourceVersionId,
-        status: raw.status,
-      };
+      const comparison = comparisonFromWire(raw.comparison);
       if (raw.status === "unchanged") {
-        return { kind: "unchanged", reason: "already-same", comparison };
+        return {
+          kind: "unchanged",
+          reason: raw.reason ?? "already-same",
+          comparison,
+        };
       }
       if (raw.status === "conflict") {
         const conflicts = await store.listTextConflicts({
@@ -734,14 +809,53 @@ export function createCaptureLiveStores(
         throw new Error(`Engine conflict ${input.conflictId} was not resolved locally.`);
       }
       const conflict = conflictFromWire(raw.conflict as ConflictRecord);
-      const snapshot = await store.readTextFile({
-        workspaceId: input.workspaceId,
-        versionId: existing.targetVersionId,
-        path: existing.path,
+      if (raw.write !== null) {
+        const write = raw.write as {
+          object: unknown;
+          snapshot: VersionedTextReadValue;
+          moment: MomentRecord;
+        };
+        return {
+          kind: "resolved",
+          conflict,
+          write: {
+            object: fileObjectFromWire(write.object),
+            snapshot: snapshotFromWire(write.snapshot, input.metadata),
+            moment: momentFromWire(
+              input.workspaceId,
+              write.moment,
+              input.metadata,
+            ),
+          },
+        };
+      }
+      if (raw.delete !== null) {
+        const deletion = raw.delete as {
+          object: unknown;
+          before: VersionedTextReadValue;
+          moment: MomentRecord;
+        };
+        return {
+          kind: "resolved",
+          conflict,
+          delete: {
+            object: fileObjectFromWire(deletion.object),
+            before: snapshotFromWire(deletion.before, input.metadata),
+            moment: momentFromWire(
+              input.workspaceId,
+              deletion.moment,
+              input.metadata,
+            ),
+          },
+        };
+      }
+      return { kind: "resolved", conflict };
+    },
+
+    async flushCapture() {
+      await runRead(async (adapter) => {
+        await adapter.flushCapture();
       });
-      return snapshot
-        ? { kind: "resolved", conflict, write: { snapshot } }
-        : { kind: "resolved", conflict, delete: { before: existing.current } };
     },
 
     close: async () => await sessions.closeWorkspace(workspace.workspaceId),
@@ -751,8 +865,8 @@ export function createCaptureLiveStores(
     async writeSecretFile(input: Parameters<SecretFileStore["writeSecretFile"]>[0]) {
       return await runMutation(async (adapter) => {
         const result = await adapter.writeSecretFile({
-            ...input,
-            metadata: adapterMetadata(input.metadata),
+          ...input,
+          metadata: adapterMetadata(input.metadata),
         });
         return {
           ...result,

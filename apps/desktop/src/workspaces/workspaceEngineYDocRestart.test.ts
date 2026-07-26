@@ -57,6 +57,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   });
   const firstClient = client(1);
   const secondClient = client(2);
+  const thirdClient = client(3);
   let currentClient = firstClient;
   const sessions = new EngineWorkspaceSessions(
     { currentClient: () => currentClient },
@@ -73,7 +74,12 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
     const doc = new Y.Doc();
     Y.applyUpdate(doc, seedUpdate);
     openedDocs.push(doc);
-    const generation = options.transport === firstClient ? 1 : 2;
+    const generation =
+      options.transport === firstClient
+        ? 1
+        : options.transport === secondClient
+          ? 2
+          : 3;
     return {
       doc,
       initialUpdate: Y.encodeStateAsUpdate(doc),
@@ -81,8 +87,8 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
       path: options.path,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
-        if (generation === 1) {
-          currentClient = secondClient;
+        if (generation < 3) {
+          currentClient = generation === 1 ? secondClient : thirdClient;
           throw Object.assign(new Error("daemon exited"), {
             code: "transport-error",
           });
@@ -140,6 +146,23 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   expect(openedDocs).toHaveLength(2);
   expect(openedDocs[1].getText("plainText").toString()).toBe("seed survives");
   expect(session.doc).toBe(stableDoc);
+  expect(stableDoc.getText("plainText").toString()).toBe("seed survives");
+
+  const beforeSecondRestart = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(13, " twice");
+  session.applyLocalUpdate(
+    Y.encodeStateAsUpdate(rendererDoc, beforeSecondRestart),
+  );
+
+  const settledAfterSecondRestart = await session.settleNow();
+  expect(settledAfterSecondRestart.markdown).toBe("seed survives twice");
+  expect(openedDocs).toHaveLength(3);
+  expect(openedDocs[2].getText("plainText").toString()).toBe(
+    "seed survives twice",
+  );
+  expect(stableDoc.getText("plainText").toString()).toBe(
+    "seed survives twice",
+  );
 
   await session.close({ settle: false });
   await capture.stop();

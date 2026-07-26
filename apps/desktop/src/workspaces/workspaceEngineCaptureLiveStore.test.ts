@@ -63,6 +63,35 @@ const snapshot = {
   metadataOrigin: "capture",
 } as const;
 
+const moment = {
+  momentOrder: 1,
+  momentId: "resolved-moment",
+  versionId: "main",
+  objectId: "object",
+  path: "note.md",
+  recordedAtMs: 3,
+  operation: "write",
+  afterContentKind: "text",
+  afterBlobSha256: "a".repeat(64),
+  afterBinarySha256: null,
+  beforePresent: true,
+  beforeContentKind: "text",
+  beforeBlobSha256: "a".repeat(64),
+  beforeBinarySha256: null,
+  beforeLatestMomentId: "moment",
+  metadataOrigin: "api",
+  metadataSummary: "Resolved note.md",
+  metadataCorrelationId: "conflict-1",
+  author: null,
+  syncRecordOnly: false,
+  afterText: "hello",
+  afterByteLength: 5,
+  afterInbandLimitBytes: null,
+  beforeText: "hello",
+  beforeByteLength: 5,
+  beforeInbandLimitBytes: null,
+} as const;
+
 function conflict(status: "open" | "resolved" = "open"): ConflictRecord {
   const state = {
     path: snapshot.path,
@@ -178,10 +207,22 @@ describe("createCaptureLiveStores", () => {
         return { id: request.id, result: [conflict()] };
       }
       if (request.method === WORKSPACE_METHOD.conflictsResolve) {
-        return { id: request.id, result: { conflict: conflict("resolved") } };
-      }
-      if (request.method === VERSIONED_METHOD.textRead) {
-        return { id: request.id, result: snapshot };
+        return {
+          id: request.id,
+          result: {
+            conflict: conflict("resolved"),
+            write: {
+              object: {
+                id: "object",
+                workspaceId: WORKSPACE_ID,
+                createdAtMs: 1,
+              },
+              snapshot,
+              moment,
+            },
+            delete: null,
+          },
+        };
       }
       throw new Error(`Unexpected method ${request.method}`);
     });
@@ -201,7 +242,17 @@ describe("createCaptureLiveStores", () => {
           correlationId: "conflict-1",
         },
       }),
-    ).resolves.toMatchObject({ kind: "resolved" });
+    ).resolves.toMatchObject({
+      kind: "resolved",
+      write: {
+        object: { id: "object" },
+        snapshot: { text: "hello" },
+        moment: { id: "resolved-moment" },
+      },
+    });
+    expect(
+      requests.some((request) => request.method === VERSIONED_METHOD.textRead),
+    ).toBe(false);
     expect(
       requests.find(
         (request) => request.method === WORKSPACE_METHOD.conflictsResolve,
@@ -219,6 +270,173 @@ describe("createCaptureLiveStores", () => {
         metadataCorrelationId: "conflict-1",
       },
     });
+  });
+
+  it("preserves keep-current as a conflict-only no-op", async () => {
+    const requests: Request[] = [];
+    const client = clientFor(async (request) => {
+      requests.push(request);
+      if (request.method === WORKSPACE_METHOD.conflictsList) {
+        return { id: request.id, result: [conflict()] };
+      }
+      if (request.method === WORKSPACE_METHOD.conflictsResolve) {
+        return {
+          id: request.id,
+          result: {
+            conflict: {
+              ...conflict("resolved"),
+              chosenFrom: "current",
+              resolution: "kept-current",
+            },
+            write: null,
+            delete: null,
+          },
+        };
+      }
+      throw new Error(`Unexpected method ${request.method}`);
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    await expect(
+      store.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: "conflict",
+        resolution: { kind: "keep-current" },
+        metadata: { origin: "api" },
+      }),
+    ).resolves.toEqual({
+      kind: "resolved",
+      conflict: expect.objectContaining({
+        id: "conflict",
+        resolution: "kept-current",
+      }),
+    });
+    expect(
+      requests.some((request) => request.method === VERSIONED_METHOD.textRead),
+    ).toBe(false);
+  });
+
+  it("returns the oracle comparison states instead of mergeability shorthand", async () => {
+    const client = clientFor(async (request) => {
+      expect(request.method).toBe(VERSIONED_METHOD.versionsCompare);
+      return {
+        id: request.id,
+        result: {
+          workspaceId: WORKSPACE_ID,
+          path: "note.md",
+          targetVersionId: "main",
+          sourceVersionId: "draft",
+          base: snapshot,
+          current: null,
+          incoming: { ...snapshot, versionId: "draft", text: "incoming" },
+          status: "incoming-changed",
+        },
+      };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    await expect(
+      store.compareTextFileVersions({
+        workspaceId: WORKSPACE_ID,
+        targetVersionId: "main",
+        sourceVersionId: "draft",
+        path: "note.md",
+      }),
+    ).resolves.toEqual({
+      workspaceId: WORKSPACE_ID,
+      path: "note.md",
+      targetVersionId: "main",
+      sourceVersionId: "draft",
+      base: expect.objectContaining({
+        exists: true,
+        path: "note.md",
+        text: "hello",
+        metadata: { origin: "local-file" },
+      }),
+      current: { exists: false, path: "note.md" },
+      incoming: expect.objectContaining({
+        exists: true,
+        path: "note.md",
+        text: "incoming",
+      }),
+      status: "incoming-changed",
+    });
+  });
+
+  it("rejects a truncated text moment instead of fabricating empty content", async () => {
+    const client = clientFor(async (request) => {
+      expect(request.method).toBe(VERSIONED_METHOD.momentsGet);
+      return {
+        id: request.id,
+        result: {
+          ...moment,
+          afterText: null,
+          afterByteLength: 60 * 1024,
+          afterInbandLimitBytes: 48 * 1024,
+        },
+      };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    await expect(
+      store.getMoment({
+        workspaceId: WORKSPACE_ID,
+        momentId: "resolved-moment",
+      }),
+    ).rejects.toThrow("exceeds the RPC in-band limit");
+  });
+
+  it("keeps digest and byte length on metadata-only listings", async () => {
+    const client = clientFor(async (request) => {
+      expect(request.method).toBe(VERSIONED_METHOD.textList);
+      return {
+        id: request.id,
+        result: {
+          files: [
+            {
+              path: "note.md",
+              objectId: "object",
+              contentKind: "text",
+              sha256: "a".repeat(64),
+              byteLength: 5,
+              binarySha256: null,
+              updatedAtMs: 2,
+              latestMomentId: "moment",
+              metadataOrigin: "capture",
+              metadataSummary: null,
+              metadataCorrelationId: null,
+            },
+          ],
+          nextAfterPath: null,
+        },
+      };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    await expect(
+      store.listTextFileMetadata?.({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        path: "note.md",
+        sha256: "a".repeat(64),
+        byteLength: 5,
+      }),
+    ]);
   });
 
   it("omits nullable protected-moment metadata fields", async () => {

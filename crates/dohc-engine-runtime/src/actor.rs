@@ -61,9 +61,10 @@ use dohc_engine_domain::{
     delete_secret_file_keyless, derive_capture_object_id, enqueue_binary_delete,
     enqueue_binary_rename, enqueue_write, fork_version_keyless, get_secret_moment_keyless,
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_page_keyless, restore_secret_file_verbatim,
-    secret_file_len_keyless, select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
-    write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
+    list_secret_files_keyless_page, list_secret_moments_page_keyless,
+    restore_secret_file_verbatim_with_metadata, secret_file_len_keyless,
+    select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
+    write_projected_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, ProjectionTargetKind, ProjectionTargetState, StdBackoff,
@@ -499,6 +500,9 @@ enum Command {
         path: String,
         before_moment_id: String,
         moment_id: String,
+        metadata_origin: String,
+        metadata_summary: Option<String>,
+        metadata_correlation_id: Option<String>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -2177,6 +2181,9 @@ impl ActorHandle {
         path: String,
         before_moment_id: String,
         moment_id: String,
+        metadata_origin: String,
+        metadata_summary: Option<String>,
+        metadata_correlation_id: Option<String>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -2188,6 +2195,9 @@ impl ActorHandle {
                 path,
                 before_moment_id,
                 moment_id,
+                metadata_origin,
+                metadata_summary,
+                metadata_correlation_id,
                 now_ms,
                 faults,
                 token,
@@ -5589,6 +5599,9 @@ fn worker_main(
                 path,
                 before_moment_id,
                 moment_id,
+                metadata_origin,
+                metadata_summary,
+                metadata_correlation_id,
                 now_ms,
                 faults,
                 token,
@@ -5597,12 +5610,15 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    restore_secret_file_verbatim(
+                    restore_secret_file_verbatim_with_metadata(
                         &mut store,
                         &workspace_id,
                         &path,
                         &before_moment_id,
                         &moment_id,
+                        &metadata_origin,
+                        metadata_summary,
+                        metadata_correlation_id,
                         now_ms,
                         faults.as_ref(),
                     )

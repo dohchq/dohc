@@ -438,6 +438,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.textRead(state, workspace, params);
       case VERSIONED_METHOD.binaryWrite:
         return this.binaryWrite(state, workspace, params, request);
+      case VERSIONED_METHOD.binaryWriteBlob:
+        return this.binaryWriteBlob(state, workspace, params, request);
       case VERSIONED_METHOD.textRename:
         return this.textRename(state, workspace, params, request);
       case VERSIONED_METHOD.textDelete:
@@ -465,7 +467,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       case VERSIONED_METHOD.versionsMerge:
         return this.merge(state, workspace, params, request);
       case VERSIONED_METHOD.versionsCompare:
-        return this.compare(state, params);
+        return this.compare(state, workspace, params);
       case VERSIONED_METHOD.versionsCompareFiles:
         return this.compareFiles(state, params);
       case VERSIONED_METHOD.secretsWrite:
@@ -617,6 +619,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     workspace: string,
     params: JsonObject,
     request: Request,
+    allowFullRange = false,
   ): JsonValue {
     const path = requiredString(params, "path", "binary write");
     if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
@@ -641,7 +644,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     } else {
       throw new Error("invalid-input");
     }
-    if (bytes.length > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
+    if (!allowFullRange && bytes.length > INBAND_LIMIT_BYTES) {
+      throw new Error("content-exceeds-inband-cap");
+    }
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const objectId = optionalString(params, "objectId") ??
       (requestId
@@ -740,6 +745,30 @@ export class VersionedLoopbackEngine implements EngineTransport {
     };
     this.recordReplay(state, requestId, params, result, replayFingerprint);
     return result;
+  }
+
+  private binaryWriteBlob(
+    state: WorkspaceState,
+    workspace: string,
+    params: JsonObject,
+    request: Request,
+  ): JsonValue {
+    const expectedSha = requiredString(params, "sha256", "binary blob write").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(expectedSha)) throw new Error("invalid-input");
+    const encoded = optionalString(params, "bytesBase64");
+    const bytes =
+      encoded === undefined
+        ? state.blobs.get(expectedSha)
+        : decodeBase64(encoded);
+    if (bytes === undefined) throw new Error("file-not-found");
+    if (sha256(bytes) !== expectedSha) throw new Error("invalid-input");
+    return this.binaryWrite(
+      state,
+      workspace,
+      { ...params, bytesBase64: encodeBase64(bytes) },
+      request,
+      true,
+    );
   }
 
   private textRename(
@@ -929,7 +958,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
         path,
         objectId: file.objectId,
         contentKind: file.contentKind,
-        byteLength: file.contentKind === "text" ? utf8Length(file.text ?? "") : null,
+        sha256:
+          file.contentKind === "binary"
+            ? file.binarySha ?? sha256([])
+            : sha256(file.text ?? ""),
+        byteLength:
+          file.contentKind === "text"
+            ? utf8Length(file.text ?? "")
+            : file.bytes?.length ?? 0,
         binarySha256: file.binarySha ?? null,
         updatedAtMs: file.updatedAtMs,
         latestMomentId: file.latestMomentId,
@@ -1056,27 +1092,49 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return this.versionJson(version);
   }
 
-  private compare(state: WorkspaceState, params: JsonObject): JsonValue {
-    const source = this.version(state, requiredString(params, "sourceVersionId", "compare"));
-    const target = this.version(state, requiredString(params, "targetVersionId", "compare"));
-    const path = requiredString(params, "path", "compare");
+  private comparisonRecord(
+    workspace: string,
+    path: string,
+    target: LoopbackVersion,
+    source: LoopbackVersion,
+  ): JsonObject {
     const incoming = source.files.get(path);
     const current = target.files.get(path);
     const base = source.textForkBase.get(path);
-    if (this.filesEqual(incoming, current) || this.filesEqual(incoming, base)) {
-      return { status: "unchanged" };
-    }
-    if (this.filesEqual(current, base)) return { status: "merged" };
-    if (
-      base?.contentKind === "text" &&
-      current?.contentKind === "text" &&
-      incoming?.contentKind === "text"
-    ) {
-      return {
-        status: mergeMarkdown(base.text ?? "", current.text ?? "", incoming.text ?? "").status,
-      };
-    }
-    return { status: "conflict" };
+    const status = this.filesEqual(current, incoming)
+      ? "same"
+      : this.filesEqual(current, base)
+        ? "incoming-changed"
+        : this.filesEqual(incoming, base)
+          ? "current-changed"
+          : "diverged";
+    return {
+      workspaceId: workspace,
+      path,
+      targetVersionId: target.id,
+      sourceVersionId: source.id,
+      base: base
+        ? this.comparisonState(workspace, source.id, path, base)
+        : null,
+      current: current
+        ? this.comparisonState(workspace, target.id, path, current)
+        : null,
+      incoming: incoming
+        ? this.comparisonState(workspace, source.id, path, incoming)
+        : null,
+      status,
+    };
+  }
+
+  private compare(
+    state: WorkspaceState,
+    workspace: string,
+    params: JsonObject,
+  ): JsonValue {
+    const source = this.version(state, requiredString(params, "sourceVersionId", "compare"));
+    const target = this.version(state, requiredString(params, "targetVersionId", "compare"));
+    const path = requiredString(params, "path", "compare");
+    return this.comparisonRecord(workspace, path, target, source);
   }
 
   private merge(
@@ -1124,6 +1182,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const incoming = source.files.get(path);
     const current = target.files.get(path);
     const base = source.textForkBase.get(path);
+    const comparison = this.comparisonRecord(workspace, path, target, source);
     if (
       incoming?.contentKind === "binary" ||
       current?.contentKind === "binary" ||
@@ -1134,6 +1193,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (this.filesEqual(incoming, current)) {
       const result: JsonObject = {
         status: "unchanged",
+        reason: "already-same",
+        comparison,
         deduped: false,
         materializeEnqueued: false,
         materialized: false,
@@ -1145,6 +1206,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (this.filesEqual(incoming, base)) {
       const result: JsonObject = {
         status: "unchanged",
+        reason: "source-unchanged",
+        comparison,
         deduped: false,
         materializeEnqueued: false,
         materialized: false,
@@ -1166,6 +1229,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       } else {
         const result: JsonObject = {
           status: "conflict",
+          comparison,
           deduped: false,
           materializeEnqueued: false,
           materialized: false,
@@ -1195,7 +1259,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
         status: "merged",
         writeKind: "delete",
         object: this.fileObject(workspace, before.objectId, now),
+        before: this.snapshotMetadata(workspace, target.id, path, before),
         moment: this.capMoment(moment),
+        comparison,
         deduped: false,
         materializeEnqueued,
         materialized: materializeEnqueued,
@@ -1231,6 +1297,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       object: this.fileObject(workspace, copied.objectId, now),
       snapshot: this.snapshotMetadata(workspace, target.id, path, copied),
       moment: this.capMoment(moment),
+      comparison,
       deduped: false,
       materializeEnqueued,
       materialized: materializeEnqueued,
@@ -1765,6 +1832,24 @@ export class VersionedLoopbackEngine implements EngineTransport {
       updatedAtMs: file.updatedAtMs,
       latestMomentId: file.latestMomentId,
       metadataOrigin: file.metadataOrigin,
+    };
+  }
+
+  private comparisonState(
+    workspace: string,
+    versionId: string,
+    path: string,
+    file: LoopbackFile,
+  ): JsonObject {
+    const metadata = this.snapshotMetadata(workspace, versionId, path, file);
+    const digest =
+      file.contentKind === "binary"
+        ? file.binarySha ?? sha256([])
+        : sha256(file.text ?? "");
+    return {
+      ...metadata,
+      text: file.contentKind === "binary" ? "" : file.text ?? "",
+      blobSha256: digest,
     };
   }
 

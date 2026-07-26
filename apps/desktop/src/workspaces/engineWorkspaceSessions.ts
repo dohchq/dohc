@@ -6,8 +6,8 @@ import {
   type WorkspaceHandle,
 } from "@dohc/workspace-engine-client";
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { EngineDaemonClient } from "./engineDaemonLifecycle";
 
 export interface EngineWorkspace {
@@ -111,7 +111,7 @@ export class EngineWorkspaceSessions {
   ): Promise<T> {
     const maxAttempts = options.retryTransportErrors
       ? this.transportRebindAttempts
-      : 2;
+      : 1;
     let rebindStarted = false;
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -137,21 +137,25 @@ export class EngineWorkspaceSessions {
       try {
         return await operation(binding);
       } catch (error) {
-        const retryAfterReconnect = isEngineSessionReconnectError(error);
+        const reconnectRequired = isEngineSessionReconnectError(error);
         const retryAfterTransport =
           options.retryTransportErrors === true &&
           typeof error === "object" &&
           error !== null &&
           "code" in error &&
           error.code === "transport-error";
+        if (reconnectRequired) {
+          const entry = this.entry(workspace.workspaceId);
+          if (entry.binding === binding) entry.binding = null;
+        }
+        const retryAfterReconnect =
+          options.retryTransportErrors === true && reconnectRequired;
         if (
           (!retryAfterReconnect && !retryAfterTransport) ||
           attempt >= maxAttempts
         ) {
           throw error;
         }
-        const entry = this.entry(workspace.workspaceId);
-        if (entry.binding === binding) entry.binding = null;
         rebindStarted = true;
         lastError = error;
         if (retryAfterTransport) {
@@ -237,9 +241,19 @@ export class EngineWorkspaceSessions {
     let preparation = this.preparations.get(rootPath);
     if (!preparation) {
       preparation = (async () => {
-        const markerDirectory = join(rootPath, ".dohc", "engine");
+        const workspaceRoot = resolve(rootPath);
+        const rootInfo = await lstat(workspaceRoot);
+        if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
+          throw new Error(
+            `Rust engine workspace root must be a real directory: ${rootPath}.`,
+          );
+        }
+        const realRoot = await realpath(workspaceRoot);
+        const dohcDirectory = join(workspaceRoot, ".dohc");
+        const markerDirectory = join(dohcDirectory, "engine");
         const markerPath = join(markerDirectory, "SHADOW_CLONE");
-        await mkdir(markerDirectory, { recursive: true });
+        await this.ensureRealDirectory(dohcDirectory, realRoot);
+        await this.ensureRealDirectory(markerDirectory, realRoot);
         try {
           await writeFile(
             markerPath,
@@ -248,6 +262,12 @@ export class EngineWorkspaceSessions {
           );
         } catch (error) {
           if (!isAlreadyExists(error)) throw error;
+          const markerInfo = await lstat(markerPath);
+          if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) {
+            throw new Error(
+              `Rust engine shadow marker must be a real file: ${markerPath}.`,
+            );
+          }
           const token = await readFile(markerPath, "utf8");
           if (!SHADOW_CLONE_TOKEN.test(token)) {
             throw new Error(
@@ -264,6 +284,30 @@ export class EngineWorkspaceSessions {
       });
     }
     await preparation;
+  }
+
+  private async ensureRealDirectory(
+    directory: string,
+    realRoot: string,
+  ): Promise<void> {
+    try {
+      await mkdir(directory);
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+    }
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error(`Rust engine directory must not be a symlink: ${directory}.`);
+    }
+    const resolvedDirectory = await realpath(directory);
+    const escape = relative(realRoot, resolvedDirectory);
+    if (
+      escape === ".." ||
+      escape.startsWith(`..${sep}`) ||
+      isAbsolute(escape)
+    ) {
+      throw new Error(`Rust engine directory escapes the workspace: ${directory}.`);
+    }
   }
 
   private async closeBinding(binding: EngineWorkspaceBinding): Promise<void> {

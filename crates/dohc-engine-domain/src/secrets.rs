@@ -1200,9 +1200,37 @@ pub fn restore_secret_file_verbatim(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<SecretRestoreResult, DomainError> {
+    restore_secret_file_verbatim_with_metadata(
+        store,
+        workspace_id,
+        path,
+        before_moment_id,
+        moment_id,
+        "restore",
+        None,
+        None,
+        now_ms,
+        faults,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn restore_secret_file_verbatim_with_metadata(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    path: &str,
+    before_moment_id: &str,
+    moment_id: &str,
+    metadata_origin: &str,
+    metadata_summary: Option<String>,
+    metadata_correlation_id: Option<String>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<SecretRestoreResult, DomainError> {
     non_empty(workspace_id, "workspace_id")?;
     non_empty(before_moment_id, "moment_id")?;
     non_empty(moment_id, "moment_id")?;
+    validate_origin(metadata_origin)?;
     let path = validate_secret_path(path)?;
     let outcome = store.write_with(faults, |tx| {
         let before = tx
@@ -1271,9 +1299,9 @@ pub fn restore_secret_file_verbatim(
             path: before.path,
             recorded_at_ms: now_ms,
             operation: if target.is_some() { SecretOp::Write } else { SecretOp::Delete },
-            metadata_origin: "restore".to_owned(),
-            metadata_summary: None,
-            metadata_correlation_id: None,
+            metadata_origin: metadata_origin.to_owned(),
+            metadata_summary,
+            metadata_correlation_id,
         };
         // Restore always materializes; capture never observed this state.
         insert_moment(tx, &record, moment_order, target.as_ref(), false)?;

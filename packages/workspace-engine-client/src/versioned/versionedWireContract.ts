@@ -8,6 +8,7 @@ export const VERSIONED_METHOD = {
   textRollback: "versionedText.rollback",
   textList: "versionedText.list",
   binaryWrite: "versionedBinary.write",
+  binaryWriteBlob: "versionedBinary.writeBlob",
   binaryRead: "versionedBinary.read",
   binaryReadBlob: "versionedBinary.readBlob",
   versionsCreateNamed: "versions.createNamed",
@@ -84,6 +85,15 @@ export type VersionedBinaryWriteParams = MutationMetadata & {
   objectId?: string;
   path: string;
   bytes?: number[];
+  bytesBase64?: string;
+  momentId?: string;
+};
+
+export type VersionedBinaryWriteBlobParams = MutationMetadata & {
+  versionId: string;
+  objectId?: string;
+  path: string;
+  sha256: string;
   bytesBase64?: string;
   momentId?: string;
 };
@@ -222,6 +232,9 @@ export type SecretsRestoreParams = JsonObject & {
   path: string;
   beforeMomentId: string;
   momentId: string;
+  origin: VersionedOrigin;
+  summary?: string;
+  correlationId?: string;
 };
 
 export type SecretsMomentsListParams = JsonObject & {
@@ -389,6 +402,7 @@ export type VersionedTextListEntry = JsonObject & {
   path: string;
   objectId: string;
   contentKind: VersionedContentKind;
+  sha256: string;
   byteLength: number | null;
   binarySha256: string | null;
   updatedAtMs: number;
@@ -463,6 +477,8 @@ export type VersionsMergeResult =
       MergeMaterializationResult & {
         status: "unchanged" | "conflict";
         deduped: boolean;
+        comparison: VersionedComparisonRecord;
+        reason?: "already-same" | "source-unchanged";
       })
   | (JsonObject & {
       status: "merged";
@@ -471,18 +487,30 @@ export type VersionsMergeResult =
       snapshot: SnapshotMetadata;
       moment: MomentRecord;
       deduped: boolean;
+      comparison: VersionedComparisonRecord;
     } & MergeMaterializationResult)
   | (JsonObject & {
       status: "merged";
       writeKind: "delete";
       object: FileObject;
+      before: SnapshotMetadata;
       moment: MomentRecord;
       deduped: boolean;
+      comparison: VersionedComparisonRecord;
     } & MergeMaterializationResult);
 
-export type VersionsCompareResult = JsonObject & {
-  status: VersionedComparisonStatus;
+export type VersionedComparisonRecord = JsonObject & {
+  workspaceId: string;
+  path: string;
+  targetVersionId: string;
+  sourceVersionId: string;
+  base: VersionedTextReadValue | null;
+  current: VersionedTextReadValue | null;
+  incoming: VersionedTextReadValue | null;
+  status: "same" | "incoming-changed" | "current-changed" | "diverged";
 };
+
+export type VersionsCompareResult = VersionedComparisonRecord;
 
 export type VersionsCompareFilesEntry = JsonObject & {
   path: string;
@@ -573,6 +601,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackParams;
   [VERSIONED_METHOD.textList]: VersionedTextListParams;
   [VERSIONED_METHOD.binaryWrite]: VersionedBinaryWriteParams;
+  [VERSIONED_METHOD.binaryWriteBlob]: VersionedBinaryWriteBlobParams;
   [VERSIONED_METHOD.binaryRead]: VersionedBinaryReadParams;
   [VERSIONED_METHOD.binaryReadBlob]: VersionedBinaryReadBlobParams;
   [VERSIONED_METHOD.versionsCreateNamed]: VersionsCreateNamedParams;
@@ -606,6 +635,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackResult;
   [VERSIONED_METHOD.textList]: VersionedTextListResult;
   [VERSIONED_METHOD.binaryWrite]: VersionedBinaryWriteResult;
+  [VERSIONED_METHOD.binaryWriteBlob]: VersionedBinaryWriteResult;
   [VERSIONED_METHOD.binaryRead]: VersionedBinaryReadResult;
   [VERSIONED_METHOD.binaryReadBlob]: VersionedBinaryReadBlobResult;
   [VERSIONED_METHOD.versionsCreateNamed]: VersionsCreateNamedResult;
@@ -1239,6 +1269,9 @@ export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult
     "materializeEnqueued",
     "materialized",
     "materializeOutcome",
+    "comparison",
+    "reason",
+    "before",
   ]);
   const status = object.status;
   const materialization: MergeMaterializationResult = {
@@ -1246,12 +1279,27 @@ export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult
     materialized: booleanValue(object, "materialized", label),
     materializeOutcome: materializeOutcomeValue(object, label),
   };
+  const comparison = comparisonValue(
+    object.comparison ?? null,
+    `${label}.comparison`,
+  );
   if (status === "unchanged" || status === "conflict") {
-    return {
+    const result: Extract<VersionsMergeResult, { status: "unchanged" | "conflict" }> = {
       status,
       deduped: booleanValue(object, "deduped", label),
+      comparison,
       ...materialization,
     };
+    if (status === "unchanged") {
+      const reason = object.reason;
+      if (reason !== "already-same" && reason !== "source-unchanged") {
+        throw new VersionedProtocolShapeError(`${label}.reason is invalid.`);
+      }
+      result.reason = reason;
+    } else if (object.reason !== undefined) {
+      throw new VersionedProtocolShapeError(`${label}.reason is invalid for conflict.`);
+    }
+    return result;
   }
   if (status !== "merged") {
     throw new VersionedProtocolShapeError(`${label}.status is invalid.`);
@@ -1265,6 +1313,7 @@ export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult
       snapshot: snapshotMetadataValue(object.snapshot ?? null, `${label}.snapshot`),
       moment: momentValue(object.moment ?? null, `${label}.moment`),
       deduped: booleanValue(object, "deduped", label),
+      comparison,
       ...materialization,
     };
   }
@@ -1273,8 +1322,13 @@ export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult
       status,
       writeKind,
       object: fileObjectValue(object.object ?? null, `${label}.object`),
+      before: snapshotMetadataValue(
+        object.before ?? null,
+        `${label}.before`,
+      ),
       moment: momentValue(object.moment ?? null, `${label}.moment`),
       deduped: booleanValue(object, "deduped", label),
+      comparison,
       ...materialization,
     };
   }
@@ -1518,6 +1572,7 @@ export function decodeVersionedTextListResult(
       "path",
       "objectId",
       "contentKind",
+      "sha256",
       "byteLength",
       "binarySha256",
       "updatedAtMs",
@@ -1530,6 +1585,7 @@ export function decodeVersionedTextListResult(
       path: stringValue(row, "path", entryLabel),
       objectId: stringValue(row, "objectId", entryLabel),
       contentKind: contentKindValue(row, "contentKind", entryLabel),
+      sha256: stringValue(row, "sha256", entryLabel),
       byteLength: nullableNumberValue(row, "byteLength", entryLabel),
       binarySha256: nullableStringValue(row, "binarySha256", entryLabel),
       updatedAtMs: numberValue(row, "updatedAtMs", entryLabel),
@@ -1561,17 +1617,46 @@ export function decodeVersionedTextListResult(
 export function decodeVersionsCompareResult(
   value: JsonValue,
 ): VersionsCompareResult {
-  const label = "versionedText.compare result";
-  const object = strictObjectValue(value, label, ["status"]);
+  return comparisonValue(value, "versionedText.compare result");
+}
+
+function comparisonValue(
+  value: JsonValue,
+  label: string,
+): VersionedComparisonRecord {
+  const object = strictObjectValue(value, label, [
+    "workspaceId",
+    "path",
+    "targetVersionId",
+    "sourceVersionId",
+    "base",
+    "current",
+    "incoming",
+    "status",
+  ]);
   const status = object.status;
   if (
-    status !== "unchanged" &&
-    status !== "merged" &&
-    status !== "conflict"
+    status !== "same" &&
+    status !== "incoming-changed" &&
+    status !== "current-changed" &&
+    status !== "diverged"
   ) {
     throw new VersionedProtocolShapeError(`${label}.status is invalid.`);
   }
-  return { status };
+  const state = (key: "base" | "current" | "incoming") => {
+    const candidate = object[key] ?? null;
+    return candidate === null ? null : decodeVersionedTextReadResult(candidate);
+  };
+  return {
+    workspaceId: stringValue(object, "workspaceId", label),
+    path: stringValue(object, "path", label),
+    targetVersionId: stringValue(object, "targetVersionId", label),
+    sourceVersionId: stringValue(object, "sourceVersionId", label),
+    base: state("base"),
+    current: state("current"),
+    incoming: state("incoming"),
+    status,
+  };
 }
 
 function decodeEmptyObject(value: JsonValue, label: string): JsonObject {
@@ -1604,6 +1689,7 @@ export function decodeVersionedResult<M extends VersionedMethod>(
       result = decodeVersionedTextListResult(value);
       break;
     case VERSIONED_METHOD.binaryWrite:
+    case VERSIONED_METHOD.binaryWriteBlob:
       result = decodeVersionedBinaryWriteResult(value);
       break;
     case VERSIONED_METHOD.binaryRead:

@@ -54,6 +54,14 @@ const VERSIONED_REQUEST_CASES: VersionedRequestCase[] = [
     method: VERSIONED_METHOD.binaryWrite,
     params: { versionId: "main", path: "a.bin", bytes: [1] },
   },
+  {
+    method: VERSIONED_METHOD.binaryWriteBlob,
+    params: {
+      versionId: "main",
+      path: "a.bin",
+      sha256: "a".repeat(64),
+    },
+  },
   { method: VERSIONED_METHOD.binaryRead, params: { versionId: "main", path: "a.bin" } },
   {
     method: VERSIONED_METHOD.binaryReadBlob,
@@ -134,6 +142,7 @@ const VERSIONED_REQUEST_CASES: VersionedRequestCase[] = [
       path: ".env",
       beforeMomentId: "before",
       momentId: "after",
+      origin: "restore",
     },
   },
   {
@@ -221,7 +230,10 @@ const WORKSPACE_DECODER_CASES: Array<{
   { method: WORKSPACE_METHOD.close, valid: { closed: true } },
   { method: WORKSPACE_METHOD.conflictsList, valid: [conflict] },
   { method: WORKSPACE_METHOD.conflictsOpen, valid: { inserted: true } },
-  { method: WORKSPACE_METHOD.conflictsResolve, valid: { conflict } },
+  {
+    method: WORKSPACE_METHOD.conflictsResolve,
+    valid: { conflict, write: null, delete: null },
+  },
   { method: WORKSPACE_METHOD.searchQuery, valid: [] },
   {
     method: WORKSPACE_METHOD.watcherStatus,
@@ -323,6 +335,73 @@ describe("VersionedLiveAdapter", () => {
       VERSIONED_METHOD.binaryReadBlob,
     ]);
     expect(blobHandlers.size).toBe(0);
+  });
+
+  it("writes an over-cap binary by digest instead of embedding its bytes", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
+    const bytes = new Uint8Array(48 * 1024 + 1).fill(7);
+
+    await expect(
+      adapter.writeBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "asset.bin",
+        bytes,
+        metadata: { origin: "restore", summary: "Restore asset" },
+      }),
+    ).rejects.toBe(SENTINEL);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: VERSIONED_METHOD.binaryWriteBlob,
+      params: {
+        versionId: "main",
+        path: "asset.bin",
+        sha256: "be094ba239945c6a73d6f4bb49cebcede4910e2fc62f5daa17946f1f0af5d39a",
+        origin: "restore",
+        summary: "Restore asset",
+      },
+    });
+    expect(requests[0]?.params).not.toHaveProperty("bytes");
+    expect(requests[0]?.params).not.toHaveProperty("bytesBase64");
+  });
+
+  it("uses the full-range blob endpoint for a new over-cap binary", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
+    const bytes = new Uint8Array(48 * 1024 + 1).fill(11);
+
+    await expect(
+      adapter.writeBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "new-asset.bin",
+        bytes,
+        metadata: { origin: "api" },
+      }),
+    ).rejects.toBe(SENTINEL);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: VERSIONED_METHOD.binaryWriteBlob,
+      params: {
+        versionId: "main",
+        path: "new-asset.bin",
+        sha256: "a676bf58279257bf7913f059ee405a3c40aab6be644a0ffd072a3aa3231f58ca",
+        bytesBase64: Buffer.from(bytes).toString("base64"),
+        origin: "api",
+      },
+    });
+    expect(requests[0]?.params).not.toHaveProperty("bytes");
   });
 
   it("fails with a typed capability error when blob egress is unavailable", async () => {
@@ -613,10 +692,37 @@ describe("VersionedLiveAdapter", () => {
     }
   });
 
-  it("forwards supported secret mutation metadata and rejects unsupported restore metadata", async () => {
+  it("forwards metadata for every secret mutation, including restore", async () => {
     const requests: Request[] = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        if (request.method === VERSIONED_METHOD.secretsMomentsGet) {
+          return {
+            id: request.id,
+            result: {
+              id: "secret-moment",
+              workspaceId: WORKSPACE,
+              versionId: "main",
+              path: ".env",
+              recordedAtMs: 1,
+              operation: "write",
+              metadata: {
+                origin: "api",
+                summary: null,
+                correlationId: null,
+              },
+              momentOrder: 1,
+              protected: true,
+            },
+          };
+        }
+        throw SENTINEL;
+      },
+    };
     const adapter = new VersionedLiveAdapter(
-      captureClient(requests),
+      client,
       WORKSPACE,
       { workspaceId: "workspace" },
     );
@@ -646,22 +752,27 @@ describe("VersionedLiveAdapter", () => {
       method: VERSIONED_METHOD.secretsDelete,
       params: { correlationId: "operation-1" },
     });
-    const requestCount = requests.length;
     await expect(
       adapter.restoreSecretFileToBeforeMoment({
         workspaceId: "workspace",
         momentId: "secret-moment",
-        metadata: { origin: "restore", summary: "Undo secret change" },
+        metadata: {
+          origin: "restore",
+          summary: "Undo secret change",
+          correlationId: "operation-restore",
+        },
       }),
-    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
-    await expect(
-      adapter.restoreSecretFileToBeforeMoment({
-        workspaceId: "workspace",
-        momentId: "secret-moment",
-        metadata: { origin: "api" },
-      }),
-    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
-    expect(requests).toHaveLength(requestCount);
+    ).rejects.toBe(SENTINEL);
+    expect(requests.at(-1)).toMatchObject({
+      method: VERSIONED_METHOD.secretsRestore,
+      params: {
+        path: ".env",
+        beforeMomentId: "secret-moment",
+        origin: "restore",
+        summary: "Undo secret change",
+        correlationId: "operation-restore",
+      },
+    });
 
     await expect(
       adapter.applySecretFileFromVersion({
@@ -686,8 +797,8 @@ describe("VersionedLiveAdapter", () => {
     });
   });
 
-  it("encodes every one of the 30 versioned methods with exact params", async () => {
-    expect(VERSIONED_REQUEST_CASES).toHaveLength(30);
+  it("encodes every one of the 31 versioned methods with exact params", async () => {
+    expect(VERSIONED_REQUEST_CASES).toHaveLength(31);
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
       captureClient(requests),
@@ -757,6 +868,7 @@ describe("VersionedLiveAdapter", () => {
             path: "a.md",
             objectId: "object",
             contentKind: "text",
+            sha256: "a".repeat(64),
             byteLength: 1,
             binarySha256: null,
             updatedAtMs: 1,
@@ -769,9 +881,20 @@ describe("VersionedLiveAdapter", () => {
     ).toMatchObject({ files: [{ path: "a.md" }] });
     expect(
       decodeVersionedResult(VERSIONED_METHOD.versionsCompare, {
-        status: "merged",
+        workspaceId: WORKSPACE,
+        path: "a.md",
+        targetVersionId: "main",
+        sourceVersionId: "draft",
+        base: snapshot,
+        current: null,
+        incoming: snapshot,
+        status: "incoming-changed",
       }),
-    ).toEqual({ status: "merged" });
+    ).toMatchObject({
+      path: "a.md",
+      status: "incoming-changed",
+      current: null,
+    });
     expect(
       decodeVersionedResult(VERSIONED_METHOD.secretsFork, {}),
     ).toEqual({});
@@ -830,6 +953,7 @@ describe("VersionedLiveAdapter", () => {
       path: `notes/${index}.md`,
       objectId: `object-${index}`,
       contentKind: "text" as const,
+      sha256: "a".repeat(64),
       byteLength: index,
       binarySha256: null,
       updatedAtMs: index,

@@ -23,12 +23,12 @@ use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
     ConflictStatus, CreateFileThread, CreateNamedVersion, DeleteTextFile, DispatchClaim,
     DispatchRecord, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
-    LocalAttachmentInput, MarkdownMergeResult, MentionCursor, MergeTextFileFromVersion,
-    MergeTextFileResult, MomentOp, RenameTextFile, ResolveConflictKind, ResolveDecision,
+    LocalAttachmentInput, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
+    MergeUnchangedReason, MomentOp, RenameTextFile, ResolveConflictKind, ResolveDecision,
     ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent,
     SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread,
     TextConflict, TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus, VersionRecord,
-    WriteBinary, WriteText, merge_markdown, validate_addressable_plaintext_path,
+    WriteBinary, WriteText, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -55,9 +55,9 @@ use std::{
 const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 
-/// In-band CONTENT (binary bytes, secret plaintext) is bounded by the DOP1
-/// string limit (64 KiB per string): base64 expands 4/3, so this raw cap
-/// leaves headroom under it. Larger binary blobs use raw blob-chunk egress.
+/// In-band CONTENT (binary bytes, secret plaintext) uses the capture contract's
+/// smaller request cap. Larger binary blobs use the full-range write endpoint
+/// or raw blob-chunk egress.
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
 const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
 
@@ -68,7 +68,7 @@ const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
 const BLOB_EGRESS_BYTE_BUDGET: usize = dohc_engine_storage::MAX_BLOB_BYTES;
 
 /// Largest raw Y.Doc full-state that still fits one wire string once
-/// base64-expanded (4/3): DOP1's 64 KiB `max_string_bytes` divided by 4,
+/// base64-expanded (4/3): DOP1's `max_string_bytes` divided by 4,
 /// times 3. Refusing here surfaces a clean error instead of the framer
 /// rejecting the whole response (which InProcessTransport would not even
 /// catch). Docs beyond this belong to the blob-chunk streaming path.
@@ -551,6 +551,10 @@ impl EngineService {
             }
             "versionedBinary.write" => {
                 self.versioned_binary_write(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedBinary.writeBlob" => {
+                self.versioned_binary_write_blob(&ctx, &request, request.params.clone())
                     .await?
             }
             "versionedText.rename" => {
@@ -1562,6 +1566,117 @@ impl EngineService {
         }))
     }
 
+    async fn versioned_binary_write_blob(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedBinaryWriteBlobParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        if params.sha256.len() != 64 || !params.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+        }
+        let sha256 = params.sha256.to_ascii_lowercase();
+        let path = params.path.clone();
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let bytes = match params.bytes_base64 {
+            Some(encoded) => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-input"))?;
+                if bytes.len() > dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES {
+                    return Err(wire(
+                        ErrorCode::InvalidParams,
+                        "content-exceeds-capture-cap",
+                    ));
+                }
+                let actual = Sha256::digest(&bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                if actual != sha256 {
+                    return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+                }
+                bytes
+            }
+            None => {
+                let blob = Self::read_under_ctx(
+                    &cancellation,
+                    "versionedBinary.writeBlob",
+                    open.actor
+                        .read_binary_blob_for_egress(open.workspace_id.clone(), sha256),
+                )
+                .await?
+                .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
+                blob.bytes
+                    .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?
+            }
+        };
+        let session_serial = self
+            .mutation_session_guard(&open, &cancellation, "versionedBinary.writeBlob (queued)")
+            .await?;
+        self.ensure_path_not_leased(&open, &params.version_id, &path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let object_id = params.object_id.unwrap_or_else(|| {
+            self.generated_rpc_id("object", request.id, request_id.as_deref(), &path)
+        });
+        let moment_id = params.moment_id.unwrap_or_else(|| {
+            self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
+        });
+        let execution = open
+            .actor
+            .versioned_binary_write(
+                WriteBinary {
+                    workspace_id: open.workspace_id.clone(),
+                    version_id: params.version_id,
+                    object_id,
+                    path,
+                    bytes,
+                    moment_id,
+                    metadata_origin: origin,
+                    metadata_summary: params.summary,
+                    metadata_correlation_id: params.correlation_id,
+                    author_json,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
+                },
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await;
+        drop(session_serial);
+        let execution = execution.map_err(map_runtime)?;
+        let result = execution.write;
+        Ok(json!({
+            "object": file_object_json(&result.object),
+            "snapshot": {
+                "objectId": result.object_id,
+                "path": result.path,
+                "contentKind": "binary",
+                "text": "",
+                "sha256": result.sha256,
+                "byteLength": result.byte_length,
+                "updatedAtMs": result.updated_at_ms,
+                "latestMomentId": result.moment.moment_id,
+            },
+            "moment": moment_json(&result.moment),
+            "deduped": result.deduped,
+            "materializeEnqueued": result.materialize_enqueued,
+            "materialized": execution.materialized,
+            "materializeOutcome": materialize_outcome_name(execution.materialize_outcome),
+        }))
+    }
+
     async fn versioned_text_rename(
         &self,
         ctx: &RequestContext,
@@ -1784,7 +1899,7 @@ impl EngineService {
             }),
         )
         .await?;
-        Ok(json!({ "status": comparison_wire_status(&comparison) }))
+        Ok(comparison_json(&comparison))
     }
 
     async fn versioned_text_merge(
@@ -1842,15 +1957,25 @@ impl EngineService {
         let materialized = execution.materialized;
         let materialize_outcome = materialize_outcome_name(execution.materialize_outcome);
         Ok(match execution.merge {
-            MergeTextFileResult::Unchanged { deduped, .. } => json!({
+            MergeTextFileResult::Unchanged {
+                reason,
+                comparison,
+                deduped,
+            } => json!({
                 "status": "unchanged",
+                "reason": match reason {
+                    MergeUnchangedReason::AlreadySame => "already-same",
+                    MergeUnchangedReason::SourceUnchanged => "source-unchanged",
+                },
+                "comparison": comparison_json(&comparison),
                 "deduped": deduped,
                 "materializeEnqueued": materialize_enqueued,
                 "materialized": materialized,
                 "materializeOutcome": materialize_outcome,
             }),
-            MergeTextFileResult::Write { write, .. } => json!({
+            MergeTextFileResult::Write { comparison, write } => json!({
                 "status": "merged",
+                "comparison": comparison_json(&comparison),
                 "writeKind": "write",
                 "object": file_object_json(&write.object),
                 "snapshot": snapshot_metadata_json(&write.snapshot, "text", None, None),
@@ -1860,18 +1985,25 @@ impl EngineService {
                 "materialized": materialized,
                 "materializeOutcome": materialize_outcome,
             }),
-            MergeTextFileResult::Delete { delete, .. } => json!({
+            MergeTextFileResult::Delete { comparison, delete } => json!({
                 "status": "merged",
+                "comparison": comparison_json(&comparison),
                 "writeKind": "delete",
                 "object": file_object_json(&delete.object),
+                "before": snapshot_metadata_json(&delete.before, "text", None, None),
                 "moment": moment_json(&delete.moment),
                 "deduped": delete.deduped,
                 "materializeEnqueued": materialize_enqueued,
                 "materialized": materialized,
                 "materializeOutcome": materialize_outcome,
             }),
-            MergeTextFileResult::Conflict { deduped, .. } => json!({
+            MergeTextFileResult::Conflict {
+                comparison,
+                deduped,
+                ..
+            } => json!({
                 "status": "conflict",
+                "comparison": comparison_json(&comparison),
                 "deduped": deduped,
                 "materializeEnqueued": materialize_enqueued,
                 "materialized": materialized,
@@ -2263,7 +2395,7 @@ impl EngineService {
                 open.workspace_id,
                 params.version_id,
                 params.path,
-                MAX_INBAND_CONTENT_BYTES,
+                MAX_DESKTOP_CAPTURE_TEXT_BYTES,
             ),
         )
         .await?;
@@ -2288,7 +2420,7 @@ impl EngineService {
                     "metadataCorrelationId": snapshot.metadata_correlation_id
                 });
                 if over_cap {
-                    body["inbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+                    body["inbandLimitBytes"] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
                 }
                 body
             }
@@ -2617,7 +2749,8 @@ impl EngineService {
                     "path": row.path,
                     "objectId": row.object_id,
                     "contentKind": row.content_kind,
-                    "byteLength": row.text_byte_length,
+                    "sha256": row.sha256,
+                    "byteLength": row.byte_length,
                     "binarySha256": row.binary_sha256,
                     "updatedAtMs": row.updated_at_ms,
                     "latestMomentId": row.latest_moment_id,
@@ -2991,7 +3124,7 @@ impl EngineService {
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let path = params.path.clone();
         let text = params.text;
-        if text.len() > MAX_INBAND_CONTENT_BYTES {
+        if text.len() > dohc_engine_domain::MAX_SECRET_FILE_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
         let origin = validated_origin(Some(&params.origin), None)?;
@@ -3364,6 +3497,7 @@ impl EngineService {
         let params: SecretsRestoreParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let origin = validated_origin(Some(&params.origin), None)?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
         let result = open
@@ -3373,6 +3507,9 @@ impl EngineService {
                 path,
                 params.before_moment_id,
                 params.moment_id,
+                origin,
+                params.summary,
+                params.correlation_id,
                 now_ms()?,
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -3479,7 +3616,7 @@ impl EngineService {
                 params.version_id,
                 secret_path,
                 key,
-                MAX_INBAND_CONTENT_BYTES,
+                dohc_engine_domain::MAX_SECRET_FILE_BYTES,
             ),
         )
         .await?;
@@ -3490,7 +3627,7 @@ impl EngineService {
                 None => json!({
                     "text": Value::Null,
                     "byteLength": secret.byte_length,
-                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                    "inbandLimitBytes": dohc_engine_domain::MAX_SECRET_FILE_BYTES,
                 }),
             },
         })
@@ -6277,7 +6414,19 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        Ok(json!({ "conflict": conflict_json(&result.conflict) }))
+        Ok(json!({
+            "conflict": conflict_json(&result.conflict),
+            "write": result.write.as_ref().map(|write| json!({
+                "object": file_object_json(&write.object),
+                "snapshot": snapshot_json(&write.snapshot),
+                "moment": moment_json(&write.moment),
+            })),
+            "delete": result.delete.as_ref().map(|delete| json!({
+                "object": file_object_json(&delete.object),
+                "before": snapshot_json(&delete.before),
+                "moment": moment_json(&delete.moment),
+            })),
+        }))
     }
 
     async fn search_query(
@@ -6736,6 +6885,38 @@ struct VersionedBinaryWriteParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedBinaryWriteBlobParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    #[serde(default)]
+    object_id: Option<String>,
+    path: String,
+    sha256: String,
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    moment_id: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedTextRenameParams {
     #[serde(default)]
     workspace_id: Option<String>,
@@ -6995,6 +7176,11 @@ struct SecretsRestoreParams {
     path: String,
     before_moment_id: String,
     moment_id: String,
+    origin: String,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -8347,14 +8533,14 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         && moment.after_text.is_none()
         && moment
             .after_byte_length
-            .is_some_and(|length| length as usize > MAX_INBAND_CONTENT_BYTES))
-    .then_some(MAX_INBAND_CONTENT_BYTES);
+            .is_some_and(|length| length as usize > MAX_DESKTOP_CAPTURE_TEXT_BYTES))
+    .then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
     let before_inband_limit = (moment.before_content_kind == "text"
         && moment.before_text.is_none()
         && moment
             .before_byte_length
-            .is_some_and(|length| length as usize > MAX_INBAND_CONTENT_BYTES))
-    .then_some(MAX_INBAND_CONTENT_BYTES);
+            .is_some_and(|length| length as usize > MAX_DESKTOP_CAPTURE_TEXT_BYTES))
+    .then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
     json!({
         "momentOrder": moment.moment_order,
         "momentId": moment.moment_id,
@@ -8453,7 +8639,7 @@ fn parsed_moment_author(raw: &str) -> Value {
 /// tells the caller what was withheld).
 fn inband_text(text: Option<&str>) -> Value {
     match text {
-        Some(text) if text.len() <= MAX_INBAND_CONTENT_BYTES => json!(text),
+        Some(text) if text.len() <= MAX_DESKTOP_CAPTURE_TEXT_BYTES => json!(text),
         _ => Value::Null,
     }
 }
@@ -8533,26 +8719,22 @@ fn snapshot_metadata_json(
     })
 }
 
-fn comparison_wire_status(
-    comparison: &dohc_engine_domain::VersionedTextComparison,
-) -> &'static str {
-    match comparison.status {
-        ComparisonStatus::Same | ComparisonStatus::CurrentChanged => "unchanged",
-        ComparisonStatus::IncomingChanged => "merged",
-        ComparisonStatus::Diverged => match (
-            comparison.base.as_ref(),
-            comparison.current.as_ref(),
-            comparison.incoming.as_ref(),
-        ) {
-            (Some(base), Some(current), Some(incoming)) => {
-                match merge_markdown(&base.text, &current.text, &incoming.text) {
-                    MarkdownMergeResult::Merged(_) => "merged",
-                    MarkdownMergeResult::Conflict => "conflict",
-                }
-            }
-            _ => "conflict",
+fn comparison_json(comparison: &dohc_engine_domain::VersionedTextComparison) -> Value {
+    json!({
+        "workspaceId": comparison.workspace_id,
+        "path": comparison.path,
+        "targetVersionId": comparison.target_version_id,
+        "sourceVersionId": comparison.source_version_id,
+        "base": comparison.base.as_ref().map(snapshot_json),
+        "current": comparison.current.as_ref().map(snapshot_json),
+        "incoming": comparison.incoming.as_ref().map(snapshot_json),
+        "status": match comparison.status {
+            ComparisonStatus::Same => "same",
+            ComparisonStatus::IncomingChanged => "incoming-changed",
+            ComparisonStatus::CurrentChanged => "current-changed",
+            ComparisonStatus::Diverged => "diverged",
         },
-    }
+    })
 }
 
 fn conflict_json(conflict: &TextConflict) -> Value {

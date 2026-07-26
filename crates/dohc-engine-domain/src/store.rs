@@ -1233,7 +1233,7 @@ impl<'a> VersionedTextStore<'a> {
                  before_latest_moment_id, metadata_origin, metadata_summary, \
                  metadata_correlation_id, author_json, sync_record_only, \
                  COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
              COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
              COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)) \
                  FROM moments m \
@@ -1312,7 +1312,12 @@ impl<'a> VersionedTextStore<'a> {
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT s.object_id, s.path, LENGTH(CAST(b.text AS BLOB)), \
+                    "SELECT s.object_id, s.path, \
+                     CASE COALESCE(s.content_kind, 'text') \
+                       WHEN 'binary' THEN bb.sha256 ELSE s.blob_sha256 END, \
+                     CASE COALESCE(s.content_kind, 'text') \
+                       WHEN 'binary' THEN bb.byte_length \
+                       ELSE LENGTH(CAST(b.text AS BLOB)) END, \
                      s.updated_at_ms, s.latest_moment_id, s.metadata_origin, \
                      s.metadata_summary, s.metadata_correlation_id, \
                      COALESCE(s.content_kind, 'text'), bb.sha256 FROM snapshots s \
@@ -1334,14 +1339,15 @@ impl<'a> VersionedTextStore<'a> {
                         Ok(SnapshotMetadata {
                             object_id: row.get(0)?,
                             path: row.get(1)?,
-                            text_byte_length: row.get::<_, Option<i64>>(2)?,
-                            updated_at_ms: row.get(3)?,
-                            latest_moment_id: row.get(4)?,
-                            metadata_origin: row.get(5)?,
-                            metadata_summary: row.get(6)?,
-                            metadata_correlation_id: row.get(7)?,
-                            content_kind: row.get(8)?,
-                            binary_sha256: row.get(9)?,
+                            sha256: row.get(2)?,
+                            byte_length: row.get(3)?,
+                            updated_at_ms: row.get(4)?,
+                            latest_moment_id: row.get(5)?,
+                            metadata_origin: row.get(6)?,
+                            metadata_summary: row.get(7)?,
+                            metadata_correlation_id: row.get(8)?,
+                            content_kind: row.get(9)?,
+                            binary_sha256: row.get(10)?,
                         })
                     },
                 )
@@ -1353,7 +1359,7 @@ impl<'a> VersionedTextStore<'a> {
             // binary head its sha (get_snapshot raises the same invariant).
             for row in &rows {
                 let sound = match row.content_kind.as_str() {
-                    "text" => row.text_byte_length.is_some(),
+                    "text" => true,
                     "binary" => row.binary_sha256.is_some(),
                     _ => false,
                 };
@@ -3977,7 +3983,7 @@ fn select_moment_by_order(
              before_latest_moment_id, metadata_origin, metadata_summary, \
              metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
              COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
              COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)) \
              FROM moments m \
@@ -4583,7 +4589,7 @@ pub(crate) fn get_moment(
              before_latest_moment_id, metadata_origin, metadata_summary, \
              metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
              COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
              COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)) \
              FROM moments m \

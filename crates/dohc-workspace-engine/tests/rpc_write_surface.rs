@@ -1,6 +1,7 @@
 //! RPC-D sequencing steps 1-3: mutation guards exercised through the real
 //! in-process transport and actor-owned store.
 
+use base64::Engine as _;
 use dohc_engine_protocol::{
     ErrorCode,
     frame::{Frame, FrameDecoder, blob_chunks, encode_blob_chunk_frame},
@@ -462,6 +463,54 @@ async fn capture_sized_text_write_succeeds_and_over_cap_refuses_before_commit() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blob_write_accepts_full_range_bytes_and_reuses_a_referenced_digest() {
+    let (scratch, transport, handle) = fixture("binary-blob-write").await;
+    let bytes = vec![23_u8; 64 * 1024];
+    let sha256 = "f4b2c062d90362445dbc56af4628e6511315ab018340fb8818ed5d8adac4e0d1";
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    let uploaded = call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.writeBlob",
+        json!({
+            "versionId": "main",
+            "path": "uploaded.bin",
+            "sha256": sha256,
+            "bytesBase64": encoded,
+            "origin": "api",
+        }),
+    )
+    .await;
+    assert_eq!(uploaded["snapshot"]["sha256"], sha256);
+    assert_eq!(uploaded["snapshot"]["byteLength"], 64 * 1024);
+    assert_eq!(
+        std::fs::read(scratch.path().join("uploaded.bin")).expect("uploaded binary"),
+        bytes
+    );
+
+    let restored = call(
+        &transport,
+        &handle,
+        3,
+        "versionedBinary.writeBlob",
+        json!({
+            "versionId": "main",
+            "path": "restored.bin",
+            "sha256": sha256,
+            "origin": "restore",
+        }),
+    )
+    .await;
+    assert_eq!(restored["snapshot"]["sha256"], sha256);
+    assert_eq!(
+        std::fs::read(scratch.path().join("restored.bin")).expect("restored binary"),
+        bytes
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_paths_flow_verbatim_without_unicode_normalization() {
     // MUTATION: NFC-normalize RPC paths -> the stored spelling changes and a
     // caller feeding back a listed path misses its own row (the recorded
@@ -565,7 +614,7 @@ async fn secrets_write_rejects_over_cap_text_before_commit() {
                     "workspaceId": "ws-rpcd-secret-cap",
                     "versionId": "main",
                     "path": ".env",
-                    "text": "x".repeat(dohc_engine_domain::INBAND_CONTENT_CAP_BYTES + 1),
+                    "text": "x".repeat(dohc_engine_domain::MAX_SECRET_FILE_BYTES + 1),
                     "origin": "api",
                     "momentId": "secret-too-big",
                 }),
@@ -1263,6 +1312,9 @@ async fn secret_restore_to_absent_removes_materialized_plaintext_on_reopen() {
             "path": ".env",
             "beforeMomentId": "restore-away-first-write",
             "momentId": "restore-away-to-absent",
+            "origin": "restore",
+            "summary": "Restore protected file",
+            "correlationId": "restore-away",
         }),
     )
     .await;
@@ -4764,7 +4816,12 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
         json!({ "path": "merge.md", "sourceVersionId": "feature", "targetVersionId": "main" }),
     )
     .await;
-    assert_eq!(compared["status"], "merged");
+    assert_eq!(compared["status"], "incoming-changed");
+    assert_eq!(compared["workspaceId"], "ws-rpcd-merge");
+    assert_eq!(compared["targetVersionId"], "main");
+    assert_eq!(compared["sourceVersionId"], "feature");
+    assert_eq!(compared["current"]["text"], "base");
+    assert_eq!(compared["incoming"]["text"], "incoming");
     let merged = call(&transport, &handle, 3, "versionedText.merge", json!({ "path": "merge.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api", "requestId": "merge-1" })).await;
     assert_eq!(merged["status"], "merged");
     assert!(merged["snapshot"].get("text").is_none());

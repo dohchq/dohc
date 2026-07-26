@@ -129,7 +129,11 @@ export type ConflictOpenResult =
   | (WorkspaceJsonObject & { inserted: boolean })
   | ReplicatedConflictResult;
 export type ConflictResolveResult =
-  | (WorkspaceJsonObject & { conflict: ConflictRecord })
+  | (WorkspaceJsonObject & {
+      conflict: ConflictRecord;
+      write: WorkspaceJsonObject | null;
+      delete: WorkspaceJsonObject | null;
+    })
   | ReplicatedConflictResult;
 
 export type SearchResult = WorkspaceJsonObject & {
@@ -551,12 +555,20 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
       if (object.replicated === true) {
         result = decodeReplicatedConflict(value, label);
       } else {
-        const local = objectValue(value, label, ["conflict"]);
+        const local = objectValue(value, label, ["conflict", "write", "delete"]);
         result = {
           conflict: decodeConflictRecord(
             local.conflict ?? null,
             `${label}.conflict`,
           ),
+          write:
+            local.write === null
+              ? null
+              : recordValue(local.write ?? null, `${label}.write`),
+          delete:
+            local.delete === null
+              ? null
+              : recordValue(local.delete ?? null, `${label}.delete`),
         };
       }
       break;

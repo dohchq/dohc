@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   DaemonClientCapabilityError,
   DaemonProtocolError,
@@ -61,6 +61,7 @@ export interface VersionedLiveAdapterOptions {
 }
 
 const LIST_TEXT_FILE_HYDRATION_CONCURRENCY = 8;
+const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
 
 async function mapWithConcurrency<T, R>(
   values: readonly T[],
@@ -272,6 +273,32 @@ export class VersionedLiveAdapter {
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
     const requestId = randomUUID();
+    if (input.bytes.byteLength > INBAND_CONTENT_CAP_BYTES) {
+      const sha256 = createHash("sha256").update(input.bytes).digest("hex");
+      return this.request(
+        VERSIONED_METHOD.binaryWriteBlob,
+        {
+          workspaceId: input.workspaceId,
+          versionId: input.versionId,
+          path: input.path,
+          sha256,
+          ...(input.metadata.origin === "restore"
+            ? {}
+            : { bytesBase64: Buffer.from(input.bytes).toString("base64") }),
+          origin: input.metadata.origin,
+          ...(input.metadata.summary !== undefined
+            ? { summary: input.metadata.summary }
+            : {}),
+          ...(input.metadata.correlationId !== undefined
+            ? { correlationId: input.metadata.correlationId }
+            : {}),
+          ...(input.author ? { author: input.author } : {}),
+          ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
+          requestId,
+        },
+        { idempotencyKey: requestId },
+      );
+    }
     return this.request(
       VERSIONED_METHOD.binaryWrite,
       {
@@ -828,11 +855,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["secrets.restore"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported(
-      "secrets.restore",
-      input.metadata,
-      "restore",
-    );
     const before = await this.getSecretMoment({
       workspaceId: input.workspaceId,
       momentId: input.momentId,
@@ -847,6 +869,13 @@ export class VersionedLiveAdapter {
       path: before.path,
       beforeMomentId: input.momentId,
       momentId: this.createId("moment"),
+      origin: input.metadata.origin,
+      ...(input.metadata.summary !== undefined
+        ? { summary: input.metadata.summary }
+        : {}),
+      ...(input.metadata.correlationId !== undefined
+        ? { correlationId: input.metadata.correlationId }
+        : {}),
     });
   }
 

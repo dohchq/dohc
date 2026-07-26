@@ -453,6 +453,10 @@ export interface WorkspaceEngineCaptureOptions {
   // reconnect-safe session owner supplies the daemon-backed text, secret, and
   // Y.Doc paths. Injectable stores still take precedence in focused tests.
   rustEngineSessions?: EngineWorkspaceSessions;
+  // The real Rust daemon owns filesystem observation and version
+  // materialization. Tests backed by the in-process loopback omit this because
+  // that transport has no autonomous watcher or disk writer.
+  daemonOwnsCapture?: boolean;
   // Injectable only to simulate daemon generations in focused restart tests.
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionRustOptions,
@@ -1121,6 +1125,10 @@ export function createWorkspaceEngineCapture(
       path: sessionPath,
       applyLocalUpdate(update) {
         void append(async () => {
+          if (canonicalDoc === null) {
+            throw new Error(`Y.Doc session for ${input.path} is closed.`);
+          }
+          Y.applyUpdate(canonicalDoc, update);
           await executeWithReconnect(async (session) => {
             await session.applyLocalUpdate(update);
           });
@@ -1908,6 +1916,12 @@ export function createWorkspaceEngineCapture(
 
   return {
     start() {
+      if (options.daemonOwnsCapture) {
+        enqueue("daemon capture startup", async () => {
+          await engineStore();
+        });
+        return;
+      }
       enqueue("startup reconciliation", () =>
         // reconcile() reports false when the tolerant scan skipped paths:
         // everything readable seeded, but the pass is degraded, so the
@@ -1918,6 +1932,7 @@ export function createWorkspaceEngineCapture(
 
     captureBatch(events) {
       if (events.length === 0) return;
+      if (options.daemonOwnsCapture) return;
       const batch = events.map((event) => ({ ...event }));
       // Attribution is decided HERE, at settle (captureBatch runs on the
       // watcher's settle path), not when the chain task executes — the legacy
@@ -2089,16 +2104,20 @@ export function createWorkspaceEngineCapture(
         );
         // Fork from exactly what's on disk right now — capture the latest
         // edits first so the new version starts as a faithful copy.
-        await reconcileDiskIntoVersion(
-          engine,
-          fromVersionId,
-          policy,
-          {
-            origin: "local-file",
-            summary: "Saved latest edits",
-            correlationId: `version-create-${createId()}`,
-          },
-        );
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        } else {
+          await reconcileDiskIntoVersion(
+            engine,
+            fromVersionId,
+            policy,
+            {
+              origin: "local-file",
+              summary: "Saved latest edits",
+              correlationId: `version-create-${createId()}`,
+            },
+          );
+        }
         const version = await engine.createNamedVersion({
           workspaceId,
           name,
@@ -2139,6 +2158,23 @@ export function createWorkspaceEngineCapture(
           () => true,
           "Saved latest edits before switching versions",
         );
+        if (options.daemonOwnsCapture) {
+          const before = await listTextFileMetadata(engine, fromVersionId);
+          const after = await listTextFileMetadata(engine, versionId);
+          const beforeByPath = new Map(
+            before.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
+          );
+          const afterByPath = new Map(
+            after.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
+          );
+          const changedPaths = new Set([...beforeByPath.keys(), ...afterByPath.keys()]);
+          let changedFileCount = 0;
+          for (const path of changedPaths) {
+            if (beforeByPath.get(path) !== afterByPath.get(path)) changedFileCount += 1;
+          }
+          await engine.setActiveVersion({ workspaceId, versionId });
+          return { activeVersionId: versionId, changedFileCount };
+        }
         // Nothing is ever lost: the current disk state (including edits still
         // inside the watcher settle window) is captured into the version the
         // user is leaving.
@@ -2193,16 +2229,20 @@ export function createWorkspaceEngineCapture(
         // Capture the latest disk edits first so the comparison reflects what
         // the user actually sees in the folder.
         const activeVersionId = await activeVersionIdOf(engine);
-        await reconcileDiskIntoVersion(
-          engine,
-          activeVersionId,
-          policy,
-          {
-            origin: "local-file",
-            summary: "Saved latest edits",
-            correlationId: `version-compare-${createId()}`,
-          },
-        );
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        } else {
+          await reconcileDiskIntoVersion(
+            engine,
+            activeVersionId,
+            policy,
+            {
+              origin: "local-file",
+              summary: "Saved latest edits",
+              correlationId: `version-compare-${createId()}`,
+            },
+          );
+        }
         const textChanges = await compareVersionFiles(engine, {
           workspaceId,
           sourceVersionId,
@@ -2243,16 +2283,20 @@ export function createWorkspaceEngineCapture(
         );
         // Capture the latest disk edits so the merge sees them (whichever
         // side is active).
-        await reconcileDiskIntoVersion(
-          engine,
-          activeVersionId,
-          policy,
-          {
-            origin: "local-file",
-            summary: "Saved latest edits",
-            correlationId,
-          },
-        );
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        } else {
+          await reconcileDiskIntoVersion(
+            engine,
+            activeVersionId,
+            policy,
+            {
+              origin: "local-file",
+              summary: "Saved latest edits",
+              correlationId,
+            },
+          );
+        }
         const versions = await engine.listVersions({ workspaceId });
         const source = versions.find((version) => version.id === sourceVersionId);
         if (!source || source.kind !== "named") {
@@ -2313,10 +2357,14 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           mergedFileCount += 1;
-          if (result.operation === "write") {
-            materializations.push(await materializeWriteForSnapshot(engine, result.write.snapshot));
-          } else {
-            materializations.push({ kind: "delete", path: change.path });
+          if (!options.daemonOwnsCapture) {
+            if (result.operation === "write") {
+              materializations.push(
+                await materializeWriteForSnapshot(engine, result.write.snapshot),
+              );
+            } else {
+              materializations.push({ kind: "delete", path: change.path });
+            }
           }
         }
         // Secret files merge through the encrypted path (PR 08): whole-file,
@@ -2384,6 +2432,9 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("resolve conflict", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        }
         const result = await engine.resolveTextConflict({
           workspaceId,
           conflictId,
@@ -2422,6 +2473,9 @@ export function createWorkspaceEngineCapture(
     async listMoments(input = {}) {
       await chain;
       const engine = await engineStore();
+      if (options.daemonOwnsCapture) {
+        await engine.flushCapture?.();
+      }
       const activeVersionId = await activeVersionIdOf(engine);
       const page = await engine.listMoments({
         workspaceId,
@@ -2490,6 +2544,9 @@ export function createWorkspaceEngineCapture(
     async readMoment(momentId) {
       await chain;
       const engine = await engineStore();
+      if (options.daemonOwnsCapture) {
+        await engine.flushCapture?.();
+      }
       const moment = await engine.getMoment({ workspaceId, momentId });
       if (moment) return { protected: false, moment };
       // Protected moments live in the secret store; the detail is
@@ -2507,6 +2564,9 @@ export function createWorkspaceEngineCapture(
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        }
         const moment = await engine.getMoment({ workspaceId, momentId });
         if (!moment) {
           // Protected restore (PR 08): the whole round trip stays encrypted —
@@ -3175,8 +3235,11 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    flush() {
-      return chain;
+    async flush() {
+      await chain;
+      if (options.daemonOwnsCapture) {
+        await (await engineStore()).flushCapture?.();
+      }
     },
 
     async stop() {
@@ -3184,6 +3247,9 @@ export function createWorkspaceEngineCapture(
       // batch) still runs; only NEW work is refused.
       stopped = true;
       await chain;
+      if (options.daemonOwnsCapture && store) {
+        await store.flushCapture?.();
+      }
       // Release the SQLite handles for the stores THIS capture created, so
       // repeated workspace switches never accumulate handles/WAL locks. An
       // injected store belongs to its creator and is left open.

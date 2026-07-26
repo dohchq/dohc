@@ -108,9 +108,10 @@ pub enum SnapshotContent {
 pub struct SnapshotMetadata {
     pub object_id: String,
     pub path: String,
-    /// Byte length of a TEXT head; None for binary heads (their length
-    /// comes with `versionedBinary.read`'s metadata).
-    pub text_byte_length: Option<i64>,
+    /// Digest of the current content, regardless of text/binary kind.
+    pub sha256: String,
+    /// Byte length of the current content, regardless of text/binary kind.
+    pub byte_length: i64,
     pub updated_at_ms: i64,
     pub latest_moment_id: String,
     pub metadata_origin: String,

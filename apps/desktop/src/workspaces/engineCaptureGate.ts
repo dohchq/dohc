@@ -36,7 +36,7 @@ export async function captureForFlaggedWorkspace(
     // stamped with agent authorship (History shows "<User Name>'s agent").
     activeAgentRun: hooks.activeAgentRun,
     ...(rustEngineSessions
-      ? { rustEngineSessions }
+      ? { rustEngineSessions, daemonOwnsCapture: true }
       : {}),
   });
 }

@@ -1,4 +1,11 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -81,4 +88,84 @@ describe("EngineWorkspaceSessions", () => {
     ).rejects.toThrow("shadow marker is invalid");
     expect(requests).toBe(0);
   });
+
+  it("invalidates but does not replay a mutation after a transport failure", async () => {
+    const rootPath = await tempRoot();
+    let opens = 0;
+    const client: EngineDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request) {
+        opens += 1;
+        return {
+          id: request.id,
+          result: { workspace: `workspace-handle-${opens}` },
+        };
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    let mutationAttempts = 0;
+
+    await expect(
+      sessions.run(
+        { workspaceId: "workspace", rootPath },
+        async () => {
+          mutationAttempts += 1;
+          throw { code: "transport-error" };
+        },
+      ),
+    ).rejects.toMatchObject({ code: "transport-error" });
+    expect(mutationAttempts).toBe(1);
+
+    await expect(
+      sessions.run(
+        { workspaceId: "workspace", rootPath },
+        async (binding) => binding.workspace,
+      ),
+    ).resolves.toBe("workspace-handle-2");
+    expect(opens).toBe(2);
+  });
+
+  it.each([".dohc", ".dohc/engine"])(
+    "refuses a symlinked %s engine ancestor",
+    async (relativeLink) => {
+      const rootPath = await tempRoot();
+      const outside = await tempRoot();
+      const segments = relativeLink.split("/");
+      if (segments.length > 1) {
+        await mkdir(join(rootPath, segments[0]!));
+      }
+      await symlink(
+        outside,
+        join(rootPath, ...segments),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      let requests = 0;
+      const client: EngineDaemonClient = {
+        close: () => undefined,
+        async sendRequest(request) {
+          requests += 1;
+          return {
+            id: request.id,
+            result: { workspace: "workspace-handle" },
+          };
+        },
+      };
+      const sessions = new EngineWorkspaceSessions({
+        currentClient: () => client,
+      });
+
+      await expect(
+        sessions.run(
+          { workspaceId: "workspace", rootPath },
+          async (binding) => binding.workspace,
+        ),
+      ).rejects.toThrow("must not be a symlink");
+      expect(requests).toBe(0);
+      await expect(
+        readFile(join(outside, "SHADOW_CLONE"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
 });

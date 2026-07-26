@@ -28,6 +28,7 @@ import {
 import { createChangeSetStore } from "@dohc/workspace-engine";
 import { WorkspaceKernelClient } from "@dohc/workspace-kernel-client";
 import {
+  VERSIONED_METHOD,
   VersionedLoopbackEngine,
   type JsonValue,
   type Request,
@@ -152,6 +153,7 @@ function capture(root: string, options: {
   onCaptureOutcome?: (outcome: { ok: boolean }) => void;
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
   rustEngineSessions?: EngineWorkspaceSessions;
+  daemonOwnsCapture?: boolean;
 } = {}) {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-capture-test",
@@ -173,6 +175,12 @@ function mockLiveSessions(loopback: VersionedLoopbackEngine) {
       }
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
+      }
+      if (request.method === "capture.flush") {
+        return {
+          id: request.id,
+          result: { settled: true, running: true, degraded: false },
+        };
       }
       return await loopback.sendRequest(request);
     },
@@ -249,6 +257,59 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
     expect(loopback.requests).toHaveLength(0);
     expect(existsSync(join(root, ".dohc", "engine", "engine.db"))).toBe(true);
+  });
+
+  it("uses the daemon as the sole capture and version-switch materialization owner", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: "note.md",
+      text: "main",
+    });
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      daemonOwnsCapture: true,
+    });
+
+    engine.start();
+    await engine.flush();
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.flush();
+    expect(
+      loopback.requests.some(
+        (request) =>
+          request.method === VERSIONED_METHOD.textWrite ||
+          request.method === VERSIONED_METHOD.textDelete,
+      ),
+    ).toBe(false);
+
+    const draft = await engine.createVersion("Draft");
+    loopback.requests.length = 0;
+    const result = await engine.switchVersion("main");
+
+    expect(result).toEqual({
+      activeVersionId: "main",
+      changedFileCount: 0,
+    });
+    expect(
+      loopback.requests.some(
+        (request) =>
+          request.method === VERSIONED_METHOD.textRead ||
+          request.method === VERSIONED_METHOD.binaryRead ||
+          request.method === VERSIONED_METHOD.textWrite ||
+          request.method === VERSIONED_METHOD.textDelete,
+      ),
+    ).toBe(false);
+    expect(
+      loopback.requests.some(
+        (request) => request.method === VERSIONED_METHOD.versionsSetActive,
+      ),
+    ).toBe(true);
+    expect(draft.activeVersionId).not.toBe("main");
+    await engine.stop();
   });
 
   it.each(["typescript", "live"] as const)(
