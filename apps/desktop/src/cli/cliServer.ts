@@ -53,6 +53,7 @@ import { z } from "zod";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 export const CLI_TOKEN_FILE = "dohc-cli-token";
+export const CLI_ENDPOINT_FILE = "dohc-cli-endpoint";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_FTS_CANDIDATES = 50_000;
@@ -1862,25 +1863,33 @@ export async function startCliServer(
   options: CliServerOptions,
 ): Promise<CliServerHandle> {
   const platform = options.platform ?? process.platform;
-  if (platform === "win32") {
-    throw new Error("dohc: CLI socket server is not yet supported on this platform");
-  }
+  const isWindows = platform === "win32";
 
+  // Windows ignores this mode; directory access depends on the inherited stateDir ACL.
   await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
+  // Windows chmod does not set a DACL; directory access still depends on its inherited ACL.
   await chmod(options.stateDir, 0o700);
+  // main added the provenance-restore step; this branch made the endpoint
+  // platform-aware. Both are needed, restore first as main had it.
   await restoreCliServerRuntime(options);
-  const socketPath = join(options.stateDir, CLI_SOCKET_FILE);
+  const endpointPath = join(options.stateDir, CLI_ENDPOINT_FILE);
+  const socketPath = isWindows
+    ? `\\\\.\\pipe\\dohc-cli-${randomBytes(16).toString("hex")}`
+    : join(options.stateDir, CLI_SOCKET_FILE);
   const tokenPath = join(options.stateDir, CLI_TOKEN_FILE);
+  const endpointArtifactPath = isWindows ? endpointPath : socketPath;
   await Promise.all([
-    rm(socketPath, { force: true }),
+    rm(endpointArtifactPath, { force: true }),
     rm(tokenPath, { force: true }),
   ]);
   const token = randomBytes(32).toString("hex");
+  // Windows ignores this mode; token secrecy depends on the inherited stateDir ACL.
   await writeFile(tokenPath, `${token}\n`, {
     encoding: "utf8",
     mode: 0o600,
     flag: "wx",
   });
+  // Windows chmod does not set a DACL; token secrecy still depends on the inherited ACL.
   await chmod(tokenPath, 0o600);
 
   const sockets = new Set<Socket>();
@@ -1890,14 +1899,25 @@ export async function startCliServer(
   server.maxConnections = MAX_SOCKET_CONNECTIONS;
   try {
     await listen(server, socketPath);
-    await chmod(socketPath, 0o600);
+    if (isWindows) {
+      // Windows ignores this mode; pipe-name secrecy depends on the inherited stateDir ACL.
+      await writeFile(endpointPath, `${socketPath}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+      // Windows chmod does not set a DACL; pipe-name secrecy still depends on that ACL.
+      await chmod(endpointPath, 0o600);
+    } else {
+      await chmod(socketPath, 0o600);
+    }
   } catch (error) {
     if (server.listening) {
       for (const socket of sockets) socket.destroy();
       await closeServer(server);
     }
     await Promise.all([
-      rm(socketPath, { force: true }),
+      rm(endpointArtifactPath, { force: true }),
       rm(tokenPath, { force: true }),
     ]);
     disposeCliServerRuntime(options);
@@ -1923,7 +1943,7 @@ export async function startCliServer(
         Promise.allSettled([...inFlight]),
       ]);
       await Promise.all([
-        rm(socketPath, { force: true }),
+        rm(endpointArtifactPath, { force: true }),
         rm(tokenPath, { force: true }),
       ]);
       disposeCliServerRuntime(options);

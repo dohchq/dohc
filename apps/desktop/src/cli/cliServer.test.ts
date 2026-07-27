@@ -28,6 +28,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nativeTmpdir } from "../workspaces/testTemp";
 import {
+  CLI_ENDPOINT_FILE,
   CLI_SOCKET_FILE,
   RUN_MESSAGE_LINK_RECOVERY_FILE,
   cliThreadId,
@@ -172,7 +173,10 @@ describe("CLI socket server", () => {
       mkdir(workspaceRoot, { recursive: true }),
       mkdir(stateDir, { recursive: true }),
     ]);
-    await writeFile(join(stateDir, CLI_SOCKET_FILE), "stale socket marker", "utf8");
+    const staleEndpointArtifact = process.platform === "win32"
+      ? CLI_ENDPOINT_FILE
+      : CLI_SOCKET_FILE;
+    await writeFile(join(stateDir, staleEndpointArtifact), "stale endpoint", "utf8");
     await writeFile(
       join(workspaceRoot, "AGENTS.md"),
       "# Workspace instructions\n\nKeep this user-owned line.\n",
@@ -242,7 +246,7 @@ describe("CLI socket server", () => {
         errors.push(error);
       },
       nowMs: () => SERVER_NOW_MS,
-      platform: "linux",
+      platform: process.platform,
     };
     try {
       server = await startCliServer(serverOptions);
@@ -254,24 +258,11 @@ describe("CLI socket server", () => {
         : undefined;
       const sandboxDenied =
         process.env.CODEX_SANDBOX_NETWORK_DISABLED === "1" && code === "EPERM";
-      // Node on win32 cannot listen on an AF_UNIX filesystem path (the CLI
-      // server is unix-only; startCliServer guards win32 and the suite forces
-      // platform "linux" to reach the real listener). Pinned to the listen
-      // syscall so an EACCES from the earlier mkdir/chmod/write steps still
-      // throws.
-      const syscall =
-        typeof error === "object" && error !== null && "syscall" in error
-          ? error.syscall
-          : undefined;
-      const win32NoAfUnix =
-        process.platform === "win32" && code === "EACCES" && syscall === "listen";
-      if (!sandboxDenied && !win32NoAfUnix) {
+      if (!sandboxDenied) {
         throw error;
       }
-      // No listener is available here (sandbox forbids every listener; win32
-      // lacks AF_UNIX). State/token setup already ran before listen failed.
-      // Run requests through the exact authenticated line handler so
-      // command/store coverage remains live.
+      // The sandbox forbids every listener. Run requests through the exact
+      // authenticated line handler so command/store coverage remains live.
       server = null;
       token = "a".repeat(64);
     }
@@ -288,7 +279,8 @@ describe("CLI socket server", () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
-  it("rejects authentication before workspace lookup or verb dispatch", async () => {
+  it("rejects a wrong token over the live transport before request parsing", async (ctx) => {
+    if (!server) ctx.skip();
     calls.listWorkspaces = 0;
     const rejectedToken = `${token.startsWith("0") ? "1" : "0"}${token.slice(1)}`;
     const response = await rawRequest({
@@ -297,11 +289,7 @@ describe("CLI socket server", () => {
       verb: "post",
       args: {
         cwd: workspaceRoot,
-        actor: "human",
-        channel: "general",
-        attachments: [],
-        needsDecision: false,
-        body: "Must not be dispatched",
+        malformed: "Must not be parsed",
       },
     });
 
@@ -315,6 +303,19 @@ describe("CLI socket server", () => {
     expect(calls.identity).toBe(0);
     expect(calls.writable).toBe(0);
     expect(calls.writes).toBe(0);
+  });
+
+  it("writes a random capability endpoint descriptor for a Windows named pipe", async (ctx) => {
+    if (process.platform !== "win32") ctx.skip();
+    if (!server) ctx.skip();
+
+    const descriptorPath = join(stateDir, CLI_ENDPOINT_FILE);
+    const describedEndpoint = (await readFile(descriptorPath, "utf8")).trim();
+
+    expect(describedEndpoint).toBe(server!.socketPath);
+    expect(describedEndpoint).toMatch(/^\\\\\.\\pipe\\dohc-cli-[a-f0-9]{32,}$/u);
+    expect(describedEndpoint).not.toContain(stateDir);
+    expect(describedEndpoint).not.toBe(join(stateDir, CLI_SOCKET_FILE));
   });
 
   it("rejects older and newer CLIs before opening a workspace", async () => {
@@ -1598,9 +1599,9 @@ describe("CLI socket server", () => {
   });
 
   it("secures the CLI state directory, token, and socket", async (ctx) => {
-    // Without a live listener (win32, sandbox) the mode assertions this test
-    // is named for cannot run — skip loudly instead of reporting a hollow
-    // green.
+    // Windows mode bits do not represent its inherited ACL or named-pipe DACL.
+    if (process.platform === "win32") ctx.skip();
+    // Without a live listener (sandbox) the mode assertions cannot run.
     if (!server) ctx.skip();
     expect((await stat(stateDir)).mode & 0o777).toBe(0o700);
     expect((await stat(server!.tokenPath)).mode & 0o777).toBe(0o600);
