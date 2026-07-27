@@ -53,6 +53,20 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # packages/workspace-kernel-client's suite shells out to
+      # `cargo build --offline` to produce the kernel binary it drives. The
+      # --offline is deliberate -- it keeps the test hermetic -- but it only
+      # works against a populated registry, which a fresh runner does not have.
+      # Fetching here preserves the test's intent instead of relaxing it.
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
+
+      - name: Fetch crate dependencies
+        run: cargo fetch --locked
+
       # Runs every package, not just the one a PR touched. apps/site was broken
       # on main for weeks precisely because a red typecheck there read as noise
       # from whichever PR happened to be running.
