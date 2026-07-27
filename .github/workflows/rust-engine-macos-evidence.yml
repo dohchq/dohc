@@ -280,8 +280,41 @@ jobs:
             console.log("RUN VERDICT: " + d.verdict);
           ' "$SOAK_EVIDENCE_PATH"
 
+      # The artifact quota is account-wide, so uploads can fail for reasons this
+      # repo cannot fix -- and every macOS run so far has hit exactly that,
+      # leaving the evidence produced but unbanked. Emit the JSON into the run's
+      # own durable record BEFORE attempting the upload, so a quota failure
+      # costs convenience rather than the evidence itself.
+      - name: Bank the evidence JSON in the run record
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -z "${SOAK_EVIDENCE_PATH:-}" ] || [ ! -s "$SOAK_EVIDENCE_PATH" ]; then
+            echo "no evidence json to bank"
+            exit 0
+          fi
+          {
+            echo "### macOS soak evidence — \`$SOAK_EVIDENCE_PATH\`"
+            echo
+            echo "Commit this to \`tools/rust-engine-program/soak-evidence/\` to bank it."
+            echo
+            echo '```json'
+            cat "$SOAK_EVIDENCE_PATH"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "--- BEGIN SOAK EVIDENCE JSON ---"
+          cat "$SOAK_EVIDENCE_PATH"
+          echo
+          echo "--- END SOAK EVIDENCE JSON ---"
+
       - name: Upload macOS evidence artifacts
         if: always()
+        # The evidence is already in the step summary and the log by now, so a
+        # quota failure here costs convenience, not evidence. Without this the
+        # whole run reports failure even when the gate and soak both passed --
+        # which is exactly how ten macOS runs came to be recorded as failures.
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-engine-macos-evidence-${{ inputs.mode }}-${{ job.status }}
