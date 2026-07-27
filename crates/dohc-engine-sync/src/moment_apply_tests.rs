@@ -1841,6 +1841,8 @@ fn local_overwrite_clears_imported_snapshot_metadata() {
                 text: "local".to_owned(),
                 moment_id: "local-head".to_owned(),
                 metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 author_json: None,
                 now_ms: 3_000,
                 request_id: None,

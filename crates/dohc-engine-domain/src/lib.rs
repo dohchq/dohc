@@ -94,7 +94,8 @@ pub use secrets::{
     derive_capture_secret_moment_id, derive_capture_secret_retire_moment_id, fork_version_keyless,
     get_secret_moment_keyless, has_secret_state, list_secret_files_keyless,
     list_secret_files_keyless_page, list_secret_moments_keyless, list_secret_moments_page_keyless,
-    restore_secret_file_verbatim, secret_file_len_keyless,
+    restore_secret_file_verbatim, restore_secret_file_verbatim_with_metadata,
+    secret_file_len_keyless,
 };
 pub use store::{
     CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES, MAX_CAPTURE_BINARY_FILE_BYTES,

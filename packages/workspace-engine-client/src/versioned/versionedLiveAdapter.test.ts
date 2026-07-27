@@ -54,6 +54,14 @@ const VERSIONED_REQUEST_CASES: VersionedRequestCase[] = [
     method: VERSIONED_METHOD.binaryWrite,
     params: { versionId: "main", path: "a.bin", bytes: [1] },
   },
+  {
+    method: VERSIONED_METHOD.binaryWriteBlob,
+    params: {
+      versionId: "main",
+      path: "a.bin",
+      sha256: "a".repeat(64),
+    },
+  },
   { method: VERSIONED_METHOD.binaryRead, params: { versionId: "main", path: "a.bin" } },
   {
     method: VERSIONED_METHOD.binaryReadBlob,
@@ -134,6 +142,7 @@ const VERSIONED_REQUEST_CASES: VersionedRequestCase[] = [
       path: ".env",
       beforeMomentId: "before",
       momentId: "after",
+      origin: "restore",
     },
   },
   {
@@ -170,6 +179,7 @@ const WORKSPACE_REQUEST_CASES: WorkspaceRequestCase[] = [
   },
   { method: WORKSPACE_METHOD.watcherStatus, params: {} },
   { method: WORKSPACE_METHOD.captureFlush, params: {} },
+  { method: WORKSPACE_METHOD.captureSetAuthor, params: { author: null } },
 ];
 
 const snapshot = {
@@ -190,6 +200,10 @@ const conflictState = {
   path: "a.md",
   contentKind: "text",
   snapshot,
+  binarySha256: null,
+  binaryByteLength: null,
+  binaryObjectId: null,
+  binaryLatestMomentId: null,
   metadataSummary: null,
   metadataCorrelationId: null,
 } as const;
@@ -218,7 +232,10 @@ const WORKSPACE_DECODER_CASES: Array<{
   { method: WORKSPACE_METHOD.close, valid: { closed: true } },
   { method: WORKSPACE_METHOD.conflictsList, valid: [conflict] },
   { method: WORKSPACE_METHOD.conflictsOpen, valid: { inserted: true } },
-  { method: WORKSPACE_METHOD.conflictsResolve, valid: { conflict } },
+  {
+    method: WORKSPACE_METHOD.conflictsResolve,
+    valid: { conflict, write: null, delete: null },
+  },
   { method: WORKSPACE_METHOD.searchQuery, valid: [] },
   {
     method: WORKSPACE_METHOD.watcherStatus,
@@ -227,6 +244,10 @@ const WORKSPACE_DECODER_CASES: Array<{
   {
     method: WORKSPACE_METHOD.captureFlush,
     valid: { settled: true, running: true, degraded: false },
+  },
+  {
+    method: WORKSPACE_METHOD.captureSetAuthor,
+    valid: { updated: true },
   },
 ];
 
@@ -320,6 +341,96 @@ describe("VersionedLiveAdapter", () => {
       VERSIONED_METHOD.binaryReadBlob,
     ]);
     expect(blobHandlers.size).toBe(0);
+  });
+
+  it("writes an over-cap binary by digest instead of embedding its bytes", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
+    const bytes = new Uint8Array(48 * 1024 + 1).fill(7);
+
+    await expect(
+      adapter.writeBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "asset.bin",
+        bytes,
+        metadata: { origin: "restore", summary: "Restore asset" },
+      }),
+    ).rejects.toBe(SENTINEL);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: VERSIONED_METHOD.binaryWriteBlob,
+      params: {
+        versionId: "main",
+        path: "asset.bin",
+        sha256: "be094ba239945c6a73d6f4bb49cebcede4910e2fc62f5daa17946f1f0af5d39a",
+        origin: "restore",
+        summary: "Restore asset",
+      },
+    });
+    expect(requests[0]?.params).not.toHaveProperty("bytes");
+    expect(requests[0]?.params).not.toHaveProperty("bytesBase64");
+  });
+
+  it("mutation proof: routes a 16,385-byte binary around the wire collection limit", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
+
+    await expect(
+      adapter.writeBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "collection-limit.bin",
+        bytes: new Uint8Array(16_385).fill(3),
+        metadata: { origin: "api" },
+      }),
+    ).rejects.toBe(SENTINEL);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe(VERSIONED_METHOD.binaryWriteBlob);
+    expect(requests[0]?.params).not.toHaveProperty("bytes");
+  });
+
+  it("uses the full-range blob endpoint for a new over-cap binary", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
+    const bytes = new Uint8Array(48 * 1024 + 1).fill(11);
+
+    await expect(
+      adapter.writeBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "new-asset.bin",
+        bytes,
+        metadata: { origin: "api" },
+      }),
+    ).rejects.toBe(SENTINEL);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: VERSIONED_METHOD.binaryWriteBlob,
+      params: {
+        versionId: "main",
+        path: "new-asset.bin",
+        sha256: "a676bf58279257bf7913f059ee405a3c40aab6be644a0ffd072a3aa3231f58ca",
+        bytesBase64: Buffer.from(bytes).toString("base64"),
+        origin: "api",
+      },
+    });
+    expect(requests[0]?.params).not.toHaveProperty("bytes");
   });
 
   it("fails with a typed capability error when blob egress is unavailable", async () => {
@@ -455,6 +566,62 @@ describe("VersionedLiveAdapter", () => {
     ).resolves.toBeNull();
   });
 
+  it("preserves the store null contract when an older daemon refuses a text-headed binary read", async () => {
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest() {
+        throw {
+          wireError: {
+            code: "INVALID_PARAMS",
+            message: "text-head-not-binary",
+            retry: "no",
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.readBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "note.md",
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("does not hide unrelated invalid binary-read parameters as an absent value", async () => {
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest() {
+        throw {
+          wireError: {
+            code: "INVALID_PARAMS",
+            message: "invalid-version",
+            retry: "no",
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.readBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "missing",
+        path: "note.md",
+      }),
+    ).rejects.toMatchObject({
+      name: "DaemonRefusalError",
+      wireCode: "INVALID_PARAMS",
+      message: "invalid-version",
+    });
+  });
+
   it("rejects a caller-supplied delete moment id the daemon cannot preserve", async () => {
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
@@ -475,7 +642,7 @@ describe("VersionedLiveAdapter", () => {
     expect(requests).toEqual([]);
   });
 
-  it("never silently drops unsupported text and binary mutation metadata", async () => {
+  it("forwards text and binary mutation metadata without dropping it", async () => {
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
       captureClient(requests),
@@ -484,7 +651,10 @@ describe("VersionedLiveAdapter", () => {
     );
 
     const mutations = [
-      () =>
+      {
+        method: VERSIONED_METHOD.textWrite,
+        metadata: { summary: "Write note" },
+        mutate: () =>
         adapter.writeTextFile({
           workspaceId: "workspace",
           versionId: "main",
@@ -492,7 +662,11 @@ describe("VersionedLiveAdapter", () => {
           text: "text",
           metadata: { origin: "api", summary: "Write note" },
         }),
-      () =>
+      },
+      {
+        method: VERSIONED_METHOD.binaryWrite,
+        metadata: { correlationId: "binary-write" },
+        mutate: () =>
         adapter.writeBinaryFile({
           workspaceId: "workspace",
           versionId: "main",
@@ -500,7 +674,11 @@ describe("VersionedLiveAdapter", () => {
           bytes: new Uint8Array([1]),
           metadata: { origin: "api", correlationId: "binary-write" },
         }),
-      () =>
+      },
+      {
+        method: VERSIONED_METHOD.versionsMerge,
+        metadata: { summary: "Merge note" },
+        mutate: () =>
         adapter.mergeTextFileFromVersion({
           workspaceId: "workspace",
           targetVersionId: "main",
@@ -508,7 +686,11 @@ describe("VersionedLiveAdapter", () => {
           path: "notes/merge.md",
           metadata: { origin: "api", summary: "Merge note" },
         }),
-      () =>
+      },
+      {
+        method: VERSIONED_METHOD.textRename,
+        metadata: { correlationId: "rename-note" },
+        mutate: () =>
         adapter.renameTextFile({
           workspaceId: "workspace",
           versionId: "main",
@@ -516,27 +698,60 @@ describe("VersionedLiveAdapter", () => {
           toPath: "notes/new.md",
           metadata: { origin: "api", correlationId: "rename-note" },
         }),
-      () =>
+      },
+      {
+        method: VERSIONED_METHOD.textDelete,
+        metadata: { summary: "Delete note" },
+        mutate: () =>
         adapter.deleteTextFile({
           workspaceId: "workspace",
           versionId: "main",
           path: "notes/delete.md",
           metadata: { origin: "api", summary: "Delete note" },
         }),
+      },
     ];
 
-    for (const mutate of mutations) {
-      await expect(mutate()).rejects.toBeInstanceOf(
-        VersionedAdapterCapabilityError,
-      );
+    for (const entry of mutations) {
+      await expect(entry.mutate()).rejects.toBe(SENTINEL);
+      expect(requests.at(-1)).toMatchObject({
+        method: entry.method,
+        params: entry.metadata,
+      });
     }
-    expect(requests).toEqual([]);
   });
 
-  it("never silently drops secret mutation metadata rejected by the daemon", async () => {
+  it("forwards metadata for every secret mutation, including restore", async () => {
     const requests: Request[] = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        if (request.method === VERSIONED_METHOD.secretsMomentsGet) {
+          return {
+            id: request.id,
+            result: {
+              id: "secret-moment",
+              workspaceId: WORKSPACE,
+              versionId: "main",
+              path: ".env",
+              recordedAtMs: 1,
+              operation: "write",
+              metadata: {
+                origin: "api",
+                summary: null,
+                correlationId: null,
+              },
+              momentOrder: 1,
+              protected: true,
+            },
+          };
+        }
+        throw SENTINEL;
+      },
+    };
     const adapter = new VersionedLiveAdapter(
-      captureClient(requests),
+      client,
       WORKSPACE,
       { workspaceId: "workspace" },
     );
@@ -549,7 +764,11 @@ describe("VersionedLiveAdapter", () => {
         text: "TOKEN=value",
         metadata: { origin: "api", summary: "Set token" },
       }),
-    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
+    ).rejects.toBe(SENTINEL);
+    expect(requests.at(-1)).toMatchObject({
+      method: VERSIONED_METHOD.secretsWrite,
+      params: { summary: "Set token" },
+    });
     await expect(
       adapter.deleteSecretFile({
         workspaceId: "workspace",
@@ -557,22 +776,32 @@ describe("VersionedLiveAdapter", () => {
         path: ".env",
         metadata: { origin: "api", correlationId: "operation-1" },
       }),
-    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
+    ).rejects.toBe(SENTINEL);
+    expect(requests.at(-1)).toMatchObject({
+      method: VERSIONED_METHOD.secretsDelete,
+      params: { correlationId: "operation-1" },
+    });
     await expect(
       adapter.restoreSecretFileToBeforeMoment({
         workspaceId: "workspace",
         momentId: "secret-moment",
-        metadata: { origin: "restore", summary: "Undo secret change" },
+        metadata: {
+          origin: "restore",
+          summary: "Undo secret change",
+          correlationId: "operation-restore",
+        },
       }),
-    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
-    await expect(
-      adapter.restoreSecretFileToBeforeMoment({
-        workspaceId: "workspace",
-        momentId: "secret-moment",
-        metadata: { origin: "api" },
-      }),
-    ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
-    expect(requests).toEqual([]);
+    ).rejects.toBe(SENTINEL);
+    expect(requests.at(-1)).toMatchObject({
+      method: VERSIONED_METHOD.secretsRestore,
+      params: {
+        path: ".env",
+        beforeMomentId: "secret-moment",
+        origin: "restore",
+        summary: "Undo secret change",
+        correlationId: "operation-restore",
+      },
+    });
 
     await expect(
       adapter.applySecretFileFromVersion({
@@ -587,7 +816,7 @@ describe("VersionedLiveAdapter", () => {
         },
       }),
     ).rejects.toBe(SENTINEL);
-    expect(requests[0]).toMatchObject({
+    expect(requests.at(-1)).toMatchObject({
       method: VERSIONED_METHOD.secretsApply,
       params: {
         origin: "sync",
@@ -597,8 +826,8 @@ describe("VersionedLiveAdapter", () => {
     });
   });
 
-  it("encodes every one of the 30 versioned methods with exact params", async () => {
-    expect(VERSIONED_REQUEST_CASES).toHaveLength(30);
+  it("encodes every one of the 31 versioned methods with exact params", async () => {
+    expect(VERSIONED_REQUEST_CASES).toHaveLength(31);
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
       captureClient(requests),
@@ -618,17 +847,28 @@ describe("VersionedLiveAdapter", () => {
     }
   });
 
-  it("encodes workspace.open and all seven bound workspace-family methods", async () => {
+  it("encodes workspace.open and all eight bound workspace-family methods", async () => {
     const openRequests: Request[] = [];
+    const captureAuthor = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "run",
+    };
     await expect(
       VersionedLiveAdapter.openWorkspace(captureClient(openRequests), {
         rootDir: "C:/shadow",
         workspaceId: WORKSPACE,
+        captureAuthor,
       }),
     ).rejects.toBe(SENTINEL);
     expect(openRequests[0]).toMatchObject({
       method: WORKSPACE_METHOD.open,
-      params: { rootDir: "C:/shadow", workspaceId: WORKSPACE },
+      params: {
+        rootDir: "C:/shadow",
+        workspaceId: WORKSPACE,
+        captureAuthor,
+      },
     });
     expect(openRequests[0]?.workspace).toBeUndefined();
 
@@ -668,6 +908,7 @@ describe("VersionedLiveAdapter", () => {
             path: "a.md",
             objectId: "object",
             contentKind: "text",
+            sha256: "a".repeat(64),
             byteLength: 1,
             binarySha256: null,
             updatedAtMs: 1,
@@ -680,9 +921,20 @@ describe("VersionedLiveAdapter", () => {
     ).toMatchObject({ files: [{ path: "a.md" }] });
     expect(
       decodeVersionedResult(VERSIONED_METHOD.versionsCompare, {
-        status: "merged",
+        workspaceId: WORKSPACE,
+        path: "a.md",
+        targetVersionId: "main",
+        sourceVersionId: "draft",
+        base: snapshot,
+        current: null,
+        incoming: snapshot,
+        status: "incoming-changed",
       }),
-    ).toEqual({ status: "merged" });
+    ).toMatchObject({
+      path: "a.md",
+      status: "incoming-changed",
+      current: null,
+    });
     expect(
       decodeVersionedResult(VERSIONED_METHOD.secretsFork, {}),
     ).toEqual({});
@@ -734,6 +986,64 @@ describe("VersionedLiveAdapter", () => {
       disposition: "afterReconnect",
       wireCode: "SESSION_EXPIRED",
     } satisfies Partial<DaemonRefusalError>);
+  });
+
+  it("bounds concurrent hydration when listing text files", async () => {
+    const files = Array.from({ length: 100 }, (_, index) => ({
+      path: `notes/${index}.md`,
+      objectId: `object-${index}`,
+      contentKind: "text" as const,
+      sha256: "a".repeat(64),
+      byteLength: index,
+      binarySha256: null,
+      updatedAtMs: index,
+      latestMomentId: `moment-${index}`,
+      metadataOrigin: "api",
+    }));
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        if (request.method === VERSIONED_METHOD.textList) {
+          return {
+            id: request.id,
+            result: { files, nextAfterPath: null },
+          };
+        }
+        const path = (request.params as { path: string }).path;
+        const row = files.find((candidate) => candidate.path === path)!;
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        inFlight -= 1;
+        return {
+          id: request.id,
+          result: {
+            workspaceId: WORKSPACE,
+            versionId: "main",
+            objectId: row.objectId,
+            path,
+            contentKind: "text",
+            text: path,
+            sha256: "a".repeat(64),
+            blobSha256: "a".repeat(64),
+            byteLength: Buffer.byteLength(path),
+            updatedAtMs: row.updatedAtMs,
+            latestMomentId: row.latestMomentId,
+            metadataOrigin: "api",
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.listTextFiles({ workspaceId: WORKSPACE, versionId: "main" }),
+    ).resolves.toHaveLength(files.length);
+    expect(maxInFlight).toBe(8);
   });
 
   it("decodes loopback responses through the live adapter", async () => {

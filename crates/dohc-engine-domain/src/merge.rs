@@ -66,6 +66,8 @@ pub struct MergeTextFileFromVersion {
     pub request_id: Option<String>,
     pub conflict_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
 }
@@ -888,6 +890,8 @@ fn merge_write_input(input: &MergeTextFileFromVersion, text: &str) -> WriteText 
         text: text.to_owned(),
         moment_id: input.moment_id.clone(),
         metadata_origin: input.metadata_origin.clone(),
+        metadata_summary: input.metadata_summary.clone(),
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
         request_id: None,
@@ -902,6 +906,8 @@ fn merge_delete_input(input: &MergeTextFileFromVersion) -> DeleteTextFile {
         moment_id: input.moment_id.clone(),
         request_id: None,
         metadata_origin: input.metadata_origin.clone(),
+        metadata_summary: input.metadata_summary.clone(),
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
     }

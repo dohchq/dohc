@@ -73,6 +73,7 @@ pub struct ConflictFileState {
     pub path: String,
     pub snapshot: Option<TextSnapshot>,
     pub binary_sha256: Option<String>,
+    pub binary_byte_length: Option<i64>,
     pub binary_object_id: Option<String>,
     pub binary_latest_moment_id: Option<String>,
     pub content_kind: ConflictContentKind,
@@ -86,6 +87,7 @@ impl ConflictFileState {
             path: path.into(),
             snapshot,
             binary_sha256: None,
+            binary_byte_length: None,
             binary_object_id: None,
             binary_latest_moment_id: None,
             content_kind: ConflictContentKind::Text,
@@ -101,6 +103,7 @@ impl ConflictFileState {
             path: path.into(),
             snapshot: None,
             binary_sha256: Some(binary_sha256.into()),
+            binary_byte_length: None,
             binary_object_id: None,
             binary_latest_moment_id: None,
             content_kind: ConflictContentKind::Binary,
@@ -120,6 +123,7 @@ impl ConflictFileState {
     pub fn binary_head(
         path: impl Into<String>,
         binary_sha256: impl Into<String>,
+        byte_length: i64,
         object_id: impl Into<String>,
         latest_moment_id: impl Into<String>,
     ) -> Self {
@@ -127,6 +131,7 @@ impl ConflictFileState {
             path: path.into(),
             snapshot: None,
             binary_sha256: Some(binary_sha256.into()),
+            binary_byte_length: Some(byte_length),
             binary_object_id: Some(object_id.into()),
             binary_latest_moment_id: Some(latest_moment_id.into()),
             content_kind: ConflictContentKind::Binary,
@@ -260,6 +265,8 @@ pub struct WriteBinaryFile {
     /// Provenance recorded on the moment and snapshot. Mirrored resolve
     /// passes `"sync"` (the historical hardcode); capture passes `"capture"`.
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     /// `Some(preimage)`: enqueue a materialization job sharing the moment's
     /// generation (mirrored resolve — the bytes must REACH disk). `None`: no
@@ -286,6 +293,8 @@ pub struct ResolveTextConflict {
     pub write_moment_id: String,
     pub delete_moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,
@@ -1014,6 +1023,8 @@ pub fn write_binary_file_in_tx(
             binary_sha256: &input.binary_sha256,
             moment_id: &input.moment_id,
             metadata_origin: &input.metadata_origin,
+            metadata_summary: input.metadata_summary.as_deref(),
+            metadata_correlation_id: input.metadata_correlation_id.as_deref(),
             author_json: input.author_json.as_deref(),
             now_ms: input.now_ms,
         },
@@ -1052,6 +1063,8 @@ pub struct PersistBinaryHead<'a> {
     pub binary_sha256: &'a str,
     pub moment_id: &'a str,
     pub metadata_origin: &'a str,
+    pub metadata_summary: Option<&'a str>,
+    pub metadata_correlation_id: Option<&'a str>,
     pub author_json: Option<&'a str>,
     pub now_ms: i64,
 }
@@ -1083,7 +1096,8 @@ pub fn persist_binary_head_in_tx(
         "INSERT INTO moments (
              workspace_id, moment_order, moment_id, version_id, object_id, path,
              recorded_at_ms, operation, after_blob_sha256, before_present,
-             before_blob_sha256, before_latest_moment_id, metadata_origin, author_json,
+             before_blob_sha256, before_latest_moment_id, metadata_origin,
+             metadata_summary, metadata_correlation_id, author_json,
              sync_record_only, after_content_kind, after_binary_sha256,
              before_content_kind, before_binary_sha256,
              payload_before_path, payload_before_content_kind,
@@ -1092,9 +1106,9 @@ pub fn persist_binary_head_in_tx(
              payload_after_blob_sha256
          ) VALUES (
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', NULL, ?8,
-             ?9, ?10, ?11, ?12, NULL, 'binary', ?13, ?14, ?15,
-             CASE WHEN ?8 = 2 THEN ?6 END, CASE WHEN ?8 = 2 THEN ?14 END,
-             CASE ?14 WHEN 'binary' THEN ?15 ELSE ?9 END, ?6, 'binary', ?13
+             ?9, ?10, ?11, ?12, ?13, ?14, NULL, 'binary', ?15, ?16, ?17,
+             CASE WHEN ?8 = 2 THEN ?6 END, CASE WHEN ?8 = 2 THEN ?16 END,
+             CASE ?16 WHEN 'binary' THEN ?17 ELSE ?9 END, ?6, 'binary', ?15
          )",
         params![
             head.workspace_id,
@@ -1108,6 +1122,8 @@ pub fn persist_binary_head_in_tx(
             before_blob_sha256,
             before_latest_moment_id,
             head.metadata_origin,
+            head.metadata_summary,
+            head.metadata_correlation_id,
             head.author_json,
             head.binary_sha256,
             before_content_kind,
@@ -1120,7 +1136,7 @@ pub fn persist_binary_head_in_tx(
              workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
              latest_moment_id, metadata_origin, metadata_summary,
              metadata_correlation_id, content_kind, binary_sha256
-         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, NULL, NULL, 'binary', ?8)
+         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, 'binary', ?10)
          ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET
              path = excluded.path,
              blob_sha256 = NULL,
@@ -1139,6 +1155,8 @@ pub fn persist_binary_head_in_tx(
             head.now_ms,
             head.moment_id,
             head.metadata_origin,
+            head.metadata_summary,
+            head.metadata_correlation_id,
             head.binary_sha256,
         ],
     )
@@ -1167,6 +1185,8 @@ fn write_input(
         text: text.to_owned(),
         moment_id: moment_id.to_owned(),
         metadata_origin: input.metadata_origin.clone(),
+        metadata_summary: input.metadata_summary.clone(),
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
         request_id: None,
@@ -1181,6 +1201,8 @@ fn delete_input(input: &ResolveTextConflict, version_id: &str, path: &str) -> De
         moment_id: input.delete_moment_id.clone(),
         request_id: None,
         metadata_origin: input.metadata_origin.clone(),
+        metadata_summary: input.metadata_summary.clone(),
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
     }
@@ -1299,11 +1321,17 @@ pub fn load_text_conflict_in_tx(
 const CONFLICT_SELECT: &str = "SELECT c.*,
     base_blob.text AS base_text,
     current_blob.text AS current_text,
-    incoming_blob.text AS incoming_text
+    incoming_blob.text AS incoming_text,
+    base_binary.byte_length AS base_binary_byte_length,
+    current_binary.byte_length AS current_binary_byte_length,
+    incoming_binary.byte_length AS incoming_binary_byte_length
     FROM conflicts c
     LEFT JOIN blobs base_blob ON base_blob.sha256 = c.base_blob_sha256
     LEFT JOIN blobs current_blob ON current_blob.sha256 = c.current_blob_sha256
-    LEFT JOIN blobs incoming_blob ON incoming_blob.sha256 = c.incoming_blob_sha256";
+    LEFT JOIN blobs incoming_blob ON incoming_blob.sha256 = c.incoming_blob_sha256
+    LEFT JOIN binary_blobs base_binary ON base_binary.sha256 = c.base_binary_sha256
+    LEFT JOIN binary_blobs current_binary ON current_binary.sha256 = c.current_binary_sha256
+    LEFT JOIN binary_blobs incoming_binary ON incoming_binary.sha256 = c.incoming_binary_sha256";
 
 fn map_conflict_row(
     row: &rusqlite::Row<'_>,
@@ -1445,19 +1473,25 @@ fn map_side(
     // Head identity for a binary side is carried in the shared object/latest
     // moment columns; a text side keeps it inside its `TextSnapshot`, so leave
     // these `None` there to avoid duplicating it.
-    let (binary_object_id, binary_latest_moment_id) = match content_kind {
+    // Hydration is not validated while reconstructing a conflict: the byte-use
+    // boundary owns the absent-versus-corrupt classification.
+    let (binary_byte_length, binary_object_id, binary_latest_moment_id) = match content_kind {
+        ConflictContentKind::Binary if exists == 0 => (None, None, None),
         ConflictContentKind::Binary => (
+            row.get(format!("{prefix}_binary_byte_length").as_str())
+                .map_err(DomainError::sql_corrupt)?,
             row.get(column("object_id").as_str())
                 .map_err(DomainError::sql_corrupt)?,
             row.get(column("latest_moment_id").as_str())
                 .map_err(DomainError::sql_corrupt)?,
         ),
-        ConflictContentKind::Text => (None, None),
+        ConflictContentKind::Text => (None, None, None),
     };
     Ok(ConflictFileState {
         path,
         snapshot,
         binary_sha256,
+        binary_byte_length,
         binary_object_id,
         binary_latest_moment_id,
         content_kind,
@@ -1516,13 +1550,15 @@ pub fn select_snapshot_by_path_in_tx(
         Option<String>,
         String,
         Option<String>,
+        Option<i64>,
+        Option<i64>,
     );
     let row: Option<HeadRow> = conn
         .query_row(
             "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
              s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
-             s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
-             bb.sha256 FROM snapshots s \
+              s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
+              bb.sha256, bb.byte_length, LENGTH(bb.bytes) FROM snapshots s \
              LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
              LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
              WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3",
@@ -1540,6 +1576,8 @@ pub fn select_snapshot_by_path_in_tx(
                     row.get(8)?,
                     row.get(9)?,
                     row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
                 ))
             },
         )
@@ -1557,6 +1595,8 @@ pub fn select_snapshot_by_path_in_tx(
         metadata_correlation_id,
         content_kind,
         binary_sha256,
+        binary_byte_length,
+        binary_actual_length,
     )) = row
     else {
         return Ok(ConflictFileState::text(path.to_owned(), None));
@@ -1590,9 +1630,18 @@ pub fn select_snapshot_by_path_in_tx(
             let binary_sha256 = binary_sha256.ok_or(DomainError::StateCorrupt {
                 reason: "binary snapshot is missing its blob",
             })?;
+            let binary_byte_length = binary_byte_length.ok_or(DomainError::StateCorrupt {
+                reason: "binary snapshot is missing its byte length",
+            })?;
+            if binary_byte_length < 0 || binary_actual_length != Some(binary_byte_length) {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary snapshot has an invalid byte length",
+                });
+            }
             Ok(ConflictFileState::binary_head(
                 snapshot_path,
                 binary_sha256,
+                binary_byte_length,
                 object_id,
                 latest_moment_id,
             ))
@@ -1678,12 +1727,15 @@ mod tests {
         let base_sha = hex_sha256(base_bytes);
         let current_sha = hex_sha256(current_bytes);
         let incoming_sha = hex_sha256(incoming_bytes);
-        let expected = conflict(
+        let mut expected = conflict(
             "both-binary",
             ConflictFileState::binary("asset.bin", base_sha.clone()),
             ConflictFileState::binary("asset.bin", current_sha.clone()),
             ConflictFileState::binary("asset.bin", incoming_sha.clone()),
         );
+        expected.base.binary_byte_length = Some(base_bytes.len() as i64);
+        expected.current.binary_byte_length = Some(current_bytes.len() as i64);
+        expected.incoming.binary_byte_length = Some(incoming_bytes.len() as i64);
 
         let outcome = store
             .write_with(&NoFaults, |tx| {
@@ -1740,7 +1792,7 @@ mod tests {
         let (_scratch, mut store) = open_store();
         let incoming_bytes = b"incoming binary";
         let incoming_sha = hex_sha256(incoming_bytes);
-        let expected = conflict(
+        let mut expected = conflict(
             "mixed",
             ConflictFileState::text("mixed.dat", None),
             ConflictFileState::text(
@@ -1749,6 +1801,7 @@ mod tests {
             ),
             ConflictFileState::binary("mixed.dat", incoming_sha.clone()),
         );
+        expected.incoming.binary_byte_length = Some(incoming_bytes.len() as i64);
 
         let outcome = store
             .write_with(&NoFaults, |tx| {
@@ -1838,6 +1891,8 @@ mod tests {
                         binary_sha256: sha.clone(),
                         moment_id: "job-a".to_owned(),
                         metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         materialize: Some(Preimage::Absent),
                         now_ms: 10,
@@ -1859,6 +1914,8 @@ mod tests {
                         binary_sha256: sha.clone(),
                         moment_id: "job-b".to_owned(),
                         metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         materialize: Some(Preimage::Absent),
                         now_ms: 11,
@@ -1897,6 +1954,8 @@ mod tests {
                         binary_sha256: sha.clone(),
                         moment_id: "binary-moment".to_owned(),
                         metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         materialize: Some(Preimage::Absent),
                         now_ms: 10,
@@ -1952,6 +2011,8 @@ mod tests {
                     text: "after binary".to_owned(),
                     moment_id: "text-moment".to_owned(),
                     metadata_origin: "user".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
                     author_json: None,
                     now_ms: 11,
                     request_id: None,

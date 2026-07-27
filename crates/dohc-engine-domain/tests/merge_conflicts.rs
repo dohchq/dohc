@@ -49,6 +49,8 @@ fn write(version: &str, path: &str, text: &str, moment: &str, object: &str) -> W
         text: text.to_owned(),
         moment_id: moment.to_owned(),
         metadata_origin: "user".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms: 100,
         request_id: None,
@@ -63,6 +65,8 @@ fn delete(version: &str, path: &str, moment: &str) -> DeleteTextFile {
         moment_id: moment.to_owned(),
         request_id: None,
         metadata_origin: "user".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms: 110,
     }
@@ -106,6 +110,8 @@ fn write_binary(
                     binary_sha256: stored_sha256,
                     moment_id: job_id.to_owned(),
                     metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
                     author_json: None,
                     materialize: Some(preimage),
                     now_ms: 120,
@@ -144,6 +150,8 @@ fn merge_input(path: &str, moment: &str, conflict: &str, object: &str) -> MergeT
         request_id: None,
         conflict_id: conflict.to_owned(),
         metadata_origin: "agent".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms: 500,
     }
@@ -505,6 +513,8 @@ fn merge_materialization_is_gated_to_the_active_target_version_across_reopen() {
             request_id: Some("gate-inactive-request".to_owned()),
             conflict_id: "gate-inactive-conflict".to_owned(),
             metadata_origin: "agent".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
             author_json: None,
             now_ms: 70,
         };
@@ -586,6 +596,8 @@ fn merge_materialization_is_gated_to_the_active_target_version_across_reopen() {
         request_id: Some("gate-active-request".to_owned()),
         conflict_id: "gate-active-conflict".to_owned(),
         metadata_origin: "agent".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms: 90,
     };
@@ -863,6 +875,8 @@ fn resolve(id: &str, kind: ResolveConflictKind, suffix: &str) -> ResolveTextConf
         write_moment_id: format!("resolve-write-{suffix}"),
         delete_moment_id: format!("resolve-delete-{suffix}"),
         metadata_origin: "agent".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms: 900,
         request_id: None,
@@ -1386,6 +1400,8 @@ fn merge_refuses_to_clobber_a_binary_head_at_the_target() {
                     binary_sha256: sha,
                     moment_id: "bin-a-job".to_owned(),
                     metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
                     author_json: None,
                     materialize: Some(Preimage::Absent),
                     now_ms: 120,
@@ -1523,7 +1539,7 @@ fn exact_merge_retry_reconstructs_recorded_outcome_before_binary_head_comparison
 /// a recorded side that DOES carry identity keeps the strict no-clobber check.
 #[test]
 fn exact_head_gate_falls_back_for_legacy_null_identity_binary_sides() {
-    let live = ConflictFileState::binary_head("a.md", "sha-bytes", "obj-live", "moment-live");
+    let live = ConflictFileState::binary_head("a.md", "sha-bytes", 9, "obj-live", "moment-live");
 
     // Legacy recorded side (NULL identity) with matching path+bytes RESOLVES.
     let legacy = ConflictFileState::binary("a.md", "sha-bytes");
@@ -1542,13 +1558,13 @@ fn exact_head_gate_falls_back_for_legacy_null_identity_binary_sides() {
     // A recorded side that DOES carry identity keeps the strict check: same
     // bytes but a recreated head (different object/moment) must NOT match.
     let strict_same =
-        ConflictFileState::binary_head("a.md", "sha-bytes", "obj-live", "moment-live");
+        ConflictFileState::binary_head("a.md", "sha-bytes", 9, "obj-live", "moment-live");
     assert!(
         live_state_matches_conflict_current(&live, &strict_same),
         "an identity-carrying side matching object+moment must still match"
     );
     let strict_recreated =
-        ConflictFileState::binary_head("a.md", "sha-bytes", "obj-recreated", "moment-recreated");
+        ConflictFileState::binary_head("a.md", "sha-bytes", 9, "obj-recreated", "moment-recreated");
     assert!(
         !live_state_matches_conflict_current(&live, &strict_recreated),
         "an identity-carrying side must reject a same-bytes-but-recreated head (no clobber)"

@@ -194,6 +194,24 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     )
     .await;
 
+    // Capture accepts text through 128 KiB, and the text-read endpoint passes
+    // that same cap to the one-query hydrator. The unrelated 48 KiB
+    // binary/history cap must not truncate this captured body.
+    id += 1;
+    let large_text = call(
+        &transport,
+        &handle,
+        id,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "notes/big.md" }),
+    )
+    .await;
+    assert_eq!(
+        large_text["text"].as_str().map(str::len),
+        Some(64 * 1024),
+        "captured text between 48 KiB and 128 KiB must hydrate"
+    );
+
     // The listing pages by path with a keyset cursor — metadata only, so
     // no page can outgrow the wire frame.
     id += 1;
@@ -339,13 +357,16 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     assert_eq!(fetched["momentId"], newest["momentId"]);
     assert_eq!(fetched["path"], newest["path"]);
 
-    // MUTATION: omit the in-band marker when an over-cap body is nulled -> fails.
+    // Capture-sized text remains fully hydratable for desktop restores.
     let big_text_moment = moment_list
         .iter()
         .find(|moment| moment["path"] == "notes/big.md")
         .expect("large captured text moment");
-    assert!(big_text_moment["afterText"].is_null());
-    assert_eq!(big_text_moment["afterInbandLimitBytes"], json!(48 * 1024));
+    assert_eq!(
+        big_text_moment["afterText"].as_str().map(str::len),
+        Some(64 * 1024)
+    );
+    assert!(big_text_moment["afterInbandLimitBytes"].is_null());
     id += 1;
     let big_text_fetched = call(
         &transport,
@@ -355,8 +376,11 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         json!({ "momentId": big_text_moment["momentId"] }),
     )
     .await;
-    assert!(big_text_fetched["afterText"].is_null());
-    assert_eq!(big_text_fetched["afterInbandLimitBytes"], json!(48 * 1024));
+    assert_eq!(
+        big_text_fetched["afterText"].as_str().map(str::len),
+        Some(64 * 1024)
+    );
+    assert!(big_text_fetched["afterInbandLimitBytes"].is_null());
 
     // secrets.list exposes metadata only; secrets.materialize is the single
     // plaintext accessor and roundtrips the captured secret.
@@ -416,8 +440,8 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     .await;
     assert!(absent.is_null(), "an absent secret materializes to null");
 
-    // An over-cap secret answers its SIZE, never a post-decrypt encode
-    // failure (the DOP1 string limit binds every in-band body).
+    // Protected plaintext is hydratable throughout the oracle's accepted
+    // secret-file range.
     id += 1;
     let big = call(
         &transport,
@@ -427,12 +451,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         json!({ "versionId": "main", "path": "big.env" }),
     )
     .await;
-    assert!(
-        big["text"].is_null(),
-        "over-cap plaintext stays out-of-band"
-    );
-    assert_eq!(big["inbandLimitBytes"], json!(48 * 1024));
-    assert!(big["byteLength"].as_u64().expect("byteLength") > 48 * 1024);
+    assert_eq!(big["text"], json!(big_secret));
 
     // FAIL CLOSED: live secret state with a MISSING key file is
     // corrupt/misrestored — materialize must error, never read as empty.

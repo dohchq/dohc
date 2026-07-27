@@ -155,6 +155,67 @@ async fn autonomous_capture_notices_external_disk_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_capture_author_stamps_the_startup_baseline() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "during-restart.md", b"closed-period edit");
+    let author = json!({
+        "kind": "agent",
+        "agentId": "agent",
+        "onBehalfOf": "local",
+        "agentRunId": "run",
+    });
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                    "captureAuthor": author,
+                }),
+            ),
+        )
+        .await
+        .expect("workspace open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let store = EngineStore::open(&db_path, 100).expect("reopen store");
+    let author_json: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments WHERE path = 'during-restart.md'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("baseline moment");
+    let captured_author: Value = serde_json::from_str(
+        author_json
+            .as_deref()
+            .expect("startup baseline must retain the open author"),
+    )
+    .expect("valid author json");
+
+    // MUTATION: initializing CaptureDriver with None makes this actor-neutral.
+    assert_eq!(captured_author, author);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");

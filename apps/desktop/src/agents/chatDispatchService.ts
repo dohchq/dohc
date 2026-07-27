@@ -124,7 +124,7 @@ export interface ChatDispatchServiceOptions {
   setRunAttribution(
     workspaceId: string,
     run: { agentId: string; onBehalfOf: string; agentRunId: string } | null,
-  ): void;
+  ): void | Promise<void>;
   runSlotOccupied?(workspaceId: string): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
   requeueFailedTrigger?(input: {
@@ -719,12 +719,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     });
   }
 
-  function clearLiveAttribution(live: LiveRun): void {
-    try {
-      options.setRunAttribution(live.workspace.workspaceId, null);
-    } catch (error) {
-      reportError(error);
-    }
+  async function clearLiveAttribution(live: LiveRun): Promise<void> {
+    await options.setRunAttribution(live.workspace.workspaceId, null);
     finishPresence(live);
   }
 
@@ -836,8 +832,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
     }
     if (!live.child.hasExited()) return false;
+    await clearLiveAttribution(live);
     liveRuns.delete(live.workspace.workspaceId);
-    clearLiveAttribution(live);
     await releaseLiveWorkspace(live);
     return true;
   }
@@ -879,9 +875,19 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     claim: AgentDispatchClaim,
     reason: string,
   ): Promise<void> {
-    try {
-      options.setRunAttribution(workspace.workspaceId, null);
-    } catch {}
+    // A daemon restart can reject attribution teardown after the claim has
+    // reserved this workspace but before a child exists. Retry once, then
+    // finish the failed claim even if capture remains unavailable: the next
+    // run overwrites attribution before it can spawn, while retaining the
+    // in-memory reservation would deadlock dispatch until app quit.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await options.setRunAttribution(workspace.workspaceId, null);
+        break;
+      } catch (error) {
+        reportError(error);
+      }
+    }
     await postFailureNote(
       workspace,
       claim.run,
@@ -929,7 +935,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     runReservations.add(workspace.workspaceId);
     try {
       const identity = await options.identityFor(workspace.workspaceId);
-      options.setRunAttribution(workspace.workspaceId, {
+      await options.setRunAttribution(workspace.workspaceId, {
         agentId: "dohc-chat-runner",
         onBehalfOf: "local",
         agentRunId: claim.run.runId,
@@ -1620,7 +1626,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               : "A runner became active before the self-test could start.",
           };
         }
-        options.setRunAttribution(workspaceId, {
+        await options.setRunAttribution(workspaceId, {
           agentId: "dohc-chat-runner-self-test",
           onBehalfOf: "local",
           agentRunId: runId,
@@ -1646,7 +1652,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             }
             selfTests.delete(workspaceId);
             try {
-              options.setRunAttribution(workspaceId, null);
+              await options.setRunAttribution(workspaceId, null);
             } catch (error) {
               reportError(error);
             }
@@ -1747,7 +1753,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         });
       } catch (error) {
         try {
-          options.setRunAttribution(workspaceId, null);
+          await options.setRunAttribution(workspaceId, null);
         } catch {}
         reportError(error);
         return {
@@ -1786,7 +1792,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         if (live.presenceHeartbeat) clearInterval(live.presenceHeartbeat);
         appQuitRuns.push(live);
       }
-      clearLiveAttribution(live);
       runWorkspacesToRelease.push(live);
       quitProcesses.push(live.child);
     }
@@ -1816,7 +1821,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       clearTimeout(test.timeout);
       if (test.killEscalation) clearTimeout(test.killEscalation);
       try {
-        options.setRunAttribution(test.workspaceId, null);
+        await options.setRunAttribution(test.workspaceId, null);
       } catch {}
       test.resolve({
         ok: false,
@@ -1830,18 +1835,28 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     pendingNoReplyChecks.clear();
     pendingPreRunFailures.clear();
     pendingInterruptedRequeues.clear();
-    liveRuns.clear();
-    await Promise.all([...workspaceChains.values()].map((chain) => chain.catch(() => undefined)));
     await Promise.all(quitTerminations);
     await Promise.all(
       [
-        ...runWorkspacesToRelease.map((live) => releaseLiveWorkspace(live)),
+        ...runWorkspacesToRelease.map(async (live) => {
+          try {
+            await clearLiveAttribution(live);
+          } catch (error) {
+            reportError(error);
+          } finally {
+            if (liveRuns.get(live.workspace.workspaceId) === live) {
+              liveRuns.delete(live.workspace.workspaceId);
+            }
+            await releaseLiveWorkspace(live);
+          }
+        }),
         ...preRunFailures.map(async (recovery) => {
           await releaseWorkspaceLease(recovery.releaseWorkspace);
           recovery.releaseWorkspace = null;
         }),
       ],
     );
+    liveRuns.clear();
   }
 
   return {

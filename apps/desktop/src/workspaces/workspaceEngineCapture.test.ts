@@ -15,6 +15,7 @@ import { nativeTmpdir } from "./testTemp";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+  DAEMON_CAPTURE_HEALTH_POLL_MS,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
   UnsupportedWorkspacePathError,
@@ -27,7 +28,20 @@ import {
 } from "./workspaceEngineCapture";
 import { createChangeSetStore } from "@dohc/workspace-engine";
 import { WorkspaceKernelClient } from "@dohc/workspace-kernel-client";
+import {
+  VERSIONED_METHOD,
+  VersionedLoopbackEngine,
+  type JsonValue,
+  type Request,
+  type Response,
+} from "@dohc/workspace-engine-client";
 import { startWorkspaceWatch } from "./workspaceWatcher";
+import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import type {
+  EngineYdocProviderSessionRust,
+  EngineYdocProviderSessionRustOptions,
+} from "../collab/ydocEngineProviderSessionRust";
+import * as Y from "yjs";
 
 // node:sqlite via createRequire, matching the engine store: vitest's vite
 // pipeline cannot statically resolve the node:sqlite builtin yet.
@@ -45,6 +59,7 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
 const roots: string[] = [];
 const ORIGINAL_KERNEL_SIDECAR = process.env.DOHC_KERNEL_SIDECAR;
 const ORIGINAL_KERNEL_BINARY_PATH = process.env.DOHC_KERNEL_BINARY_PATH;
+const ORIGINAL_RUST_ENGINE_ADAPTER = process.env.DOHC_RUST_ENGINE_ADAPTER;
 
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-capture-"));
@@ -62,6 +77,11 @@ afterEach(async () => {
   else process.env.DOHC_KERNEL_SIDECAR = ORIGINAL_KERNEL_SIDECAR;
   if (ORIGINAL_KERNEL_BINARY_PATH === undefined) delete process.env.DOHC_KERNEL_BINARY_PATH;
   else process.env.DOHC_KERNEL_BINARY_PATH = ORIGINAL_KERNEL_BINARY_PATH;
+  if (ORIGINAL_RUST_ENGINE_ADAPTER === undefined) {
+    delete process.env.DOHC_RUST_ENGINE_ADAPTER;
+  } else {
+    process.env.DOHC_RUST_ENGINE_ADAPTER = ORIGINAL_RUST_ENGINE_ADAPTER;
+  }
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -138,11 +158,63 @@ function capture(root: string, options: {
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (outcome: { ok: boolean }) => void;
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
+  rustEngineSessions?: EngineWorkspaceSessions;
+  daemonOwnsCapture?: boolean;
+  openRustYDocProviderSession?: (
+    options: EngineYdocProviderSessionRustOptions,
+  ) => Promise<EngineYdocProviderSessionRust>;
 } = {}) {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-capture-test",
     rootPath: root,
     ...options,
+  });
+}
+
+function mockLiveSessions(
+  loopback: VersionedLoopbackEngine,
+  requests?: Request[],
+  captureFlushResult: () => {
+    settled: boolean;
+    running: boolean;
+    degraded: boolean;
+  } = () => ({ settled: true, running: true, degraded: false }),
+) {
+  const client = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      requests?.push(request);
+      const params = request.params as Record<string, JsonValue | undefined>;
+      if (request.method === "workspace.open") {
+        return {
+          id: request.id,
+          result: { workspace: String(params.workspaceId) },
+        };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      if (request.method === "capture.flush") {
+        return {
+          id: request.id,
+          result: captureFlushResult(),
+        };
+      }
+      if (request.method === "capture.setAuthor") {
+        return { id: request.id, result: { updated: true } };
+      }
+      if (request.method === "watcher.status") {
+        return {
+          id: request.id,
+          result: { running: true, degraded: false, terminal: false },
+        };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  return new EngineWorkspaceSessions({
+    currentClient: () => client,
   });
 }
 
@@ -198,22 +270,449 @@ function readEngineMomentAuthors(rootPath: string): Array<Record<string, unknown
 }
 
 describe("workspaceEngineCapture batch capture", () => {
-  it("accepts the dormant Rust adapter composition slot without reading it", async () => {
+  it("leaves the TypeScript stores untouched when Rust sessions exist but the flag is off", async () => {
     const root = await tempRoot();
-    const transport = {
-      sendRequest: vi.fn(),
-      onEvent: vi.fn(() => () => {}),
-    };
+    const loopback = new VersionedLoopbackEngine();
+    delete process.env.DOHC_RUST_ENGINE_ADAPTER;
     const engine = createWorkspaceEngineCapture({
       workspaceId: "engine-capture-test",
       rootPath: root,
-      rustEngineAdapter: { transport },
+      rustEngineSessions: mockLiveSessions(loopback),
     });
 
     engine.start();
     await engine.flush();
-    expect(transport.sendRequest).not.toHaveBeenCalled();
-    expect(transport.onEvent).not.toHaveBeenCalled();
+    await engine.stop();
+    expect(loopback.requests).toHaveLength(0);
+    expect(existsSync(join(root, ".dohc", "engine", "engine.db"))).toBe(true);
+  });
+
+  it("uses the daemon as the sole capture and version-switch materialization owner", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    loopback.seedTextFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: "note.md",
+      text: "main",
+    });
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, requests),
+      daemonOwnsCapture: true,
+    });
+
+    engine.start();
+    await engine.flush();
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.flush();
+    expect(
+      loopback.requests.some(
+        (request) =>
+          request.method === VERSIONED_METHOD.textWrite ||
+          request.method === VERSIONED_METHOD.textDelete,
+      ),
+    ).toBe(false);
+
+    const draft = await engine.createVersion("Draft");
+    loopback.requests.length = 0;
+    requests.length = 0;
+    const result = await engine.switchVersion("main");
+
+    expect(result).toEqual({
+      activeVersionId: "main",
+      changedFileCount: 0,
+    });
+    expect(
+      loopback.requests.some(
+        (request) =>
+          request.method === VERSIONED_METHOD.textRead ||
+          request.method === VERSIONED_METHOD.binaryRead ||
+          request.method === VERSIONED_METHOD.textWrite ||
+          request.method === VERSIONED_METHOD.textDelete,
+      ),
+    ).toBe(false);
+    const flushIndex = requests.findIndex(
+      (request) => request.method === "capture.flush",
+    );
+    // MUTATION: omit the daemon flush in switchVersion. Source metadata is
+    // listed without a capture settlement between the target preflight and
+    // the before/after comparison.
+    expect(flushIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      requests
+        .slice(flushIndex + 1)
+        .some((request) => request.method === VERSIONED_METHOD.textList),
+    ).toBe(true);
+    expect(
+      loopback.requests.some(
+        (request) => request.method === VERSIONED_METHOD.versionsSetActive,
+      ),
+    ).toBe(true);
+    expect(draft.activeVersionId).not.toBe("main");
+    await engine.stop();
+  });
+
+  it("flushes daemon capture before resolving a file object id", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    loopback.seedTextFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: "just-saved.md",
+      text: "ready for chat",
+    });
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, requests),
+      daemonOwnsCapture: true,
+    });
+
+    const objectId = await engine.fileObjectIdForPath("just-saved.md");
+    const relevant = requests
+      .map((request) => request.method)
+      .filter(
+        (method) =>
+          method === "capture.flush" || method === VERSIONED_METHOD.textRead,
+      );
+
+    expect(objectId).toBeTruthy();
+    // MUTATION: remove fileObjectIdForPath's flushCapture call. The read
+    // remains, making this order assertion fail on the missing first entry.
+    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
+    await engine.stop();
+  });
+
+  it("closes both daemon stores when the final capture flush rejects", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    let settled = true;
+    const sessions = mockLiveSessions(loopback, undefined, () => ({
+      settled,
+      running: true,
+      degraded: !settled,
+    }));
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+    });
+
+    // createVersion opens both the text and secret daemon adapters.
+    await engine.createVersion("Draft");
+    settled = false;
+    const outcome = await engine.stop().catch((error: unknown) => error);
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toContain("did not settle");
+    // MUTATION: await the final flush outside try/finally. Its rejection skips
+    // both adapter closes, so this count is zero.
+    expect(closeWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it("mutation proof: installs remote updates buffered during the initial Y.Doc open", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: "note.md",
+      text: "seed",
+    });
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const baseDoc = new Y.Doc();
+    baseDoc.getText("content").insert(0, "base");
+    const staleInitialUpdate = Y.encodeStateAsUpdate(baseDoc);
+    const daemonDoc = new Y.Doc();
+    Y.applyUpdate(daemonDoc, staleInitialUpdate);
+    const remoteDoc = new Y.Doc();
+    Y.applyUpdate(remoteDoc, staleInitialUpdate);
+    remoteDoc.getText("content").insert(4, "+remote");
+    const bufferedUpdate = Y.encodeStateAsUpdate(
+      remoteDoc,
+      Y.encodeStateVector(daemonDoc),
+    );
+    const forwarded: Uint8Array[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        Y.applyUpdate(daemonDoc, bufferedUpdate);
+        options.onRemoteUpdate(bufferedUpdate);
+        return {
+          doc: daemonDoc,
+          initialUpdate: staleInitialUpdate,
+          contentKind: "plaintext",
+          path: "note.md",
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () =>
+            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
+          close: async () => undefined,
+        };
+      },
+    });
+
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: (update) => forwarded.push(update),
+    });
+    const rendererDoc = new Y.Doc();
+    Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+    expect(rendererDoc.getText("content").toString()).toBe("base+remote");
+    expect(forwarded).toEqual([bufferedUpdate]);
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("mutation proof: polls daemon watcher degradation after startup", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = await tempRoot();
+      let degraded = false;
+      const outcomes: boolean[] = [];
+      const daemonStore = Object.assign(createVersionedTextStore(root), {
+        watcherStatus: async () => ({
+          running: true,
+          degraded,
+          terminal: false,
+        }),
+        flushCapture: async () => undefined,
+      });
+      const engine = capture(root, {
+        store: daemonStore,
+        daemonOwnsCapture: true,
+        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      });
+
+      engine.start();
+      await engine.flush();
+      degraded = true;
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await engine.flush();
+
+      expect(outcomes).toEqual([true, false]);
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("mutation proof: counts a secret-only daemon version switch", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedSecretFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: ".env",
+      text: "VALUE=main\n",
+    });
+    await write(root, ".env", "VALUE=main\n");
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      daemonOwnsCapture: true,
+    });
+    const created = await engine.createVersion("Draft");
+    const draftId = created.activeVersionId;
+    loopback.seedSecretFile({
+      workspace: "engine-capture-test",
+      versionId: draftId,
+      path: ".env",
+      text: "VALUE=draft\n",
+    });
+    await write(root, ".env", "VALUE=draft\n");
+
+    await expect(engine.switchVersion("main")).resolves.toEqual({
+      activeVersionId: "main",
+      changedFileCount: 1,
+    });
+    await engine.stop();
+  });
+
+  it.each(["typescript", "live"] as const)(
+    "captures, reads back, and switches materialized text with the %s backend",
+    async (backend) => {
+      const root = await tempRoot();
+      const loopback = new VersionedLoopbackEngine();
+      const rustEngineSessions =
+        backend === "live" ? mockLiveSessions(loopback) : undefined;
+      if (backend === "live") process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+
+      await write(root, "notes.md", "main text\n");
+      const engine = capture(root, {
+        ...(rustEngineSessions ? { rustEngineSessions } : {}),
+      });
+      engine.captureBatch([{ path: "notes.md", operation: "update" }]);
+      await engine.flush();
+      expect(await engine.fileObjectIdForPath("notes.md")).toBeTruthy();
+
+      const created = await engine.createVersion("Draft");
+      const draftId = created.activeVersionId;
+      await write(root, "notes.md", "draft text\n");
+      engine.captureBatch([{ path: "notes.md", operation: "update" }]);
+      await engine.flush();
+
+      await engine.switchVersion("main");
+      expect(await readFile(join(root, "notes.md"), "utf8")).toBe("main text\n");
+      await engine.switchVersion(draftId);
+      expect(await readFile(join(root, "notes.md"), "utf8")).toBe("draft text\n");
+      await engine.stop();
+
+      if (backend === "live") {
+        expect(
+          loopback.requests.some(
+            (request) => request.method === "versionedText.list",
+          ),
+        ).toBe(true);
+        expect(
+          loopback.requests.some(
+            (request) => request.method === "versionedText.read",
+          ),
+        ).toBe(true);
+      }
+    },
+  );
+
+  it("hydrates target text after the daemon metadata-only list before materialization", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    await write(root, "note.md", "main\n");
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.flush();
+    const draft = await engine.createVersion("Draft");
+    await write(root, "note.md", "draft\n");
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.flush();
+    loopback.requests.length = 0;
+
+    await engine.switchVersion("main");
+    const targetListIndex = loopback.requests.findIndex(
+      (request) =>
+        request.method === "versionedText.list" &&
+        (request.params as { versionId?: string }).versionId === "main",
+    );
+    const targetReadIndex = loopback.requests.findIndex(
+      (request) =>
+        request.method === "versionedText.read" &&
+        (request.params as { versionId?: string; path?: string }).versionId ===
+          "main" &&
+        (request.params as { path?: string }).path === "note.md",
+    );
+    expect(targetListIndex).toBeGreaterThanOrEqual(0);
+    expect(targetReadIndex).toBeGreaterThan(targetListIndex);
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("main\n");
+    await engine.stop();
+    expect(draft.activeVersionId).not.toBe("main");
+  });
+
+  it("uses list metadata sha to avoid binary hydration when target bytes already match", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    await write(root, "logo.png", bytes);
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+    await engine.createVersion("Draft");
+    loopback.requests.length = 0;
+
+    await engine.switchVersion("main");
+    expect(
+      loopback.requests.filter(
+        (request) => request.method === "versionedBinary.read",
+      ),
+    ).toHaveLength(0);
+    expect(await readFile(join(root, "logo.png"))).toEqual(bytes);
+    await engine.stop();
+  });
+
+  it("validates an unknown switch target from metadata without attempting text hydration", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    loopback.requests.length = 0;
+
+    await expect(engine.switchVersion("missing-version")).rejects.toThrow();
+    expect(
+      loopback.requests.filter(
+        (request) => request.method === "versionedText.read",
+      ),
+    ).toHaveLength(0);
+    await engine.stop();
+  });
+
+  it("reconciles the tracked set from metadata and hydrates only the path being deleted", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: "closed-period-delete.md",
+      text: "gone from disk\n",
+    });
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    loopback.requests.length = 0;
+
+    engine.start();
+    await engine.flush();
+    const listIndex = loopback.requests.findIndex(
+      (request) => request.method === "versionedText.list",
+    );
+    const readIndexes = loopback.requests
+      .map((request, index) => ({ request, index }))
+      .filter(({ request }) => request.method === "versionedText.read")
+      .map(({ index }) => index);
+    expect(listIndex).toBeGreaterThanOrEqual(0);
+    // The one read belongs to deleteIfTracked's presence check. The live
+    // facade must use the mutation's atomic preimage, not race it with a
+    // second pre-delete read. Hydrating listTextFiles would add another read.
+    expect(readIndexes).toHaveLength(1);
+    expect(readIndexes.every((index) => index > listIndex)).toBe(true);
+    await engine.stop();
+  });
+
+  it("uses previous-version metadata for deletion planning without hydrating its text", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    await engine.createVersion("Draft");
+    await write(root, "draft-only.md", "draft only\n");
+    engine.captureBatch([{ path: "draft-only.md", operation: "update" }]);
+    await engine.flush();
+    loopback.requests.length = 0;
+
+    await engine.switchVersion("main");
+    const previousListIndex = loopback.requests.findLastIndex(
+      (request) =>
+        request.method === "versionedText.list" &&
+        (request.params as { versionId?: string }).versionId !== "main",
+    );
+    const readAfterPreviousList = loopback.requests
+      .slice(previousListIndex + 1)
+      .some((request) => request.method === "versionedText.read");
+    expect(previousListIndex).toBeGreaterThanOrEqual(0);
+    expect(readAfterPreviousList).toBe(false);
+    expect(existsSync(join(root, "draft-only.md"))).toBe(false);
     await engine.stop();
   });
 
@@ -1614,6 +2113,41 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     expect(readEngineMoments(root).map((m) => m.path)).toEqual(["note.md"]);
   });
 
+  it("mutation proof: daemon startup open failure raises the capture outcome", async () => {
+    const root = await tempRoot();
+    const { store, state } = flakyStore(root);
+    const outcomes: boolean[] = [];
+    const errors: string[] = [];
+    let resolveOutcome!: () => void;
+    const outcomeReported = new Promise<void>((resolve) => {
+      resolveOutcome = resolve;
+    });
+    let resolveError!: () => void;
+    const errorReported = new Promise<void>((resolve) => {
+      resolveError = resolve;
+    });
+    const engine = capture(root, {
+      store,
+      daemonOwnsCapture: true,
+      onCaptureOutcome: ({ ok }) => {
+        outcomes.push(ok);
+        resolveOutcome();
+      },
+      onError: (context) => {
+        errors.push(context);
+        resolveError();
+      },
+    });
+
+    engine.start();
+    await Promise.all([outcomeReported, errorReported]);
+
+    expect(outcomes).toEqual([false]);
+    expect(errors).toEqual(["daemon capture health"]);
+    state.failing = false;
+    await engine.stop();
+  });
+
   it("reports a failed outcome when only one path in a batch fails", async () => {
     const root = await tempRoot();
     await write(root, "good.md", "fine\n");
@@ -1899,6 +2433,71 @@ describe("createDefaultDiskWriter symlink containment", () => {
 // unchanged — an absent run means an absent author).
 describe("workspaceEngineCapture agent attribution", () => {
   const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+
+  it("mutation proof: daemon author state is set before work and flushed before clear", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, requests),
+      daemonOwnsCapture: true,
+    });
+
+    await engine.setActiveAgentRun(run);
+    await engine.setActiveAgentRun(null);
+
+    const authorRequests = requests.filter((request) =>
+      request.method === "capture.setAuthor" ||
+      request.method === "capture.flush",
+    );
+    expect(authorRequests.map((request) => request.method)).toEqual([
+      "capture.setAuthor",
+      "capture.flush",
+      "capture.setAuthor",
+    ]);
+    expect(authorRequests[0]?.params).toEqual({
+      author: { kind: "agent", ...run },
+    });
+    expect(authorRequests[2]?.params).toEqual({ author: null });
+    await engine.stop();
+  });
+
+  it("mutation proof: an unsettled flush refuses to clear daemon authorship", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const loopback = new VersionedLoopbackEngine();
+    let settled = false;
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        settled,
+        running: true,
+        degraded: !settled,
+      })),
+      daemonOwnsCapture: true,
+    });
+
+    await engine.setActiveAgentRun(run);
+    await expect(engine.setActiveAgentRun(null)).rejects.toThrow("did not settle");
+    expect(
+      requests
+        .filter(
+          (request) =>
+            request.method === "capture.flush" ||
+            request.method === "capture.setAuthor",
+        )
+        .map((request) => request.method),
+    ).toEqual(["capture.setAuthor", "capture.flush"]);
+
+    settled = true;
+    await engine.setActiveAgentRun(null);
+    expect(
+      requests.filter((request) => request.method === "capture.setAuthor").at(-1)
+        ?.params,
+    ).toEqual({ author: null });
+    await engine.stop();
+  });
 
   it("stamps captured writes and deletes with the active run's author", async () => {
     const root = await tempRoot();

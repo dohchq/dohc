@@ -109,6 +109,10 @@ interface FixtureOptions {
     chat: LinkedChatStore,
   ) => void | boolean | Promise<void | boolean>;
   temporaryRunActivity?: boolean;
+  setRunAttribution?: (
+    workspaceId: string,
+    run: { agentId: string; onBehalfOf: string; agentRunId: string } | null,
+  ) => void | Promise<void>;
   requeueFailures?: Error[];
   recordEligibleTriggerFailures?: Error[];
   claimFailures?: Error[];
@@ -626,8 +630,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     authorizeServiceNote: async () => options.serviceNotesWritable !== false,
     onMessagePosted: (workspaceId) => postedWorkspaces.push(workspaceId),
     onRunUpdated: (workspaceId) => runUpdatedWorkspaces.push(workspaceId),
-    setRunAttribution: (workspaceId, run) => {
+    setRunAttribution: async (workspaceId, run) => {
       attributions.push({ workspaceId, run });
+      await options.setRunAttribution?.(workspaceId, run);
     },
     publishPresence: async (input) => {
       presence.push(input);
@@ -1131,7 +1136,9 @@ describe("chatDispatchService", () => {
     fixture.spawnCalls[0]!.process.emitExit(0);
     await flushMicrotasks(100);
 
-    expect(fixture.completeRunRequests).toBe(6);
+    await vi.waitFor(() => {
+      expect(fixture.completeRunRequests).toBe(6);
+    });
     expect(fixture.dispatch.getRunRecord(claim.run.runId)).not.toHaveProperty(
       "endedAtMs",
     );
@@ -1153,7 +1160,9 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(1);
     await flushMicrotasks(100);
 
-    expect(fixture.completeRunRequests).toBe(7);
+    await vi.waitFor(() => {
+      expect(fixture.completeRunRequests).toBe(7);
+    });
     expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       endedAtMs: fixture.now.value,
       exitCode: 0,
@@ -1215,7 +1224,9 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
     await flushMicrotasks(100);
 
-    expect(fixture.failRunRequests).toBe(7);
+    await vi.waitFor(() => {
+      expect(fixture.failRunRequests).toBe(7);
+    });
     expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       failureReason: expect.stringContaining("runner failed to start"),
     });
@@ -1755,6 +1766,79 @@ describe("chatDispatchService", () => {
       failureNotePosted: true,
     });
     expect(fixture.dispatch.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([notes[0]!.id]);
+  });
+
+  it("mutation proof: retains a finalized run until attribution teardown succeeds", async () => {
+    let clearAttempts = 0;
+    const teardownError = new Error("capture author clear failed");
+    const fixture = await createFixture({
+      setRunAttribution: (_workspaceId, run) => {
+        if (run === null && clearAttempts++ === 0) throw teardownError;
+      },
+    });
+    await createAgentThread(fixture, {
+      body: "Finish only after capture ownership clears.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await vi.waitFor(() => {
+      expect(fixture.errors).toContain(teardownError);
+    });
+
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
+
+    // A recovery scan retries only the retained finalized run's teardown path;
+    // no second runner is spawned.
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false);
+    expect(fixture.spawnCalls).toHaveLength(1);
+  });
+
+  it("releases a pre-spawn reservation when attribution teardown keeps failing", async () => {
+    const teardownError = new Error("pre-spawn author clear failed");
+    const contextError = new Error("thread context failed");
+    let clearFailures = 0;
+    const fixture = await createFixture({
+      setRunAttribution: (_workspaceId, run) => {
+        if (run === null && clearFailures < 2) {
+          clearFailures += 1;
+          throw teardownError;
+        }
+      },
+    });
+    const first = await createAgentThread(fixture, {
+      body: "Fail while preparing this run.",
+      authorUserId: "user_local",
+    });
+    const second = await createAgentThread(fixture, {
+      body: "Run after teardown failed.",
+      authorUserId: "user_local",
+    });
+    vi.spyOn(fixture.chat, "listMessages").mockRejectedValueOnce(contextError);
+
+    const activation = await activate(fixture)
+      .then(() => null)
+      .catch((error: unknown) => error);
+
+    expect(activation).toBeNull();
+    expect(fixture.errors).toContain(contextError);
+    expect(fixture.errors.filter((error) => error === teardownError)).toHaveLength(2);
+    expect(
+      fixture.dispatchDb
+        .prepare(
+          `SELECT state FROM chat_dispatch_ledger
+           WHERE workspace_id = ? AND trigger_message_id = ?`,
+        )
+        .get(WORKSPACE_ID, first.messageId)?.state,
+    ).toBe("failed");
+    // MUTATION: move reservation deletion back after failClaimBeforeRun. The
+    // persistent clear failure throws first, so this assertion sees a
+    // reservation instead of the second live child.
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
+    expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(second.threadId);
   });
 
   it("deadlines every daemon RPC awaited before terminal persistence", async () => {
@@ -2430,7 +2514,9 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await flushMicrotasks(100);
 
-    expect(fixture.failRunRequests).toBe(6);
+    await vi.waitFor(() => {
+      expect(fixture.failRunRequests).toBe(6);
+    });
     expect(fixture.dispatch.getRunRecord(claim.run.runId)).not.toHaveProperty(
       "endedAtMs",
     );
@@ -2438,7 +2524,9 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
     await flushMicrotasks(100);
 
-    expect(fixture.failRunRequests).toBe(7);
+    await vi.waitFor(() => {
+      expect(fixture.failRunRequests).toBe(7);
+    });
     expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       endedAtMs: fixture.now.value,
       exitCode: 124,

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   DaemonClientCapabilityError,
   DaemonProtocolError,
@@ -23,6 +23,7 @@ import {
   type WorkspaceMethod,
   type WorkspaceMethodParamsMap,
   type WorkspaceMethodResultMap,
+  type WorkspaceOpenParams,
 } from "../workspace/workspaceWireContract";
 import {
   VERSIONED_METHOD,
@@ -35,6 +36,7 @@ import {
   type VersionedMethodParamsMap,
   type VersionedMethodResultMap,
   type VersionedOrigin,
+  type VersionedTextListEntry,
   type VersionedTextReadValue,
   type VersionRecord,
 } from "./versionedWireContract";
@@ -57,6 +59,35 @@ export interface VersionedLiveAdapterOptions {
   createId?: (
     kind: "conflict" | "moment" | "object" | "version",
   ) => string;
+}
+
+const LIST_TEXT_FILE_HYDRATION_CONCURRENCY = 8;
+const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
+// JSON byte arrays are collections, so the negotiated collection bound is
+// stricter than the content-size bound used by base64/blob transports.
+const INBAND_BINARY_COLLECTION_CAP_BYTES = 16_384;
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  operation: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, values.length) },
+      async () => {
+        for (;;) {
+          const index = nextIndex;
+          nextIndex += 1;
+          if (index >= values.length) return;
+          results[index] = await operation(values[index]!);
+        }
+      },
+    ),
+  );
+  return results;
 }
 
 export class VersionedLiveAdapter {
@@ -86,7 +117,7 @@ export class VersionedLiveAdapter {
 
   static async openWorkspace(
     client: MinimalDaemonClient,
-    input: { rootDir: string; workspaceId: string },
+    input: WorkspaceOpenParams,
     options: Omit<VersionedLiveAdapterOptions, "workspaceId"> = {},
   ): Promise<VersionedLiveAdapter> {
     const requester = new WorkspaceDaemonRequester(client);
@@ -212,7 +243,6 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.write"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedText.write", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textWrite,
@@ -222,6 +252,12 @@ export class VersionedLiveAdapter {
         path: input.path,
         text: input.text,
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
         requestId,
@@ -240,8 +276,33 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedBinary.write", input.metadata);
     const requestId = randomUUID();
+    if (input.bytes.byteLength > INBAND_BINARY_COLLECTION_CAP_BYTES) {
+      const sha256 = createHash("sha256").update(input.bytes).digest("hex");
+      return this.request(
+        VERSIONED_METHOD.binaryWriteBlob,
+        {
+          workspaceId: input.workspaceId,
+          versionId: input.versionId,
+          path: input.path,
+          sha256,
+          ...(input.metadata.origin === "restore"
+            ? {}
+            : { bytesBase64: Buffer.from(input.bytes).toString("base64") }),
+          origin: input.metadata.origin,
+          ...(input.metadata.summary !== undefined
+            ? { summary: input.metadata.summary }
+            : {}),
+          ...(input.metadata.correlationId !== undefined
+            ? { correlationId: input.metadata.correlationId }
+            : {}),
+          ...(input.author ? { author: input.author } : {}),
+          ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
+          requestId,
+        },
+        { idempotencyKey: requestId },
+      );
+    }
     return this.request(
       VERSIONED_METHOD.binaryWrite,
       {
@@ -250,6 +311,12 @@ export class VersionedLiveAdapter {
         path: input.path,
         bytes: Array.from(input.bytes),
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
         requestId,
@@ -264,10 +331,27 @@ export class VersionedLiveAdapter {
     path: string;
   }): Promise<Uint8Array | null> {
     this.assertWorkspace(input.workspaceId);
-    const result = await this.request(VERSIONED_METHOD.binaryRead, {
-      versionId: input.versionId,
-      path: input.path,
-    });
+    let result: VersionedMethodResultMap["versionedBinary.read"];
+    try {
+      result = await this.request(VERSIONED_METHOD.binaryRead, {
+        versionId: input.versionId,
+        path: input.path,
+      });
+    } catch (error) {
+      // Older daemon rounds exposed the domain's content-kind mismatch as an
+      // INVALID_PARAMS refusal. The TypeScript store contract has always
+      // treated a text-headed path as "not a binary value", exactly like an
+      // absent head or missing blob, so preserve that null contract here.
+      if (
+        error instanceof DaemonRefusalError &&
+        error.wireCode === "INVALID_PARAMS" &&
+        (error.message === "text-head-not-binary" ||
+          error.message === "content at path is a text head, not binary")
+      ) {
+        return null;
+      }
+      throw error;
+    }
     if (result === null) return null;
     if (result.bytesBase64 !== null) {
       return this.decodeBase64(result.bytesBase64);
@@ -378,7 +462,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.merge"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedText.merge", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.versionsMerge,
@@ -388,6 +471,12 @@ export class VersionedLiveAdapter {
         sourceVersionId: input.sourceVersionId,
         path: input.path,
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         requestId,
       },
       { idempotencyKey: requestId },
@@ -425,7 +514,28 @@ export class VersionedLiveAdapter {
     versionId: string;
   }): Promise<VersionedTextReadValue[]> {
     this.assertWorkspace(input.workspaceId);
-    const files: VersionedTextReadValue[] = [];
+    const metadata = await this.listTextFileMetadata(input);
+    const snapshots = await mapWithConcurrency(
+      metadata,
+      LIST_TEXT_FILE_HYDRATION_CONCURRENCY,
+      async (row) =>
+        await this.readTextFile({
+          workspaceId: input.workspaceId,
+          versionId: input.versionId,
+          path: row.path,
+        }),
+    );
+    return snapshots.filter(
+      (snapshot): snapshot is VersionedTextReadValue => snapshot !== null,
+    );
+  }
+
+  async listTextFileMetadata(input: {
+    workspaceId: string;
+    versionId: string;
+  }): Promise<VersionedTextListEntry[]> {
+    this.assertWorkspace(input.workspaceId);
+    const files: VersionedTextListEntry[] = [];
     let afterPath: string | undefined;
     do {
       const page = await this.request(VERSIONED_METHOD.textList, {
@@ -433,14 +543,7 @@ export class VersionedLiveAdapter {
         limit: 500,
         ...(afterPath !== undefined ? { afterPath } : {}),
       });
-      for (const row of page.files) {
-        const snapshot = await this.readTextFile({
-          workspaceId: input.workspaceId,
-          versionId: input.versionId,
-          path: row.path,
-        });
-        if (snapshot !== null) files.push(snapshot);
-      }
+      files.push(...page.files);
       afterPath = page.nextAfterPath ?? undefined;
     } while (afterPath !== undefined);
     return files;
@@ -454,7 +557,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.rename"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedText.rename", input.metadata);
     const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textRename,
@@ -464,6 +566,12 @@ export class VersionedLiveAdapter {
         fromPath: input.fromPath,
         toPath: input.toPath,
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         requestId,
       },
       { idempotencyKey: requestId },
@@ -479,7 +587,6 @@ export class VersionedLiveAdapter {
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.delete"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("versionedText.delete", input.metadata);
     if (input.momentId !== undefined) {
       throw new VersionedAdapterCapabilityError(
         "versionedText.delete does not accept a caller-supplied moment id.",
@@ -493,6 +600,12 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         origin: input.metadata.origin,
+        ...(input.metadata.summary !== undefined
+          ? { summary: input.metadata.summary }
+          : {}),
+        ...(input.metadata.correlationId !== undefined
+          ? { correlationId: input.metadata.correlationId }
+          : {}),
         ...(input.author ? { author: input.author } : {}),
         requestId,
       },
@@ -568,7 +681,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<{ changed: boolean; moment?: SecretMomentRecord }> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("secrets.write", input.metadata);
     const result = await this.request(VERSIONED_METHOD.secretsWrite, {
       workspaceId: input.workspaceId,
       versionId: input.versionId,
@@ -576,6 +688,12 @@ export class VersionedLiveAdapter {
       text: input.text,
       origin: input.metadata.origin,
       momentId: this.createId("moment"),
+      ...(input.metadata.summary !== undefined
+        ? { summary: input.metadata.summary }
+        : {}),
+      ...(input.metadata.correlationId !== undefined
+        ? { correlationId: input.metadata.correlationId }
+        : {}),
     });
     return {
       changed: result.changed,
@@ -590,13 +708,18 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<{ moment: SecretMomentRecord | null }> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported("secrets.delete", input.metadata);
     return this.request(VERSIONED_METHOD.secretsDelete, {
       workspaceId: input.workspaceId,
       versionId: input.versionId,
       path: input.path,
       origin: input.metadata.origin,
       momentId: this.createId("moment"),
+      ...(input.metadata.summary !== undefined
+        ? { summary: input.metadata.summary }
+        : {}),
+      ...(input.metadata.correlationId !== undefined
+        ? { correlationId: input.metadata.correlationId }
+        : {}),
     });
   }
 
@@ -736,11 +859,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["secrets.restore"]> {
     this.assertWorkspace(input.workspaceId);
-    this.assertMutationMetadataSupported(
-      "secrets.restore",
-      input.metadata,
-      "restore",
-    );
     const before = await this.getSecretMoment({
       workspaceId: input.workspaceId,
       momentId: input.momentId,
@@ -755,6 +873,13 @@ export class VersionedLiveAdapter {
       path: before.path,
       beforeMomentId: input.momentId,
       momentId: this.createId("moment"),
+      origin: input.metadata.origin,
+      ...(input.metadata.summary !== undefined
+        ? { summary: input.metadata.summary }
+        : {}),
+      ...(input.metadata.correlationId !== undefined
+        ? { correlationId: input.metadata.correlationId }
+        : {}),
     });
   }
 
@@ -783,6 +908,10 @@ export class VersionedLiveAdapter {
 
   async flushCapture(): Promise<CaptureFlushResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.captureFlush, {});
+  }
+
+  async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
   }
 
   async close(): Promise<void> {

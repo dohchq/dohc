@@ -81,9 +81,9 @@ describe("workspaceActivity capture hooks", () => {
     expect(liveSlot!()).toBeNull();
 
     const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
-    activity.setAgentRun("activity-test", run);
+    await activity.setAgentRun("activity-test", run);
     expect(liveSlot!()).toEqual(run);
-    activity.setAgentRun("activity-test", null);
+    await activity.setAgentRun("activity-test", null);
     expect(liveSlot!()).toBeNull();
     await activity.stopAll();
   });
@@ -107,13 +107,13 @@ describe("workspaceActivity capture hooks", () => {
       onBehalfOf: "local",
       agentRunId: "run-2",
     };
-    expect(activity.claimAgentRun("activity-test", first)).toBe(true);
-    expect(activity.claimAgentRun("activity-test", second)).toBe(false);
-    activity.clearAgentRun("activity-test", second.agentRunId);
+    expect(await activity.claimAgentRun("activity-test", first)).toBe(true);
+    expect(await activity.claimAgentRun("activity-test", second)).toBe(false);
+    await activity.clearAgentRun("activity-test", second.agentRunId);
     expect(liveSlot!()).toEqual(first);
-    activity.clearAgentRun("activity-test", first.agentRunId);
+    await activity.clearAgentRun("activity-test", first.agentRunId);
     expect(liveSlot!()).toBeNull();
-    expect(activity.claimAgentRun("activity-test", second)).toBe(true);
+    expect(await activity.claimAgentRun("activity-test", second)).toBe(true);
     await activity.stopAll();
   });
 });
