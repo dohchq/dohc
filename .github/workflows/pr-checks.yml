@@ -64,8 +64,16 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           cargo --version
 
+      # crates/workspace-kernel is deliberately EXCLUDED from the cargo
+      # workspace (Cargo.toml documents why: build-workspace-kernel.mjs copies
+      # from a hard-coded crates/workspace-kernel/target/... path that workspace
+      # membership would relocate). So a root fetch does not cover it and its
+      # deps must be fetched through its own manifest.
       - name: Fetch crate dependencies
-        run: cargo fetch --locked
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/workspace-kernel/Cargo.toml
 
       # Runs every package, not just the one a PR touched. apps/site was broken
       # on main for weeks precisely because a red typecheck there read as noise
