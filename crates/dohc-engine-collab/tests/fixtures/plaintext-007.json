@@ -2,13 +2,13 @@
  "seed": 7,
  "contentKind": "plaintext",
  "updates": [
-  "AQGM14moBQAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmAA==",
-  "AQGM14moBQbEjNeJqAUDjNeJqAUEA2HMgQA=",
-  "AQGM14moBQjEjNeJqAUDjNeJqAUGBWNhZsOpAA==",
-  "AQGM14moBQzEjNeJqAUGjNeJqAUHCeaXpeacrOiqngA="
+  "AQGQu92oBQAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmAA==",
+  "AQGQu92oBQbEkLvdqAUDkLvdqAUEA2HMgQA=",
+  "AQGQu92oBQjEkLvdqAUDkLvdqAUGBWNhZsOpAA==",
+  "AQGQu92oBQzEkLvdqAUGkLvdqAUHCeaXpeacrOiqngA="
  ],
- "mergedUpdateB64": "AQSM14moBQAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmxIzXiagFA4zXiagFBANhzIHEjNeJqAUDjNeJqAUGBWNhZsOpxIzXiagFBozXiagFBwnml6XmnKzoqp4A",
- "stateVectorB64": "AYzXiagFDw==",
+ "mergedUpdateB64": "AQSQu92oBQAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmxJC73agFA5C73agFBANhzIHEkLvdqAUDkLvdqAUGBWNhZsOpxJC73agFBpC73agFBwnml6XmnKzoqp4A",
+ "stateVectorB64": "AZC73agFDw==",
  "expected": {
   "text": "𝔘𝔫caféa日本語́𝔦"
  }

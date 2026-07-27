@@ -1,0 +1,24 @@
+{
+ "seed": -111,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-inline-code-backticks",
+ "updates": [
+  "ARGgwsfLBQAHAQRib2R5AwlwYXJhZ3JhcGgHAKDCx8sFAAYGAKDCx8sFAQRjb2RlAnt9hKDCx8sFAgNhYGKGoMLHywUFBGNvZGUEbnVsbISgwsfLBQYDIC8ghqDCx8sFCQRjb2RlAnt9hKDCx8sFCgZgZWRnZWCGoMLHywUQBGNvZGUEbnVsbISgwsfLBREDIC8ghqDCx8sFFARjb2RlAnt9hKDCx8sFFQggc3BhY2VkIIagwsfLBR0EY29kZQRudWxshKDCx8sFHgMgLyCGoMLHywUhBGNvZGUCe32EoMLHywUiAyAgIIagwsfLBSUEY29kZQRudWxsAA==",
+  "AQGgwsfLBScoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcVaW5saW5lLWNvZGUtYmFja3RpY2tzAA=="
+ ],
+ "mergedUpdateB64": "ARKgwsfLBQAHAQRib2R5AwlwYXJhZ3JhcGgHAKDCx8sFAAYGAKDCx8sFAQRjb2RlAnt9hKDCx8sFAgNhYGKGoMLHywUFBGNvZGUEbnVsbISgwsfLBQYDIC8ghqDCx8sFCQRjb2RlAnt9hKDCx8sFCgZgZWRnZWCGoMLHywUQBGNvZGUEbnVsbISgwsfLBREDIC8ghqDCx8sFFARjb2RlAnt9hKDCx8sFFQggc3BhY2VkIIagwsfLBR0EY29kZQRudWxshKDCx8sFHgMgLyCGoMLHywUhBGNvZGUCe32EoMLHywUiAyAgIIagwsfLBSUEY29kZQRudWxsKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3FWlubGluZS1jb2RlLWJhY2t0aWNrcwA=",
+ "stateVectorB64": "AaDCx8sFKA==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "text"
+  ],
+  "marks": [
+   "code"
+  ]
+ },
+ "expected": {
+  "markdown": "``a`b`` / `` `edge` `` / `  spaced  ` / `   `"
+ }
+}
