@@ -2582,3 +2582,52 @@ assertions, a self-skipping suite, and a drift check that skips without node_mod
 **Reading never found these** — a careful audit read the same R15 code and passed all
 three items, two of which were unguarded. Mutation did.
 
+## 2026-07-27 (final) — the engine work is done; two evidence gates remain
+
+**32 PRs merged.** RPC-E and all nine R13b shards are on `main`, MCP no longer opens
+the engine database, every review loop is closed with mutation-proven fixes, and `main`
+is fully green: canonical gate PASS on every step (including `fixture drift` and
+`cargo-audit`, both of which were silently SKIPping this morning), desktop 178 files,
+MCP 4/4, CLI 4/4.
+
+**The flip itself is built and gate-green, held unmerged in #290.** The
+`DOHC_RUST_ENGINE_ADAPTER` flag is deleted at all six call sites; `relayTransportModeForRoot`
+lost only its flag parameter and kept all three real runtime conditions (null root,
+absent marker, malformed marker).
+
+### What still gates it
+
+1. **R15-2 is NOT satisfied on final main.** The macOS soak fails at
+   `rssSlopeTailB/s=21171.3` against the unchanged 20480 bound — under the tail
+   methodology, not merely the old whole-run fit. Recorded in GATE6 §1c. Deliberately
+   NOT attributed to today's merges: one sample on each side cannot separate a
+   regression from runner variance, and this program has already made and retracted one
+   confident claim from insufficient data. A repeat run is in flight.
+2. **The clone-reset rehearsal.** Blocked on three pnpm hard links whose twins are all
+   inside the source tree; the harness fails closed on any link count above one. Being
+   narrowed to refuse only OUTSIDE-tree twins, proven in both directions.
+
+### What made the difference today
+
+The handoff described the remaining work as merging PRs and running a cutover. The work
+actually consisted of discovering that several things marked DONE were not:
+
+- **R15-3** was recorded done while Rust still shipped the lossy serializer, because the
+  parity fixtures were frozen against an oracle that had moved.
+- **R15-1's** ordinal-14 backfill could be inverted in the SECURITY direction with ~450
+  tests still green.
+- **R15-5's** Linux `RESOLVE_NO_SYMLINKS` refusal could be deleted with nothing noticing.
+- **A replaced workspace root left a dead watch reporting healthy** — `disruption_count`
+  0 and `is_unavailable` false — defeating the capture driver's supervision loop, which
+  polls exactly those signals. Linux reuses inode numbers; the identity check was a
+  use-after-free of an identifier.
+- **A real DoS advisory** sat on `main` behind a `cargo-audit=SKIP`.
+
+Seven of the day's findings share one shape: **a check that reports green while
+verifying nothing.** A careful reading audit had passed the very R15 items that turned
+out unguarded. Mutation found them; reading did not.
+
+The repository also had **no automated checks on pull requests at all** until today. The
+gate added in #275 has already caught two real regressions — the Linux inode-reuse bug,
+and a three-way integration break where each PR was green alone and `main` was red.
+
