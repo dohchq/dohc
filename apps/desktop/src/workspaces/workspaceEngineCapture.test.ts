@@ -290,6 +290,7 @@ describe("workspaceEngineCapture batch capture", () => {
   it("uses the daemon as the sole capture and version-switch materialization owner", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
     loopback.seedTextFile({
       workspace: "engine-capture-test",
       versionId: "main",
@@ -298,7 +299,7 @@ describe("workspaceEngineCapture batch capture", () => {
     });
     process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
-      rustEngineSessions: mockLiveSessions(loopback),
+      rustEngineSessions: mockLiveSessions(loopback, requests),
       daemonOwnsCapture: true,
     });
 
@@ -316,6 +317,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
     const draft = await engine.createVersion("Draft");
     loopback.requests.length = 0;
+    requests.length = 0;
     const result = await engine.switchVersion("main");
 
     expect(result).toEqual({
@@ -331,6 +333,18 @@ describe("workspaceEngineCapture batch capture", () => {
           request.method === VERSIONED_METHOD.textDelete,
       ),
     ).toBe(false);
+    const flushIndex = requests.findIndex(
+      (request) => request.method === "capture.flush",
+    );
+    // MUTATION: omit the daemon flush in switchVersion. Source metadata is
+    // listed without a capture settlement between the target preflight and
+    // the before/after comparison.
+    expect(flushIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      requests
+        .slice(flushIndex + 1)
+        .some((request) => request.method === VERSIONED_METHOD.textList),
+    ).toBe(true);
     expect(
       loopback.requests.some(
         (request) => request.method === VERSIONED_METHOD.versionsSetActive,
@@ -338,6 +352,65 @@ describe("workspaceEngineCapture batch capture", () => {
     ).toBe(true);
     expect(draft.activeVersionId).not.toBe("main");
     await engine.stop();
+  });
+
+  it("flushes daemon capture before resolving a file object id", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    loopback.seedTextFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: "just-saved.md",
+      text: "ready for chat",
+    });
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, requests),
+      daemonOwnsCapture: true,
+    });
+
+    const objectId = await engine.fileObjectIdForPath("just-saved.md");
+    const relevant = requests
+      .map((request) => request.method)
+      .filter(
+        (method) =>
+          method === "capture.flush" || method === VERSIONED_METHOD.textRead,
+      );
+
+    expect(objectId).toBeTruthy();
+    // MUTATION: remove fileObjectIdForPath's flushCapture call. The read
+    // remains, making this order assertion fail on the missing first entry.
+    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
+    await engine.stop();
+  });
+
+  it("closes both daemon stores when the final capture flush rejects", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    let settled = true;
+    const sessions = mockLiveSessions(loopback, undefined, () => ({
+      settled,
+      running: true,
+      degraded: !settled,
+    }));
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+    });
+
+    // createVersion opens both the text and secret daemon adapters.
+    await engine.createVersion("Draft");
+    settled = false;
+    const outcome = await engine.stop().catch((error: unknown) => error);
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toContain("did not settle");
+    // MUTATION: await the final flush outside try/finally. Its rejection skips
+    // both adapter closes, so this count is zero.
+    expect(closeWorkspace).toHaveBeenCalledTimes(2);
   });
 
   it("mutation proof: installs remote updates buffered during the initial Y.Doc open", async () => {

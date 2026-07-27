@@ -5,6 +5,7 @@ use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
+use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
     CaptureApplyProbe, EngineService, shadow_fence::write_shadow_marker_for_harness,
@@ -971,6 +972,82 @@ async fn create_named_fences_live_ydoc_and_unannounced_disk_edits_into_fork() {
         Some("unannounced disk edit"),
         "the immutable fork retains the forced-scan snapshot"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forced_pre_fork_capture_retains_the_active_agent_author() {
+    let probe = CaptureApplyProbe::default();
+    let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+    let (scratch, transport, handle, workspace_id) = fixture("forced-scan-author", service).await;
+    let author = json!({
+        "kind": "agent",
+        "agentId": "dohc-chat-runner",
+        "onBehalfOf": "local",
+        "agentRunId": "run-switch",
+    });
+    call(
+        &transport,
+        &handle,
+        2,
+        "capture.setAuthor",
+        json!({ "author": author }),
+    )
+    .await;
+
+    probe.pause_next_version_fence();
+    let create_transport = Arc::clone(&transport);
+    let create_handle = handle.clone();
+    let create_workspace = workspace_id.clone();
+    let creating = tokio::spawn(async move {
+        call(
+            &create_transport,
+            &create_handle,
+            3,
+            "versions.createNamed",
+            json!({
+                "workspaceId": create_workspace,
+                "name": "authored forced scan",
+                "fromVersionId": "main",
+            }),
+        )
+        .await
+    });
+    bounded(
+        "createNamed pre-scan author probe",
+        probe.wait_until_version_fence_paused(),
+    )
+    .await;
+    std::fs::write(
+        scratch.path().join("agent-switch-edit.md"),
+        "closed-period agent edit",
+    )
+    .expect("external edit");
+    probe.release_version_fence();
+    bounded("authored createNamed task", creating)
+        .await
+        .expect("create task");
+
+    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+    let store = EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 100)
+        .expect("reopen store");
+    let author_json: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments \
+                 WHERE path = 'agent-switch-edit.md' ORDER BY moment_order DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("forced scan moment");
+    let captured = author_json
+        .as_deref()
+        .map(serde_json::from_str::<Value>)
+        .transpose()
+        .expect("valid author");
+    // MUTATION: pass None to reconcile_full_for_switch. The only scan allowed
+    // to observe this edit records an actor-neutral moment.
+    assert_eq!(captured, Some(author));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

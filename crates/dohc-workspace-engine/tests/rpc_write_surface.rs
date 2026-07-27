@@ -3606,6 +3606,28 @@ async fn origin_closed_set_rejects_capture_and_ydoc() {
             .expect_err("reserved origin");
         assert_eq!(error.message, "invalid-metadata");
     }
+    let conflict_origin = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                22,
+                "conflicts.resolve",
+                Some(handle),
+                json!({ "local": {
+                    "conflictId": "missing",
+                    "resolution": "keep-current",
+                    "objectId": "resolve-object",
+                    "writeMomentId": "resolve-write",
+                    "deleteMomentId": "resolve-delete",
+                    "metadataOrigin": "capture",
+                }}),
+            ),
+        )
+        .await
+        .expect_err("conflicts.resolve reserved origin");
+    // MUTATION: forward LocalResolveDto.metadata_origin without
+    // validated_origin. The actor sees the missing conflict instead.
+    assert_eq!(conflict_origin.message, "invalid-metadata");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3658,6 +3680,18 @@ async fn mutation_metadata_fields_are_bounded_at_every_rpc_entry() {
         (
             "secrets.restore",
             json!({ "workspaceId": "ws-rpcd-metadata-bounds", "path": ".env", "beforeMomentId": "before", "momentId": "secret-restore", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "conflicts.resolve",
+            json!({ "local": {
+                "conflictId": "missing",
+                "resolution": "keep-current",
+                "objectId": "resolve-object",
+                "writeMomentId": "resolve-write",
+                "deleteMomentId": "resolve-delete",
+                "metadataOrigin": "api",
+                "metadataSummary": oversized.clone(),
+            }}),
         ),
     ];
     for (index, (method, params)) in cases.into_iter().enumerate() {

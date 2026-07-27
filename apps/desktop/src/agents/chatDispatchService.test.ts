@@ -970,25 +970,49 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toHaveLength(1);
   });
 
-  it("retains a pre-spawn reservation when attribution teardown fails", async () => {
+  it("releases a pre-spawn reservation when attribution teardown keeps failing", async () => {
     const teardownError = new Error("pre-spawn author clear failed");
     const contextError = new Error("thread context failed");
+    let clearFailures = 0;
     const fixture = await createFixture({
       setRunAttribution: (_workspaceId, run) => {
-        if (run === null) throw teardownError;
+        if (run === null && clearFailures < 2) {
+          clearFailures += 1;
+          throw teardownError;
+        }
       },
     });
-    await createAgentThread(fixture, {
+    const first = await createAgentThread(fixture, {
       body: "Fail while preparing this run.",
+      authorUserId: "user_local",
+    });
+    const second = await createAgentThread(fixture, {
+      body: "Run after teardown failed.",
       authorUserId: "user_local",
     });
     vi.spyOn(fixture.chat, "listMessages").mockRejectedValueOnce(contextError);
 
-    await expect(activate(fixture)).rejects.toBe(teardownError);
+    const activation = await activate(fixture)
+      .then(() => null)
+      .catch((error: unknown) => error);
 
+    expect(activation).toBeNull();
     expect(fixture.errors).toContain(contextError);
+    expect(fixture.errors.filter((error) => error === teardownError)).toHaveLength(2);
+    expect(
+      fixture.dispatchDb
+        .prepare(
+          `SELECT state FROM chat_dispatch_ledger
+           WHERE workspace_id = ? AND trigger_message_id = ?`,
+        )
+        .get(WORKSPACE_ID, first.messageId)?.state,
+    ).toBe("failed");
+    // MUTATION: move reservation deletion back after failClaimBeforeRun. The
+    // persistent clear failure throws first, so this assertion sees a
+    // reservation instead of the second live child.
     expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
-    expect(fixture.spawnCalls).toHaveLength(0);
+    expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(second.threadId);
   });
 
   it("finalizes a failed run and dispatches the next claim when its failure note throws", async () => {

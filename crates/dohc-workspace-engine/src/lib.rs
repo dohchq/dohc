@@ -2229,9 +2229,9 @@ impl EngineService {
             return Err(wire(ErrorCode::InvalidParams, "richdoc-settle-unsupported"));
         }
 
-        let capture_status = lock(&open.capture)
+        let (capture_status, capture_author_json) = lock(&open.capture)
             .as_ref()
-            .map(|driver| Arc::clone(driver.status()))
+            .map(|driver| (Arc::clone(driver.status()), driver.author_json()))
             .ok_or_else(|| {
                 wire(
                     ErrorCode::WorkspaceUnavailable,
@@ -2297,6 +2297,7 @@ impl EngineService {
                 &open.workspace_id,
                 &capture_status,
                 &self_writes.scoped(&open.root),
+                capture_author_json,
                 token.clone(),
             )
             .await;
@@ -6449,6 +6450,11 @@ impl EngineService {
                 "missing local resolve or envelope",
             )
         })?;
+        validate_metadata_fields(
+            local.metadata_summary.as_deref(),
+            local.metadata_correlation_id.as_deref(),
+        )?;
+        let metadata_origin = validated_origin(Some(&local.metadata_origin), None)?;
         let resolution = match local.resolution.as_str() {
             "keep-current" => ResolveConflictKind::KeepCurrent,
             "apply-incoming" => ResolveConflictKind::ApplyIncoming,
@@ -6474,7 +6480,7 @@ impl EngineService {
                     object_id: local.object_id,
                     write_moment_id: local.write_moment_id,
                     delete_moment_id: local.delete_moment_id,
-                    metadata_origin: local.metadata_origin,
+                    metadata_origin,
                     metadata_summary: local.metadata_summary,
                     metadata_correlation_id: local.metadata_correlation_id,
                     author_json: local.author_json,

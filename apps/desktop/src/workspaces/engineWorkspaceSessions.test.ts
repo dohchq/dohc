@@ -9,7 +9,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { EngineDaemonClient } from "./engineDaemonLifecycle";
+import {
+  EngineDaemonUnavailableError,
+  type EngineDaemonClient,
+} from "./engineDaemonLifecycle";
 import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 
 const roots: string[] = [];
@@ -125,6 +128,51 @@ describe("EngineWorkspaceSessions", () => {
       ),
     ).resolves.toBe("workspace-handle-2");
     expect(opens).toBe(2);
+  });
+
+  it("retries an initial daemon-unavailable open when reconnect retries were requested", async () => {
+    const rootPath = await tempRoot();
+    const client: EngineDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request) {
+        return {
+          id: request.id,
+          result: { workspace: "workspace-after-restart" },
+        };
+      },
+    };
+    let available = false;
+    const sleeps: number[] = [];
+    const sessions = new EngineWorkspaceSessions(
+      {
+        currentClient: () => {
+          if (!available) {
+            throw new EngineDaemonUnavailableError("daemon restarting");
+          }
+          return client;
+        },
+      },
+      {
+        transportRebindAttempts: 3,
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+          available = true;
+        },
+      },
+    );
+
+    const outcome = await sessions
+      .run(
+        { workspaceId: "workspace", rootPath },
+        async (binding) => binding.workspace,
+        { retryTransportErrors: true },
+      )
+      .catch((error: unknown) => error);
+
+    // MUTATION: require rebindStarted in the open-error retry branch. The
+    // first currentClient() failure is returned here instead of the handle.
+    expect(outcome).toBe("workspace-after-restart");
+    expect(sleeps).toEqual([100]);
   });
 
   it.each([".dohc", ".dohc/engine"])(

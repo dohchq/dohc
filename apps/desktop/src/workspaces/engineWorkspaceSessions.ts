@@ -9,7 +9,10 @@ import {
 import { randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { EngineDaemonClient } from "./engineDaemonLifecycle";
+import {
+  EngineDaemonUnavailableError,
+  type EngineDaemonClient,
+} from "./engineDaemonLifecycle";
 
 export interface EngineWorkspace {
   workspaceId: string;
@@ -122,8 +125,10 @@ export class EngineWorkspaceSessions {
         binding = await this.open(workspace);
       } catch (reopenError) {
         if (
-          rebindStarted &&
           options.retryTransportErrors &&
+          (rebindStarted ||
+            reopenError instanceof EngineDaemonUnavailableError ||
+            isEngineSessionReconnectError(reopenError)) &&
           attempt < maxAttempts
         ) {
           lastError = reopenError;

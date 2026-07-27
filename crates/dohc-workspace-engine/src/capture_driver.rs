@@ -1595,6 +1595,13 @@ impl CaptureDriver {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = author_json;
     }
 
+    pub(crate) fn author_json(&self) -> Option<String> {
+        self.author_json
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Wait until the startup baseline reconcile has been applied (or the
     /// initial start failed — the workspace still opens, degraded).
     pub(crate) async fn wait_for_baseline(&self) {
@@ -2505,6 +2512,7 @@ pub(crate) async fn reconcile_full_for_switch(
     workspace_id: &str,
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
+    author_json: Option<String>,
     token: CancellationToken,
 ) -> Result<bool, SwitchReconcileError> {
     if token.is_cancelled() {
@@ -2550,7 +2558,7 @@ pub(crate) async fn reconcile_full_for_switch(
                 workspace_id,
                 status,
                 self_writes,
-                author_json: None,
+                author_json,
             };
             if apply_run_with_handle(context, &handle, run).await {
                 Ok(manifest_changed)

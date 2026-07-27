@@ -2231,6 +2231,10 @@ export function createWorkspaceEngineCapture(
           "Saved latest edits before switching versions",
         );
         if (options.daemonOwnsCapture) {
+          // The daemon watcher owns the source version. Force it to settle
+          // before comparing heads, otherwise both the changed-file count and
+          // the version being left can be based on pre-save state.
+          await engine.flushCapture?.();
           const [before, after, secretOperations] = await Promise.all([
             listTextFileMetadata(engine, fromVersionId),
             listTextFileMetadata(engine, versionId),
@@ -2851,6 +2855,9 @@ export function createWorkspaceEngineCapture(
       // Drain the chain so a just-captured file is immediately chat-able.
       await chain;
       const engine = await engineStore();
+      if (options.daemonOwnsCapture) {
+        await engine.flushCapture?.();
+      }
       const activeVersionId = await activeVersionIdOf(engine);
       const snapshot = await engine.readTextFile({
         workspaceId,
@@ -3328,17 +3335,21 @@ export function createWorkspaceEngineCapture(
         daemonCaptureHealthTimer = null;
       }
       await chain;
-      if (options.daemonOwnsCapture && store) {
-        await store.flushCapture?.();
-      }
-      // Release the SQLite handles for the stores THIS capture created, so
-      // repeated workspace switches never accumulate handles/WAL locks. An
-      // injected store belongs to its creator and is left open.
-      if (!options.store && store) {
-        await store.close().catch(() => undefined);
-      }
-      if (!options.secretStore && secretStore) {
-        await secretStore.close().catch(() => undefined);
+      try {
+        if (options.daemonOwnsCapture && store) {
+          await store.flushCapture?.();
+        }
+      } finally {
+        // Release the SQLite handles for the stores THIS capture created, so
+        // repeated workspace switches never accumulate handles/WAL locks. An
+        // injected store belongs to its creator and is left open. A degraded
+        // daemon flush must not strand either close.
+        if (!options.store && store) {
+          await store.close().catch(() => undefined);
+        }
+        if (!options.secretStore && secretStore) {
+          await secretStore.close().catch(() => undefined);
+        }
       }
     },
   };

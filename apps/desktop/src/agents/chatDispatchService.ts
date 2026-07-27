@@ -729,7 +729,19 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     claim: AgentDispatchClaim,
     cause: unknown,
   ): Promise<void> {
-    await options.setRunAttribution(workspace.workspaceId, null);
+    // A daemon restart can reject attribution teardown after the claim has
+    // reserved this workspace but before a child exists. Retry once, then
+    // finish the failed claim even if capture remains unavailable: the next
+    // run overwrites attribution before it can spawn, while retaining the
+    // in-memory reservation would deadlock dispatch until app quit.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await options.setRunAttribution(workspace.workspaceId, null);
+        break;
+      } catch (error) {
+        reportError(error);
+      }
+    }
     const detail = cause instanceof Error && cause.message ? cause.message : "unknown error";
     await postFailureNote(
       workspace,
@@ -820,8 +832,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       reportError(error);
       try {
         await failClaimBeforeRun(workspace, claim, error);
-        runReservations.delete(workspace.workspaceId);
       } finally {
+        runReservations.delete(workspace.workspaceId);
         await releaseWorkspaceLease(releaseWorkspace);
       }
       if (dispatch.openRuns(workspace.workspaceId).length === 0) {

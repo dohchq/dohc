@@ -556,7 +556,11 @@ fn apply_mirrored_content(
     if !live_state_matches_conflict_current(&live, &conflict.current) {
         return Ok(MirroredOutcome::Deferred(PendingResolveReason::StaleHead));
     }
-
+    if live.content_kind == ConflictContentKind::Binary && live.binary_byte_length.is_none() {
+        return Ok(MirroredOutcome::Deferred(
+            PendingResolveReason::BinaryUnhydrated,
+        ));
+    }
     match resolution {
         ConflictResolution::KeptCurrent => Ok(MirroredOutcome::Applied),
         ConflictResolution::AppliedIncoming => {
@@ -614,7 +618,7 @@ fn select_snapshot_by_path(
             "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
              s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
              s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
-              bb.sha256, bb.byte_length, LENGTH(bb.bytes) FROM snapshots s \
+              s.binary_sha256, bb.byte_length, LENGTH(bb.bytes) FROM snapshots s \
              LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
              LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
              WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3",
@@ -686,24 +690,28 @@ fn select_snapshot_by_path(
             let binary_sha256 = binary_sha256.ok_or(SyncError::InvalidInput {
                 reason: "binary snapshot is missing its blob",
             })?;
-            let binary_byte_length = binary_byte_length.ok_or(SyncError::InvalidInput {
-                reason: "binary snapshot is missing its byte length",
-            })?;
-            if binary_byte_length < 0 || binary_actual_length != Some(binary_byte_length) {
+            if binary_byte_length.is_some_and(|byte_length| byte_length < 0)
+                || binary_actual_length.is_some() && binary_actual_length != binary_byte_length
+            {
                 return Err(SyncError::InvalidInput {
                     reason: "binary snapshot has an invalid byte length",
                 });
             }
-            // Carry the binary head's IDENTITY (object + latest moment), not just
-            // path+bytes, so the exact-head stale gate rejects a
-            // same-bytes-but-recreated head instead of clobbering it.
-            Ok(ConflictFileState::binary_head(
-                snapshot_path,
-                binary_sha256,
+            // A missing binary_blobs row is local hydration state, not a
+            // malformed replicated payload. Preserve the snapshot's hash +
+            // identity for the exact-head gate; apply_mirrored_content then
+            // defers until the local blob is hydrated.
+            Ok(ConflictFileState {
+                path: snapshot_path,
+                snapshot: None,
+                binary_sha256: Some(binary_sha256),
                 binary_byte_length,
-                object_id,
-                latest_moment_id,
-            ))
+                binary_object_id: Some(object_id),
+                binary_latest_moment_id: Some(latest_moment_id),
+                content_kind: ConflictContentKind::Binary,
+                metadata_summary: None,
+                metadata_correlation_id: None,
+            })
         }
         _ => Err(SyncError::InvalidInput {
             reason: "snapshot has an unknown content kind",
@@ -2217,8 +2225,6 @@ mod tests {
                 )
             })
             .expect("live binary head identity");
-        // Current = the live binary head (with its identity); incoming = ABSENT
-        // (a delete).
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
@@ -2263,7 +2269,6 @@ mod tests {
                 ..
             })
         ));
-        // The binary snapshot AND its path alias are gone.
         let (snap_count, alias_count): (i64, i64) = store
             .read_with(|conn| {
                 let s: i64 = conn.query_row(
@@ -2283,7 +2288,6 @@ mod tests {
             .expect("counts");
         assert_eq!(snap_count, 0, "the binary snapshot must be removed");
         assert_eq!(alias_count, 0, "the path alias must be removed");
-        // A delete materialization job was enqueued over the binary preimage.
         let delete_job: (String, i64, Option<String>) = store
             .read_with(|conn| {
                 conn.query_row(
@@ -2298,7 +2302,149 @@ mod tests {
         assert_eq!(delete_job.1, 1, "delete preimage present");
         assert_eq!(delete_job.2.as_deref(), Some(live_sha.as_str()));
         assert_resolved_conflict(&store, "delete-binary");
-        // The delete-peer's resolve envelope was imported and its ack advanced.
+        let (imported, acked_seq): (i64, i64) = store
+            .read_with(|conn| {
+                let imported: i64 = conn.query_row(
+                    "SELECT imported FROM replication_log \
+                     WHERE workspace_id = 'ws' AND origin_id = 'delete-peer' AND origin_seq = 1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let acked_seq: i64 = conn.query_row(
+                    "SELECT acked_seq FROM replication_peers \
+                     WHERE workspace_id = 'ws' AND origin_id = 'delete-peer'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok::<_, rusqlite::Error>((imported, acked_seq))
+            })
+            .expect("delete-peer replication cursor");
+        assert_ne!(imported, 0, "the delete resolve was imported");
+        assert_eq!(
+            acked_seq, 1,
+            "the delete-peer ack advanced past the resolve"
+        );
+    }
+
+    /// An absent local binary blob is hydration state, not a malformed remote
+    /// resolve. Ack and defer it while preserving the head/conflict for retry.
+    #[test]
+    fn mirrored_resolve_over_unhydrated_local_binary_head_defers_and_acks() {
+        let (_scratch, mut store) = store();
+        let live_sha = stage_binary_head(&mut store, "first-binary", b"\x00binary live\xff");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "delete-peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("delete-binary", "placeholder", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open delete-binary conflict");
+        let (live_object_id, live_latest_moment): (String, String) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT object_id, latest_moment_id FROM snapshots \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .expect("live binary head identity");
+        // Current = the live binary head (with its identity); incoming = ABSENT
+        // (a delete).
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET \
+                     current_content_kind = 'binary', current_blob_sha256 = NULL, \
+                     current_binary_sha256 = ?1, current_object_id = ?2, \
+                     current_latest_moment_id = ?3, \
+                     incoming_exists = 0, incoming_content_kind = 'text', \
+                     incoming_blob_sha256 = NULL, incoming_binary_sha256 = NULL, \
+                     incoming_object_id = NULL, incoming_latest_moment_id = NULL \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'delete-binary'",
+                    params![live_sha, live_object_id, live_latest_moment],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("record binary current + absent incoming");
+        store
+            .read_with(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+                conn.execute("DELETE FROM binary_blobs WHERE sha256 = ?1", [&live_sha])?;
+                conn.execute_batch("PRAGMA foreign_keys = ON")?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .expect("simulate a local binary head whose bytes are not hydrated");
+
+        let resolved = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "delete-peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "delete-binary",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 4_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        );
+        assert!(
+            resolved.is_ok(),
+            "missing local binary bytes are retryable local state: {resolved:?}"
+        );
+        let outcome = resolved.expect("asserted successful resolve");
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Applied(ConflictApplyResult {
+                conflict_id: "delete-binary".to_owned(),
+                inserted: None,
+                matched: false,
+                pending_resolve: Some(PendingResolve {
+                    remote_conflict_id: "delete-binary".to_owned(),
+                    local_conflict_id: Some("delete-binary".to_owned()),
+                    path: Some("doc.md".to_owned()),
+                    reason: PendingResolveReason::BinaryUnhydrated,
+                }),
+            })
+        );
+        // Deferral preserves the local head and conflict until hydration.
+        let (snap_count, alias_count): (i64, i64) = store
+            .read_with(|conn| {
+                let s: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let a: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM path_aliases \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok::<_, rusqlite::Error>((s, a))
+            })
+            .expect("counts");
+        assert_eq!(snap_count, 1, "the unhydrated binary snapshot stays live");
+        assert_eq!(alias_count, 1, "the path alias stays live");
+        assert_eq!(
+            materialization_job_count(&store),
+            1,
+            "only the original binary job remains"
+        );
+        assert_open_conflict(&store, "delete-binary");
+        // The resolve envelope was imported and acked even though application
+        // waits for the local blob to hydrate.
         let (imported, acked_seq): (i64, i64) = store
             .read_with(|conn| {
                 let imported: i64 = conn.query_row(
