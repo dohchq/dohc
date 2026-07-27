@@ -216,9 +216,19 @@ deferred ONLY under it; they are now in-scope-or-revisit:
   grant the daemon custody. Desktop-side custody is the posture-consistent
   default recommendation.
 
-## OPEN — Does the steady-state tail slope satisfy R15-2's soak criterion?
+## RESOLVED (Ice, 2026-07-27) — the steady-state tail slope SATISFIES R15-2
 
-**Raised 2026-07-27 by the program. Ice owns this; it must not be self-answered.**
+**Ice accepted the tail verdict.** R15-2's soak criterion is met by the
+post-warm-up tail slope against the unchanged 20 KiB/s bound.
+
+Recorded plainly so the basis is auditable later: the same run measures
+**26208 B/s on the whole-run fit (over the bound) and 14255 B/s on the tail
+(under it)**, over 460 samples spanning 2823 s. This is a PASS *because* the
+verdict window changed, not because the engine's memory behaviour changed. A
+synthetic constant-slope leak still fails the tail test, so leak detection is
+preserved.
+
+The original question and its evidence follow.
 
 R15-2 authorized the flip on a passing full-mode gate **and** cutoverBlocking
 soak on the Blacksmith macOS runner. The gate half passes and earned its keep
