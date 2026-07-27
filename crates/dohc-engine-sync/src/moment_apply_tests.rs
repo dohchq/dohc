@@ -1350,6 +1350,20 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
         read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
         -1
     );
+    let journaled: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id='ws' AND origin_id='peer'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("missing-version journal count");
+    assert_eq!(
+        journaled, 0,
+        "MUTATION: journaling the retryable failure permanently consumes the missing-version coordinate"
+    );
 
     let version = ReplicationEnvelope {
         workspace_id: "ws".to_owned(),

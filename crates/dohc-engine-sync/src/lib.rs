@@ -26,7 +26,7 @@ mod ydoc_apply;
 
 pub use apply::{
     ApplyOutcome, RefusalReason, ReplicationRefusal, apply_chat_envelope, apply_envelope_with,
-    read_replayed_refusal,
+    read_replayed_refusal, retain_refusal_for_direct_retry,
 };
 pub use conflict_apply::{
     ConflictApplyResult, PendingResolve, PendingResolveReason, apply_conflict_envelope,

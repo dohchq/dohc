@@ -14,8 +14,11 @@ use dohc_engine_domain::{
     resolve_thread_message, validate_addressable_plaintext_path,
 };
 
+use crate::error::local_corruption;
 use crate::journal::{ack_tx, crashes, read_ack_tx};
 use crate::{ReplicationEnvelope, SyncError};
+
+const DIRECT_RPC_REFUSAL_REPORT_ID: &str = "direct-rpc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome<T> {
@@ -311,6 +314,30 @@ pub fn read_replayed_refusal(
     })
 }
 
+pub fn retain_refusal_for_direct_retry(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+) -> Result<(), SyncError> {
+    match store.write_with(faults, |tx| {
+        tx.execute(
+            "UPDATE replication_pending_refusals SET report_id=?4 \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![
+                envelope.workspace_id,
+                envelope.origin_id,
+                envelope.origin_seq,
+                DIRECT_RPC_REFUSAL_REPORT_ID
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
+}
+
 pub(crate) fn claim_pending_refusals(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -320,8 +347,9 @@ pub(crate) fn claim_pending_refusals(
         let report_id: Option<String> = tx
             .query_row(
                 "SELECT CASE WHEN EXISTS(SELECT 1 FROM replication_pending_refusals \
-                 WHERE workspace_id=?1) THEN lower(hex(randomblob(16))) END",
-                [workspace_id],
+                 WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?2) \
+                 THEN lower(hex(randomblob(16))) END",
+                params![workspace_id, DIRECT_RPC_REFUSAL_REPORT_ID],
                 |row| row.get(0),
             )
             .map_err(SyncError::corrupt)?;
@@ -333,8 +361,8 @@ pub(crate) fn claim_pending_refusals(
         // the old cursor's report token can no longer sweep them.
         tx.execute(
             "UPDATE replication_pending_refusals SET report_id=?2 \
-             WHERE workspace_id=?1",
-            params![workspace_id, report_id],
+             WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?3",
+            params![workspace_id, report_id, DIRECT_RPC_REFUSAL_REPORT_ID],
         )
         .map_err(SyncError::persist)?;
         let refusals = {
@@ -387,7 +415,21 @@ pub fn apply_chat_envelope(
     if !envelope.op_kind.starts_with("chat.") {
         return Err(SyncError::UnsupportedOperation);
     }
-    apply_envelope_with(store, envelope, faults, apply_chat_tx)
+    apply_envelope_with(store, envelope, faults, apply_chat_tx).map(|outcome| {
+        let (primary, nested_refusals) = outcome.into_primary_and_refusals();
+        match primary {
+            ApplyOutcome::Applied(replay_refusals) => ApplyOutcome::Applied(())
+                .with_refusals(nested_refusals.into_iter().chain(replay_refusals).collect()),
+            ApplyOutcome::Refused(refusal) => {
+                ApplyOutcome::Refused(refusal).with_refusals(nested_refusals)
+            }
+            ApplyOutcome::Skipped => ApplyOutcome::Skipped.with_refusals(nested_refusals),
+            ApplyOutcome::Crashed { committed } => {
+                ApplyOutcome::Crashed { committed }.with_refusals(nested_refusals)
+            }
+            ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+        }
+    })
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(value: &serde_json::Value) -> Result<T, SyncError> {
@@ -411,12 +453,6 @@ fn map_chat_rule(error: DomainError, reason: &'static str) -> SyncError {
         }
         _ => SyncError::InvalidInput { reason },
     }
-}
-
-fn local_corruption(reason: &'static str) -> SyncError {
-    SyncError::Storage(dohc_engine_storage::StorageError::corrupt_public(
-        std::io::Error::other(reason),
-    ))
 }
 
 fn is_bounded_replicated_id(value: &str, max_utf16_units: usize) -> bool {
@@ -546,11 +582,22 @@ struct AttachmentAdd {
 pub(crate) fn apply_chat_tx(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
-) -> Result<(), SyncError> {
+) -> Result<Vec<ReplicationRefusal>, SyncError> {
     apply_chat_mutation(tx, op)?;
-    replay_ready_pending_chat_coordinates(tx, &op.workspace_id)
+    let replay_refusals = replay_ready_pending_chat_coordinates(tx, &op.workspace_id)
         .map_err(|error| map_chat_rule(error, "pending chat coordinate replay failed"))?;
-    Ok(())
+    Ok(replay_refusals
+        .into_iter()
+        .map(|refusal| ReplicationRefusal {
+            workspace_id: op.workspace_id.clone(),
+            origin_id: refusal.origin_id,
+            origin_seq: refusal.origin_seq,
+            op_kind: refusal.op_kind,
+            reason: RefusalReason::InvalidInput {
+                reason: refusal.reason.to_owned(),
+            },
+        })
+        .collect())
 }
 
 fn apply_chat_mutation(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
@@ -1096,9 +1143,7 @@ fn apply_message(
         )
         .map_err(SyncError::corrupt)?;
     if !thread_exists {
-        return Err(SyncError::InvalidInput {
-            reason: "chat message thread is missing",
-        });
+        return park_chat_coordinate(tx, op, "message-thread", &payload.thread_id);
     }
     let previous: i64 = tx
         .query_row(

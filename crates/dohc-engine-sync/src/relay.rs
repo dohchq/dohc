@@ -299,6 +299,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut conflicts_opened = 0_i64;
         let mut pending_resolves = Vec::new();
         let mut refusals = Vec::new();
+        let mut retryable = Vec::new();
         for op in &response.ops {
             // Workspace scoping: a buggy/compromised transport must never make a
             // pull for workspace A apply an op targeting workspace B (which would
@@ -307,51 +308,59 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             if op.workspace_id != workspace_id {
                 return Err(RelayError::InvalidResponse);
             }
-            let routed =
-                crate::apply_replication_envelope(store, op, faults, leases).map_err(local)?;
-            let (primary, drain_refusals) = routed.into_primary_and_refusals();
-            for refusal in drain_refusals {
-                push_refusal_once(&mut refusals, refusal);
-            }
-            match primary {
-                ApplyOutcome::Applied(routed) => {
-                    if let Some(pending) = routed.pending_resolve() {
-                        pending_resolves.push(pending.clone());
-                    }
-                    conflicts_opened = conflicts_opened
-                        .checked_add(routed.conflicts_opened)
-                        .ok_or(RelayError::InvalidResponse)?;
-                    applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
-                }
-                ApplyOutcome::Refused(refusal) => {
-                    refused = refused.checked_add(1).ok_or(RelayError::InvalidResponse)?;
-                    push_refusal_once(&mut refusals, refusal);
-                }
-                ApplyOutcome::Skipped => {
-                    if let Some(refusal) =
-                        crate::apply::read_replayed_refusal(store, op).map_err(local)?
-                    {
-                        push_refusal_once(&mut refusals, refusal);
-                    }
-                    if let Some(pending) =
-                        crate::conflict_apply::read_replayed_pending_resolve(store, op)
-                            .map_err(local)?
-                    {
-                        pending_resolves.push(pending);
-                    }
-                    skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?
-                }
-                ApplyOutcome::Crashed { .. } => {
-                    return Err(RelayError::Local("injected-crash".to_owned()));
-                }
-                ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+            match crate::apply_replication_envelope(store, op, faults, leases) {
+                Err(SyncError::RetryableState { .. }) => retryable.push(op),
+                Err(error) => return Err(local(error)),
+                Ok(outcome) => accumulate_pull_outcome(
+                    store,
+                    op,
+                    outcome,
+                    &mut applied,
+                    &mut refused,
+                    &mut skipped,
+                    &mut conflicts_opened,
+                    &mut pending_resolves,
+                    &mut refusals,
+                )?,
             }
         }
+        while !retryable.is_empty() {
+            let mut still_retryable = Vec::new();
+            let mut made_progress = false;
+            for op in retryable {
+                match crate::apply_replication_envelope(store, op, faults, leases) {
+                    Err(SyncError::RetryableState { .. }) => still_retryable.push(op),
+                    Err(error) => return Err(local(error)),
+                    Ok(outcome) => {
+                        made_progress = true;
+                        accumulate_pull_outcome(
+                            store,
+                            op,
+                            outcome,
+                            &mut applied,
+                            &mut refused,
+                            &mut skipped,
+                            &mut conflicts_opened,
+                            &mut pending_resolves,
+                            &mut refusals,
+                        )?;
+                    }
+                }
+            }
+            if still_retryable.is_empty() {
+                break;
+            }
+            if !made_progress {
+                return Err(RelayError::Local("retryable-state".to_owned()));
+            }
+            retryable = still_retryable;
+        }
         // A drain refusal can commit before a later envelope fails hard, or
-        // outside a pull during open/resync/close. Claim every pending sidecar
-        // under a unique local report token and return it here. Cursor commit
-        // clears only that token; a later drain remains unowned, while a newer
-        // pull retags rows so a stale cursor cannot destroy an unread refusal.
+        // outside a pull during open/resync/close. Claim every relay-owned
+        // pending sidecar under a unique local report token and return it here.
+        // Direct-RPC retry rows retain their sentinel. Cursor commit clears only
+        // the claimed token; a later drain remains unowned, while a newer pull
+        // retags relay rows so a stale cursor cannot destroy an unread refusal.
         let (pending_refusals, refusal_report_id) =
             crate::apply::claim_pending_refusals(store, workspace_id, faults).map_err(local)?;
         for refusal in pending_refusals {
@@ -444,6 +453,55 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         Err(RelayError::Conflict)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accumulate_pull_outcome(
+    store: &EngineStore,
+    op: &ReplicationEnvelope,
+    outcome: ApplyOutcome<crate::RoutedApply>,
+    applied: &mut usize,
+    refused: &mut usize,
+    skipped: &mut usize,
+    conflicts_opened: &mut i64,
+    pending_resolves: &mut Vec<crate::PendingResolve>,
+    refusals: &mut Vec<crate::ReplicationRefusal>,
+) -> Result<(), RelayError> {
+    let (primary, drain_refusals) = outcome.into_primary_and_refusals();
+    for refusal in drain_refusals {
+        push_refusal_once(refusals, refusal);
+    }
+    match primary {
+        ApplyOutcome::Applied(routed) => {
+            if let Some(pending) = routed.pending_resolve() {
+                pending_resolves.push(pending.clone());
+            }
+            *conflicts_opened = conflicts_opened
+                .checked_add(routed.conflicts_opened)
+                .ok_or(RelayError::InvalidResponse)?;
+            *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+        }
+        ApplyOutcome::Refused(refusal) => {
+            *refused = refused.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+            push_refusal_once(refusals, refusal);
+        }
+        ApplyOutcome::Skipped => {
+            if let Some(refusal) = crate::apply::read_replayed_refusal(store, op).map_err(local)? {
+                push_refusal_once(refusals, refusal);
+            }
+            if let Some(pending) =
+                crate::conflict_apply::read_replayed_pending_resolve(store, op).map_err(local)?
+            {
+                pending_resolves.push(pending);
+            }
+            *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+        }
+        ApplyOutcome::Crashed { .. } => {
+            return Err(RelayError::Local("injected-crash".to_owned()));
+        }
+        ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+    }
+    Ok(())
 }
 
 fn push_refusal_once(

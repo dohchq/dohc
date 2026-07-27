@@ -215,8 +215,7 @@ the deferred fetch-cursor commit (`syncRelay.ts:938-999`). One malformed
 per-operation payload permanently wedges that origin in the oracle.
 
 Rust deliberately does not preserve that DoS behavior. Per-operation
-`InvalidInput` (including Y.Doc preflight validation),
-`MomentAppendNotImplemented`, and operation kinds unknown to an older receiver
+`InvalidInput` (including Y.Doc preflight validation) and operation kinds unknown to an older receiver
 become `ApplyOutcome::Refused`:
 the mutation savepoint is rolled back, then the envelope is journaled and its
 workspace-scoped origin coordinate acked. Relay outcomes count refusals and

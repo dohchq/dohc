@@ -42,7 +42,7 @@ pub fn apply_shared_envelope(
     apply_envelope_with(store, envelope, faults, |tx, op| {
         if boundary.surface == ShareSurface::SharedChannel {
             enforce_shared_channel_boundary(tx, boundary, op)?;
-            crate::apply::apply_chat_tx(tx, op)?;
+            let _ = crate::apply::apply_chat_tx(tx, op)?;
             advance_shared_peer_tx(
                 tx,
                 &op.workspace_id,

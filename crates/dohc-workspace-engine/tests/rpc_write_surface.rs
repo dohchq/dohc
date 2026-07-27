@@ -5862,6 +5862,11 @@ async fn replicated_conflict_rpc_retries_replay_the_persisted_refusal() {
         assert_eq!(first["status"], "refused");
         assert_eq!(first["code"], "invalid-input");
         assert_eq!(
+            first["reason"],
+            format!("{op_kind} payload is malformed"),
+            "MUTATION ({method}): the direct RPC must preserve the rejection explanation"
+        );
+        assert_eq!(
             replay, first,
             "MUTATION ({method}): formatting the ACKed replay as a bare skip loses the durable refusal"
         );

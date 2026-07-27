@@ -19,6 +19,7 @@ use dohc_engine_storage::{EngineStore, FaultInjector, Preimage};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
+use crate::error::local_corruption;
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 
 /// Result details callers surface instead of silently swallowing an unmatched
@@ -1021,12 +1022,6 @@ fn map_domain(error: DomainError) -> SyncError {
             reason: "replicated conflict operation is invalid",
         },
     }
-}
-
-fn local_corruption(reason: &'static str) -> SyncError {
-    SyncError::Storage(dohc_engine_storage::StorageError::corrupt_public(
-        std::io::Error::other(reason),
-    ))
 }
 
 #[cfg(test)]

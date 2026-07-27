@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
 
+use crate::error::local_corruption;
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
 #[derive(Deserialize)]
@@ -110,7 +111,7 @@ pub fn drain_deferred_ydoc_for_key(
             let (origin_id, origin_seq, recorded_at_ms, payload_json) =
                 row.map_err(SyncError::corrupt)?;
             let payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
-                .map_err(|_| hard_local_state("parked ydoc.update payload is malformed"))?;
+                .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
             pending.push((origin_id, origin_seq, recorded_at_ms, payload));
         }
         Ok::<_, SyncError>(pending)
@@ -128,19 +129,11 @@ pub fn drain_deferred_ydoc_for_key(
         let established_kind = dohc_engine_collab::read_marker(store, key)
             .map_err(map_collab_hard_error)?
             .map(|marker| marker.content_kind);
-        if established_kind.is_some_and(|kind| {
-            kind != dohc_engine_collab::ContentKind::parse(&payload.content_kind)
-        }) {
-            refusals.push(refuse_deferred_ydoc(
-                store,
-                key,
-                &origin_id,
-                origin_seq,
-                "ydoc.update content kind does not match the established lineage",
-                faults,
-            )?);
-            continue;
-        }
+        let content_kind_refusal = established_kind
+            .is_some_and(|kind| {
+                kind != dohc_engine_collab::ContentKind::parse(&payload.content_kind)
+            })
+            .then_some("ydoc.update content kind does not match the established lineage");
         // Once the base arrives it establishes the authoritative path. A
         // queued payload naming another path is still refused, but its valid
         // CRDT bytes must enter the lineage first so descendants do not retain
@@ -186,7 +179,7 @@ pub fn drain_deferred_ydoc_for_key(
             TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
-        if let Some(reason) = identity_refusal {
+        if let Some(reason) = content_kind_refusal.or(identity_refusal) {
             // The CRDT bytes landed even though the established path identity
             // forbids projection. Count the coordinate as drained before its
             // already-ACKed queue row is converted into a refusal: a live
@@ -511,7 +504,7 @@ pub fn apply_ydoc_envelope(
             })?;
             for payload_json in rows {
                 let queued_payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
-                    .map_err(|_| hard_local_state("parked ydoc.update payload is malformed"))?;
+                    .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
                 let queued_bytes = store
                     .get_binary_blob(&queued_payload.update_blob_sha256)?
                     .ok_or(SyncError::BlobInvalid)?;
@@ -537,9 +530,9 @@ pub fn apply_ydoc_envelope(
         // session settles or closes.
         let marker = dohc_engine_collab::read_marker(store, &key).map_err(map_collab_hard_error)?;
         if !marker.is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated) {
-            return Err(hard_local_state(
-                "live lease on a non-replicated Y.Doc lineage",
-            ));
+            return Err(SyncError::RetryableState {
+                reason: "live lease on a non-replicated Y.Doc lineage",
+            });
         }
         let deferred_key = key.clone();
         return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
@@ -725,7 +718,7 @@ pub fn apply_ydoc_envelope(
                     )
                     .map_err(SyncError::corrupt)?;
                 if !version_exists {
-                    return Err(SyncError::InvalidInput {
+                    return Err(SyncError::RetryableState {
                         reason: "ydoc.update version is missing",
                     });
                 }
@@ -877,8 +870,8 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
         | CollabError::EmptyUpdate
         | CollabError::UpdateTooLarge { .. }
         | CollabError::ProjectionTooLarge { .. }
-        | CollabError::ProjectionTooComplex { .. }
-        | CollabError::BaseStateDiverged => SyncError::InvalidInput { reason },
+        | CollabError::ProjectionTooComplex { .. } => SyncError::InvalidInput { reason },
+        CollabError::BaseStateDiverged => SyncError::CoordinateDiverged,
         hard => map_collab_hard_error(hard),
     }
 }
@@ -959,8 +952,4 @@ fn map_domain_hard_error(error: DomainError) -> SyncError {
         DomainError::Storage(storage) => SyncError::Storage(storage),
         hard => SyncError::Storage(StorageError::corrupt_public(hard)),
     }
-}
-
-fn hard_local_state(reason: &'static str) -> SyncError {
-    SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(reason)))
 }

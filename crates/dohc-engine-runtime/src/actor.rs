@@ -77,7 +77,7 @@ use dohc_engine_storage::{
 };
 use dohc_engine_sync::{
     ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
-    read_replayed_refusal,
+    read_replayed_refusal, retain_refusal_for_direct_retry,
 };
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
@@ -6017,6 +6017,11 @@ fn worker_main(
                     Err(RuntimeError::Cancelled)
                 } else {
                     match apply_conflict_envelope(&mut store, &envelope, faults.as_ref()) {
+                        Ok(outcome @ ApplyOutcome::Refused(_)) => {
+                            retain_refusal_for_direct_retry(&mut store, &envelope, faults.as_ref())
+                                .map(|()| outcome)
+                                .map_err(RuntimeError::from)
+                        }
                         Ok(ApplyOutcome::Skipped) => read_replayed_refusal(&store, &envelope)
                             .map(|refusal| {
                                 refusal.map_or(ApplyOutcome::Skipped, ApplyOutcome::Refused)

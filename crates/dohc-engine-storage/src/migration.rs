@@ -1751,6 +1751,37 @@ CREATE INDEX replication_pending_refusals_by_report
 pub(crate) const REPLICATION_PENDING_REFUSALS_MIGRATION_ID: &str =
     "v1-replication-pending-refusals";
 
+/// Ordinal 23. A replicated message may arrive before its thread. Preserve
+/// that coordinate in the same durable dependency queue used by the other
+/// cross-origin chat references.
+const V1_CHAT_PENDING_MESSAGE_THREAD_DDL: &str = "\
+ALTER TABLE chat_pending_replication RENAME TO chat_pending_replication_old;
+CREATE TABLE chat_pending_replication (
+    workspace_id    TEXT    NOT NULL,
+    origin_id       TEXT    NOT NULL,
+    origin_seq      INTEGER NOT NULL,
+    dependency_kind TEXT    NOT NULL CHECK (
+      dependency_kind IN (
+        'follow-target',
+        'feed-message',
+        'attachment-message',
+        'message-thread'
+      )
+    ),
+    dependency_id   TEXT    NOT NULL,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq)
+) STRICT;
+INSERT INTO chat_pending_replication
+    (workspace_id, origin_id, origin_seq, dependency_kind, dependency_id)
+SELECT workspace_id, origin_id, origin_seq, dependency_kind, dependency_id
+  FROM chat_pending_replication_old;
+DROP TABLE chat_pending_replication_old;
+CREATE INDEX chat_pending_replication_by_dependency
+    ON chat_pending_replication (workspace_id, dependency_kind, dependency_id);
+";
+
+pub(crate) const CHAT_PENDING_MESSAGE_THREAD_MIGRATION_ID: &str = "v1-chat-pending-message-thread";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1912,6 +1943,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: REPLICATION_PENDING_REFUSALS_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_REPLICATION_PENDING_REFUSALS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 23,
+        id: CHAT_PENDING_MESSAGE_THREAD_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_CHAT_PENDING_MESSAGE_THREAD_DDL,
         sets_user_version: None,
     },
 ];

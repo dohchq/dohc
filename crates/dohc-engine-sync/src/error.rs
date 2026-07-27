@@ -47,6 +47,10 @@ impl SyncError {
     }
 }
 
+pub(crate) fn local_corruption(reason: &'static str) -> SyncError {
+    SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(reason)))
+}
+
 /// Relay transport errors preserve the TS class-per-condition contract while
 /// keeping recovery detail in successful response values.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

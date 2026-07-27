@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
-const SECRET_FORK_RETRY_LIMIT: i64 = 3;
 const SECRET_FORK_MISMATCH_REASON: &str =
     "secret fork payload does not match the local sealed source state";
 
@@ -79,75 +78,14 @@ pub fn apply_secret_envelope(
     ) {
         return Err(SyncError::UnsupportedOperation);
     }
-    let first = apply_secret_envelope_once(store, envelope, faults, false);
-    if !matches!(
-        &first,
-        Err(SyncError::RetryableState {
-            reason: SECRET_FORK_MISMATCH_REASON
-        })
-    ) {
-        return first;
-    }
-    let attempts = record_secret_fork_retry(store, envelope, faults)?;
-    if attempts < SECRET_FORK_RETRY_LIMIT {
-        return first;
-    }
-    // Re-run the full admission and fork validation after recording the final
-    // attempt. The source may have converged between transactions; if so the
-    // fork applies. Only a still-live mismatch becomes a refusal and ACK,
-    // bounding a genuinely bad coordinate without sacrificing short ordering
-    // races.
-    apply_secret_envelope_once(store, envelope, faults, true)
-}
-
-fn apply_secret_envelope_once(
-    store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    refuse_fork_mismatch: bool,
-) -> Result<ApplyOutcome<()>, SyncError> {
     crate::apply_envelope_with(store, envelope, faults, |tx, op| {
         match op.op_kind.as_str() {
             "secret.file.put" => apply_put(tx, op, decode(&op.payload)?),
             "secret.file.delete" => apply_delete(tx, op, decode(&op.payload)?),
-            "secret.version.fork" => apply_fork(tx, op, decode(&op.payload)?, refuse_fork_mismatch),
+            "secret.version.fork" => apply_fork(tx, op, decode(&op.payload)?),
             _ => Err(SyncError::UnsupportedOperation),
         }
     })
-}
-
-fn record_secret_fork_retry(
-    store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-) -> Result<i64, SyncError> {
-    match store.write_with(faults, |tx| {
-        tx.execute(
-            "INSERT INTO replication_peers \
-             (workspace_id,origin_id,acked_seq,retry_origin_seq,retry_count) \
-             VALUES (?1,?2,-1,?3,1) \
-             ON CONFLICT(workspace_id,origin_id) DO UPDATE SET \
-               retry_count = CASE WHEN retry_origin_seq=excluded.retry_origin_seq \
-                 THEN retry_count+1 ELSE 1 END, \
-               retry_origin_seq=excluded.retry_origin_seq",
-            params![
-                envelope.workspace_id,
-                envelope.origin_id,
-                envelope.origin_seq
-            ],
-        )
-        .map_err(SyncError::persist)?;
-        tx.query_row(
-            "SELECT retry_count FROM replication_peers \
-             WHERE workspace_id=?1 AND origin_id=?2",
-            params![envelope.workspace_id, envelope.origin_id],
-            |row| row.get(0),
-        )
-        .map_err(SyncError::corrupt)
-    })? {
-        dohc_engine_storage::TxnOutcome::Committed(attempts) => Ok(attempts),
-        dohc_engine_storage::TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
-    }
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(value: &serde_json::Value) -> Result<T, SyncError> {
@@ -184,7 +122,7 @@ fn validate_common(
         )
         .map_err(SyncError::corrupt)?;
     if !version_exists {
-        return Err(SyncError::InvalidInput {
+        return Err(SyncError::RetryableState {
             reason: "secret target version is missing",
         });
     }
@@ -260,7 +198,6 @@ fn apply_fork(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     payload: SecretFork,
-    refuse_mismatch: bool,
 ) -> Result<(), SyncError> {
     crate::model::bounded(
         &payload.from_version_id,
@@ -314,7 +251,7 @@ fn apply_fork(
             .map_err(SyncError::corrupt)?
     };
     if payload.rows.len() != source_by_path.len() {
-        return Err(secret_fork_mismatch(refuse_mismatch));
+        return Err(secret_fork_mismatch());
     }
     let mut seen = HashSet::with_capacity(payload.rows.len());
     for row in &payload.rows {
@@ -325,7 +262,7 @@ fn apply_fork(
         }
         let source = source_by_path
             .get(&row.path)
-            .ok_or_else(|| secret_fork_mismatch(refuse_mismatch))?;
+            .ok_or_else(secret_fork_mismatch)?;
         let source_ciphertext = STANDARD.decode(&source.ciphertext_base64).map_err(|_| {
             SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(
                 "sealed source ciphertext is malformed",
@@ -336,7 +273,7 @@ fn apply_fork(
             || dohc_engine_storage::hex_sha256(&source_ciphertext) != row.ciphertext_sha256
             || source.byte_length != row.byte_length
         {
-            return Err(secret_fork_mismatch(refuse_mismatch));
+            return Err(secret_fork_mismatch());
         }
     }
 
@@ -402,7 +339,7 @@ fn require_version(
         )
         .map_err(SyncError::corrupt)?;
     if !exists {
-        return Err(SyncError::InvalidInput {
+        return Err(SyncError::RetryableState {
             reason: "secret fork version is missing",
         });
     }
@@ -489,15 +426,9 @@ fn load_ciphertext(
     Ok(ciphertext)
 }
 
-const fn secret_fork_mismatch(refuse: bool) -> SyncError {
-    if refuse {
-        SyncError::InvalidInput {
-            reason: SECRET_FORK_MISMATCH_REASON,
-        }
-    } else {
-        SyncError::RetryableState {
-            reason: SECRET_FORK_MISMATCH_REASON,
-        }
+const fn secret_fork_mismatch() -> SyncError {
+    SyncError::RetryableState {
+        reason: SECRET_FORK_MISMATCH_REASON,
     }
 }
 

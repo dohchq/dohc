@@ -46,6 +46,24 @@ fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> R
     }
 }
 
+fn decode_hex(encoded: &str) -> Vec<u8> {
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("hex utf8");
+            u8::from_str_radix(pair, 16).expect("hex byte")
+        })
+        .collect()
+}
+
+fn clock_collision_pair() -> (Vec<u8>, Vec<u8>) {
+    (
+        decode_hex("01010c00040109706c61696e546578740461efbfbd00"),
+        decode_hex("01010c00040109706c61696e546578740561f09f988000"),
+    )
+}
+
 fn seed_text_head(engine: &mut EngineStore, object_id: &str, path: &str, text: &str) -> String {
     let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
     engine
@@ -1038,6 +1056,158 @@ fn pending_chat_coordinate_count(engine: &EngineStore) -> i64 {
             .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("pending chat coordinate count")
+}
+
+#[test]
+fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
+    let (_scratch, _path, mut engine) = store();
+    let message = envelope(
+        "early-message-peer",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "early-message",
+            "threadId": "late-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ice",
+            "authorUserId": "ice",
+            "body": "arrived first",
+            "createdAtMs": 30
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &message, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "early-message-peer").expect("message ack"),
+        0,
+        "the durable pending row allows the cross-origin coordinate to ACK"
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    let channel = envelope(
+        "late-channel-peer",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "late-channel",
+            "name": "Late",
+            "slug": "late",
+            "kind": "channel",
+            "createdAtMs": 10
+        }),
+    );
+    apply_chat_envelope(&mut engine, &channel, &NoFaults).expect("channel");
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 20,
+            "channelSlug": "late"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+
+    let replayed: (String, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT body FROM chat_messages \
+                     WHERE workspace_id='ws' AND thread_id='late-thread' \
+                       AND message_id='early-message'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM chat_pending_replication", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .expect("replayed message state");
+    assert_eq!(
+        replayed,
+        ("arrived first".to_owned(), 0),
+        "MUTATION: missing-thread refusal loses the message instead of replaying it"
+    );
+}
+
+#[test]
+fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_apply() {
+    let (_scratch, _path, mut engine) = store();
+    let follow = envelope(
+        "pending-terminal-follow",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "channel",
+            "targetId": "later-private-wire",
+            "state": "following",
+            "atMs": 20
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park follow"),
+        ApplyOutcome::Applied(())
+    );
+    let private_channel = envelope(
+        "private-channel-source",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "later-private-channel",
+            "name": "Later private",
+            "slug": "later-private",
+            "kind": "dm",
+            "createdAtMs": 30,
+            "wireId": "later-private-wire"
+        }),
+    );
+    let outcome =
+        apply_chat_envelope(&mut engine, &private_channel, &NoFaults).expect("private channel");
+    let (primary, refusals) = outcome.into_primary_and_refusals();
+    assert_eq!(primary, ApplyOutcome::Applied(()));
+    assert_eq!(
+        refusals,
+        vec![ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: "pending-terminal-follow".to_owned(),
+            origin_seq: 0,
+            op_kind: "chat.follow.set".to_owned(),
+            reason: RefusalReason::InvalidInput {
+                reason: "chat follow target is not followable".to_owned(),
+            },
+        }],
+        "MUTATION: deleting a terminal pending coordinate without returning it loses the disposition"
+    );
+    let disposition: (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_pending_replication \
+                     WHERE workspace_id='ws' AND origin_id='pending-terminal-follow'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals \
+                     WHERE workspace_id='ws' AND origin_id='pending-terminal-follow' \
+                       AND reason_message='chat follow target is not followable'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("pending terminal disposition");
+    assert_eq!(
+        disposition,
+        (0, 1),
+        "MUTATION: deleting without persistence makes the ACKed terminal coordinate unobservable"
+    );
 }
 
 #[test]
@@ -4917,7 +5087,7 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
 }
 
 #[test]
-fn ydoc_prebase_content_kind_mismatches_are_refused_without_entering_the_lineage() {
+fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant() {
     for (case, base_kind, queued_kind) in [
         ("plaintext-base", "plaintext", "richdoc"),
         ("richdoc-base", "richdoc", "plaintext"),
@@ -4943,10 +5113,18 @@ fn ydoc_prebase_content_kind_mismatches_are_refused_without_entering_the_lineage
             "richdoc" => queued_doc.richdoc_append_paragraph("queued"),
             _ => unreachable!(),
         };
+        let descendant_bytes = match queued_kind {
+            "plaintext" => queued_doc.plaintext_insert(6, "-descendant"),
+            "richdoc" => queued_doc.richdoc_append_paragraph("descendant"),
+            _ => unreachable!(),
+        };
         let base_sha = engine
             .put_binary_blob(&base_doc.encode_full_state())
             .expect("base blob");
         let queued_sha = engine.put_binary_blob(&queued_bytes).expect("queued blob");
+        let descendant_sha = engine
+            .put_binary_blob(&descendant_bytes)
+            .expect("descendant blob");
         let object_id = format!("object-kind-{case}");
         let path = format!("notes/{case}.md");
         let queued_origin = format!("queued-kind-{case}-peer");
@@ -4965,6 +5143,26 @@ fn ydoc_prebase_content_kind_mismatches_are_refused_without_entering_the_lineage
         );
         assert!(matches!(
             apply_ydoc_envelope(&mut engine, &queued, &NoFaults, &NoLiveLeases),
+            Ok(ApplyOutcome::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent")
+            }))
+        ));
+        let descendant = envelope(
+            &queued_origin,
+            1,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": object_id,
+                "path": path,
+                "contentKind": base_kind,
+                "updateBlobSha256": descendant_sha,
+                "isBaseState": false
+            }),
+        );
+        assert!(matches!(
+            apply_ydoc_envelope(&mut engine, &descendant, &NoFaults, &NoLiveLeases),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
                 reason: Some("ydoc-lineage-absent")
@@ -5014,7 +5212,11 @@ fn ydoc_prebase_content_kind_mismatches_are_refused_without_entering_the_lineage
         assert!(projected.markdown.contains("base"));
         assert!(
             !projected.markdown.contains("queued"),
-            "MUTATION ({case}): comparing kinds only after apply leaves refused bytes in the lineage"
+            "the refused alternate-root edit must not project through the established kind"
+        );
+        assert!(
+            !persisted.doc.has_pending_dependencies(),
+            "MUTATION ({case}): refusing before applying the mismatched coordinate strands its descendant"
         );
         let (deferred, updates, refusal_rows): (i64, i64, i64) = engine
             .read_with(|conn| {
@@ -5042,8 +5244,8 @@ fn ydoc_prebase_content_kind_mismatches_are_refused_without_entering_the_lineage
             .expect("mismatched-kind disposition");
         assert_eq!(
             (deferred, updates, refusal_rows),
-            (0, 0, 1),
-            "MUTATION ({case}): the refused coordinate must be consumed and persisted without an update row"
+            (0, 2, 1),
+            "the refused clock and its dependent descendant must both enter the causal lineage"
         );
     }
 }
@@ -5324,7 +5526,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
 }
 
 #[test]
-fn ydoc_prebase_update_for_missing_version_is_refused_without_a_placeholder() {
+fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_create() {
     let (_scratch, _path, mut engine) = store();
     let update_bytes = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "orphan");
     let update_sha = engine
@@ -5344,16 +5546,15 @@ fn ydoc_prebase_update_for_missing_version_is_refused_without_a_placeholder() {
         }),
     );
 
-    assert_invalid_refusal!(apply_ydoc_envelope(
-        &mut engine,
-        &update,
-        &NoFaults,
-        &NoLiveLeases
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        Err(SyncError::RetryableState {
+            reason: "ydoc.update version is missing"
+        })
     ));
     assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "missing-version-ydoc-peer")
-            .expect("refusal ack"),
-        0
+        read_replication_acked_seq(&engine, "ws", "missing-version-ydoc-peer").expect("retry ack"),
+        -1
     );
     let (objects, deferred, refusal_rows): (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -5382,8 +5583,21 @@ fn ydoc_prebase_update_for_missing_version_is_refused_without_a_placeholder() {
         .expect("missing-version disposition");
     assert_eq!(
         (objects, deferred, refusal_rows),
-        (0, 0, 1),
-        "MUTATION: removing the version-existence gate creates an immortal placeholder and queue row"
+        (0, 0, 0),
+        "MUTATION: classifying the dependency as invalid input journals and retires the coordinate"
+    );
+    seed_replication_version(&mut engine, "never-created", "branch");
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            reason: Some("ydoc-lineage-absent")
+        }))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "missing-version-ydoc-peer")
+            .expect("applied ack"),
+        0
     );
 }
 
@@ -5473,21 +5687,10 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
 
-    let decode_hex = |encoded: &str| {
-        encoded
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let pair = std::str::from_utf8(pair).expect("hex utf8");
-                u8::from_str_radix(pair, 16).expect("hex byte")
-            })
-            .collect::<Vec<_>>()
-    };
     // Both updates are individually valid, but they redefine client 12 clock
     // 0 with different content. The second must become a terminal refusal only
     // after the first arrives as the base.
-    let base_bytes = decode_hex("01010c00040109706c61696e546578740461efbfbd00");
-    let invalid_bytes = decode_hex("01010c00040109706c61696e546578740561f09f988000");
+    let (base_bytes, invalid_bytes) = clock_collision_pair();
     let valid_before = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "valid-before ");
     let valid_after = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, " valid-after");
     let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
@@ -5926,7 +6129,7 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
 }
 
 #[test]
-fn divergent_second_ydoc_base_is_refused_and_acked_while_seq_zero_is_retained() {
+fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
     let first_doc = dohc_engine_collab::Ydoc::wire();
@@ -5970,17 +6173,25 @@ fn divergent_second_ydoc_base_is_refused_and_acked_while_seq_zero_is_retained() 
         &NoFaults,
         &NoLiveLeases,
     );
-    assert!(matches!(
-        second,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { ref reason },
-            ..
-        })) if reason == "ydoc.update base could not be claimed"
-    ));
+    assert!(matches!(second, Err(SyncError::CoordinateDiverged)));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "second-base-peer").expect("second-base ack"),
-        0,
-        "MUTATION: mapping BaseStateDiverged as hard leaves this origin at -1 forever"
+        -1,
+        "a divergent lineage must not advance the peer coordinate"
+    );
+    let journaled: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id='ws' AND origin_id='second-base-peer'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("divergent journal count");
+    assert_eq!(
+        journaled, 0,
+        "MUTATION: mapping BaseStateDiverged to InvalidInput journals and ACKs the unusable lineage"
     );
     let key =
         dohc_engine_collab::DocKey::new("ws", "main", "object-divergent-base").expect("doc key");
@@ -5995,7 +6206,7 @@ fn divergent_second_ydoc_base_is_refused_and_acked_while_seq_zero_is_retained() 
 }
 
 #[test]
-fn live_lease_on_local_only_lineage_is_hard_and_unacked() {
+fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
     let (_scratch, _path, mut engine) = store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -6040,11 +6251,27 @@ fn live_lease_on_local_only_lineage_is_hard_and_unacked() {
 
     assert!(matches!(
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &AlwaysLive),
-        Err(SyncError::Storage(_))
+        Err(SyncError::RetryableState {
+            reason: "live lease on a non-replicated Y.Doc lineage"
+        })
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "local-lease-peer").expect("ack"),
         -1
+    );
+    let journaled: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id='ws' AND origin_id='local-lease-peer'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("lease-race journal count");
+    assert_eq!(
+        journaled, 0,
+        "MUTATION: treating the lease race as a terminal refusal journals the coordinate"
     );
 }
 
@@ -6155,6 +6382,121 @@ fn seed_replication_version_in_workspace(
             Ok::<_, SyncError>(())
         })
         .expect("seed replication version");
+}
+
+#[test]
+fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_secret_scratch, _secret_path, mut secret_engine) = store();
+    let ciphertext = b"late secret";
+    let sha = secret_engine
+        .put_binary_blob(ciphertext)
+        .expect("secret blob");
+    let secret = envelope(
+        "late-secret-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "late-secret-version",
+            "path": "app/.env",
+            "metadata": {"origin": "sync"},
+            "ivBase64": STANDARD.encode([1_u8; SECRET_IV_BYTES]),
+            "authTagBase64": STANDARD.encode([2_u8; SECRET_TAG_BYTES]),
+            "ciphertextSha256": sha,
+            "byteLength": ciphertext.len()
+        }),
+    );
+    assert!(matches!(
+        apply_secret_envelope(&mut secret_engine, &secret, &NoFaults),
+        Err(SyncError::RetryableState {
+            reason: "secret target version is missing"
+        })
+    ));
+    assert_unacked_and_unjournaled(&secret_engine, "late-secret-peer");
+    seed_replication_version(&mut secret_engine, "late-secret-version", "named");
+    assert!(matches!(
+        apply_secret_envelope(&mut secret_engine, &secret, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+
+    let (_version_scratch, _version_path, mut version_engine) = store();
+    seed_replication_version(&mut version_engine, "main", "main");
+    let child = envelope(
+        "late-version-child-peer",
+        0,
+        "version.create",
+        json!({
+            "versionId": "late-child",
+            "name": "Late child",
+            "kind": "named",
+            "forkVersionId": "late-source",
+            "forkMomentId": "late-source-tip",
+            "createdAtMs": 30
+        }),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut version_engine, &child, &NoFaults, &NoLiveLeases),
+        Err(SyncError::RetryableState {
+            reason: "version.create source version is missing"
+        })
+    ));
+    assert_unacked_and_unjournaled(&version_engine, "late-version-child-peer");
+    let source = envelope(
+        "late-version-source-peer",
+        0,
+        "version.create",
+        json!({
+            "versionId": "late-source",
+            "name": "Late source",
+            "kind": "named",
+            "createdAtMs": 20
+        }),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut version_engine, &source, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    assert!(matches!(
+        apply_replication_envelope(&mut version_engine, &child, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    let created: bool = version_engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM versions \
+                 WHERE workspace_id='ws' AND version_id='late-child')",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("late child version");
+    assert!(
+        created,
+        "MUTATION: terminal missing-version classification prevents later dependency arrival from reviving the operation"
+    );
+}
+
+fn assert_unacked_and_unjournaled(engine: &EngineStore, origin_id: &str) {
+    assert_eq!(
+        read_replication_acked_seq(engine, "ws", origin_id).expect("retry ack"),
+        -1
+    );
+    let journaled: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id='ws' AND origin_id=?1",
+                [origin_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("retry journal");
+    assert_eq!(
+        journaled, 0,
+        "MUTATION: a retryable dependency must not be journaled before it applies"
+    );
 }
 
 #[test]
@@ -6575,42 +6917,6 @@ fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
             "{content_kind:?} must remain accepted"
         );
     }
-
-    let (_scratch, _path, mut engine) = store();
-    seed_replication_version(&mut engine, "main", "main");
-    let text_sha = dohc_engine_storage::hex_sha256(b"content");
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,7,'content')",
-                [&text_sha],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("seed text blob");
-    let mut malformed = shipped_text_snapshot("richdoc-object", "richdoc.md", &text_sha);
-    malformed["contentKind"] = json!("richdoc");
-    let operation = version_create_with_shipped_snapshots(
-        "richdoc-kind-peer",
-        "richdoc-kind-version",
-        vec![malformed],
-    );
-
-    assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput {
-                ref reason
-            },
-            ..
-        })) if reason == "version.create shipped snapshot content kind is invalid"
-    ));
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "richdoc-kind-peer").expect("ack"),
-        0,
-        "an unknown content kind is journaled and acknowledged as refused"
-    );
 }
 
 #[test]
@@ -7388,7 +7694,97 @@ fn secret_version_fork_retries_after_the_sealed_source_converges() {
 }
 
 #[test]
-fn secret_version_fork_mismatch_is_refused_after_the_durable_retry_budget() {
+fn relay_page_applies_later_secret_source_before_retrying_an_early_fork() {
+    let (_scratch, _path, mut engine) = store();
+    let original = b"sealed source bytes";
+    let (_original_sha, iv, tag) = seed_secret_fork_state(&mut engine, original);
+    seed_identity(&mut engine);
+    let converged = b"poison source bytes";
+    let converged_sha = engine
+        .put_binary_blob(converged)
+        .expect("converged source blob");
+    let fork = envelope(
+        "page-fork-peer",
+        0,
+        "secret.version.fork",
+        json!({
+            "fromVersionId": "main",
+            "toVersionId": "feature",
+            "rows": [{
+                "path": "app/.env",
+                "ivBase64": iv,
+                "authTagBase64": tag,
+                "ciphertextSha256": converged_sha,
+                "byteLength": converged.len(),
+                "updatedAtMs": 2_000,
+                "latestMomentId": "secret-sync-page-source-peer-0"
+            }, {
+                "path": "config/prod.env",
+                "ivBase64": iv,
+                "authTagBase64": tag,
+                "ciphertextSha256": dohc_engine_storage::hex_sha256(original),
+                "byteLength": original.len(),
+                "updatedAtMs": 101,
+                "latestMomentId": "source-tip-2"
+            }]
+        }),
+    );
+    let source = envelope(
+        "page-source-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "main",
+            "path": "app/.env",
+            "metadata": {"origin": "sync"},
+            "ivBase64": iv,
+            "authTagBase64": tag,
+            "ciphertextSha256": converged_sha,
+            "byteLength": converged.len()
+        }),
+    );
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![fork, source],
+            next_cursor: "after-secret-page".to_owned(),
+        })),
+    });
+
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("page-local dependency retry");
+    let SyncPassOutcome::Complete {
+        applied,
+        refused,
+        pending_cursor,
+        ..
+    } = outcome
+    else {
+        panic!("pull must complete");
+    };
+    assert_eq!(
+        (applied, refused),
+        (2, 0),
+        "MUTATION: aborting on the first retryable fork never reaches its later source operation"
+    );
+    assert!(pending_cursor.is_some());
+    let destination_present: bool = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM secret_files \
+                 WHERE workspace_id='ws' AND version_id='feature' AND path='app/.env' \
+                   AND latest_moment_id='secret-sync-page-source-peer-0')",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("fork destination");
+    assert!(destination_present);
+}
+
+#[test]
+fn secret_version_fork_mismatch_never_acks_without_source_progress() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
@@ -7422,70 +7818,28 @@ fn secret_version_fork_mismatch_is_refused_after_the_durable_retry_budget() {
         }),
     );
 
-    for attempt in 1..=2 {
+    for _ in 0..5 {
         assert!(matches!(
             apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
             Err(SyncError::RetryableState {
                 reason: "secret fork payload does not match the local sealed source state"
             })
         ));
-        let retry_state: (Option<i64>, i64, i64) = engine
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT retry_origin_seq,retry_count,acked_seq
-                     FROM replication_peers
-                     WHERE workspace_id='ws' AND origin_id='bounded-fork-peer'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-            })
-            .expect("durable fork retry state");
-        assert_eq!(retry_state, (Some(0), attempt, -1));
     }
-
-    assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { ref reason },
-            ..
-        })) if reason == "secret fork payload does not match the local sealed source state"
-    ));
-    let retry_state: (Option<i64>, i64, i64) = engine
+    assert_unacked_and_unjournaled(&engine, "bounded-fork-peer");
+    let refusal_count: i64 = engine
         .read_with(|conn| {
             conn.query_row(
-                "SELECT retry_origin_seq,retry_count,acked_seq
-                 FROM replication_peers
+                "SELECT COUNT(*) FROM replication_pending_refusals \
                  WHERE workspace_id='ws' AND origin_id='bounded-fork-peer'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| row.get(0),
             )
         })
-        .expect("cleared fork retry state");
+        .expect("fork refusal count");
     assert_eq!(
-        retry_state,
-        (None, 0, 0),
-        "MUTATION: leaving the mismatch retryable wedges this coordinate forever"
-    );
-
-    let next = envelope(
-        "bounded-fork-peer",
-        1,
-        "chat.channel.create",
-        json!({
-            "channelId": "after-bounded-fork",
-            "name": "After bounded fork",
-            "slug": "after-bounded-fork",
-            "kind": "channel",
-            "createdAtMs": 2_100
-        }),
-    );
-    assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
-    ));
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "bounded-fork-peer").expect("next ack"),
-        1
+        refusal_count, 0,
+        "MUTATION: a pull-count cutoff eventually retires an otherwise recoverable fork"
     );
 }
 
@@ -7854,6 +8208,11 @@ fn secret_put_corrupt_local_ciphertext_blob_is_hard_and_unacked() {
     seed_replication_version(&mut engine, "main", "main");
     let honest_ciphertext = b"honest";
     let corrupt_ciphertext = b"sealed";
+    assert_eq!(
+        honest_ciphertext.len(),
+        corrupt_ciphertext.len(),
+        "the corruption fixture must isolate digest mismatch from byte-length mismatch"
+    );
     let sha = dohc_engine_storage::hex_sha256(honest_ciphertext);
     engine
         .write_with(&NoFaults, |tx| {
@@ -8710,18 +9069,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
-    let decode_hex = |encoded: &str| {
-        encoded
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let pair = std::str::from_utf8(pair).expect("hex utf8");
-                u8::from_str_radix(pair, 16).expect("hex byte")
-            })
-            .collect::<Vec<_>>()
-    };
-    let base_bytes = decode_hex("01010c00040109706c61696e546578740461efbfbd00");
-    let invalid_bytes = decode_hex("01010c00040109706c61696e546578740561f09f988000");
+    let (base_bytes, invalid_bytes) = clock_collision_pair();
     let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
     let invalid_sha = engine
         .put_binary_blob(&invalid_bytes)
@@ -9007,23 +9355,10 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
-    let decode_hex = |encoded: &str| {
-        encoded
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let pair = std::str::from_utf8(pair).expect("hex utf8");
-                u8::from_str_radix(pair, 16).expect("hex byte")
-            })
-            .collect::<Vec<_>>()
-    };
-    let base_sha = engine
-        .put_binary_blob(&decode_hex("01010c00040109706c61696e546578740461efbfbd00"))
-        .expect("base blob");
+    let (base_bytes, invalid_bytes) = clock_collision_pair();
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
     let invalid_sha = engine
-        .put_binary_blob(&decode_hex(
-            "01010c00040109706c61696e546578740561f09f988000",
-        ))
+        .put_binary_blob(&invalid_bytes)
         .expect("deferred blob");
     let deferred = envelope(
         "post-pull-drain-peer",
@@ -9182,6 +9517,41 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     assert_eq!(
         remaining, 0,
         "a refusal clears only after the cursor that actually surfaced it commits"
+    );
+}
+
+#[test]
+fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
+    let (_scratch, _path, mut engine) = store();
+    let direct = envelope("direct-conflict-peer", 0, "conflict.open", json!({}));
+    assert!(matches!(
+        apply_conflict_envelope(&mut engine, &direct, &NoFaults),
+        Ok(ApplyOutcome::Refused(_))
+    ));
+    retain_refusal_for_direct_retry(&mut engine, &direct, &NoFaults)
+        .expect("protect direct refusal");
+
+    let (claimed, report_id) = crate::apply::claim_pending_refusals(&mut engine, "ws", &NoFaults)
+        .expect("unrelated relay claim");
+    assert!(
+        claimed.is_empty() && report_id.is_none(),
+        "MUTATION: claiming every workspace row steals the direct RPC retry disposition"
+    );
+    let cursor = RelayCursor {
+        cursor: "unrelated-cursor".to_owned(),
+        replication_epoch: "epoch".to_owned(),
+        stream_identity: "stream".to_owned(),
+        refusal_report_id: report_id,
+    };
+    commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults).expect("cursor commit");
+    let replayed = read_replayed_refusal(&engine, &direct)
+        .expect("read direct refusal")
+        .expect("direct refusal survives");
+    assert_eq!(
+        replayed.reason,
+        RefusalReason::InvalidInput {
+            reason: "conflict.open payload is malformed".to_owned()
+        }
     );
 }
 
@@ -9571,5 +9941,100 @@ fn every_refusal_reason_round_trips_through_persist_and_read() {
             expected,
             "the owned refusal message and variant must round-trip losslessly"
         );
+        let exhaustively_matched_message = match &expected.reason {
+            RefusalReason::InvalidInput { reason } => reason,
+        };
+        assert_eq!(
+            exhaustively_matched_message,
+            expected.reason.message(),
+            "MUTATION: the exhaustive guard must execute for every persisted refusal variant"
+        );
     }
+}
+
+#[test]
+fn docs_refusal_contract_does_not_name_retired_variants() {
+    let contract = include_str!("../../../docs/superpowers/plans/rust-engine/RPC_GAP.md");
+    assert!(
+        !contract.contains("MomentAppendNotImplemented"),
+        "MUTATION: the executable refusal contract must not advertise a removed disposition"
+    );
+}
+
+#[test]
+fn local_corruption_constructor_has_one_shared_definition() {
+    let sources = [
+        include_str!("error.rs"),
+        include_str!("apply.rs"),
+        include_str!("conflict_apply.rs"),
+        include_str!("ydoc_apply.rs"),
+    ];
+    let constructors = sources
+        .iter()
+        .map(|source| {
+            source
+                .matches(&["std::io::Error::other", "(reason)"].concat())
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(
+        constructors, 1,
+        "MUTATION: local-corruption construction must stay centralized in error.rs"
+    );
+    assert!(sources[0].contains("pub(crate) fn local_corruption"));
+}
+
+#[test]
+fn clock_collision_fixtures_are_shared() {
+    let source = include_str!("tests.rs");
+    assert_eq!(
+        source.matches(&["fn decode", "_hex("].concat()).count(),
+        1,
+        "MUTATION: hex decoding belongs in one shared fixture helper"
+    );
+    assert_eq!(
+        source
+            .matches(&["fn clock_collision", "_pair("].concat())
+            .count(),
+        1,
+        "MUTATION: the opaque collision payload pair belongs in one named fixture"
+    );
+    assert_eq!(
+        source.matches(&["let decode", "_hex = |"].concat()).count(),
+        0,
+        "MUTATION: per-test decoder closures duplicate an opaque fixture"
+    );
+}
+
+#[test]
+fn accepted_content_kind_test_has_no_unknown_kind_tail() {
+    let source = include_str!("tests.rs");
+    let accepted = source
+        .split_once("fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds()")
+        .expect("accepted-kind test")
+        .1
+        .split_once("fn version_create_unknown_content_kind_is_refused_and_acked()")
+        .expect("dedicated unknown-kind test")
+        .0;
+    assert!(
+        !accepted.contains("version.create shipped snapshot content kind is invalid"),
+        "MUTATION: the accepted-kind test must not duplicate the dedicated refusal test"
+    );
+}
+
+#[test]
+fn corrupt_secret_fixture_asserts_equal_lengths() {
+    let source = include_str!("tests.rs");
+    let fixture = source
+        .split_once("fn secret_put_corrupt_local_ciphertext_blob_is_hard_and_unacked()")
+        .expect("corrupt-secret test")
+        .1
+        .split_once("#[test]")
+        .expect("next test")
+        .0;
+    assert!(
+        fixture.contains("honest_ciphertext.len(),")
+            && fixture.contains("corrupt_ciphertext.len(),"),
+        "MUTATION: the fixture must assert that only ciphertext content changed"
+    );
 }
