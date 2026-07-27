@@ -60,6 +60,11 @@ export interface ChatDispatchIdentity {
 export interface RunnerProcess {
   readonly pid: number | undefined;
   readonly rawChild?: ChildProcess;
+  // Deliver the prompt. It rides stdin rather than argv because it carries
+  // the rendered thread — unbounded in length and content — and a cmd.exe
+  // command line can carry neither (~8191 characters, and no safe
+  // representation for a double quote).
+  writeStdin(text: string): void;
   hasExited(): boolean;
   onExit(listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void): void;
   onError(listener: (error: Error) => void): void;
@@ -69,7 +74,7 @@ export interface RunnerSpawnOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   detached: true;
-  stdio: ["ignore", number, number];
+  stdio: ["pipe", number, number];
   windowsHide: true;
   windowsVerbatimArguments?: boolean;
 }
@@ -223,6 +228,13 @@ function defaultSpawnRunner(
       return child.pid;
     },
     rawChild: child,
+    writeStdin: (text) => {
+      // A runner that exits before reading its prompt breaks this pipe. That
+      // is the runner's outcome, reported through its exit code and log, not
+      // a dispatch-time crash.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(text);
+    },
     hasExited: () => child.exitCode !== null || child.signalCode !== null,
     onExit: (listener) => {
       child.once("exit", listener);
@@ -544,28 +556,44 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }): SpawnedRun {
     const commandParts = tokenizeRunnerCommand(input.command);
     const executable = commandParts[0]!;
-    const args = [...commandParts.slice(1), input.prompt];
+    // The prompt is DATA and rides stdin, never argv. It carries the rendered
+    // thread, so it is unbounded in both length and content, and a command
+    // line can carry neither safely:
+    //   - Length. A .cmd/.bat runner (the npm -g layout on Windows) must run
+    //     behind cmd.exe, which hard-fails past ~8191 characters with "The
+    //     command line is too long." Any thread of real size exceeds that, so
+    //     no amount of quoting would have made argv work.
+    //   - Content. quoteForCmd refuses a double quote outright, and the
+    //     dispatch prompt always contains one (`--as-agent "<report>"`), so
+    //     every dispatch through a shimmed runner threw before it spawned.
+    // stdin has neither limit and needs no escaping at all.
+    const args = commandParts.slice(1);
     const env = runnerEnvironment({
       workspaceId: input.workspace.workspaceId,
       threadId: input.threadId,
       runId: input.runId,
     });
-    const resolved = resolveSpawnCommand(executable, args, {
-      env,
-      cwd: input.workspace.rootPath,
-    });
     const logFd = prepareLog(input.logPath);
     try {
+      // Inside the try: resolveSpawnCommand REFUSES some runner commands
+      // (a double quote or percent sign in the configured command itself),
+      // and it used to sit outside, so its throw escaped the spawn path
+      // entirely instead of failing this one dispatch.
+      const resolved = resolveSpawnCommand(executable, args, {
+        env,
+        cwd: input.workspace.rootPath,
+      });
       const child = spawnRunner(resolved.command, resolved.args, {
         cwd: input.workspace.rootPath,
         env,
         detached: true,
-        stdio: ["ignore", logFd, logFd],
+        stdio: ["pipe", logFd, logFd],
         windowsHide: true,
         ...(resolved.windowsVerbatimArguments
           ? { windowsVerbatimArguments: true }
           : {}),
       });
+      child.writeStdin(input.prompt);
       return { child, logPath: input.logPath };
     } finally {
       closeSync(logFd);

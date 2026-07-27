@@ -63,6 +63,9 @@ interface SpawnCall {
 
 class FakeRunnerProcess implements RunnerProcess {
   readonly rawChild = undefined;
+  // What the dispatch delivered on stdin. The prompt travels here rather than
+  // in argv, so this is where a test must look to prove it was sent at all.
+  stdinText: string | null = null;
   private exited = false;
   private readonly exitListeners: Array<
     (exitCode: number | null, signal: NodeJS.Signals | null) => void
@@ -70,6 +73,10 @@ class FakeRunnerProcess implements RunnerProcess {
   private readonly errorListeners: Array<(error: Error) => void> = [];
 
   constructor(readonly pid: number | undefined) {}
+
+  writeStdin(text: string): void {
+    this.stdinText = text;
+  }
 
   hasExited(): boolean {
     return this.exited;
@@ -1008,8 +1015,11 @@ describe("chatDispatchService", () => {
 
     const firstSpawn = fixture.spawnCalls[0]!;
     expect(firstSpawn.command).toMatch(/(?:^|[\\/])claude(?:\.exe)?$/iu);
-    expect(firstSpawn.args.slice(0, -1)).toEqual(["-p", "--allowedTools", "Bash(dohc chat:*)"]);
-    const prompt = firstSpawn.args.at(-1);
+    // The prompt is NOT in argv — it rides stdin, so argv is exactly the
+    // configured runner command. Asserting the full array (not a slice that
+    // drops the last element) is what proves the prompt is absent from it.
+    expect(firstSpawn.args).toEqual(["-p", "--allowedTools", "Bash(dohc chat:*)"]);
+    const prompt = firstSpawn.process.stdinText;
     expect(prompt).toContain("# Launch review");
     expect(prompt).toContain("Audit the rollback plan.");
     expect(prompt).toContain(`dohc chat reply ${first.threadId} --as-agent`);
@@ -1019,7 +1029,10 @@ describe("chatDispatchService", () => {
       detached: true,
       windowsHide: true,
     });
-    expect(firstSpawn.options.stdio[0]).toBe("ignore");
+    // stdin is a PIPE, not "ignore" — that is the channel the prompt arrives
+    // on. An "ignore" here would mean the runner is spawned with no prompt at
+    // all.
+    expect(firstSpawn.options.stdio[0]).toBe("pipe");
     expect(typeof firstSpawn.options.stdio[1]).toBe("number");
     expect(firstSpawn.options.stdio[2]).toBe(firstSpawn.options.stdio[1]);
     expect(firstSpawn.options.env.DOHC_CHAT_THREAD).toBe(first.threadId);
@@ -1346,6 +1359,33 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(trigger.threadId);
   });
 
+  // Issue #251. The dispatch prompt always contains a double quote (the
+  // `--as-agent "<report>"` contract) and carries the whole rendered thread.
+  // While it rode argv, a .cmd/.bat runner -- the npm -g layout on Windows --
+  // had to go through cmd.exe, where quoteForCmd refuses a double quote
+  // outright and the command line hard-fails past ~8191 characters. Dispatch
+  // was impossible for those users; a native claude.exe earlier in PATHEXT
+  // order was the only thing masking it.
+  it("keeps the prompt off argv so a cmd-shimmed runner can dispatch", async () => {
+    const fixture = await createFixture();
+    await activate(fixture);
+    const trigger = await createAgentThread(fixture, {
+      body: "Ship the release notes.",
+    });
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    const call = fixture.spawnCalls[0]!;
+    const prompt = call.process.stdinText ?? "";
+    expect(prompt).toContain(`--as-agent "`);
+    expect(prompt).toContain("Ship the release notes.");
+    // Nothing carrying a quote may reach the command line, because that is
+    // exactly what cmd.exe cannot represent.
+    for (const arg of call.args) expect(arg).not.toContain('"');
+    expect(call.args.join(" ")).not.toContain("--as-agent");
+    expect(call.args.join(" ")).not.toContain("Ship the release notes.");
+    expect(trigger.threadId).toBeTruthy();
+  });
+
   it("pumps a sync-bound workspace that was never renderer-opened", async () => {
     vi.useFakeTimers();
     let inserted = false;
@@ -1374,7 +1414,9 @@ describe("chatDispatchService", () => {
 
     expect(fixture.syncRequests).toEqual([WORKSPACE_ID]);
     expect(fixture.spawnCalls).toHaveLength(1);
-    expect(fixture.spawnCalls[0]!.args.at(-1)).toContain("Remote tray-only task.");
+    expect(fixture.spawnCalls[0]!.process.stdinText).toContain(
+      "Remote tray-only task.",
+    );
   });
 
   it("starts workspace pump syncs concurrently", async () => {
@@ -2651,7 +2693,7 @@ describe("chatDispatchService", () => {
     const runId = call.options.env.DOHC_RUN_ID;
     if (!threadId || !runId) throw new Error("Expected self-test attribution.");
     const marker = `dohc-runner-self-test:${runId}`;
-    expect(call.args.at(-1)).toContain(
+    expect(call.process.stdinText).toContain(
       `dohc chat reply ${threadId} --as-agent "${marker}"`,
     );
     expect(runId).toBe("run_self_test_self_test_id_1");
