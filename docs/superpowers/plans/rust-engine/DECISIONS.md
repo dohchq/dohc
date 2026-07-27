@@ -337,3 +337,59 @@ neither. If you would rather take the silent-drop behaviour for liveness, say
 so and this flips; the program's judgement is that data-loss-by-ack is the worse
 failure during a cutover.
 
+## OPEN — the GATE6 rehearsal cannot run on Ice's real workspace (hard links)
+
+**Found 2026-07-27 by re-running the rehearsal against final main. Ice owns this.**
+
+The clone-reset rehearsal is the only evidence that a user's files survive the cutover
+reset. Re-run against current `main`, it **refuses**:
+
+```
+the clone contains an unsupported alias or special file:
+  ...\personal\sites\dohc-workspace-demoendor\dohc-sdk\dist\index.d.ts
+```
+
+### The facts
+
+- `run_rehearsal` fails closed on ANY source file with `link_count > 1`
+  (`rehearsal_harness.rs:1139-1140`). The recorded contract says so explicitly:
+  *"any link count above one fails closed before reset."*
+- Ice's workspace contains **265 hard links**, all created by pnpm. **262 are under
+  `node_modules`, which the path floor already excludes** (`policy.rs:230`:
+  `.dohc | .git | node_modules`).
+- So the refusal is caused by exactly **three** files:
+  `sites/dohc-workspace-demo/vendor/dohc-sdk/{package.json, dist/index.d.ts,
+  dist/index.js}`.
+- **Every one of their twins is INSIDE the source tree** — they point into
+  `sites/dohc-workspace-demo/node_modules/.pnpm/@dohc+sdk@file+vendor+dohc-sdk/...`.
+  None escapes the workspace.
+
+### Why this is a decision, not a bug fix
+
+The check is deliberately fail-closed on a data-safety path, and relaxing it is not the
+program's call. But `HardLinkEvidence` **already models the distinction** —
+`inside_source_tree_twin_count`, `outside_source_tree_twin_count`,
+`outside_source_tree_observed`, `flagged_observation_for_ice` — so the design
+anticipated that inside-tree twins are a different case from outside-tree ones.
+
+### Options
+
+- **(a) Allow intra-source-tree hard links** — copy the content, record the twin, keep
+  failing closed only when a twin resolves OUTSIDE the source root. A twin inside the
+  tree is not an aliasing escape: the clone copies bytes, and each name gets its own
+  copy. **Program recommendation.**
+- **(b) Keep failing closed** and require de-hard-linking before a rehearsal. Honest,
+  but it means the rehearsal can never run on a workspace containing a JS project,
+  since pnpm hard-links by default.
+- **(c) Floor out `vendor/` as well.** Cheapest, and wrong: `vendor/` is real user
+  content, and excluding it from the rehearsal would mean the evidence no longer covers
+  files the user would expect to survive.
+
+### Consequence either way
+
+**There is currently NO valid rehearsal evidence for the cutover.** The banked
+`REHEARSAL_EVIDENCE-2026-07-26.json` was produced before the traversal hardening in
+#259 and against code that has since taken 25 merges, five of them to the capture
+pipeline it exercises. It cannot be treated as current, and a fresh run is blocked by
+this refusal.
+
