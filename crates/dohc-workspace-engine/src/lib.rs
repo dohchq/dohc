@@ -1424,14 +1424,23 @@ impl EngineService {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
-            let kind = match &cursor {
-                IssuedCursor::Relay(_) => "relay",
-                IssuedCursor::ShareView(_) => "shareView",
+            let (kind, wire_kind) = match &cursor {
+                IssuedCursor::Relay(_) => (PendingCursorKind::Relay, "relay"),
+                IssuedCursor::ShareView(_) => (PendingCursorKind::ShareView, "shareView"),
             };
             let mut pending = lock(&self.pending_cursors);
             if pending.contains_key(&token) {
                 continue;
             }
+            pending.retain(|_, issued| {
+                issued.handle != *handle
+                    || issued.workspace_id != workspace_id
+                    || !matches!(
+                        (&issued.cursor, kind),
+                        (IssuedCursor::Relay(_), PendingCursorKind::Relay)
+                            | (IssuedCursor::ShareView(_), PendingCursorKind::ShareView)
+                    )
+            });
             pending.insert(
                 token.clone(),
                 PendingCursor {
@@ -1440,7 +1449,7 @@ impl EngineService {
                     cursor,
                 },
             );
-            return Ok(json!({ "kind": kind, "token": token }));
+            return Ok(json!({ "kind": wire_kind, "token": token }));
         }
         Err(wire(ErrorCode::Internal, "pending-cursor-token-collision"))
     }
@@ -1763,7 +1772,6 @@ impl EngineService {
                 RelayOperation::PullShareView {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
-                    path_prefix: params.path_prefix,
                 },
                 "share.view.pull",
             )
@@ -7181,7 +7189,8 @@ struct SharedChannelParams {
 struct ShareViewParams {
     workspace_id: String,
     share_id: String,
-    path_prefix: String,
+    #[serde(default, rename = "pathPrefix")]
+    _legacy_path_prefix: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -9244,6 +9253,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         }
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
             "fetched": outcome.fetched,
+            "hasMore": outcome.has_more,
             "applied": outcome.applied,
             "skipped": outcome.skipped,
             "changedPaths": outcome.changed_paths.into_iter().map(|change| json!({
@@ -9456,15 +9466,39 @@ fn map_runtime(error: RuntimeError) -> WireError {
 fn map_relay_code(error: RelayError) -> ErrorCode {
     match error {
         RelayError::Unauthorized => ErrorCode::AuthFailed,
-        RelayError::WorkspaceUnavailable
-        | RelayError::ShareUnavailable
-        | RelayError::KeyEnvelopeMissing
-        | RelayError::Partitioned => ErrorCode::WorkspaceUnavailable,
+        RelayError::Forbidden => ErrorCode::Forbidden,
+        RelayError::Conflict => ErrorCode::Conflict,
+        RelayError::OriginDiverged => ErrorCode::OriginDiverged,
+        RelayError::ShareUnavailable => ErrorCode::ShareUnavailable,
+        RelayError::KeyEnvelopeMissing => ErrorCode::KeyEnvelopeMissing,
+        RelayError::EpochSuperseded => ErrorCode::EpochSuperseded,
+        RelayError::IdentityNotRecognized => ErrorCode::IdentityNotRecognized,
+        RelayError::ShareReadOnly => ErrorCode::ShareReadOnly,
+        RelayError::ShareOperationRejected => ErrorCode::ShareOperationRejected,
+        RelayError::PayloadTooLarge => ErrorCode::PayloadTooLarge,
+        RelayError::QuotaExceeded => ErrorCode::QuotaExceeded,
+        RelayError::NoProgress => ErrorCode::RelayNoProgress,
+        RelayError::BlobMissing => ErrorCode::BlobMissing,
+        RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
+        RelayError::BlobInvalid => ErrorCode::BlobInvalid,
+        RelayError::IdentityRequired => ErrorCode::IdentityRequired,
+        RelayError::StreamIdentityMismatch => ErrorCode::StreamIdentityMismatch,
+        RelayError::AuthorshipMismatch => ErrorCode::AuthorshipMismatch,
+        RelayError::UnknownChatOperation => ErrorCode::UnknownChatOperation,
+        RelayError::PresenceCapacity => ErrorCode::PresenceCapacity,
+        RelayError::SelfShare => ErrorCode::SelfShare,
+        RelayError::AmbiguousSelector => ErrorCode::AmbiguousSelector,
+        RelayError::InvalidChannel => ErrorCode::InvalidChannel,
+        RelayError::MethodNotAllowed => ErrorCode::RelayMethodNotAllowed,
+        RelayError::InvalidResponse => ErrorCode::RelayInvalidResponse,
+        RelayError::WorkspaceUnavailable | RelayError::Partitioned => {
+            ErrorCode::WorkspaceUnavailable
+        }
         RelayError::ServerInternal
         | RelayError::UnknownServerCode(_)
         | RelayError::HttpStatus(_)
         | RelayError::Local(_) => ErrorCode::Internal,
-        _ => ErrorCode::InvalidParams,
+        RelayError::BadRequest => ErrorCode::InvalidParams,
     }
 }
 
@@ -9728,6 +9762,95 @@ mod tests {
         assert_eq!(
             value["hasMore"], true,
             "MUTATION: omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
+        );
+    }
+
+    #[test]
+    fn relay_error_mapping_preserves_recovery_and_authorization_conditions() {
+        let cases = [
+            (RelayError::Conflict, ErrorCode::Conflict),
+            (RelayError::OriginDiverged, ErrorCode::OriginDiverged),
+            (RelayError::ShareUnavailable, ErrorCode::ShareUnavailable),
+            (
+                RelayError::KeyEnvelopeMissing,
+                ErrorCode::KeyEnvelopeMissing,
+            ),
+            (RelayError::EpochSuperseded, ErrorCode::EpochSuperseded),
+            (
+                RelayError::IdentityNotRecognized,
+                ErrorCode::IdentityNotRecognized,
+            ),
+            (RelayError::QuotaExceeded, ErrorCode::QuotaExceeded),
+            (RelayError::PayloadTooLarge, ErrorCode::PayloadTooLarge),
+            (RelayError::Forbidden, ErrorCode::Forbidden),
+            (RelayError::ShareReadOnly, ErrorCode::ShareReadOnly),
+            (
+                RelayError::ShareOperationRejected,
+                ErrorCode::ShareOperationRejected,
+            ),
+            (RelayError::NoProgress, ErrorCode::RelayNoProgress),
+            (RelayError::BlobMissing, ErrorCode::BlobMissing),
+            (
+                RelayError::BlobReferenceMissing,
+                ErrorCode::BlobReferenceMissing,
+            ),
+            (RelayError::BlobInvalid, ErrorCode::BlobInvalid),
+            (RelayError::IdentityRequired, ErrorCode::IdentityRequired),
+            (
+                RelayError::StreamIdentityMismatch,
+                ErrorCode::StreamIdentityMismatch,
+            ),
+            (
+                RelayError::AuthorshipMismatch,
+                ErrorCode::AuthorshipMismatch,
+            ),
+            (
+                RelayError::UnknownChatOperation,
+                ErrorCode::UnknownChatOperation,
+            ),
+            (RelayError::PresenceCapacity, ErrorCode::PresenceCapacity),
+            (RelayError::SelfShare, ErrorCode::SelfShare),
+            (RelayError::AmbiguousSelector, ErrorCode::AmbiguousSelector),
+            (RelayError::InvalidChannel, ErrorCode::InvalidChannel),
+            (
+                RelayError::MethodNotAllowed,
+                ErrorCode::RelayMethodNotAllowed,
+            ),
+            (RelayError::InvalidResponse, ErrorCode::RelayInvalidResponse),
+        ];
+        for (relay, expected) in cases {
+            assert_eq!(
+                map_relay_code(relay),
+                expected,
+                "MUTATION: collapsing a relay condition prevents generated clients from recovering"
+            );
+        }
+        assert_eq!(
+            map_relay_code(RelayError::Partitioned),
+            ErrorCode::WorkspaceUnavailable
+        );
+    }
+
+    #[test]
+    fn share_view_outcome_json_surfaces_has_more() {
+        let value = relay_outcome_json(RelayOperationOutcome::ShareViewPulled(
+            dohc_engine_sync::ShareViewPullOutcome {
+                fetched: 1,
+                has_more: true,
+                applied: 0,
+                skipped: 0,
+                changed_paths: Vec::new(),
+                pending_cursor: ShareCursor {
+                    kind: dohc_engine_sync::CursorKind::ShareView,
+                    share_id: "share".to_owned(),
+                    cursor: 1,
+                },
+            },
+        ))
+        .expect("serialize share view outcome");
+        assert_eq!(
+            value["hasMore"], true,
+            "MUTATION: omitting hasMore hides that the pending cursor is only a bounded prefix"
         );
     }
 

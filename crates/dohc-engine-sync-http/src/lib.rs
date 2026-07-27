@@ -500,7 +500,8 @@ impl RelayTransport for HttpRelayTransport {
     }
 
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
-        let page = self.read_share_log(&req.share_id, req.cursor, req.limit, &[])?;
+        let page =
+            self.read_share_log(&req.share_id, req.cursor, req.limit.min(MAX_PULL_OPS), &[])?;
         Ok(ShareViewResponse {
             ops: page.ops,
             next_cursor: page.next_cursor,
@@ -570,12 +571,18 @@ struct ErrorBody {
 }
 
 fn base_url_is_allowed(base_url: &str, allow_insecure_loopback: bool) -> bool {
+    if base_url.contains('#') {
+        return false;
+    }
     let Ok(uri) = base_url.parse::<Uri>() else {
         return false;
     };
     let Some(host) = uri.host() else {
         return false;
     };
+    if uri.query().is_some() {
+        return false;
+    }
     match uri.scheme_str() {
         Some("https") => true,
         Some("http") if allow_insecure_loopback => {
@@ -940,6 +947,16 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn relay_base_url_rejects_query_and_fragment_components() {
+        assert!(HttpRelayTransport::new("https://relay.example?tenant=a", "token").is_err());
+        assert!(HttpRelayTransport::new("https://relay.example/#fragment", "token").is_err());
+        assert!(
+            HttpRelayTransport::new("https://relay.example/base", "token").is_ok(),
+            "ordinary path prefixes remain supported"
+        );
     }
 
     #[test]

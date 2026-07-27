@@ -196,10 +196,7 @@ fn enforce_share_view_boundary(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    let prefix = boundary
-        .path_prefix
-        .as_deref()
-        .ok_or(SyncError::ShareBoundaryViolation)?;
+    let prefix = boundary.path_prefix.as_deref();
     if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
         return Err(SyncError::ShareBoundaryViolation);
     }
@@ -233,7 +230,9 @@ fn enforce_share_view_boundary(
         return Err(SyncError::ShareBoundaryViolation);
     }
     for path in paths {
-        if classify_share_path(path) != PathClass::Tracked || !path_within_prefix(path, prefix) {
+        if classify_share_path(path) != PathClass::Tracked
+            || prefix.is_some_and(|prefix| !path_within_prefix(path, prefix))
+        {
             return Err(SyncError::ShareBoundaryViolation);
         }
     }

@@ -331,12 +331,46 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<TestRequest> {
         }
         bytes.extend_from_slice(&chunk[..count]);
     }
+    if bytes.len() < header_end + content_length {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
     Ok(TestRequest {
         method,
         target,
         headers,
         body: bytes[header_end..header_end + content_length].to_vec(),
     })
+}
+
+#[test]
+fn truncated_test_request_body_returns_unexpected_eof_without_panicking() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    let sender = thread::spawn(move || {
+        let mut stream = TcpStream::connect(address).expect("connect");
+        stream
+            .write_all(b"POST / HTTP/1.1\r\ncontent-length: 10\r\n\r\nshort")
+            .expect("write truncated request");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown writer");
+    });
+    let (mut stream, _) = listener.accept().expect("accept");
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_request(&mut stream)));
+    sender.join().expect("sender");
+    assert!(
+        outcome.is_ok(),
+        "MUTATION: slicing to content-length panics instead of returning a read error"
+    );
+    let error = outcome
+        .expect("read must not panic")
+        .expect_err("truncated body must be rejected");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::UnexpectedEof,
+        "truncation must surface as the precise read error"
+    );
 }
 
 fn write_response(stream: &mut TcpStream, response: TestResponse) -> std::io::Result<()> {
@@ -1146,6 +1180,75 @@ async fn commit_cursor_accepts_only_the_server_issued_pending_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn newer_pull_token_supersedes_the_older_token_for_the_same_scope() {
+    let workspace_id = "rpc-relay-superseded-cursor";
+    let relay = FakeRelay::start(RelayState {
+        workspace_ops: vec![workspace_row(
+            1,
+            workspace_id,
+            "remote",
+            0,
+            "workspace.init",
+            json!({}),
+        )],
+        ..RelayState::default()
+    });
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    seed_sync_identity(&transport, &handle, &mut id).await;
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let stale = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id + 10,
+                "sync.commitCursor",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": workspace_id,
+                    "pendingCursor": first["pendingCursor"].clone(),
+                }),
+            ),
+        )
+        .await
+        .expect_err("older token must be superseded");
+    assert_eq!(stale.message, "invalid-pending-cursor");
+    let committed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({
+            "workspaceId": workspace_id,
+            "pendingCursor": second["pendingCursor"].clone(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        committed["committed"], true,
+        "MUTATION: keeping every issued token permits stale cursor commits and leaks abandoned entries"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
     let relay = FakeRelay::start(RelayState::default());
     let scratch = ScratchDir::new().expect("scratch");
@@ -1460,11 +1563,11 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "pathPrefix": "notes",
         }),
     )
     .await;
     assert_eq!(pulled["fetched"], 2);
+    assert_eq!(pulled["hasMore"], false);
     assert_eq!(pulled["applied"], 1);
     assert_eq!(pulled["changedPaths"][0]["path"], "notes/view.md");
     assert_eq!(pulled["pendingCursor"]["kind"], "shareView");
@@ -1675,7 +1778,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         )
         .await
         .expect_err("corrupt replacement must reject the rename");
-    assert_eq!(rename.code, ErrorCode::InvalidParams);
+    assert_eq!(rename.code, ErrorCode::BlobInvalid);
 
     let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
         .expect("open engine db");

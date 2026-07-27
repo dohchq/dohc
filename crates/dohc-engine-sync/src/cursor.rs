@@ -88,7 +88,10 @@ pub fn commit_relay_cursor(
             tx.execute(
                 "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
                  VALUES (?1,?2,?3,?4) ON CONFLICT(workspace_id) DO UPDATE SET \
-                 cursor=excluded.cursor,replication_epoch=excluded.replication_epoch,stream_identity=excluded.stream_identity",
+                 cursor=excluded.cursor,replication_epoch=excluded.replication_epoch,stream_identity=excluded.stream_identity \
+                 WHERE sync_relay_cursors.replication_epoch != excluded.replication_epoch \
+                    OR sync_relay_cursors.stream_identity != excluded.stream_identity \
+                    OR CAST(sync_relay_cursors.cursor AS INTEGER) <= CAST(excluded.cursor AS INTEGER)",
                 params![
                     workspace_id,
                     cursor.cursor.to_string(),
@@ -253,7 +256,8 @@ pub fn commit_share_cursor(
     store.write_with(faults, |tx| {
         let sql = format!(
             "INSERT INTO {table} (workspace_id,share_id,cursor) VALUES (?1,?2,?3) \
-             ON CONFLICT(workspace_id,share_id) DO UPDATE SET cursor=excluded.cursor"
+             ON CONFLICT(workspace_id,share_id) DO UPDATE SET cursor=excluded.cursor \
+             WHERE CAST({table}.cursor AS INTEGER) <= CAST(excluded.cursor AS INTEGER)"
         );
         tx.execute(
             &sql,

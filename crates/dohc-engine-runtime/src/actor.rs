@@ -290,7 +290,6 @@ pub enum RelayOperation {
     PullShareView {
         workspace_id: String,
         share_id: String,
-        path_prefix: String,
     },
     CommitShareViewCursor {
         workspace_id: String,
@@ -370,7 +369,12 @@ impl DeferredRelayTransport {
                     | RelayIoRequest::SharedChannelPush(_)
                     | RelayIoRequest::UploadBlob(_)
                     | RelayIoRequest::DownloadBlob(_)
+                    | RelayIoRequest::UploadKeyEnvelope(_)
+                    | RelayIoRequest::DownloadKeyEnvelope(_)
                     | RelayIoRequest::ShareBlob(_)
+            ) || matches!(
+                &state.completed[index].1,
+                Ok(RelayIoResponse::BlobsHave(response)) if response.missing.is_empty()
             );
             let uploaded = matches!(state.completed[index].0, RelayIoRequest::UploadBlob(_));
             let projected = match &state.completed[index].1 {
@@ -625,6 +629,104 @@ mod deferred_relay_tests {
         assert_eq!(
             retained, 0,
             "persisted blob responses must be released before the RPC completes"
+        );
+    }
+
+    #[test]
+    fn completed_empty_blob_inventory_is_released_without_an_upload() {
+        let transport = DeferredRelayTransport::default();
+        let request = BlobHaveRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            sha256s: Vec::new(),
+        };
+        transport.complete(
+            RelayIoRequest::BlobsHave(request.clone()),
+            Ok(RelayIoResponse::BlobsHave(BlobHaveResponse {
+                missing: Vec::new(),
+            })),
+        );
+        assert!(
+            transport
+                .blobs_have(request)
+                .expect("consume inventory")
+                .missing
+                .is_empty()
+        );
+        assert!(
+            transport
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .completed
+                .is_empty(),
+            "MUTATION: retaining a successful all-present inventory holds its request vector"
+        );
+    }
+
+    #[test]
+    fn deferred_key_upload_surfaces_the_first_cas_conflict_without_a_cached_retry_loop() {
+        let transport = DeferredRelayTransport::default();
+        let request = KeyEnvelopeRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            envelope_json: "{}".to_owned(),
+            if_match: Some("stale".to_owned()),
+        };
+        transport.complete(
+            RelayIoRequest::UploadKeyEnvelope(request.clone()),
+            Err(RelayError::Conflict),
+        );
+        let client = RelaySyncClient::new(transport.clone());
+        assert_eq!(
+            client.upload_key_envelope(request),
+            Err(RelayError::Conflict)
+        );
+        assert!(
+            transport.take_pending().is_none(),
+            "MUTATION: rebasing the CAS conflict schedules a GET and re-enters cached I/O"
+        );
+    }
+
+    #[test]
+    fn deferred_multi_page_pull_schedules_each_http_request_once() {
+        let transport = DeferredRelayTransport::default();
+        let request = |cursor| PullRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            cursor,
+            limit: 1,
+        };
+        let mut scheduled = 0;
+        for next in 0..4 {
+            for cursor in 0..=next {
+                let result = transport.pull(request(cursor));
+                if cursor < next {
+                    assert!(result.is_ok(), "completed prefixes are memoized");
+                } else {
+                    assert_eq!(result, Err(RelayError::Local(RELAY_IO_PENDING.to_owned())));
+                    let pending = transport.take_pending().expect("one pending request");
+                    transport.complete(
+                        pending,
+                        Ok(RelayIoResponse::Pull(PullResponse {
+                            ops: Vec::new(),
+                            next_cursor: cursor + 1,
+                            has_more: cursor < 3,
+                        })),
+                    );
+                    scheduled += 1;
+                }
+            }
+        }
+        for cursor in 0..4 {
+            transport.pull(request(cursor)).expect("completed page");
+        }
+        assert_eq!(
+            scheduled, 4,
+            "each distinct HTTP page adds one actor turn; replay does not schedule a quadratic number"
         );
     }
 }
@@ -5719,9 +5821,8 @@ fn execute_relay_operation(
         RelayOperation::PullShareView {
             workspace_id,
             share_id,
-            path_prefix,
         } => client
-            .pull_share_view(store, &workspace_id, &share_id, &path_prefix, &NoFaults)
+            .pull_share_view(store, &workspace_id, &share_id, &NoFaults)
             .map(RelayOperationOutcome::ShareViewPulled)
             .map_err(RuntimeError::from),
         RelayOperation::CommitShareViewCursor {

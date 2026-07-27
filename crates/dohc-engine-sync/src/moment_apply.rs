@@ -212,65 +212,94 @@ pub(crate) fn redelivered_materialization_changes(
     if envelope.op_kind != "moment.append" {
         return Ok(Vec::new());
     }
-    let payload: MomentAppendPayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
-            reason: "moment.append payload is malformed",
-        })?;
-    let materialized = store.read_with(|conn| {
+    let decision_id = materialization_decision_id(envelope);
+    let encoded = store.read_with(|conn| {
         conn.query_row(
-            "SELECT EXISTS( \
-               SELECT 1 FROM moments m \
-               WHERE m.workspace_id=?1 AND m.moment_id=?2 AND m.version_id=?3 \
-                 AND m.object_id=?4 AND m.operation=?5 AND m.path=?6 \
-                 AND m.recorded_at_ms=?7 AND m.sync_record_only IS NULL \
-             ) AND COALESCE( \
-               (SELECT version_id FROM active_versions WHERE workspace_id=?1), \
-               (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1), \
-               '' \
-             )=?3",
-            params![
-                envelope.workspace_id,
-                payload.moment_id,
-                payload.version_id,
-                payload.object_id,
-                payload.operation,
-                payload.path,
-                payload.recorded_at_ms,
-            ],
-            |row| row.get::<_, bool>(0),
+            "SELECT payload_hash FROM engine_requests \
+             WHERE request_id=?1 AND kind='sync-materialization'",
+            [&decision_id],
+            |row| row.get::<_, String>(0),
         )
+        .optional()
         .map_err(SyncError::corrupt)
     })?;
-    if !materialized {
+    let Some(encoded) = encoded else {
         return Ok(Vec::new());
-    }
+    };
+    let values: Vec<serde_json::Value> =
+        serde_json::from_str(&encoded).map_err(|_| SyncError::CoordinateDiverged)?;
+    values
+        .into_iter()
+        .map(|value| {
+            let path = value
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(SyncError::CoordinateDiverged)?
+                .to_owned();
+            let operation = match value.get("operation").and_then(serde_json::Value::as_str) {
+                Some("write") => "write",
+                Some("delete") => "delete",
+                _ => return Err(SyncError::CoordinateDiverged),
+            };
+            let content_kind = match value.get("contentKind").and_then(serde_json::Value::as_str) {
+                Some("text") => "text",
+                Some("binary") => "binary",
+                _ => return Err(SyncError::CoordinateDiverged),
+            };
+            Ok(MomentMaterializationChange {
+                path,
+                operation,
+                content_kind,
+            })
+        })
+        .collect()
+}
 
-    let kind = ContentKind::from_wire(payload.payload_after_content_kind.as_deref()).as_str();
-    let mut changes = Vec::new();
-    if payload.operation == "delete" {
-        changes.push(MomentMaterializationChange {
-            path: payload.path,
-            operation: "delete",
-            content_kind: kind,
-        });
-        return Ok(changes);
+fn materialization_decision_id(envelope: &ReplicationEnvelope) -> String {
+    let coordinate = format!(
+        "{}\0{}\0{}",
+        envelope.workspace_id, envelope.origin_id, envelope.origin_seq
+    );
+    format!(
+        "sync-materialization:{}",
+        dohc_engine_storage::hex_sha256(coordinate.as_bytes())
+    )
+}
+
+fn record_materialization_changes(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    changes: &[MomentMaterializationChange],
+) -> Result<(), SyncError> {
+    if changes.is_empty() {
+        return Ok(());
     }
-    if payload.operation == "rename"
-        && let Some(before_path) = payload.payload_before_path
-        && before_path != payload.payload_after_path
-    {
-        changes.push(MomentMaterializationChange {
-            path: before_path,
-            operation: "delete",
-            content_kind: kind,
-        });
-    }
-    changes.push(MomentMaterializationChange {
-        path: payload.payload_after_path,
-        operation: "write",
-        content_kind: kind,
-    });
-    Ok(changes)
+    let encoded = serde_json::to_string(
+        &changes
+            .iter()
+            .map(|change| {
+                serde_json::json!({
+                    "path": change.path,
+                    "operation": change.operation,
+                    "contentKind": change.content_kind,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| SyncError::CoordinateDiverged)?;
+    tx.execute(
+        "INSERT INTO engine_requests \
+         (request_id,payload_hash,result_seq,committed_at,kind) \
+         VALUES (?1,?2,?3,?4,'sync-materialization')",
+        params![
+            materialization_decision_id(envelope),
+            encoded,
+            envelope.origin_seq,
+            envelope.recorded_at_ms,
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 pub(crate) fn redelivered_conflicts_opened(
@@ -425,16 +454,18 @@ fn apply_moment_append(
                 &payload.version_id,
                 &payload.object_id,
             )?;
+            let materialization_changes = active
+                .then(|| MomentMaterializationChange {
+                    path: payload.path.clone(),
+                    operation: "delete",
+                    content_kind: after_kind.as_str(),
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            record_materialization_changes(tx, envelope, &materialization_changes)?;
             return Ok(MomentApplyResult {
                 conflicts_opened: 0,
-                materialization_changes: active
-                    .then(|| MomentMaterializationChange {
-                        path: payload.path.clone(),
-                        operation: "delete",
-                        content_kind: after_kind.as_str(),
-                    })
-                    .into_iter()
-                    .collect(),
+                materialization_changes,
             });
         }
 
@@ -511,6 +542,7 @@ fn apply_moment_append(
                 content_kind: after_kind.as_str(),
             });
         }
+        record_materialization_changes(tx, envelope, &materialization_changes)?;
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
             materialization_changes,

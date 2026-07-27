@@ -233,6 +233,7 @@ pub struct ShareViewChangedPath {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareViewPullOutcome {
     pub fetched: usize,
+    pub has_more: bool,
     pub applied: usize,
     pub skipped: usize,
     pub changed_paths: Vec<ShareViewChangedPath>,
@@ -628,7 +629,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
     pub fn upload_key_envelope(
         &self,
-        mut req: KeyEnvelopeRequest,
+        req: KeyEnvelopeRequest,
     ) -> Result<KeyEnvelopeResponse, RelayError> {
         validate_identity_request(
             &req.workspace_id,
@@ -638,33 +639,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         if req.envelope_json.is_empty() || req.envelope_json.len() > 16 * 1024 {
             return Err(RelayError::InvalidResponse);
         }
-        for _ in 0..3 {
-            match self.transport.upload_key_envelope(req.clone()) {
-                Ok(response) if !response.etag.is_empty() => return Ok(response),
-                Ok(_) => return Err(RelayError::InvalidResponse),
-                Err(RelayError::Conflict) => {
-                    let current =
-                        self.transport
-                            .download_key_envelope(KeyEnvelopeDownloadRequest {
-                                workspace_id: req.workspace_id.clone(),
-                                replication_epoch: req.replication_epoch.clone(),
-                                stream_identity: req.stream_identity.clone(),
-                            });
-                    match current {
-                        Ok(current) if !current.etag.is_empty() => {
-                            req.if_match = Some(current.etag);
-                        }
-                        Ok(_) => return Err(RelayError::InvalidResponse),
-                        Err(RelayError::KeyEnvelopeMissing | RelayError::WorkspaceUnavailable) => {
-                            req.if_match = None;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                Err(error) => return Err(error),
-            }
+        let response = self.transport.upload_key_envelope(req)?;
+        if response.etag.is_empty() {
+            return Err(RelayError::InvalidResponse);
         }
-        Err(RelayError::Conflict)
+        Ok(response)
     }
 
     pub fn download_key_envelope(
@@ -815,6 +794,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .map_err(SyncError::persist)?;
                 tx.execute(
                     "DELETE FROM sync_relay_cursors WHERE workspace_id=?1",
+                    [workspace_id],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "DELETE FROM shared_channel_push_state WHERE workspace_id=?1",
                     [workspace_id],
                 )
                 .map_err(SyncError::persist)?;
@@ -1065,7 +1049,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         store: &mut EngineStore,
         workspace_id: &str,
         share_id: &str,
-        path_prefix: &str,
         faults: &dyn FaultInjector,
     ) -> Result<ShareViewPullOutcome, RelayError> {
         let mut cursor =
@@ -1084,7 +1067,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             share_id: share_id.to_owned(),
             surface: crate::ShareSurface::ShareView,
             channel_wire_id: None,
-            path_prefix: Some(path_prefix.to_owned()),
+            path_prefix: None,
         };
         let mut applied = 0_usize;
         let mut skipped = 0_usize;
@@ -1126,6 +1109,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         Ok(ShareViewPullOutcome {
             fetched,
+            has_more: page.has_more,
             applied,
             skipped,
             changed_paths: changed.into_values().collect(),
@@ -1204,7 +1188,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for (sha256, kinds) in collect_blob_refs(ops)? {
             let mut missing = Vec::new();
             for kind in kinds {
-                if local_blob_bytes(store, &sha256, kind)?.is_none() {
+                if !local_blob_present(store, &sha256, kind)? {
                     missing.push(kind);
                 }
             }
@@ -1378,6 +1362,8 @@ fn local_blob_bytes(
     sha256: &str,
     kind: BlobKind,
 ) -> Result<Option<Vec<u8>>, RelayError> {
+    #[cfg(test)]
+    LOCAL_BLOB_BYTES_CALLS.with(|calls| calls.set(calls.get() + 1));
     store
         .read_with(|conn| match kind {
             BlobKind::Text => {
@@ -1430,6 +1416,41 @@ fn local_blob_bytes(
         })
 }
 
+#[cfg(test)]
+thread_local! {
+    static LOCAL_BLOB_BYTES_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_local_blob_bytes_call_count() -> usize {
+    LOCAL_BLOB_BYTES_CALLS.with(|calls| {
+        let count = calls.get();
+        calls.set(0);
+        count
+    })
+}
+
+fn local_blob_present(
+    store: &EngineStore,
+    sha256: &str,
+    kind: BlobKind,
+) -> Result<bool, RelayError> {
+    store
+        .read_with(|conn| {
+            let table = match kind {
+                BlobKind::Text => "blobs",
+                BlobKind::Binary => "binary_blobs",
+            };
+            conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE sha256=?1)"),
+                [sha256],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .map_err(local)
+}
+
 fn preflight_collisions(
     store: &EngineStore,
     workspace_id: &str,
@@ -1479,6 +1500,8 @@ fn preflight_collisions(
 }
 
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {
+    #[cfg(test)]
+    CANONICAL_JSON_CALLS.with(|calls| calls.set(calls.get() + 1));
     fn write_canonical(value: &serde_json::Value, output: &mut String) -> Result<(), SyncError> {
         match value {
             serde_json::Value::Array(values) => {
@@ -1522,6 +1545,20 @@ pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>,
     let mut output = String::new();
     write_canonical(value, &mut output)?;
     Ok(output.into_bytes())
+}
+
+#[cfg(test)]
+thread_local! {
+    static CANONICAL_JSON_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_canonical_json_call_count() -> usize {
+    CANONICAL_JSON_CALLS.with(|calls| {
+        let count = calls.get();
+        calls.set(0);
+        count
+    })
 }
 
 fn javascript_number(number: &serde_json::Number) -> Result<String, SyncError> {
@@ -1631,7 +1668,7 @@ fn list_workspace_origins(
         let mut statement = conn
             .prepare(
                 "SELECT DISTINCT origin_id FROM replication_log \
-                 WHERE workspace_id=?1 ORDER BY origin_id",
+                 WHERE workspace_id=?1 AND imported=0 ORDER BY origin_id",
             )
             .map_err(SyncError::corrupt)?;
         let rows = statement
@@ -2059,6 +2096,29 @@ fn replay_share_write<T: RelayTransport>(
     if !valid_sha256(sha256) {
         return Err(RelayError::BlobInvalid);
     }
+    let key = replay_id(share_id, envelope, "write", path);
+    let request_id = format!("share-view:{key}");
+    let already_applied = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
+                [&request_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .map_err(local)?;
+    if already_applied {
+        changed.insert(
+            path.to_owned(),
+            ShareViewChangedPath {
+                path: path.to_owned(),
+                operation: "write",
+                content_kind,
+            },
+        );
+        return Ok(());
+    }
     let bytes = transport
         .share_blob(ShareBlobRequest {
             share_id: share_id.to_owned(),
@@ -2068,7 +2128,6 @@ fn replay_share_write<T: RelayTransport>(
     if hex_sha256(&bytes) != sha256 {
         return Err(RelayError::BlobInvalid);
     }
-    let key = replay_id(share_id, envelope, "write", path);
     let deduped = {
         let mut versioned = VersionedTextStore::new(store);
         if content_kind == "binary" {
@@ -2084,7 +2143,7 @@ fn replay_share_write<T: RelayTransport>(
                         metadata_origin: "sync".to_owned(),
                         author_json: None,
                         now_ms: envelope.recorded_at_ms,
-                        request_id: Some(format!("share-view:{key}")),
+                        request_id: Some(request_id.clone()),
                     },
                     faults,
                 )
@@ -2104,7 +2163,7 @@ fn replay_share_write<T: RelayTransport>(
                         metadata_origin: "sync".to_owned(),
                         author_json: None,
                         now_ms: envelope.recorded_at_ms,
-                        request_id: Some(format!("share-view:{key}")),
+                        request_id: Some(request_id),
                     },
                     faults,
                 )

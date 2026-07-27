@@ -380,6 +380,11 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         ON sync_relay_shares(recipient_user_id, created_at_ms);
       CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient_email
         ON sync_relay_shares(recipient_email, created_at_ms);
+
+      CREATE TABLE IF NOT EXISTS sync_relay_migrations (
+        migration_id TEXT PRIMARY KEY,
+        completed_at_ms INTEGER NOT NULL
+      ) STRICT;
     `);
     // Lazy additive migration (0P sync-hardening item 4): dbs created before the
     // blob retention window gain created_at_ms on open. Existing rows default to
@@ -411,18 +416,29 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     if (!workspaceColumns.includes("epoch_log_floor")) {
       db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN epoch_log_floor INTEGER");
     }
-    const invalidTimestamp = db
+    const timestampMigrationId = "recorded-at-safe-integer-v1";
+    const timestampValidated = db
       .prepare(
-        `SELECT EXISTS(
-           SELECT 1 FROM sync_relay_log
-           WHERE recorded_at_ms != CAST(recorded_at_ms AS INTEGER)
-              OR recorded_at_ms < -9007199254740991
-              OR recorded_at_ms > 9007199254740991
-         ) AS invalid`,
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
       )
-      .get();
-    if (Number(invalidTimestamp?.invalid ?? 0) !== 0) {
-      throw new Error("sync relay log contains a timestamp outside the integer wire contract");
+      .get(timestampMigrationId);
+    if (Number(timestampValidated?.complete ?? 0) === 0) {
+      const invalidTimestamp = db
+        .prepare(
+          `SELECT EXISTS(
+             SELECT 1 FROM sync_relay_log
+             WHERE recorded_at_ms != CAST(recorded_at_ms AS INTEGER)
+                OR recorded_at_ms < -9007199254740991
+                OR recorded_at_ms > 9007199254740991
+           ) AS invalid`,
+        )
+        .get();
+      if (Number(invalidTimestamp?.invalid ?? 0) !== 0) {
+        throw new Error("sync relay log contains a timestamp outside the integer wire contract");
+      }
+      db.prepare(
+        "INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)",
+      ).run(timestampMigrationId, Date.now());
     }
     db.exec("COMMIT");
   } catch (error) {
@@ -1089,6 +1105,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
+    for (const op of input.ops) {
+      if (typeof op.recordedAtMs !== "number" || !Number.isSafeInteger(op.recordedAtMs)) {
+        throw new Error("recordedAtMs must be an integer in the safe wire range");
+      }
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       // Authorization re-verification under the write lock (see the interface

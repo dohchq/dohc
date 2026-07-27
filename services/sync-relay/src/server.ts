@@ -1095,8 +1095,8 @@ function parseLogOp(value: unknown): SyncRelayLogInput {
   if (!op.payload || typeof op.payload !== "object" || Array.isArray(op.payload)) {
     throw badRequest("payload must be a JSON object");
   }
-  const recordedAtMs = Number(op.recordedAtMs);
-  if (!Number.isSafeInteger(recordedAtMs)) {
+  const recordedAtMs = op.recordedAtMs;
+  if (typeof recordedAtMs !== "number" || !Number.isSafeInteger(recordedAtMs)) {
     throw badRequest("recordedAtMs must be an integer in the safe wire range");
   }
   const payloadJson = stableJsonStringify(op.payload);

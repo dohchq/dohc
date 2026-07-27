@@ -40,7 +40,6 @@ pub fn apply_envelope_with<T>(
 ) -> Result<ApplyOutcome<T>, SyncError> {
     envelope.validate()?;
     let payload_json = envelope.payload_json()?;
-    let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
     let result = store.write_with(faults, |tx| {
         let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
         if envelope.origin_seq <= acked {
@@ -55,10 +54,11 @@ pub fn apply_envelope_with<T>(
                 )
                 .optional()
                 .map_err(SyncError::corrupt)?;
-            if let Some(row) = existing
-                && !coordinate_matches(&row, envelope, &canonical_payload)?
-            {
-                return Err(SyncError::CoordinateDiverged);
+            if let Some(row) = existing {
+                let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
+                if !coordinate_matches(&row, envelope, &canonical_payload)? {
+                    return Err(SyncError::CoordinateDiverged);
+                }
             }
             return Ok(Admission::Skipped);
         }
@@ -76,6 +76,7 @@ pub fn apply_envelope_with<T>(
             .optional()
             .map_err(SyncError::corrupt)?;
         if let Some(row) = existing {
+            let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
             if !coordinate_matches(&row, envelope, &canonical_payload)? {
                 return Err(SyncError::CoordinateDiverged);
             }

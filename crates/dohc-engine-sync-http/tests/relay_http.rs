@@ -1177,7 +1177,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
         .share_view_pull(ShareViewRequest {
             share_id: "share-1".to_owned(),
             cursor: 0,
-            limit: 1,
+            limit: usize::MAX,
         })
         .expect("share view pull");
     transport
@@ -1206,6 +1206,10 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     }
     assert!(
         seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500&channelWireId=wire-1")
+    );
+    assert!(
+        seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500"),
+        "MUTATION: forwarding an unbounded share-view limit exceeds the response budget"
     );
 }
 
