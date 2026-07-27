@@ -150,9 +150,12 @@ function checkChatSurfaceSelfHostable() {
   const relayPkg = readPackageJson(relayPkgPath)
   const deps = Object.keys(relayPkg.dependencies ?? {})
   const ALLOWED_RUNTIME_DEPS = new Set([
+    // storage.ts imports AGENT_CHANNEL_WIRE_ID from it; it was a real runtime
+    // dep that this allowlist never listed, so this check had been failing on
+    // main and nothing runs it in CI.
+    '@dohc/security-contract',
     '@dohc/workspace-auth', // Better Auth session verification (workspace-api core)
     '@dohc/workspace-core',
-    '@dohc/workspace-engine',
     'better-auth', // rides the `postgres` auth core
     'pg', // rides the `postgres` auth core
   ])
