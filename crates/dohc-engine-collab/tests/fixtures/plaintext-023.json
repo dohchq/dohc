@@ -2,13 +2,13 @@
  "seed": 23,
  "contentKind": "plaintext",
  "updates": [
-  "AQGY0pC4AgAEAQlwbGFpblRleHQECXRhYgA=",
-  "AQGY0pC4AgTEmNKQuAIAmNKQuAIBBWNhZsOpAA==",
-  "AQGY0pC4AgiEmNKQuAIDB1rDvHJpY2gA",
-  "AAGY0pC4AgEJAQ=="
+  "AQGWmeKuCQAEAQlwbGFpblRleHQECXRhYgA=",
+  "AQGWmeKuCQTElpnirgkAlpnirgkBBWNhZsOpAA==",
+  "AQGWmeKuCQiElpnirgkDB1rDvHJpY2gA",
+  "AAGWmeKuCQEJAQ=="
  ],
- "mergedUpdateB64": "AQOY0pC4AgAEAQlwbGFpblRleHQECXRhYsSY0pC4AgCY0pC4AgEFY2Fmw6mEmNKQuAIDB1rDvHJpY2gBmNKQuAIBCQE=",
- "stateVectorB64": "AZjSkLgCDg==",
+ "mergedUpdateB64": "AQOWmeKuCQAEAQlwbGFpblRleHQECXRhYsSWmeKuCQCWmeKuCQEFY2Fmw6mElpnirgkDB1rDvHJpY2gBlpnirgkBCQE=",
+ "stateVectorB64": "AZaZ4q4JDg==",
  "expected": {
   "text": "\tcafétabZrich"
  }

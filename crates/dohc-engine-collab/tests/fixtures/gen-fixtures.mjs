@@ -6,6 +6,7 @@
 // same pattern the yrs spike and R08 used. Regenerate with:
 //
 //   node crates/dohc-engine-collab/tests/fixtures/gen-fixtures.mjs
+//   DOHC_FIXTURE_OUT=<directory> node crates/dohc-engine-collab/tests/fixtures/gen-fixtures.mjs
 //
 // yjs is resolved from the workspace node_modules (pnpm; version pinned by
 // crates/yrs-spike/scripts/package.json → yjs 13.6.30, the audited interop
@@ -13,11 +14,15 @@
 
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, join } from "node:path";
-import { writeFileSync, readdirSync, unlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { mkdirSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "../../../..");
+const outputDir = process.env.DOHC_FIXTURE_OUT
+  ? resolve(process.env.DOHC_FIXTURE_OUT)
+  : here;
+mkdirSync(outputDir, { recursive: true });
 // yjs lives in the pnpm node_modules of the working checkout. When this runs
 // from a git worktree (no node_modules of its own) fall back to the shared main
 // checkout three levels up (`<main>/.claude/worktrees/<wt>/`), or an override.
@@ -431,7 +436,7 @@ const RICHDOC_PROJECTION_CASES = [
     ].join("\n"),
   },
   {
-    name: "known-lossy-table-literal-pipe",
+    name: "table-literal-pipe",
     makeDoc: () =>
       directRichdoc([
         table([
@@ -447,7 +452,7 @@ const RICHDOC_PROJECTION_CASES = [
       ]),
   },
   {
-    name: "known-lossy-code-fence-collision",
+    name: "code-fence-collision",
     makeDoc: () =>
       directRichdoc([
         xmlElement(
@@ -458,7 +463,7 @@ const RICHDOC_PROJECTION_CASES = [
       ]),
   },
   {
-    name: "known-lossy-inline-code-backticks",
+    name: "inline-code-backticks",
     makeDoc: () =>
       directRichdoc([
         paragraph([
@@ -475,7 +480,7 @@ const RICHDOC_PROJECTION_CASES = [
       ]),
   },
   {
-    name: "known-lossy-headerless-table",
+    name: "headerless-table",
     makeDoc: () =>
       directRichdoc([
         table([
@@ -670,7 +675,7 @@ const RICHDOC_PROJECTION_CASES = [
       ]),
   },
   {
-    name: "known-lossy-multi-block-table-cell-separator",
+    name: "multi-block-table-cell-separator",
     makeDoc: () =>
       directRichdoc([
         table([
@@ -812,9 +817,9 @@ function makeNestedFrontmatter() {
   };
 }
 
-// Clear old generated fixtures (keep this generator + any .rs).
-for (const f of readdirSync(here)) {
-  if (f.endsWith(".json")) unlinkSync(join(here, f));
+// Clear old generated fixtures in the selected output directory only.
+for (const f of readdirSync(outputDir)) {
+  if (f.endsWith(".json")) unlinkSync(join(outputDir, f));
 }
 
 const manifest = [];
@@ -822,21 +827,42 @@ function emit(fx) {
   const name = fx.kind
     ? `${fx.kind}.json`
     : `${fx.contentKind}-${String(fx.seed).padStart(3, "0")}.json`;
-  writeFileSync(join(here, name), JSON.stringify(fx, null, 1));
+  writeFileSync(join(outputDir, name), JSON.stringify(fx, null, 1));
   manifest.push(name);
 }
 
 const SEEDS = 24;
 for (let s = 1; s <= SEEDS; s++) emit(makePlaintext(s));
 for (let s = 1; s <= SEEDS; s++) emit(makeRichdoc(1000 + s));
-const projectionFixtures = RICHDOC_PROJECTION_CASES.map((fixture, index) =>
-  makeRichdocProjection(index, fixture),
+const allowedOracleFailures = new Set(
+  (process.env.DOHC_FIXTURE_ALLOW_ORACLE_FAILURES ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean),
 );
+const projectionFixtures = RICHDOC_PROJECTION_CASES.map((fixture, index) => {
+  try {
+    return makeRichdocProjection(index, fixture);
+  } catch (error) {
+    // The drift checker sets this to the cases the LIVE oracle can no longer
+    // produce, so one broken construct cannot blind the check for every other
+    // fixture. Regenerating normally still fails loudly on the same case.
+    if (allowedOracleFailures.has(fixture.name)) {
+      console.error(`ORACLE_FAILURE ${fixture.name}: ${error?.cause?.message ?? error?.message}`);
+      return null;
+    }
+    throw new Error(
+      `failed to generate richdocProjection-${fixture.name}.json`,
+      { cause: error },
+    );
+  }
+});
+const emittedProjectionFixtures = projectionFixtures.filter(Boolean);
 const coveredNodes = new Set(
-  projectionFixtures.flatMap((fixture) => fixture.coverage.nodes),
+  emittedProjectionFixtures.flatMap((fixture) => fixture.coverage.nodes),
 );
 const coveredMarks = new Set(
-  projectionFixtures.flatMap((fixture) => fixture.coverage.marks),
+  emittedProjectionFixtures.flatMap((fixture) => fixture.coverage.marks),
 );
 const schema = getDohcProseMirrorSchema();
 const missingNodes = Object.keys(schema.nodes).filter(
@@ -850,12 +876,15 @@ if (missingNodes.length > 0 || missingMarks.length > 0) {
     `richdoc projection fixtures do not cover the TS schema:\nmissing nodes: ${missingNodes.join(", ") || "(none)"}\nmissing marks: ${missingMarks.join(", ") || "(none)"}`,
   );
 }
-projectionFixtures.forEach(emit);
+emittedProjectionFixtures.forEach(emit);
 emit(makeOffsetProbe());
 emit(makeSurrogateProbe());
 emit(makeNestedFrontmatter());
 
-writeFileSync(join(here, "_manifest.json"), JSON.stringify({ fixtures: manifest }, null, 1));
+writeFileSync(
+  join(outputDir, "_manifest.json"),
+  JSON.stringify({ fixtures: manifest }, null, 1),
+);
 console.log(
-  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${RICHDOC_PROJECTION_CASES.length} richdoc projection + 3 probes)`,
+  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${emittedProjectionFixtures.length} richdoc projection + 3 probes)`,
 );
