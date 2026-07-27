@@ -1,0 +1,22 @@
+{
+ "seed": -110,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-code-fence-collision",
+ "updates": [
+  "AQSkyKK6AgAHAQRib2R5Awljb2RlQmxvY2sHAKTIoroCAAYEAKTIoroCARBiZWZvcmUKYGBgCmFmdGVyKACkyKK6AgAIbGFuZ3VhZ2UBdwJqcwA=",
+  "AQGkyKK6AhMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUY29kZS1mZW5jZS1jb2xsaXNpb24A"
+ ],
+ "mergedUpdateB64": "AQWkyKK6AgAHAQRib2R5Awljb2RlQmxvY2sHAKTIoroCAAYEAKTIoroCARBiZWZvcmUKYGBgCmFmdGVyKACkyKK6AgAIbGFuZ3VhZ2UBdwJqcygBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxRjb2RlLWZlbmNlLWNvbGxpc2lvbgA=",
+ "stateVectorB64": "AaTIoroCFA==",
+ "coverage": {
+  "nodes": [
+   "codeBlock",
+   "doc",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "````js\nbefore\n```\nafter\n````"
+ }
+}
