@@ -373,6 +373,14 @@ import {
   defaultEngineBinaryPath,
   type EngineDaemonLifecycle,
 } from "./workspaces/engineDaemonLifecycle";
+import {
+  EngineRelayClient,
+  RelayConfiguredDaemonClientSource,
+  RelayTransportRouteGuard,
+  relayTransportModeForRoot,
+  type EngineRelayWorkspaceClient,
+} from "./workspaces/engineRelayClient";
+import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
 import { isRustEngineAdapterEnabled } from "./workspaces/engineClientFlag";
 import {
   captureForFlaggedWorkspace,
@@ -1310,15 +1318,35 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
     // a DIFFERENT relay, skip rather than misread a 404 as "ended".
     const matching = channels.filter((channel) => relayUrlsMatch(channel.relayUrl, relayUrl));
     if (matching.length === 0) return;
+    const relay = {
+      baseUrl: normalizeServerUrl(relayUrl),
+      token: cachedCredentials.token,
+      fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+    };
+    const daemonRelay = relayClientForWorkspace({
+      workspaceId: entry.workspaceId,
+      rootPath: entry.rootPath,
+      relay,
+    });
     const result = await syncJoinedSharedChannels({
       rootDir: entry.rootPath,
       workspaceId: entry.workspaceId,
-      relay: {
-        baseUrl: normalizeServerUrl(relayUrl),
-        token: cachedCredentials.token,
-        fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
-      },
+      relay,
       channels: matching,
+      ...(daemonRelay
+        ? {
+            pull: async (input) =>
+              await daemonRelay.pullSharedChannel({
+                shareId: input.shareId,
+                channelWireId: input.channelWireId,
+              }),
+            push: async (input) =>
+              await daemonRelay.pushSharedChannel({
+                shareId: input.shareId,
+                channelWireId: input.channelWireId,
+              }),
+          }
+        : {}),
     });
     if (result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
       const ended = new Set(result.endedShareIds);
@@ -1448,6 +1476,40 @@ function testSyncTimingOverrides(): {
   };
 }
 
+function relayClientForWorkspace(input: {
+  workspaceId: string;
+  rootPath: string;
+  relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
+}): EngineRelayWorkspaceClient | null {
+  const mode = relayTransportModeForRoot(
+    input.rootPath,
+    isRustEngineAdapterEnabled(),
+  );
+  relayTransportRoutes.bind({ ...input, mode });
+  if (mode === "typescript") return null;
+  if (!rustEngineRelayClient) {
+    throw new Error("Rust engine relay client is unavailable.");
+  }
+  return rustEngineRelayClient.bind(input);
+}
+
+async function probeWorkspaceRelay(input: {
+  workspaceId: string;
+  relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
+}): ReturnType<typeof probeRelayWorkspace> {
+  relayTransportRoutes.bind({
+    ...input,
+    rootPath: `relay-probe:${input.workspaceId}`,
+    mode: relayTransportModeForRoot(null, isRustEngineAdapterEnabled()),
+  });
+  try {
+    return await probeRelayWorkspace(input);
+  } catch (error) {
+    relayTransportRoutes.releaseWorkspace(input.workspaceId);
+    throw error;
+  }
+}
+
 function engineForWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   capture: WorkspaceEngineCapture | null,
@@ -1459,13 +1521,28 @@ function engineForWorkspace(
   // Only sync when the session belongs to the server this workspace is bound
   // to; a mismatch keeps it local-only (no token leak, no mass-delete).
   if (!credentialMatchesRemote(remote.serverUrl)) return null;
+  const relay = {
+    baseUrl: cachedCredentials.relayUrl,
+    token: cachedCredentials.token,
+  };
+  const daemonRelay = relayClientForWorkspace({
+    workspaceId: remote.remoteWorkspaceId,
+    rootPath: workspace.rootPath,
+    relay,
+  });
   return createRelaySyncEngine({
     rootDir: workspace.rootPath,
     remoteWorkspaceId: remote.remoteWorkspaceId,
-    relay: {
-      baseUrl: cachedCredentials.relayUrl,
-      token: cachedCredentials.token,
-    },
+    relay,
+    ...(daemonRelay
+      ? {
+          operations: {
+            push: () => daemonRelay.push(),
+            pull: () => daemonRelay.pull(),
+            recoverOrigin: () => daemonRelay.recoverOrigin(),
+          },
+        }
+      : {}),
     capture,
     onChange: () => {
       notifyRenderer();
@@ -1796,6 +1873,12 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
         return true;
       } finally {
         await engine.stop().catch(() => undefined);
+        const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
+        if (relayWorkspaceId) {
+          await closeRelayTransportWorkspace(relayWorkspaceId).catch(
+            () => undefined,
+          );
+        }
       }
     } finally {
       await capture.stop().catch(() => undefined);
@@ -1846,10 +1929,15 @@ async function ensureWorkspaceActivityOpen(
 async function closeDispatchRunActivity(workspaceId: string): Promise<void> {
   const existing = workspaceActivityClosePromises.get(workspaceId);
   if (existing) return existing;
+  const relayWorkspaceId =
+    findWorkspace(workspaceId)?.remote?.remoteWorkspaceId;
   const closing = activity.close(workspaceId);
   workspaceActivityClosePromises.set(workspaceId, closing);
   try {
     await closing;
+    if (relayWorkspaceId) {
+      await closeRelayTransportWorkspace(relayWorkspaceId);
+    }
   } finally {
     if (workspaceActivityClosePromises.get(workspaceId) === closing) {
       workspaceActivityClosePromises.delete(workspaceId);
@@ -2365,6 +2453,30 @@ async function refreshDispatchTray(): Promise<boolean> {
 // Bounded so a wedged disk can't make the app unquittable.
 let quitting = false;
 let rustEngineDaemon: EngineDaemonLifecycle | null = null;
+let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
+let rustEngineRelayClient: EngineRelayClient | null = null;
+const relayTransportRoutes = new RelayTransportRouteGuard();
+
+async function closeRelayTransportWorkspace(workspaceId: string): Promise<void> {
+  if (rustEngineRelayClient) {
+    await rustEngineRelayClient.closeWorkspace(workspaceId);
+    return;
+  }
+  await rustEngineWorkspaceSessions?.closeWorkspace(workspaceId);
+  relayTransportRoutes.releaseWorkspace(workspaceId);
+}
+
+async function closeAllRelayTransportWorkspaces(): Promise<void> {
+  if (rustEngineRelayClient) {
+    await rustEngineRelayClient.closeAll();
+    return;
+  }
+  await rustEngineWorkspaceSessions?.closeAll();
+  for (const workspaceId of relayTransportRoutes.workspaceIds()) {
+    relayTransportRoutes.releaseWorkspace(workspaceId);
+  }
+}
+
 app.on("will-quit", (event) => {
   if (quitting) return;
   quitting = true;
@@ -2400,7 +2512,9 @@ app.on("will-quit", (event) => {
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
-  const rustEngineStop = rustEngineDaemon?.stop() ?? Promise.resolve();
+  const rustEngineStop = closeAllRelayTransportWorkspaces()
+    .catch(() => undefined)
+    .then(async () => await rustEngineDaemon?.stop());
   void Promise.race([
     Promise.all([
       agentSessionStop,
@@ -3359,7 +3473,17 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const result = await cloudLogin().poll();
     if (result.status === "complete") {
+      const previousRelayUrl = cachedCredentials?.relayUrl;
       await refreshCredentialCache();
+      const relayChanged =
+        previousRelayUrl !== undefined &&
+        cachedCredentials?.relayUrl !== undefined &&
+        normalizeServerUrl(previousRelayUrl) !==
+          normalizeServerUrl(cachedCredentials.relayUrl);
+      if (relayChanged) {
+        await activity.stopEngines();
+        await closeAllRelayTransportWorkspaces();
+      }
       // Attach engines to already-open cloud-enabled workspaces that were
       // opened local-only because no session existed yet.
       activity.reconcileCloud(engineForWorkspace);
@@ -3393,10 +3517,11 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.cloudLogout, async (event) => {
     assertTrustedSender(event);
     await cloudLogin().logout();
-    clearCachedCredentials();
     // Stop + drop active engines so edits after Disconnect never push with the
     // now-cleared session.
     await activity.stopEngines();
+    await closeAllRelayTransportWorkspaces();
+    clearCachedCredentials();
     notifyRenderer();
   });
 
@@ -3419,14 +3544,24 @@ function registerIpcHandlers(
     setCachedCredentials(credentials);
 
     {
+      const relay = {
+        baseUrl: credentials.relayUrl,
+        token: credentials.token,
+      };
+      const daemonRelay = relayClientForWorkspace({
+        workspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+        relay,
+      });
       try {
-        await claimRelayWorkspace({
-          workspaceId: workspace.workspaceId,
-          relay: {
-            baseUrl: credentials.relayUrl,
-            token: credentials.token,
-          },
-        });
+        if (daemonRelay) {
+          await daemonRelay.claim();
+        } else {
+          await claimRelayWorkspace({
+            workspaceId: workspace.workspaceId,
+            relay,
+          });
+        }
       } catch (error) {
         if (error instanceof RelayWorkspaceUnavailableError) {
           throw new Error("This workspace id is already claimed by another account");
@@ -3550,7 +3685,10 @@ function registerIpcHandlers(
     // Pre-flight against the relay BEFORE creating anything locally.
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
     try {
-      const probe = await probeRelayWorkspace({ workspaceId: parsed.workspaceId, relay });
+      const probe = await probeWorkspaceRelay({
+        workspaceId: parsed.workspaceId,
+        relay,
+      });
       if (!probe.hasContent) {
         throw new Error(
           "That workspace hasn't synced anything yet. Make sure sync is on for it on the other machine, then try again.",
@@ -3605,6 +3743,9 @@ function registerIpcHandlers(
       // user retries with the same code and the same (empty again) folder.
       console.error(`[desktop] join rollback for ${rootPath}:`, error);
       await activity.close(created.workspaceId).catch(() => undefined);
+      await closeRelayTransportWorkspace(parsed.workspaceId).catch(
+        () => undefined,
+      );
       try {
         removeWorkspace(created.workspaceId);
       } catch {}
@@ -3844,13 +3985,23 @@ function registerIpcHandlers(
     let info;
     try {
       info = await fetchSharedChannelInfo({ relay, shareId: input.shareId });
-      const pulled = await pullSharedChannel({
-        rootDir: workspace.rootPath,
+      const daemonRelay = relayClientForWorkspace({
         workspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
         relay,
-        shareId: info.shareId,
-        channelWireId: info.channelWireId,
       });
+      const pulled = daemonRelay
+        ? await daemonRelay.pullSharedChannel({
+            shareId: info.shareId,
+            channelWireId: info.channelWireId,
+          })
+        : await pullSharedChannel({
+            rootDir: workspace.rootPath,
+            workspaceId: workspace.workspaceId,
+            relay,
+            shareId: info.shareId,
+            channelWireId: info.channelWireId,
+          });
       if (pulled.applied > 0) {
         await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
       }
@@ -3956,17 +4107,33 @@ function registerIpcHandlers(
     });
     refreshNativeWorkspaceSurfaces();
     try {
+      const daemonRelay = relayClientForWorkspace({
+        workspaceId: created.workspaceId,
+        rootPath: created.rootPath,
+        relay,
+      });
       const outcome = await refreshSharedViewOnce({
         rootDir: created.rootPath,
         workspaceId: created.workspaceId,
         relay,
         shareId: parsed.shareId,
+        ...(daemonRelay
+          ? {
+              pull: async (input) =>
+                await daemonRelay.pullShareView({
+                  shareId: input.shareId,
+                }),
+            }
+          : {}),
       });
       if (outcome.status === "ended") {
         throw new ShareUnavailableError();
       }
     } catch (error) {
       console.error(`[desktop] open-share rollback for ${rootPath}:`, error);
+      await closeRelayTransportWorkspace(created.workspaceId).catch(
+        () => undefined,
+      );
       try {
         removeWorkspace(created.workspaceId);
       } catch {}
@@ -4007,11 +4174,28 @@ function registerIpcHandlers(
     ) {
       return RefreshSharedViewResult.parse({ status: "unchanged", changedPaths: 0 });
     }
+    const relay = {
+      baseUrl: cachedCredentials.relayUrl,
+      token: cachedCredentials.token,
+    };
+    const daemonRelay = relayClientForWorkspace({
+      workspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+      relay,
+    });
     const outcome = await refreshSharedViewOnce({
       rootDir: workspace.rootPath,
       workspaceId: workspace.workspaceId,
-      relay: { baseUrl: cachedCredentials.relayUrl, token: cachedCredentials.token },
+      relay,
       shareId: shareView.shareId,
+      ...(daemonRelay
+        ? {
+            pull: async (input) =>
+              await daemonRelay.pullShareView({
+                shareId: input.shareId,
+              }),
+          }
+        : {}),
     });
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
@@ -5992,13 +6176,23 @@ function registerIpcHandlers(
         // The DM peek confirmed it — claim it here (or confirm this is home).
         if (!claimDmHome(dmHomeFile(), shareId, workspace.workspaceId)) continue;
         const info = await fetchSharedChannelInfo({ relay, shareId });
-        const pulled = await pullSharedChannel({
-          rootDir: workspace.rootPath,
+        const daemonRelay = relayClientForWorkspace({
           workspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
           relay,
-          shareId: info.shareId,
-          channelWireId: info.channelWireId,
         });
+        const pulled = daemonRelay
+          ? await daemonRelay.pullSharedChannel({
+              shareId: info.shareId,
+              channelWireId: info.channelWireId,
+            })
+          : await pullSharedChannel({
+              rootDir: workspace.rootPath,
+              workspaceId: workspace.workspaceId,
+              relay,
+              shareId: info.shareId,
+              channelWireId: info.channelWireId,
+            });
         if (pulled.applied > 0) {
           await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
         }
@@ -6989,6 +7183,15 @@ async function startRustEngineDaemon(): Promise<boolean> {
   if (!rustEngineDaemon) return true;
   try {
     await rustEngineDaemon.start();
+    const relaySource = new RelayConfiguredDaemonClientSource(
+      rustEngineDaemon,
+      relayTransportRoutes,
+    );
+    rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource);
+    rustEngineRelayClient = new EngineRelayClient({
+      sessions: rustEngineWorkspaceSessions,
+      routes: relayTransportRoutes,
+    });
     console.info("[desktop] Rust engine daemon startup smoke passed.");
     return true;
   } catch (error) {
@@ -7001,6 +7204,8 @@ async function startRustEngineDaemon(): Promise<boolean> {
     );
     await rustEngineDaemon.stop();
     rustEngineDaemon = null;
+    rustEngineWorkspaceSessions = null;
+    rustEngineRelayClient = null;
     app.quit();
     return false;
   }

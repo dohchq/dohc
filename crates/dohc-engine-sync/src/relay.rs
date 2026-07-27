@@ -211,6 +211,7 @@ pub struct SharedChannelRejection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelPullOutcome {
     pub fetched: usize,
+    pub has_more: bool,
     pub applied: usize,
     pub refused: usize,
     pub rejections: Vec<SharedChannelRejection>,
@@ -912,6 +913,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         Ok(SharedChannelPullOutcome {
             fetched,
+            has_more: page.has_more,
             applied,
             refused,
             rejections,
