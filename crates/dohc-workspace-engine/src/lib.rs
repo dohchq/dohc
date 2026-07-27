@@ -11360,7 +11360,11 @@ mod tests {
         // Kill the actor underneath the live handle. The next open finds a
         // bound-but-Closed actor and takes the eviction path rather than the
         // short-circuit or the close path.
-        let db_path = scratch.path().join(".dohc").join("engine").join("engine.db");
+        let db_path = scratch
+            .path()
+            .join(".dohc")
+            .join("engine")
+            .join("engine.db");
         let closing_path = db_path.clone();
         let _closed = tokio::task::spawn_blocking(move || supervisor.close(&closing_path))
             .await
