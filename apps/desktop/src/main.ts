@@ -2058,9 +2058,6 @@ async function openCliWorkspace(
   if (!workspace || resolve(workspace.rootPath) !== resolve(requested.rootPath)) {
     throw new Error("dohc: not inside a dohc workspace");
   }
-  if (sharedViewOf(workspace.workspaceId)) {
-    throw new Error("dohc: chats are not available in a read-only shared view");
-  }
   await openWorkspaceActivity(workspace);
   const capture = activity.engineCaptureFor(workspace.workspaceId);
   if (!capture) throw new Error("Chats are not enabled for this workspace.");
@@ -2072,6 +2069,35 @@ async function openCliWorkspace(
     dispatchStore: agentDispatchStoreHandleFor(workspace).store,
     readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
     fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
+    filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
+    listMoments: async ({ limit }) => {
+      const page = await capture.listMoments({ limit });
+      return page.moments
+        .filter(
+          (moment): moment is typeof moment & { objectId: string; protected: false } =>
+            !moment.protected && Boolean(moment.objectId),
+        )
+        .map((moment) => ({
+          id: moment.id,
+          workspaceId: workspace.workspaceId,
+          versionId: moment.versionId,
+          objectId: moment.objectId,
+          path: moment.path,
+          recordedAtMs: moment.recordedAtMs,
+          operation: moment.operation,
+          ...(moment.contentKind ? { contentKind: moment.contentKind } : {}),
+          ...(moment.byteLength !== undefined
+            ? { byteLength: moment.byteLength }
+            : {}),
+          metadata: moment.metadata,
+          ...(moment.author ? { author: moment.author } : {}),
+          momentOrder: moment.momentOrder,
+        }));
+    },
+    readMoment: async (momentId) => {
+      const detail = await capture.readMoment(momentId);
+      return detail && !detail.protected ? detail.moment : null;
+    },
     assertWritable: async (target) => {
       assertWritableWorkspace(workspace);
       await assertSharedChannelWritable({

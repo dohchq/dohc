@@ -156,5 +156,7 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       });
     case "export":
       return renderExport(result as CliResultByVerb["export"]);
+    default:
+      return JSON.stringify(result, null, 2);
   }
 }
