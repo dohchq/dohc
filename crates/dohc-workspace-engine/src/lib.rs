@@ -6418,7 +6418,7 @@ impl EngineService {
         enforce_workspace(&open, &conflict.workspace_id)?;
         let inserted = open
             .actor
-            .conflict_open(conflict, Arc::new(NoFaults), cancellation.token())
+            .conflict_open(Box::new(conflict), Arc::new(NoFaults), cancellation.token())
             .await
             .map_err(map_runtime)?;
         Ok(json!({ "inserted": inserted }))

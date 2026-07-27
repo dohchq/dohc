@@ -2768,14 +2768,14 @@ impl ActorHandle {
 
     pub async fn conflict_open(
         &self,
-        conflict: TextConflict,
+        conflict: Box<TextConflict>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ConflictOpen {
-                conflict: Box::new(conflict),
+                conflict,
                 faults,
                 token,
                 reply,
