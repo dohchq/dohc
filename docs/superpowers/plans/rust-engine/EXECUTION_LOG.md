@@ -2534,3 +2534,51 @@ Ice ruled on 2026-07-27: the steady-state tail slope satisfies R15-2 (recorded
 with the basis, since the same run is over the bound on the whole-run fit); MCP
 proxies through desktop main; key-envelope custody stays desktop-side. Those were
 the last decision-shaped blockers on R15-6.
+
+## 2026-07-27 (close) — R13b complete; what still gates the flip
+
+**Every R13b call-site shard is merged.** S0, SW, S1, S2/S3/S4, S5, S6, S8, S9, S10.
+With RPC-E (#263) that is both halves of what R15-6 named.
+
+Twenty-nine PRs merged today. The nine that were NOT in the handoff are worth listing,
+because they were all found by looking rather than by being told:
+
+| what | why it mattered |
+|---|---|
+| #269 | `apps/site` typecheck broken on main, making a clean typecheck useless as a merge gate |
+| #271 | the watcher stop test was vacuous on Windows and red on Linux behind a wrong recorded excuse |
+| #272 | 2,083 of the 2,485 "unmigrated" lines had never called the engine |
+| #273 | `packages/cli` 10 tests red on Windows — and the obvious fix was hollow |
+| #274 | **R15-3 was falsely marked done**; Rust still shipped the lossy serializer |
+| #276 | R15-1 and R15-5 were marked done with unguarded guarantees |
+| #279 | **a replaced workspace root left a dead watch reporting healthy** (Linux inode reuse) |
+| #283 | RUSTSEC-2026-0009, hidden behind a `cargo-audit=SKIP` |
+| #287 | main red from three PRs that were each green alone |
+
+### The PR gate
+
+This repository had NO automated checks on pull requests before today. It has now
+caught two real regressions on its first day: the Linux inode-reuse bug and #287's
+three-way integration break. Neither was findable from a single PR's gate.
+
+### What still gates the flip
+
+1. **No valid clone-reset rehearsal evidence.** The banked run predates 25 merges and
+   the traversal hardening; a fresh run REFUSES on three pnpm hard links in
+   `vendor/dohc-sdk` whose twins are all inside the source tree. Recorded as an OPEN
+   decision — relaxing a fail-closed check on real data is Ice's call.
+2. **macOS evidence still has never been banked.** A run finally got past the gate
+   today only after #284 fixed a macOS-only `-D warnings` failure that neither the
+   Windows gate (never compiles `cfg(unix)`) nor Linux CI (genuinely uses the
+   parameter) could see.
+3. **`DOHC_RUST_ENGINE_ADAPTER` is still present** — six call sites in `main.ts`.
+   Deleting it makes the TypeScript path unreachable, which IS the flip.
+
+### The pattern worth carrying forward
+
+Seven separate defects today were checks that reported green while verifying nothing:
+a SKIP step, frozen fixtures, an untested backfill, a vacuous test, tautological
+assertions, a self-skipping suite, and a drift check that skips without node_modules.
+**Reading never found these** — a careful audit read the same R15 code and passed all
+three items, two of which were unguarded. Mutation did.
+
