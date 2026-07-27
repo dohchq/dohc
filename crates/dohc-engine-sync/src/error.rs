@@ -57,16 +57,64 @@ pub(crate) fn local_corruption(reason: &'static str) -> SyncError {
 pub enum RelayError {
     #[error("relay authorization failed")]
     Unauthorized,
+    #[error("relay request was malformed")]
+    BadRequest,
     #[error("relay conflict")]
     Conflict,
     #[error("relay origin diverged")]
     OriginDiverged,
+    #[error("relay pagination made no progress")]
+    NoProgress,
     #[error("relay workspace is unavailable")]
     WorkspaceUnavailable,
     #[error("relay blob is missing")]
     BlobMissing,
+    #[error("relay log references a missing blob")]
+    BlobReferenceMissing,
+    #[error("relay blob content failed integrity validation")]
+    BlobInvalid,
+    #[error("relay key envelope is missing")]
+    KeyEnvelopeMissing,
     #[error("share is unavailable")]
     ShareUnavailable,
+    #[error("replication epoch was superseded")]
+    EpochSuperseded,
+    #[error("replication identity is not recognized")]
+    IdentityNotRecognized,
+    #[error("replication identity is required")]
+    IdentityRequired,
+    #[error("replication stream identity does not match")]
+    StreamIdentityMismatch,
+    #[error("relay authorship check failed")]
+    AuthorshipMismatch,
+    #[error("relay cannot verify this chat operation")]
+    UnknownChatOperation,
+    #[error("share is read-only")]
+    ShareReadOnly,
+    #[error("operation is outside the shared channel")]
+    ShareOperationRejected,
+    #[error("relay payload is too large")]
+    PayloadTooLarge,
+    #[error("relay presence capacity was exceeded")]
+    PresenceCapacity,
+    #[error("relay quota was exceeded")]
+    QuotaExceeded,
+    #[error("self-sharing is not allowed")]
+    SelfShare,
+    #[error("share selector is ambiguous")]
+    AmbiguousSelector,
+    #[error("share channel is invalid")]
+    InvalidChannel,
+    #[error("relay method is not allowed")]
+    MethodNotAllowed,
+    #[error("relay forbids this request")]
+    Forbidden,
+    #[error("relay returned an internal error")]
+    ServerInternal,
+    #[error("relay returned unknown error code {0}")]
+    UnknownServerCode(String),
+    #[error("relay returned HTTP status {0}")]
+    HttpStatus(u16),
     #[error("relay transport is partitioned")]
     Partitioned,
     #[error("relay response failed validation")]

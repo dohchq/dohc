@@ -1686,6 +1686,16 @@ UPDATE moments SET
 
 pub(crate) const MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID: &str = "v1-moment-rollback-preimage";
 
+/// Ordinal 20. Shared-channel pushes previously retained only the last physical
+/// journal coordinate. New writes pair it with the corresponding dense shared
+/// coordinate; existing rows remain NULL and bootstrap once on their next push.
+const V1_SHARED_CHANNEL_DENSE_PUSH_DDL: &str = "\
+ALTER TABLE shared_channel_push_state ADD COLUMN dense_seq INTEGER
+    CHECK (dense_seq IS NULL OR dense_seq >= -1);
+";
+
+pub(crate) const SHARED_CHANNEL_DENSE_PUSH_MIGRATION_ID: &str = "v1-shared-channel-dense-push";
+
 /// Ordinal 21. An update from one origin can precede the base-state envelope
 /// from another origin. Such a coordinate must be durably parked without
 /// inventing a Y.Doc lineage, so the queue is rooted by the file object rather
@@ -1930,8 +1940,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        // PR #263 owns ordinal 20 and merges first. This branch deliberately
-        // leaves that slot reserved until its merge base advances.
+        ordinal: 20,
+        id: SHARED_CHANNEL_DENSE_PUSH_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SHARED_CHANNEL_DENSE_PUSH_DDL,
+        sets_user_version: None,
+    },
+    Migration {
         ordinal: 21,
         id: YDOC_PREBASE_DEFERRED_MIGRATION_ID,
         kind: MigrationKind::Transactional,
@@ -3035,7 +3050,7 @@ mod tests {
                 row.get(0)
             })
             .expect("ledger after rollback");
-        assert_eq!(max_ordinal, 19);
+        assert_eq!(max_ordinal, 20);
 
         conn.execute(
             "INSERT INTO file_objects (workspace_id, object_id, created_at_ms)

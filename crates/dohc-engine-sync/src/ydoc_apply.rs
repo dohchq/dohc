@@ -66,6 +66,58 @@ pub struct YdocDrainResult {
     pub refusals: Vec<crate::ReplicationRefusal>,
 }
 
+pub(crate) fn redelivered_materialization_changes(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    if envelope.op_kind != "ydoc.update" {
+        return Ok(Vec::new());
+    }
+    let payload: YdocUpdatePayload =
+        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: "ydoc.update payload is malformed",
+        })?;
+    let fingerprint = format!(
+        "{}\0{}\0{}\0{}\0{}\0{}",
+        envelope.workspace_id,
+        payload.version_id,
+        payload.object_id,
+        payload.path,
+        envelope.origin_id,
+        envelope.origin_seq
+    );
+    let job_id = format!(
+        "ydoc-mat_moment-ydoc-apply-{}",
+        dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
+    );
+    let change = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT target_path, operation FROM materialization_jobs WHERE job_id=?1",
+            [&job_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+    })?;
+    let Some((path, operation)) = change else {
+        return Ok(Vec::new());
+    };
+    let operation = match operation.as_str() {
+        "write" => "write",
+        "delete" => "delete",
+        _ => {
+            return Err(SyncError::InvalidInput {
+                reason: "ydoc materialization operation is invalid",
+            });
+        }
+    };
+    Ok(vec![crate::MomentMaterializationChange {
+        path,
+        operation,
+        content_kind: "text",
+    }])
+}
+
 /// Drain acked Y.Doc envelopes deferred while `key` was leased. The
 /// `ydoc_deferred_updates` table records exactly which coordinates are
 /// pending (written in the same transaction as their ack); the imported

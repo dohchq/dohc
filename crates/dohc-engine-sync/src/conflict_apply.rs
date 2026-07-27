@@ -130,6 +130,28 @@ pub(crate) fn read_replayed_pending_resolve(
     })
 }
 
+pub(crate) fn redelivered_conflicts_opened(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<i64, SyncError> {
+    if envelope.op_kind != "conflict.open" {
+        return Ok(0);
+    }
+    let payload: OpenPayload =
+        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: "conflict.open payload is malformed",
+        })?;
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conflicts \
+             WHERE workspace_id=?1 AND conflict_id=?2)",
+            params![envelope.workspace_id, payload.id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)
+    })
+}
+
 pub(crate) fn persist_pending_resolve(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
@@ -901,6 +923,75 @@ fn mirrored_id(envelope: &ReplicationEnvelope, kind: &str) -> String {
         "sync-conflict-{kind}-{}",
         dohc_engine_storage::hex_sha256(seed.as_bytes())
     )
+}
+
+pub(crate) fn redelivered_materialization_changes(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    if envelope.op_kind != "conflict.resolve" {
+        return Ok(Vec::new());
+    }
+    let candidates = ["incoming", "delete", "binary-materialize"]
+        .into_iter()
+        .map(|kind| {
+            let moment_id = mirrored_id(envelope, kind);
+            let job_id = if kind == "binary-materialize" {
+                moment_id.clone()
+            } else {
+                format!("sync-resolve-mat_{moment_id}")
+            };
+            (moment_id, job_id)
+        });
+    let mut changes = Vec::new();
+    for (moment_id, job_id) in candidates {
+        let change = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT j.target_path, j.operation, \
+                        COALESCE(m.after_content_kind, 'text') \
+                 FROM materialization_jobs j \
+                 LEFT JOIN moments m ON m.workspace_id=?1 AND m.moment_id=?2 \
+                 WHERE j.job_id=?3",
+                params![envelope.workspace_id, moment_id, job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(SyncError::corrupt)
+        })?;
+        let Some((path, operation, content_kind)) = change else {
+            continue;
+        };
+        let operation = match operation.as_str() {
+            "write" => "write",
+            "delete" => "delete",
+            _ => {
+                return Err(SyncError::InvalidInput {
+                    reason: "conflict materialization operation is invalid",
+                });
+            }
+        };
+        let content_kind = match content_kind.as_str() {
+            "text" => "text",
+            "binary" => "binary",
+            _ => {
+                return Err(SyncError::InvalidInput {
+                    reason: "conflict materialization content kind is invalid",
+                });
+            }
+        };
+        changes.push(crate::MomentMaterializationChange {
+            path,
+            operation,
+            content_kind,
+        });
+    }
+    Ok(changes)
 }
 
 fn resolve_target(
@@ -2022,24 +2113,21 @@ mod tests {
             })
             .expect("record binary current side");
 
-        let outcome = apply_conflict_envelope(
-            &mut store,
-            &envelope(
-                "text-peer",
-                1,
-                "conflict.resolve",
-                json!({
-                    "conflictId": "text-over-binary",
-                    "status": "resolved",
-                    "chosenFrom": "current",
-                    "resolution": "kept-current",
-                    "updatedAtMs": 4_000,
-                    "targetVersionId": "main"
-                }),
-            ),
-            &NoFaults,
-        )
-        .expect("matching binary head permits text apply");
+        let resolve = envelope(
+            "text-peer",
+            1,
+            "conflict.resolve",
+            json!({
+                "conflictId": "text-over-binary",
+                "status": "resolved",
+                "chosenFrom": "current",
+                "resolution": "kept-current",
+                "updatedAtMs": 4_000,
+                "targetVersionId": "main"
+            }),
+        );
+        let outcome = apply_conflict_envelope(&mut store, &resolve, &NoFaults)
+            .expect("matching binary head permits text apply");
         assert!(matches!(
             outcome,
             ApplyOutcome::Applied(ConflictApplyResult {
@@ -2063,6 +2151,29 @@ mod tests {
         assert_eq!(preimage_present, 1);
         assert_eq!(preimage_sha.as_deref(), Some(binary_sha.as_str()));
         assert_eq!(status, "pending");
+        assert_eq!(
+            redelivered_materialization_changes(&store, &resolve)
+                .expect("mirrored materialization change"),
+            [crate::MomentMaterializationChange {
+                path: "doc.md".to_owned(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            "MUTATION: omitting conflict.resolve durable-intent lookup loses the changed path"
+        );
+        assert_eq!(
+            apply_conflict_envelope(&mut store, &resolve, &NoFaults).expect("resolve redelivery"),
+            ApplyOutcome::Skipped
+        );
+        assert_eq!(
+            redelivered_materialization_changes(&store, &resolve)
+                .expect("redelivered mirrored materialization change"),
+            [crate::MomentMaterializationChange {
+                path: "doc.md".to_owned(),
+                operation: "write",
+                content_kind: "text",
+            }]
+        );
     }
 
     #[test]

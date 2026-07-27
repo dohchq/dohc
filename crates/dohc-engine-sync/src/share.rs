@@ -1,10 +1,13 @@
-use dohc_engine_storage::{EngineStore, FaultInjector};
+use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::Value;
 
 use crate::apply::apply_envelope_with;
 use crate::cursor::advance_shared_peer_tx;
-use crate::{ApplyOutcome, PathClass, ReplicationEnvelope, SyncError, classify_share_path};
+use crate::{
+    ApplyOutcome, PathClass, ReplicationEnvelope, SyncError, classify_share_path,
+    read_shared_peer_position,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareSurface {
@@ -38,22 +41,61 @@ pub fn apply_shared_envelope(
     crate::model::bounded(&boundary.share_id, "share_id must be non-empty and bounded")?;
     if boundary.surface == ShareSurface::ShareView {
         enforce_share_view_boundary(boundary, envelope)?;
+        return Ok(ApplyOutcome::Applied(envelope.origin_seq));
     }
-    apply_envelope_with(store, envelope, faults, |tx, op| {
-        if boundary.surface == ShareSurface::SharedChannel {
-            enforce_shared_channel_boundary(tx, boundary, op)?;
-            let _ = crate::apply::apply_chat_tx(tx, op)?;
+
+    let source_origin_id = envelope.origin_id.clone();
+    let source_origin_seq = envelope.origin_seq;
+    let position = read_shared_peer_position(
+        store,
+        &envelope.workspace_id,
+        &boundary.share_id,
+        &source_origin_id,
+    )?;
+    if source_origin_seq <= position.applied_origin_seq {
+        return Ok(ApplyOutcome::Skipped);
+    }
+    let dense_seq = position
+        .dense_seq
+        .checked_add(1)
+        .ok_or(SyncError::CoordinateDiverged)?;
+    let mut dense = envelope.clone();
+    dense.origin_id = format!("shared:{}:{}", boundary.share_id, source_origin_id);
+    dense.origin_seq = dense_seq;
+
+    let mut replay_refusals = Vec::new();
+    let outcome = apply_envelope_with(store, &dense, faults, |tx, op| {
+        enforce_shared_channel_boundary(tx, boundary, op)?;
+        replay_refusals = crate::apply::apply_chat_tx(tx, op)?;
+        advance_shared_peer_tx(
+            tx,
+            &op.workspace_id,
+            &boundary.share_id,
+            &source_origin_id,
+            source_origin_seq,
+        )
+    })?;
+    let advance_source = match &outcome {
+        ApplyOutcome::Applied(_) | ApplyOutcome::Crashed { .. } => false,
+        ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => true,
+        ApplyOutcome::WithRefusals { .. } => unreachable!("refusals are attached below"),
+    };
+    if advance_source {
+        match store.write_with(faults, |tx| {
             advance_shared_peer_tx(
                 tx,
-                &op.workspace_id,
+                &envelope.workspace_id,
                 &boundary.share_id,
-                &op.origin_id,
-                op.origin_seq,
-            )
-        } else {
-            Ok(op.origin_seq)
+                &source_origin_id,
+                source_origin_seq,
+            )?;
+            Ok::<(), SyncError>(())
+        })? {
+            TxnOutcome::Committed(()) => {}
+            TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
-    })
+    }
+    Ok(outcome.with_refusals(replay_refusals))
 }
 
 /// Fail-closed SharedChannel scoping. Every admitted op must positively bind to
@@ -156,11 +198,11 @@ fn enforce_share_view_boundary(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    let prefix = boundary
-        .path_prefix
-        .as_deref()
-        .ok_or(SyncError::ShareBoundaryViolation)?;
-    let mut any = false;
+    let prefix = boundary.path_prefix.as_deref();
+    if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
+        return Err(SyncError::ShareBoundaryViolation);
+    }
+    let mut paths = Vec::new();
     for field in [
         "path",
         "payloadBeforePath",
@@ -168,24 +210,52 @@ fn enforce_share_view_boundary(
         "beforePath",
     ] {
         if let Some(path) = op.payload.get(field).and_then(Value::as_str) {
-            any = true;
-            if classify_share_path(path) != PathClass::Tracked {
-                return Err(SyncError::ShareBoundaryViolation);
-            }
-            if !path_within_prefix(path, prefix) {
-                return Err(SyncError::ShareBoundaryViolation);
-            }
+            paths.push(path);
         }
     }
-    if !any {
+    if op.op_kind == "version.create" {
+        for snapshot in op
+            .payload
+            .get("forkSnapshots")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let path = snapshot
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or(SyncError::ShareBoundaryViolation)?;
+            paths.push(path);
+        }
+    }
+    if paths.is_empty() {
         return Err(SyncError::ShareBoundaryViolation);
+    }
+    for path in paths {
+        if classify_share_path(path) != PathClass::Tracked
+            || prefix.is_some_and(|prefix| !path_within_prefix(path, prefix))
+        {
+            return Err(SyncError::ShareBoundaryViolation);
+        }
     }
     Ok(())
 }
 
 fn path_within_prefix(path: &str, prefix: &str) -> bool {
-    path == prefix
+    prefix.is_empty()
+        || path == prefix
         || path
             .strip_prefix(prefix)
             .is_some_and(|tail| tail.starts_with('/'))
+}
+
+#[cfg(test)]
+mod path_prefix_tests {
+    use super::path_within_prefix;
+
+    #[test]
+    fn empty_prefix_is_the_tracked_workspace_root() {
+        assert!(path_within_prefix("notes/plan.md", ""));
+        assert!(path_within_prefix("plan.md", ""));
+    }
 }

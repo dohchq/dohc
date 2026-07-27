@@ -37,6 +37,19 @@ pub enum ApplyOutcome<T> {
 }
 
 impl<T> ApplyOutcome<T> {
+    pub(crate) fn map<U>(self, map: impl FnOnce(T) -> U) -> ApplyOutcome<U> {
+        match self {
+            Self::Applied(value) => ApplyOutcome::Applied(map(value)),
+            Self::Refused(refusal) => ApplyOutcome::Refused(refusal),
+            Self::Skipped => ApplyOutcome::Skipped,
+            Self::Crashed { committed } => ApplyOutcome::Crashed { committed },
+            Self::WithRefusals { outcome, refusals } => ApplyOutcome::WithRefusals {
+                outcome: Box::new(outcome.map(map)),
+                refusals,
+            },
+        }
+    }
+
     pub(crate) fn with_refusals(self, refusals: Vec<ReplicationRefusal>) -> Self {
         if refusals.is_empty() {
             self
@@ -130,11 +143,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
     let result = store.write_with(faults, |tx| {
         let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
         if envelope.origin_seq <= acked {
-            // A redelivered coordinate at or below the ack. It must byte-match
-            // the row already journaled; a divergent replay (same coordinate,
-            // different payload/kind) is a misbehaving origin and fails closed
-            // rather than silently advancing the cursor over the divergence —
-            // the same check the acked+1 redelivery path below makes.
+            // A redelivered coordinate at or below the ack must match the row
+            // already journaled after relay-compatible JSON canonicalization.
             let existing: Option<(String, String, i64)> = tx
                 .query_row(
                     "SELECT op_kind, payload_json, recorded_at_ms FROM replication_log \
@@ -144,10 +154,11 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 )
                 .optional()
                 .map_err(SyncError::corrupt)?;
-            if let Some(row) = existing
-                && row != (envelope.op_kind.clone(), payload_json.clone(), envelope.recorded_at_ms)
-            {
-                return Err(SyncError::CoordinateDiverged);
+            if let Some(row) = existing {
+                let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
+                if !coordinate_matches(&row, envelope, &canonical_payload)? {
+                    return Err(SyncError::CoordinateDiverged);
+                }
             }
             return Ok(Admission::Skipped);
         }
@@ -165,7 +176,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             .optional()
             .map_err(SyncError::corrupt)?;
         if let Some(row) = existing {
-            if row != (envelope.op_kind.clone(), payload_json.clone(), envelope.recorded_at_ms) {
+            let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
+            if !coordinate_matches(&row, envelope, &canonical_payload)? {
                 return Err(SyncError::CoordinateDiverged);
             }
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
@@ -402,6 +414,19 @@ pub(crate) fn claim_pending_refusals(
         TxnOutcome::Committed(claimed) => Ok(claimed),
         TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
     }
+}
+
+fn coordinate_matches(
+    existing: &(String, String, i64),
+    envelope: &ReplicationEnvelope,
+    canonical_payload: &[u8],
+) -> Result<bool, SyncError> {
+    if existing.0 != envelope.op_kind || existing.2 != envelope.recorded_at_ms {
+        return Ok(false);
+    }
+    let existing_payload: serde_json::Value =
+        serde_json::from_str(&existing.1).map_err(|_| SyncError::CoordinateDiverged)?;
+    Ok(crate::relay::canonical_json_bytes(&existing_payload)? == canonical_payload)
 }
 
 /// R10's built-in `chat.*` receiver apply dispatch. Structural rows use
