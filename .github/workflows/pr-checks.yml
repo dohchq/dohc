@@ -35,7 +35,7 @@ permissions:
 
 env:
   CARGO_DENY_VERSION: "0.20.2"
-  CARGO_AUDIT_VERSION: "0.21.2"
+  CARGO_AUDIT_VERSION: "0.22.2"
 
 jobs:
   javascript:
