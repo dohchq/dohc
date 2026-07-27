@@ -2353,7 +2353,10 @@ next round caught. The compounding lesson became structure:
 
 ## 2026-07-26 / 2026-07-27 — the R15-6 stretch, and an honest state of the program
 
-Twelve merges landed since the last entry and none were recorded here. That gap
+Twenty-two PRs merged since the last entry and none were recorded here. The
+table below covers the fourteen that changed program state; the remainder are
+the R15-1a/-1b/-2/-3/-4/-5 decision shards (#233, #235-#241, #247) which the
+previous entry had listed as IN REVIEW and which all landed 2026-07-25. That gap
 mattered: an audit on 2026-07-27 found no document on `main` was a reliable
 index of program state, while `SHARDS.tsv` still pointed two rows at closed PRs
 and marked three merged shards "in review". This entry closes the gap.
@@ -2398,27 +2401,42 @@ R15-6 scoped RPC-E and R13b-rest INTO the pre-flip work. Neither is close.
 - **R13b-rest:** ZERO call-site migration shards have merged. Substrate only
   (#249, #252, #253). Open: #254 (S1), #265 (S2/S3/S4), #258 (S5), #257 (S6),
   #268 (S8 partial, stacked on #263's branch rather than `main`).
-- **Five surfaces have no branch and no PR:** `sharedChannels.ts`,
+- **Five surfaces had no branch and no PR:** `sharedChannels.ts`,
   `shareMounts.ts`, `workspaceFiles.ts`, `workspaceSearch.ts`,
   `workspaceGraph.ts` (~2,485 lines), all still importing `@dohc/workspace-engine`
-  directly.
+  directly. That line count badly overstates the work: **84% of it (2,083
+  lines) is three files whose ONLY engine import is
+  `classifyEngineFilePathForRead`**, a compatibility re-export of
+  `@dohc/security-contract`. Those are a one-line redirect each, not a daemon
+  migration -- done in #272. The genuine remainder is `sharedChannels.ts`
+  (nothing to do once #268 lands) and `shareMounts.ts` (one field on
+  `versionedText.list`, plus a shadow-marker decision).
 
-### The cutover blocker nobody had written down
+### The cutover blocker, restated because it gates everything else
 
-`packages/mcp/src/tools.ts` opens `.dohc/engine/engine.db` directly
-(`:1334`, `:2463`, `:2544`) and performs agent WRITES from a separate process.
+`packages/mcp/src/tools.ts` opens the engine stores per tool call
+(`withEngineStores`, `:2540`) and performs agent WRITES from a separate
+process -- `startChannelThread` (`:2830`) and `sendMessage` (`:2874`).
 After the flip the daemon owns that database. Flipping without resolving the MCP
 transport decision puts a second writer on the daemon-owned `engine.db` —
 landing on top of a freshly wiped dogfood dataset. This is the single most
 direct route to corrupting real data post-flip and it is decision-gated on Ice.
+
+This was NOT previously unrecorded -- `DECISIONS.md:193` has carried "MCP
+transport to the daemon -- OPEN" since #255. An earlier revision of this entry
+claimed otherwise while its own merge table credited #255 for writing it. What
+was missing was a SHARDS row, so nothing keyed off it; that is now R13b-S9.
 
 ### Review state, measured rather than assumed
 
 An independent read-only triage re-checked every unresolved review thread on the
 seven `main`-based PRs against their branch heads, discarding threads already
 fixed. Result: **27 P1s genuinely open** (#263: 10, #257: 7, #245: 5, #258: 2,
-#254/#259/#265: 1 each). The PRs were gate-green, not review-clean; those are
-different things and had been conflated.
+#254/#259/#265: 1 each), measured at the time of the sweep. The PRs were
+gate-green, not review-clean; those are different things and had been
+conflated. #265's and #245's and #263's have since been closed and
+mutation-proven, so the SHARDS rows and this count deliberately disagree --
+the count is a snapshot of the sweep, not a live tally.
 
 ### macOS soak: diagnosed, not closed
 
@@ -2427,7 +2445,8 @@ the RSS bound. A 90-minute run showed quarter slopes halving
 (72.8 -> 35.4 -> 16.9 -> 6.7 KB/s), RSS ending below its peak, threads ending
 lower than they started — an allocator plateau, not a constant-rate leak.
 #267 therefore evaluates the post-warm-up tail against the unchanged 20 KiB/s
-bound.
+bound, and records the question as an OPEN decision on that branch (it is not
+on `main` until #267 lands).
 
 `GATE6_PACKET.md` §1b was briefly marked RESOLVED on that basis. **That was an
 overclaim and has been retracted.** No macOS soak has ever concluded `success`,
@@ -2445,7 +2464,7 @@ GitHub storage quota, so the only banked soak evidence is the Windows run.
   flush, so it trips wherever a startup burst is still pending — and passes
   vacuously wherever one is not. A recorded excuse was masking a hollow guard.
 - `apps/site` has been failing `tsc --noEmit` on `main`: the demo passes the
-  desktop `ActivityBar` a `chats` prop that `9eb99ef9` removed. A broken site
+  desktop `ActivityBar` a `chats` prop that `eb2c578b` removed. A broken site
   typecheck reads as noise from whichever PR is being run, which made a clean
   typecheck useless as a merge gate for all nine open PRs (fixed in #269).
 
