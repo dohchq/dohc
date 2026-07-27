@@ -39,9 +39,12 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::{
     ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
-    PostCommitMaterializeOutcome, RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
+    PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
+    RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
 };
-use dohc_engine_sync::{ReplicationEnvelope, SyncError};
+use dohc_engine_sync::{
+    RelayCursor, RelayError, ReplicationEnvelope, ShareCursor, SyncError, SyncPassOutcome,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -266,6 +269,7 @@ struct OpenWorkspace {
     workspace_id: String,
     actor: ActorHandle,
     mode: WorkspaceOpenMode,
+    relay: Option<RelayConfiguration>,
     /// The autonomous capture driver (files actor + watcher + reconcile
     /// loop), spawned only after the shadow binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
@@ -285,6 +289,19 @@ struct OpenWorkspace {
 enum WorkspaceOpenMode {
     Full,
     ReadOnly,
+}
+
+#[derive(Clone)]
+enum IssuedCursor {
+    Relay(RelayCursor),
+    ShareView(ShareCursor),
+}
+
+#[derive(Clone)]
+struct PendingCursor {
+    handle: WorkspaceHandle,
+    workspace_id: String,
+    cursor: IssuedCursor,
 }
 
 struct YdocSession {
@@ -364,6 +381,7 @@ enum VersionFenceOutcome {
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
+    pending_cursors: Mutex<HashMap<String, PendingCursor>>,
     open_lock: tokio::sync::Mutex<()>,
     next_handle: std::sync::atomic::AtomicU64,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
@@ -486,6 +504,7 @@ impl EngineService {
         EngineService {
             supervisor,
             handles: Mutex::new(HashMap::new()),
+            pending_cursors: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -553,6 +572,39 @@ impl EngineService {
         let result = match request.method.as_str() {
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
             "workspace.close" => self.workspace_close(request.workspace).await?,
+            "sync.push" => {
+                Box::pin(self.sync_push(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.pull" => {
+                Box::pin(self.sync_pull(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.commitCursor" => {
+                Box::pin(self.sync_commit_cursor(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.probe" => {
+                Box::pin(self.sync_probe(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.claim" => {
+                Box::pin(self.sync_claim(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.recoverOrigin" => {
+                Box::pin(self.sync_recover_origin(&ctx, request.workspace, request.params)).await?
+            }
+            "keys.upload" => {
+                Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
+            }
+            "keys.download" => {
+                Box::pin(self.keys_download(&ctx, request.workspace, request.params)).await?
+            }
+            "share.channel.pull" => {
+                Box::pin(self.share_channel_pull(&ctx, request.workspace, request.params)).await?
+            }
+            "share.channel.push" => {
+                Box::pin(self.share_channel_push(&ctx, request.workspace, request.params)).await?
+            }
+            "share.view.pull" => {
+                Box::pin(self.share_view_pull(&ctx, request.workspace, request.params)).await?
+            }
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
                     .await?
@@ -1117,6 +1169,12 @@ impl EngineService {
                     "workspace root is already open in a different mode",
                 ));
             }
+            if open.relay != params.relay.as_ref().map(RelayOpenParams::configuration) {
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "workspace relay configuration mismatch",
+                ));
+            }
             // Same workspace: short-circuit only on a LIVE binding. A bound-but-
             // closed actor (its worker died) is stale — drop it and reopen fresh.
             if open.actor.lifecycle() != LifecycleState::Closed {
@@ -1262,6 +1320,9 @@ impl EngineService {
                 workspace_id: params.workspace_id,
                 actor,
                 mode: requested_mode,
+                relay: params
+                    .relay
+                    .map(|configuration| configuration.configuration()),
                 capture: Arc::new(Mutex::new(capture)),
                 capture_apply_gate,
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
@@ -1358,6 +1419,7 @@ impl EngineService {
             // for a fresh actor instead of the one being torn down.
             let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
             let removed = lock(&self.handles).remove(&handle);
+            lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
             // Sessions (and their lease guards) evict only AFTER this close
             // owns the teardown — evicting earlier meant a close future
             // dropped while waiting on open_lock had already stranded live
@@ -1405,6 +1467,400 @@ impl EngineService {
             .map_err(|_| wire(ErrorCode::Internal, "workspace close task failed"))?
             .map_err(map_runtime)?;
         Ok(json!({ "closed": closed }))
+    }
+
+    fn relay_open(
+        &self,
+        handle: Option<&WorkspaceHandle>,
+        workspace_id: &str,
+    ) -> Result<(OpenWorkspace, RelayConfiguration), WireError> {
+        let open = self.open(handle)?;
+        validate_workspace_param(Some(workspace_id), &open.workspace_id)?;
+        let configuration = open
+            .relay
+            .clone()
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "relay-not-configured"))?;
+        Ok((open, configuration))
+    }
+
+    fn issue_pending_cursor(
+        &self,
+        handle: &WorkspaceHandle,
+        workspace_id: &str,
+        cursor: IssuedCursor,
+    ) -> Result<Value, WireError> {
+        for _ in 0..4 {
+            let mut bytes = [0_u8; 32];
+            getrandom::fill(&mut bytes)
+                .map_err(|_| wire(ErrorCode::Internal, "pending-cursor-token-failed"))?;
+            let token = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let (kind, wire_kind) = match &cursor {
+                IssuedCursor::Relay(_) => (PendingCursorKind::Relay, "relay"),
+                IssuedCursor::ShareView(_) => (PendingCursorKind::ShareView, "shareView"),
+            };
+            let mut pending = lock(&self.pending_cursors);
+            if pending.contains_key(&token) {
+                continue;
+            }
+            pending.retain(|_, issued| {
+                issued.handle != *handle
+                    || issued.workspace_id != workspace_id
+                    || !matches!(
+                        (&issued.cursor, kind),
+                        (IssuedCursor::Relay(_), PendingCursorKind::Relay)
+                            | (IssuedCursor::ShareView(_), PendingCursorKind::ShareView)
+                    )
+            });
+            pending.insert(
+                token.clone(),
+                PendingCursor {
+                    handle: handle.clone(),
+                    workspace_id: workspace_id.to_owned(),
+                    cursor,
+                },
+            );
+            return Ok(json!({ "kind": wire_kind, "token": token }));
+        }
+        Err(wire(ErrorCode::Internal, "pending-cursor-token-collision"))
+    }
+
+    fn consume_pending_cursor(
+        &self,
+        handle: &WorkspaceHandle,
+        workspace_id: &str,
+        kind: PendingCursorKind,
+        token: &str,
+    ) -> Result<IssuedCursor, WireError> {
+        let mut pending = lock(&self.pending_cursors);
+        let valid = pending.get(token).is_some_and(|issued| {
+            issued.handle == *handle
+                && issued.workspace_id == workspace_id
+                && matches!(
+                    (&issued.cursor, kind),
+                    (IssuedCursor::Relay(_), PendingCursorKind::Relay)
+                        | (IssuedCursor::ShareView(_), PendingCursorKind::ShareView)
+                )
+        });
+        if !valid {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-pending-cursor"));
+        }
+        pending
+            .remove(token)
+            .map(|issued| issued.cursor)
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-pending-cursor"))
+    }
+
+    async fn relay_execute(
+        &self,
+        ctx: &RequestContext,
+        open: &OpenWorkspace,
+        configuration: RelayConfiguration,
+        operation: RelayOperation,
+        label: &str,
+    ) -> Result<RelayOperationOutcome, WireError> {
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            label,
+            open.actor.relay(
+                configuration,
+                operation,
+                self.leases.scoped(&open.root),
+                cancellation.token(),
+            ),
+        )
+        .await
+    }
+
+    async fn sync_push(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::Push {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "sync.push",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_pull(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::Pull {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "sync.pull",
+            )
+            .await?;
+        let pending = match &outcome {
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                pending_cursor: Some(cursor),
+                ..
+            })
+            | RelayOperationOutcome::Sync(SyncPassOutcome::CrashedAfterApply {
+                pending_cursor: cursor,
+                ..
+            }) => Some(IssuedCursor::Relay(cursor.clone())),
+            _ => None,
+        };
+        let mut result = relay_outcome_json(outcome)?;
+        if let Some(cursor) = pending {
+            result["pendingCursor"] =
+                self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+        }
+        Ok(result)
+    }
+
+    async fn sync_commit_cursor(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CommitCursorParams = parse(params)?;
+        let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let (kind, token) = match params.pending_cursor {
+            PendingCursorParams::Relay { token } => (PendingCursorKind::Relay, token),
+            PendingCursorParams::ShareView { token } => (PendingCursorKind::ShareView, token),
+        };
+        let issued = self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
+        let operation = match issued {
+            IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
+                workspace_id: open.workspace_id.clone(),
+                cursor,
+            },
+            IssuedCursor::ShareView(cursor) => RelayOperation::CommitShareViewCursor {
+                workspace_id: open.workspace_id.clone(),
+                cursor,
+            },
+        };
+        let outcome = self
+            .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_probe(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::Probe {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "sync.probe",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_claim(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::Claim {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "sync.claim",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_recover_origin(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let new_origin_id = recovered_origin_id()?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::RecoverOrigin {
+                    workspace_id: open.workspace_id.clone(),
+                    new_origin_id,
+                },
+                "sync.recoverOrigin",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn keys_upload(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: KeyEnvelopeUploadParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::UploadKeyEnvelope {
+                    workspace_id: open.workspace_id.clone(),
+                    envelope_json: params.envelope_json,
+                    if_match: params.if_match,
+                },
+                "keys.upload",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn keys_download(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::DownloadKeyEnvelope {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "keys.download",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn share_channel_pull(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SharedChannelParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PullSharedChannel {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    channel_wire_id: params.channel_wire_id,
+                },
+                "share.channel.pull",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn share_channel_push(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SharedChannelParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PushSharedChannel {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    channel_wire_id: params.channel_wire_id,
+                },
+                "share.channel.push",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn share_view_pull(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareViewParams = parse(params)?;
+        let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PullShareView {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                },
+                "share.view.pull",
+            )
+            .await?;
+        let pending = match &outcome {
+            RelayOperationOutcome::ShareViewPulled(outcome) => {
+                Some(IssuedCursor::ShareView(outcome.pending_cursor.clone()))
+            }
+            _ => None,
+        };
+        let mut result = relay_outcome_json(outcome)?;
+        if let Some(cursor) = pending {
+            result["pendingCursor"] =
+                self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+        }
+        Ok(result)
     }
 
     fn generated_rpc_id(
@@ -6815,6 +7271,86 @@ struct WorkspaceOpenParams {
     recover_running_dispatches: Option<bool>,
     #[serde(default)]
     skip_startup_maintenance: bool,
+    #[serde(default)]
+    relay: Option<RelayOpenParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RelayOpenParams {
+    base_url: String,
+    bearer_token: String,
+    #[cfg(debug_assertions)]
+    #[serde(default)]
+    allow_insecure_loopback_for_tests: bool,
+}
+
+impl RelayOpenParams {
+    fn configuration(&self) -> RelayConfiguration {
+        RelayConfiguration {
+            base_url: self.base_url.clone(),
+            bearer_token: self.bearer_token.clone(),
+            #[cfg(debug_assertions)]
+            allow_insecure_loopback_for_tests: self.allow_insecure_loopback_for_tests,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RelayWorkspaceParams {
+    workspace_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CommitCursorParams {
+    workspace_id: String,
+    pending_cursor: PendingCursorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum PendingCursorParams {
+    Relay { token: String },
+    ShareView { token: String },
+}
+
+#[derive(Clone, Copy)]
+enum PendingCursorKind {
+    Relay,
+    ShareView,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KeyEnvelopeUploadParams {
+    workspace_id: String,
+    envelope_json: String,
+    #[serde(default)]
+    if_match: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedChannelParams {
+    workspace_id: String,
+    share_id: String,
+    channel_wire_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareViewParams {
+    workspace_id: String,
+    share_id: String,
+    #[serde(default, rename = "pathPrefix")]
+    _legacy_path_prefix: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -8791,6 +9327,128 @@ fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static s
     }
 }
 
+fn relay_cursor_json(cursor: &RelayCursor) -> Value {
+    json!({
+        "kind": "relay",
+        "cursor": cursor.cursor,
+        "replicationEpoch": cursor.replication_epoch,
+        "streamIdentity": cursor.stream_identity,
+    })
+}
+
+fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
+    match outcome {
+        SyncPassOutcome::Complete {
+            pushed,
+            fetched,
+            has_more,
+            applied,
+            skipped,
+            conflicts_opened,
+            pending_cursor,
+            changed_paths,
+            pending_resolves,
+        } => json!({
+            "status": "complete",
+            "pushed": pushed,
+            "fetched": fetched,
+            "hasMore": has_more,
+            "applied": applied,
+            "skipped": skipped,
+            "conflictsOpened": conflicts_opened,
+            "nextCursor": pending_cursor.as_ref().map(|cursor| cursor.cursor),
+            "pendingCursor": pending_cursor.as_ref().map(relay_cursor_json),
+            "changedPaths": changed_paths.iter().map(|change| json!({
+                "path": change.path,
+                "operation": change.operation,
+                "contentKind": change.content_kind,
+            })).collect::<Vec<_>>(),
+            "pendingResolves": pending_resolves,
+        }),
+        SyncPassOutcome::CrashedAfterRemoteCommit => {
+            json!({ "status": "crashedAfterRemoteCommit" })
+        }
+        SyncPassOutcome::CrashedAfterApply {
+            applied,
+            skipped,
+            conflicts_opened,
+            pending_cursor,
+            changed_paths,
+            pending_resolves,
+        } => json!({
+            "status": "crashedAfterApply",
+            "applied": applied,
+            "skipped": skipped,
+            "conflictsOpened": conflicts_opened,
+            "nextCursor": pending_cursor.cursor,
+            "pendingCursor": relay_cursor_json(&pending_cursor),
+            "changedPaths": changed_paths.iter().map(|change| json!({
+                "path": change.path,
+                "operation": change.operation,
+                "contentKind": change.content_kind,
+            })).collect::<Vec<_>>(),
+            "pendingResolves": pending_resolves,
+        }),
+    }
+}
+
+fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError> {
+    Ok(match outcome {
+        RelayOperationOutcome::Sync(outcome) => sync_outcome_json(outcome),
+        RelayOperationOutcome::CursorCommitted => json!({ "committed": true }),
+        RelayOperationOutcome::Probe(has_content) => json!({ "hasContent": has_content }),
+        RelayOperationOutcome::Claimed => json!({ "claimed": true }),
+        RelayOperationOutcome::Recovered(outcome) => json!({
+            "oldOriginId": outcome.old_origin_id,
+            "newOriginId": outcome.new_origin_id,
+            "sharedPrefixLength": outcome.shared_prefix_length,
+            "preservedOps": outcome.preserved_ops,
+        }),
+        RelayOperationOutcome::KeyEnvelopeUploaded { etag } => json!({ "etag": etag }),
+        RelayOperationOutcome::KeyEnvelopeDownloaded {
+            envelope_json,
+            etag,
+        } => json!({
+            "envelopeJson": envelope_json,
+            "etag": etag,
+        }),
+        RelayOperationOutcome::SharedChannelPulled(outcome) => json!({
+            "fetched": outcome.fetched,
+            "hasMore": outcome.has_more,
+            "applied": outcome.applied,
+            "refused": outcome.refused,
+            "rejections": outcome.rejections.iter().map(|rejection| json!({
+                "originId": rejection.origin_id,
+                "originSeq": rejection.origin_seq,
+                "opKind": rejection.op_kind,
+                "reason": rejection.reason,
+            })).collect::<Vec<_>>(),
+            "skipped": outcome.skipped,
+            "nextCursor": outcome.next_cursor,
+        }),
+        RelayOperationOutcome::SharedChannelPushed(outcome) => {
+            json!({ "pushed": outcome.pushed })
+        }
+        RelayOperationOutcome::ShareViewPulled(outcome) => json!({
+            "fetched": outcome.fetched,
+            "hasMore": outcome.has_more,
+            "applied": outcome.applied,
+            "skipped": outcome.skipped,
+            "nextCursor": outcome.pending_cursor.cursor,
+            "changedPaths": outcome.changed_paths.into_iter().map(|change| json!({
+                "path": change.path,
+                "operation": change.operation,
+                "contentKind": change.content_kind,
+            })).collect::<Vec<_>>(),
+            "pendingCursor": {
+                "kind": "shareView",
+                "shareId": outcome.pending_cursor.share_id,
+                "cursor": outcome.pending_cursor.cursor,
+            },
+        }),
+    })
+}
+
 fn validate_workspace_param(candidate: Option<&str>, resolved: &str) -> Result<(), WireError> {
     if candidate.is_some_and(|candidate| candidate != resolved) {
         return Err(wire(ErrorCode::InvalidParams, "invalid-workspace"));
@@ -8916,6 +9574,12 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if matches!(&error, RuntimeError::Collab(CollabError::UnsettledClose)) {
         return wire(ErrorCode::InvalidParams, "ydoc-unsettled-close");
     }
+    if matches!(&error, RuntimeError::Relay(RelayError::OriginDiverged)) {
+        return wire(ErrorCode::InvalidParams, "relay-origin-diverged");
+    }
+    if matches!(&error, RuntimeError::Relay(RelayError::ShareReadOnly)) {
+        return wire(ErrorCode::InvalidParams, "share-read-only");
+    }
     if let RuntimeError::Domain(domain) = &error {
         let message = match domain {
             DomainError::IdempotencyKeyReuseMismatch => Some("idempotency-key-reuse-mismatch"),
@@ -8977,10 +9641,50 @@ fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Domain(error) => map_domain_code(error),
         RuntimeError::Collab(error) => map_collab_code(error),
         RuntimeError::Sync(error) => map_sync_code(error),
+        RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
         _ => ErrorCode::Internal,
     };
     wire(code, "workspace operation failed")
+}
+
+fn map_relay_code(error: RelayError) -> ErrorCode {
+    match error {
+        RelayError::Unauthorized => ErrorCode::AuthFailed,
+        RelayError::Forbidden => ErrorCode::Forbidden,
+        RelayError::Conflict => ErrorCode::Conflict,
+        RelayError::OriginDiverged => ErrorCode::OriginDiverged,
+        RelayError::ShareUnavailable => ErrorCode::ShareUnavailable,
+        RelayError::KeyEnvelopeMissing => ErrorCode::KeyEnvelopeMissing,
+        RelayError::EpochSuperseded => ErrorCode::EpochSuperseded,
+        RelayError::IdentityNotRecognized => ErrorCode::IdentityNotRecognized,
+        RelayError::ShareReadOnly => ErrorCode::ShareReadOnly,
+        RelayError::ShareOperationRejected => ErrorCode::ShareOperationRejected,
+        RelayError::PayloadTooLarge => ErrorCode::PayloadTooLarge,
+        RelayError::QuotaExceeded => ErrorCode::QuotaExceeded,
+        RelayError::NoProgress => ErrorCode::RelayNoProgress,
+        RelayError::BlobMissing => ErrorCode::BlobMissing,
+        RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
+        RelayError::BlobInvalid => ErrorCode::BlobInvalid,
+        RelayError::IdentityRequired => ErrorCode::IdentityRequired,
+        RelayError::StreamIdentityMismatch => ErrorCode::StreamIdentityMismatch,
+        RelayError::AuthorshipMismatch => ErrorCode::AuthorshipMismatch,
+        RelayError::UnknownChatOperation => ErrorCode::UnknownChatOperation,
+        RelayError::PresenceCapacity => ErrorCode::PresenceCapacity,
+        RelayError::SelfShare => ErrorCode::SelfShare,
+        RelayError::AmbiguousSelector => ErrorCode::AmbiguousSelector,
+        RelayError::InvalidChannel => ErrorCode::InvalidChannel,
+        RelayError::MethodNotAllowed => ErrorCode::RelayMethodNotAllowed,
+        RelayError::InvalidResponse => ErrorCode::RelayInvalidResponse,
+        RelayError::WorkspaceUnavailable | RelayError::Partitioned => {
+            ErrorCode::WorkspaceUnavailable
+        }
+        RelayError::ServerInternal
+        | RelayError::UnknownServerCode(_)
+        | RelayError::HttpStatus(_)
+        | RelayError::Local(_) => ErrorCode::Internal,
+        RelayError::BadRequest => ErrorCode::InvalidParams,
+    }
 }
 
 fn map_domain_code(error: DomainError) -> ErrorCode {
@@ -9083,6 +9787,30 @@ fn workspace_unavailable() -> WireError {
     )
 }
 
+fn recovered_origin_id() -> Result<String, WireError> {
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy)
+        .map_err(|_| wire(ErrorCode::Internal, "origin-id-generation-failed"))?;
+    Ok(origin_id_from_entropy(entropy))
+}
+
+fn origin_id_from_entropy(mut entropy: [u8; 16]) -> String {
+    entropy[6] = (entropy[6] & 0x0f) | 0x40;
+    entropy[8] = (entropy[8] & 0x3f) | 0x80;
+    let hex = entropy
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "origin_{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
 fn wire(code: ErrorCode, message: &'static str) -> WireError {
     WireError::new(code, message)
 }
@@ -9101,6 +9829,18 @@ mod tests {
     use std::time::Duration;
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn recovered_origins_use_random_uuid_identity_coordinates() {
+        let first = origin_id_from_entropy([0; 16]);
+        let second = origin_id_from_entropy([1; 16]);
+        assert_eq!(first, "origin_00000000-0000-4000-8000-000000000000");
+        assert_eq!(second, "origin_01010101-0101-4101-8101-010101010101");
+        assert_ne!(
+            first, second,
+            "cross-device entropy must participate in the recovered coordinate"
+        );
+    }
 
     #[test]
     fn runtime_error_mapping_separates_corruption_from_bad_input() {
@@ -9433,6 +10173,133 @@ mod tests {
                 "path": "doc.md",
                 "reason": "binary-unhydrated"
             })
+        );
+    }
+
+    #[test]
+    fn sync_outcome_json_surfaces_an_undrained_complete_pass() {
+        let value = sync_outcome_json(SyncPassOutcome::Complete {
+            pushed: 0,
+            fetched: 500,
+            has_more: true,
+            applied: 500,
+            skipped: 0,
+            conflicts_opened: 0,
+            pending_cursor: None,
+            changed_paths: Vec::new(),
+            pending_resolves: Vec::new(),
+        });
+
+        assert_eq!(value["status"], "complete");
+        assert_eq!(
+            value["hasMore"], true,
+            "MUTATION: omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
+        );
+    }
+
+    #[test]
+    fn relay_error_mapping_preserves_recovery_and_authorization_conditions() {
+        let cases = [
+            (RelayError::Conflict, ErrorCode::Conflict),
+            (RelayError::OriginDiverged, ErrorCode::OriginDiverged),
+            (RelayError::ShareUnavailable, ErrorCode::ShareUnavailable),
+            (
+                RelayError::KeyEnvelopeMissing,
+                ErrorCode::KeyEnvelopeMissing,
+            ),
+            (RelayError::EpochSuperseded, ErrorCode::EpochSuperseded),
+            (
+                RelayError::IdentityNotRecognized,
+                ErrorCode::IdentityNotRecognized,
+            ),
+            (RelayError::QuotaExceeded, ErrorCode::QuotaExceeded),
+            (RelayError::PayloadTooLarge, ErrorCode::PayloadTooLarge),
+            (RelayError::Forbidden, ErrorCode::Forbidden),
+            (RelayError::ShareReadOnly, ErrorCode::ShareReadOnly),
+            (
+                RelayError::ShareOperationRejected,
+                ErrorCode::ShareOperationRejected,
+            ),
+            (RelayError::NoProgress, ErrorCode::RelayNoProgress),
+            (RelayError::BlobMissing, ErrorCode::BlobMissing),
+            (
+                RelayError::BlobReferenceMissing,
+                ErrorCode::BlobReferenceMissing,
+            ),
+            (RelayError::BlobInvalid, ErrorCode::BlobInvalid),
+            (RelayError::IdentityRequired, ErrorCode::IdentityRequired),
+            (
+                RelayError::StreamIdentityMismatch,
+                ErrorCode::StreamIdentityMismatch,
+            ),
+            (
+                RelayError::AuthorshipMismatch,
+                ErrorCode::AuthorshipMismatch,
+            ),
+            (
+                RelayError::UnknownChatOperation,
+                ErrorCode::UnknownChatOperation,
+            ),
+            (RelayError::PresenceCapacity, ErrorCode::PresenceCapacity),
+            (RelayError::SelfShare, ErrorCode::SelfShare),
+            (RelayError::AmbiguousSelector, ErrorCode::AmbiguousSelector),
+            (RelayError::InvalidChannel, ErrorCode::InvalidChannel),
+            (
+                RelayError::MethodNotAllowed,
+                ErrorCode::RelayMethodNotAllowed,
+            ),
+            (RelayError::InvalidResponse, ErrorCode::RelayInvalidResponse),
+        ];
+        for (relay, expected) in cases {
+            assert_eq!(
+                map_relay_code(relay),
+                expected,
+                "MUTATION: collapsing a relay condition prevents generated clients from recovering"
+            );
+        }
+        assert_eq!(
+            map_relay_code(RelayError::Partitioned),
+            ErrorCode::WorkspaceUnavailable
+        );
+    }
+
+    #[test]
+    fn share_view_outcome_json_surfaces_has_more() {
+        let value = relay_outcome_json(RelayOperationOutcome::ShareViewPulled(
+            dohc_engine_sync::ShareViewPullOutcome {
+                fetched: 1,
+                has_more: true,
+                applied: 0,
+                skipped: 0,
+                changed_paths: Vec::new(),
+                pending_cursor: ShareCursor {
+                    kind: dohc_engine_sync::CursorKind::ShareView,
+                    share_id: "share".to_owned(),
+                    cursor: 1,
+                },
+            },
+        ))
+        .expect("serialize share view outcome");
+        assert_eq!(
+            value["hasMore"], true,
+            "MUTATION: omitting hasMore hides that the pending cursor is only a bounded prefix"
+        );
+    }
+
+    #[test]
+    fn relay_refusal_messages_preserve_recovery_meaning() {
+        let origin = map_runtime(RuntimeError::Relay(RelayError::OriginDiverged));
+        assert_eq!(origin.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            origin.message, "relay-origin-diverged",
+            "MUTATION: a generic INVALID_PARAMS would re-baseline on protocol errors"
+        );
+
+        let read_only = map_runtime(RuntimeError::Relay(RelayError::ShareReadOnly));
+        assert_eq!(read_only.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            read_only.message, "share-read-only",
+            "MUTATION: a generic INVALID_PARAMS would permanently downgrade writable shares"
         );
     }
 

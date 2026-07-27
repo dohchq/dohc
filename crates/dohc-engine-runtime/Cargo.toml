@@ -18,6 +18,7 @@ dohc-engine-crypto = { path = "../dohc-engine-crypto" }
 dohc-engine-domain = { path = "../dohc-engine-domain" }
 dohc-engine-collab = { path = "../dohc-engine-collab" }
 dohc-engine-sync = { path = "../dohc-engine-sync" }
+dohc-engine-sync-http = { path = "../dohc-engine-sync-http" }
 dohc-engine-files = { path = "../dohc-engine-files" }
 # OS file identity (POSIX dev+ino, Windows volume+file-index) as a hashable
 # value. Encapsulates the platform FFI so the engine crates keep

@@ -268,6 +268,10 @@ export class EngineDaemonLifecycle {
     }
   }
 
+  currentClient(): EngineDaemonClient {
+    return this.requireClient();
+  }
+
   async stop(): Promise<void> {
     if (!this.stopPromise) this.stopPromise = this.stopOnce();
     await this.stopPromise;

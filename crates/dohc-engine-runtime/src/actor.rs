@@ -35,7 +35,7 @@ use crate::search::{
 };
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
-    AppendOutcome, CloseOutcome, ContentKind, DocKey, Projection, Regime, Ydoc,
+    AppendOutcome, CloseOutcome, ContentKind, DocKey, LeaseRegistry, Projection, Regime, Ydoc,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -78,14 +78,22 @@ use dohc_engine_storage::{
     WriteOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
+    ApplyOutcome, BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
+    BlobUploadRequest, ClaimRequest, ClaimResponse, ConflictApplyResult, EpochRequest,
+    EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
+    KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
+    PushResponse, RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport,
+    ReplicationEnvelope, ShareBlobRequest, ShareCursor, ShareViewPullOutcome, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
+    SharedChannelResponse, SyncPassOutcome, apply_conflict_envelope, read_sync_identity,
 };
+use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, OwnedPermit};
@@ -221,6 +229,522 @@ pub struct YdocSettlement {
     pub markdown: String,
     pub sha256: String,
     pub projection: Projection,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RelayConfiguration {
+    pub base_url: String,
+    pub bearer_token: String,
+    #[cfg(debug_assertions)]
+    pub allow_insecure_loopback_for_tests: bool,
+}
+
+impl std::fmt::Debug for RelayConfiguration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayConfiguration")
+            .field("base_url", &self.base_url)
+            .field("bearer_token", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RelayOperation {
+    Push {
+        workspace_id: String,
+    },
+    Pull {
+        workspace_id: String,
+    },
+    CommitCursor {
+        workspace_id: String,
+        cursor: RelayCursor,
+    },
+    Probe {
+        workspace_id: String,
+    },
+    Claim {
+        workspace_id: String,
+    },
+    RecoverOrigin {
+        workspace_id: String,
+        new_origin_id: String,
+    },
+    UploadKeyEnvelope {
+        workspace_id: String,
+        envelope_json: String,
+        if_match: Option<String>,
+    },
+    DownloadKeyEnvelope {
+        workspace_id: String,
+    },
+    PullSharedChannel {
+        workspace_id: String,
+        share_id: String,
+        channel_wire_id: String,
+    },
+    PushSharedChannel {
+        workspace_id: String,
+        share_id: String,
+        channel_wire_id: String,
+    },
+    PullShareView {
+        workspace_id: String,
+        share_id: String,
+    },
+    CommitShareViewCursor {
+        workspace_id: String,
+        cursor: ShareCursor,
+    },
+}
+
+const RELAY_IO_PENDING: &str = "relay-io-pending";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayIoRequest {
+    Push(PushRequest),
+    Pull(PullRequest),
+    Probe(ProbeRequest),
+    Claim(ClaimRequest),
+    RotateEpoch(EpochRequest),
+    BlobsHave(BlobHaveRequest),
+    UploadBlob(BlobUploadRequest),
+    DownloadBlob(BlobDownloadRequest),
+    UploadKeyEnvelope(KeyEnvelopeRequest),
+    DownloadKeyEnvelope(KeyEnvelopeDownloadRequest),
+    SharedChannelPull(SharedChannelRequest),
+    SharedChannelPush(SharedChannelRequest),
+    ShareViewPull(ShareViewRequest),
+    ShareBlob(ShareBlobRequest),
+}
+
+#[derive(Debug, Clone)]
+enum RelayIoResponse {
+    Push(PushResponse),
+    Pull(PullResponse),
+    Probe(ProbeResponse),
+    Claim(ClaimResponse),
+    RotateEpoch(EpochResponse),
+    BlobsHave(BlobHaveResponse),
+    UploadBlob,
+    DownloadBlob(BlobDownloadResponse),
+    UploadKeyEnvelope(KeyEnvelopeResponse),
+    DownloadKeyEnvelope(KeyEnvelopeDownloadResponse),
+    SharedChannelPull(SharedChannelResponse),
+    SharedChannelPush(SharedChannelResponse),
+    ShareViewPull(ShareViewResponse),
+    ShareBlob(BlobDownloadResponse),
+}
+
+#[derive(Default)]
+struct DeferredRelayState {
+    completed: Vec<(RelayIoRequest, Result<RelayIoResponse, RelayError>)>,
+    pending: Option<RelayIoRequest>,
+    workspace_pushed: usize,
+    shared_channel_pushed: usize,
+}
+
+#[derive(Clone, Default)]
+struct DeferredRelayTransport {
+    state: Arc<Mutex<DeferredRelayState>>,
+}
+
+impl DeferredRelayTransport {
+    fn resolve<T>(
+        &self,
+        request: RelayIoRequest,
+        project: impl Fn(&RelayIoResponse) -> Option<T>,
+    ) -> Result<T, RelayError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = state
+            .completed
+            .iter()
+            .position(|(completed, _)| completed == &request)
+        {
+            let release = matches!(
+                state.completed[index].0,
+                RelayIoRequest::Push(_)
+                    | RelayIoRequest::SharedChannelPush(_)
+                    | RelayIoRequest::UploadBlob(_)
+                    | RelayIoRequest::DownloadBlob(_)
+                    | RelayIoRequest::UploadKeyEnvelope(_)
+                    | RelayIoRequest::DownloadKeyEnvelope(_)
+                    | RelayIoRequest::ShareBlob(_)
+            ) || matches!(
+                &state.completed[index].1,
+                Ok(RelayIoResponse::BlobsHave(response)) if response.missing.is_empty()
+            );
+            let uploaded = matches!(state.completed[index].0, RelayIoRequest::UploadBlob(_));
+            let projected = match &state.completed[index].1 {
+                Ok(response) => project(response).ok_or(RelayError::InvalidResponse),
+                Err(error) => Err(error.clone()),
+            };
+            if release && projected.is_ok() {
+                let _ = state.completed.swap_remove(index);
+                if uploaded {
+                    state
+                        .completed
+                        .retain(|(request, _)| !matches!(request, RelayIoRequest::BlobsHave(_)));
+                }
+            }
+            return projected;
+        }
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending != &request)
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        state.pending = Some(request);
+        Err(RelayError::Local(RELAY_IO_PENDING.to_owned()))
+    }
+
+    fn take_pending(&self) -> Option<RelayIoRequest> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .take()
+    }
+
+    fn complete(&self, request: RelayIoRequest, result: Result<RelayIoResponse, RelayError>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Ok(RelayIoResponse::Push(response)) = &result
+            && let RelayIoRequest::Push(request) = &request
+            && !request.ops.is_empty()
+        {
+            state.workspace_pushed = state.workspace_pushed.saturating_add(response.inserted);
+        }
+        if let Ok(RelayIoResponse::SharedChannelPush(response)) = &result
+            && let Some(push) = &response.push
+        {
+            state.shared_channel_pushed = state.shared_channel_pushed.saturating_add(push.inserted);
+        }
+        state.completed.push((request, result));
+    }
+
+    fn apply_progress(&self, outcome: &mut RelayOperationOutcome) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match outcome {
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) => {
+                *pushed = state.workspace_pushed;
+            }
+            RelayOperationOutcome::SharedChannelPushed(outcome) => {
+                outcome.pushed = state.shared_channel_pushed;
+            }
+            _ => {}
+        }
+    }
+}
+
+macro_rules! relay_transport_method {
+    ($name:ident, $request:ty, $request_variant:ident, $response:ty, $response_variant:ident) => {
+        fn $name(&self, request: $request) -> Result<$response, RelayError> {
+            self.resolve(
+                RelayIoRequest::$request_variant(request),
+                |response| match response {
+                    RelayIoResponse::$response_variant(value) => Some(value.clone()),
+                    _ => None,
+                },
+            )
+        }
+    };
+}
+
+impl RelayTransport for DeferredRelayTransport {
+    relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
+    relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
+    relay_transport_method!(probe, ProbeRequest, Probe, ProbeResponse, Probe);
+    relay_transport_method!(claim_workspace, ClaimRequest, Claim, ClaimResponse, Claim);
+    relay_transport_method!(
+        rotate_epoch,
+        EpochRequest,
+        RotateEpoch,
+        EpochResponse,
+        RotateEpoch
+    );
+    relay_transport_method!(
+        blobs_have,
+        BlobHaveRequest,
+        BlobsHave,
+        BlobHaveResponse,
+        BlobsHave
+    );
+
+    fn upload_blob(&self, request: BlobUploadRequest) -> Result<(), RelayError> {
+        self.resolve(RelayIoRequest::UploadBlob(request), |response| {
+            matches!(response, RelayIoResponse::UploadBlob).then_some(())
+        })
+    }
+
+    relay_transport_method!(
+        download_blob,
+        BlobDownloadRequest,
+        DownloadBlob,
+        BlobDownloadResponse,
+        DownloadBlob
+    );
+    relay_transport_method!(
+        upload_key_envelope,
+        KeyEnvelopeRequest,
+        UploadKeyEnvelope,
+        KeyEnvelopeResponse,
+        UploadKeyEnvelope
+    );
+    relay_transport_method!(
+        download_key_envelope,
+        KeyEnvelopeDownloadRequest,
+        DownloadKeyEnvelope,
+        KeyEnvelopeDownloadResponse,
+        DownloadKeyEnvelope
+    );
+    relay_transport_method!(
+        shared_channel_pull,
+        SharedChannelRequest,
+        SharedChannelPull,
+        SharedChannelResponse,
+        SharedChannelPull
+    );
+    relay_transport_method!(
+        shared_channel_push,
+        SharedChannelRequest,
+        SharedChannelPush,
+        SharedChannelResponse,
+        SharedChannelPush
+    );
+    relay_transport_method!(
+        share_view_pull,
+        ShareViewRequest,
+        ShareViewPull,
+        ShareViewResponse,
+        ShareViewPull
+    );
+    relay_transport_method!(
+        share_blob,
+        ShareBlobRequest,
+        ShareBlob,
+        BlobDownloadResponse,
+        ShareBlob
+    );
+}
+
+#[cfg(test)]
+mod deferred_relay_tests {
+    use super::*;
+
+    #[test]
+    fn completed_push_batches_release_consumed_request_payloads() {
+        let transport = DeferredRelayTransport::default();
+        let request = PushRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            origin_id: "origin".to_owned(),
+            after_seq: -1,
+            ops: (0..dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH)
+                .map(|origin_seq| dohc_engine_sync::ReplicationEnvelope {
+                    workspace_id: "workspace".to_owned(),
+                    origin_id: "origin".to_owned(),
+                    origin_seq: i64::try_from(origin_seq).expect("sequence"),
+                    op_kind: "probe".to_owned(),
+                    payload: serde_json::json!({"body": "retained until consumed"}),
+                    recorded_at_ms: 1_000,
+                })
+                .collect(),
+        };
+        transport.complete(
+            RelayIoRequest::Push(request.clone()),
+            Ok(RelayIoResponse::Push(PushResponse {
+                accepted: request.ops.len(),
+                inserted: request.ops.len(),
+                skipped: 0,
+                current_max_origin_seq: i64::try_from(request.ops.len() - 1).expect("maximum"),
+            })),
+        );
+
+        assert_eq!(
+            transport.push(request).expect("consume completed push"),
+            PushResponse {
+                accepted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
+                inserted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
+                skipped: 0,
+                current_max_origin_seq:
+                    i64::try_from(dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH - 1,).expect("maximum"),
+            }
+        );
+        assert!(
+            transport
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .completed
+                .is_empty(),
+            "MUTATION: omitting Push from the release set retains every consumed batch"
+        );
+    }
+
+    #[test]
+    fn large_multi_blob_pull_does_not_retain_consumed_buffers() {
+        let transport = DeferredRelayTransport::default();
+        for index in 0..64 {
+            let request = ShareBlobRequest {
+                share_id: "share".to_owned(),
+                sha256: format!("{index:064x}"),
+            };
+            let bytes = vec![u8::try_from(index).expect("byte"); 256 * 1024];
+            transport.complete(
+                RelayIoRequest::ShareBlob(request.clone()),
+                Ok(RelayIoResponse::ShareBlob(BlobDownloadResponse {
+                    bytes: bytes.clone(),
+                })),
+            );
+            assert_eq!(
+                transport.share_blob(request).expect("consume blob").bytes,
+                bytes
+            );
+        }
+
+        let state = transport
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let retained = state
+            .completed
+            .iter()
+            .filter_map(|(_, result)| match result {
+                Ok(RelayIoResponse::DownloadBlob(response))
+                | Ok(RelayIoResponse::ShareBlob(response)) => Some(response.bytes.len()),
+                _ => None,
+            })
+            .sum::<usize>();
+        assert_eq!(
+            retained, 0,
+            "persisted blob responses must be released before the RPC completes"
+        );
+    }
+
+    #[test]
+    fn completed_empty_blob_inventory_is_released_without_an_upload() {
+        let transport = DeferredRelayTransport::default();
+        let request = BlobHaveRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            sha256s: Vec::new(),
+        };
+        transport.complete(
+            RelayIoRequest::BlobsHave(request.clone()),
+            Ok(RelayIoResponse::BlobsHave(BlobHaveResponse {
+                missing: Vec::new(),
+            })),
+        );
+        assert!(
+            transport
+                .blobs_have(request)
+                .expect("consume inventory")
+                .missing
+                .is_empty()
+        );
+        assert!(
+            transport
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .completed
+                .is_empty(),
+            "MUTATION: retaining a successful all-present inventory holds its request vector"
+        );
+    }
+
+    #[test]
+    fn deferred_key_upload_surfaces_the_first_cas_conflict_without_a_cached_retry_loop() {
+        let transport = DeferredRelayTransport::default();
+        let request = KeyEnvelopeRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            envelope_json: "{}".to_owned(),
+            if_match: Some("stale".to_owned()),
+        };
+        transport.complete(
+            RelayIoRequest::UploadKeyEnvelope(request.clone()),
+            Err(RelayError::Conflict),
+        );
+        let client = RelaySyncClient::new(transport.clone());
+        assert_eq!(
+            client.upload_key_envelope(request),
+            Err(RelayError::Conflict)
+        );
+        assert!(
+            transport.take_pending().is_none(),
+            "MUTATION: rebasing the CAS conflict schedules a GET and re-enters cached I/O"
+        );
+    }
+
+    #[test]
+    fn deferred_multi_page_pull_schedules_each_http_request_once() {
+        let transport = DeferredRelayTransport::default();
+        let request = |cursor| PullRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            cursor,
+            limit: 1,
+        };
+        let mut scheduled = 0;
+        for next in 0..4 {
+            for cursor in 0..=next {
+                let result = transport.pull(request(cursor));
+                if cursor < next {
+                    assert!(result.is_ok(), "completed prefixes are memoized");
+                } else {
+                    assert_eq!(result, Err(RelayError::Local(RELAY_IO_PENDING.to_owned())));
+                    let pending = transport.take_pending().expect("one pending request");
+                    transport.complete(
+                        pending,
+                        Ok(RelayIoResponse::Pull(PullResponse {
+                            ops: Vec::new(),
+                            next_cursor: cursor + 1,
+                            has_more: cursor < 3,
+                        })),
+                    );
+                    scheduled += 1;
+                }
+            }
+        }
+        for cursor in 0..4 {
+            transport.pull(request(cursor)).expect("completed page");
+        }
+        assert_eq!(
+            scheduled, 4,
+            "each distinct HTTP page adds one actor turn; replay does not schedule a quadratic number"
+        );
+    }
+}
+
+#[derive(Debug)]
+pub enum RelayOperationOutcome {
+    Sync(SyncPassOutcome),
+    CursorCommitted,
+    Probe(bool),
+    Claimed,
+    Recovered(RecoverResponse),
+    KeyEnvelopeUploaded { etag: String },
+    KeyEnvelopeDownloaded { envelope_json: String, etag: String },
+    SharedChannelPulled(SharedChannelPullOutcome),
+    SharedChannelPushed(SharedChannelPushOutcome),
+    ShareViewPulled(ShareViewPullOutcome),
 }
 
 /// Daemon-owned sink for identities written by settlement. Recording before
@@ -1120,6 +1644,13 @@ enum Command {
         max_attempts: i64,
         now_ms: i64,
         reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
+    },
+    Relay {
+        transport: DeferredRelayTransport,
+        operation: RelayOperation,
+        leases: LeaseRegistry,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<RelayOperationOutcome, RuntimeError>>,
     },
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
@@ -4225,6 +4756,62 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn relay(
+        &self,
+        configuration: RelayConfiguration,
+        operation: RelayOperation,
+        leases: LeaseRegistry,
+        token: CancellationToken,
+    ) -> Result<RelayOperationOutcome, RuntimeError> {
+        let transport = DeferredRelayTransport::default();
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        let http_transport = Arc::new(build_http_transport(configuration)?);
+        loop {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let (reply, reply_rx) = oneshot::channel();
+            self.tx
+                .send(Command::Relay {
+                    transport: transport.clone(),
+                    operation: operation.clone(),
+                    leases: leases.clone(),
+                    token: token.clone(),
+                    reply,
+                })
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let outcome = reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?;
+            match outcome {
+                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                    if reason == RELAY_IO_PENDING =>
+                {
+                    let request = transport
+                        .take_pending()
+                        .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
+                    let http_transport = Arc::clone(&http_transport);
+                    let io_request = request.clone();
+                    let task = tokio::task::spawn_blocking(move || {
+                        execute_http_request(&http_transport, io_request)
+                    });
+                    let result = tokio::select! {
+                        result = task => result
+                            .map_err(|_| RuntimeError::Relay(RelayError::Partitioned))?,
+                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                    };
+                    transport.complete(request, result);
+                }
+                Ok(mut outcome) => {
+                    transport.apply_progress(&mut outcome);
+                    return Ok(outcome);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Run a long operation as a sequence of bounded units, cancellable at each
     /// between-unit boundary via `token`. Returns how many units committed.
     ///
@@ -5139,6 +5726,188 @@ fn switch_active_version_on_store(
         return Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs });
     }
     Ok(target)
+}
+
+fn build_http_transport(
+    configuration: RelayConfiguration,
+) -> Result<HttpRelayTransport, RelayError> {
+    #[cfg(debug_assertions)]
+    if configuration.allow_insecure_loopback_for_tests {
+        HttpRelayTransport::new_insecure_loopback_for_tests(
+            configuration.base_url,
+            configuration.bearer_token,
+        )
+    } else {
+        HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)
+    }
+}
+
+fn execute_http_request(
+    transport: &HttpRelayTransport,
+    request: RelayIoRequest,
+) -> Result<RelayIoResponse, RelayError> {
+    match request {
+        RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
+        RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),
+        RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
+        RelayIoRequest::Claim(request) => transport
+            .claim_workspace(request)
+            .map(RelayIoResponse::Claim),
+        RelayIoRequest::RotateEpoch(request) => transport
+            .rotate_epoch(request)
+            .map(RelayIoResponse::RotateEpoch),
+        RelayIoRequest::BlobsHave(request) => transport
+            .blobs_have(request)
+            .map(RelayIoResponse::BlobsHave),
+        RelayIoRequest::UploadBlob(request) => transport
+            .upload_blob(request)
+            .map(|()| RelayIoResponse::UploadBlob),
+        RelayIoRequest::DownloadBlob(request) => transport
+            .download_blob(request)
+            .map(RelayIoResponse::DownloadBlob),
+        RelayIoRequest::UploadKeyEnvelope(request) => transport
+            .upload_key_envelope(request)
+            .map(RelayIoResponse::UploadKeyEnvelope),
+        RelayIoRequest::DownloadKeyEnvelope(request) => transport
+            .download_key_envelope(request)
+            .map(RelayIoResponse::DownloadKeyEnvelope),
+        RelayIoRequest::SharedChannelPull(request) => transport
+            .shared_channel_pull(request)
+            .map(RelayIoResponse::SharedChannelPull),
+        RelayIoRequest::SharedChannelPush(request) => transport
+            .shared_channel_push(request)
+            .map(RelayIoResponse::SharedChannelPush),
+        RelayIoRequest::ShareViewPull(request) => transport
+            .share_view_pull(request)
+            .map(RelayIoResponse::ShareViewPull),
+        RelayIoRequest::ShareBlob(request) => transport
+            .share_blob(request)
+            .map(RelayIoResponse::ShareBlob),
+    }
+}
+
+fn execute_relay_operation(
+    store: &mut EngineStore,
+    transport: DeferredRelayTransport,
+    operation: RelayOperation,
+    leases: &LeaseRegistry,
+) -> Result<RelayOperationOutcome, RuntimeError> {
+    let client = RelaySyncClient::new(transport);
+    match operation {
+        RelayOperation::Push { workspace_id } => client
+            .push_workspace(store, &workspace_id, &NoFaults)
+            .map(RelayOperationOutcome::Sync)
+            .map_err(RuntimeError::from),
+        RelayOperation::Pull { workspace_id } => client
+            .pull_chat_workspace(store, &workspace_id, &NoFaults, leases)
+            .map(RelayOperationOutcome::Sync)
+            .map_err(RuntimeError::from),
+        RelayOperation::CommitCursor {
+            workspace_id,
+            cursor,
+        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
+        RelayOperation::Probe { workspace_id } => {
+            let identity = read_sync_identity(store, &workspace_id)?
+                .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?;
+            client
+                .probe(ProbeRequest {
+                    workspace_id,
+                    replication_epoch: identity.replication_epoch,
+                    stream_identity: identity.stream_identity,
+                })
+                .map(|response| RelayOperationOutcome::Probe(response.has_content))
+                .map_err(RuntimeError::from)
+        }
+        RelayOperation::Claim { workspace_id } => {
+            let identity = read_sync_identity(store, &workspace_id)?
+                .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?;
+            client.claim_workspace(ClaimRequest {
+                workspace_id,
+                replication_epoch: identity.replication_epoch,
+                stream_identity: identity.stream_identity,
+            })?;
+            Ok(RelayOperationOutcome::Claimed)
+        }
+        RelayOperation::RecoverOrigin {
+            workspace_id,
+            new_origin_id,
+        } => client
+            .recover_origin(store, &workspace_id, &new_origin_id, &NoFaults)
+            .map(RelayOperationOutcome::Recovered)
+            .map_err(RuntimeError::from),
+        RelayOperation::UploadKeyEnvelope {
+            workspace_id,
+            envelope_json,
+            if_match,
+        } => {
+            let identity = read_sync_identity(store, &workspace_id)?
+                .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?;
+            client
+                .upload_key_envelope(KeyEnvelopeRequest {
+                    workspace_id,
+                    replication_epoch: identity.replication_epoch,
+                    stream_identity: identity.stream_identity,
+                    envelope_json,
+                    if_match,
+                })
+                .map(|response| RelayOperationOutcome::KeyEnvelopeUploaded {
+                    etag: response.etag,
+                })
+                .map_err(RuntimeError::from)
+        }
+        RelayOperation::DownloadKeyEnvelope { workspace_id } => {
+            let identity = read_sync_identity(store, &workspace_id)?
+                .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?;
+            client
+                .download_key_envelope(KeyEnvelopeDownloadRequest {
+                    workspace_id,
+                    replication_epoch: identity.replication_epoch,
+                    stream_identity: identity.stream_identity,
+                })
+                .map(|response| RelayOperationOutcome::KeyEnvelopeDownloaded {
+                    envelope_json: response.envelope_json,
+                    etag: response.etag,
+                })
+                .map_err(RuntimeError::from)
+        }
+        RelayOperation::PullSharedChannel {
+            workspace_id,
+            share_id,
+            channel_wire_id,
+        } => client
+            .pull_shared_channel(store, &workspace_id, &share_id, &channel_wire_id, &NoFaults)
+            .map(RelayOperationOutcome::SharedChannelPulled)
+            .map_err(RuntimeError::from),
+        RelayOperation::PushSharedChannel {
+            workspace_id,
+            share_id,
+            channel_wire_id,
+        } => client
+            .push_shared_channel(store, &workspace_id, &share_id, &channel_wire_id, &NoFaults)
+            .map(RelayOperationOutcome::SharedChannelPushed)
+            .map_err(RuntimeError::from),
+        RelayOperation::PullShareView {
+            workspace_id,
+            share_id,
+        } => client
+            .pull_share_view(store, &workspace_id, &share_id, &NoFaults)
+            .map(RelayOperationOutcome::ShareViewPulled)
+            .map_err(RuntimeError::from),
+        RelayOperation::CommitShareViewCursor {
+            workspace_id,
+            cursor,
+        } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
+    }
 }
 
 fn worker_main(
@@ -7143,6 +7912,20 @@ fn worker_main(
                             )
                         })
                         .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::Relay {
+                transport,
+                operation,
+                leases,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    execute_relay_operation(&mut store, transport, operation, &leases)
                 };
                 let _ = reply.send(outcome);
             }
