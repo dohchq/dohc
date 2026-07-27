@@ -52,6 +52,7 @@ const SQLITE_SOURCE_FILES: [&str; 4] = [
 ];
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const HARD_LINK_FILE_SAMPLE_LIMIT: usize = 128;
+const HARD_LINK_TWIN_PATH_SAMPLE_LIMIT: usize = 32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessConfig<'a> {
@@ -1067,16 +1068,18 @@ fn clone_tree(source: &Path, destination: &Path) -> Result<CloneTreeResult, Harn
     let source_metadata = symlink_metadata(source, "inspect source root during clone")?;
     let source_identity = traversal_identity(source, &source_metadata)?;
     let mut skipped_roots = Vec::new();
+    let mut hard_links = new_hard_link_evidence();
     clone_directory(
         source,
         source,
         destination,
         source_identity,
         &mut skipped_roots,
+        &mut hard_links,
     )?;
     Ok(CloneTreeResult {
         floor_skips: summarize_floor_skips(skipped_roots),
-        hard_links: new_hard_link_evidence(),
+        hard_links,
     })
 }
 
@@ -1086,6 +1089,7 @@ fn clone_directory(
     destination: &Path,
     source_identity: TraversalIdentity,
     skipped_roots: &mut Vec<FloorSkippedRoot>,
+    hard_links: &mut HardLinkEvidence,
 ) -> Result<(), HarnessError> {
     let metadata = symlink_metadata(source, "inspect source directory during clone")?;
     if !metadata.is_dir()
@@ -1130,17 +1134,35 @@ fn clone_directory(
                 &destination_path,
                 source_identity,
                 skipped_roots,
+                hard_links,
             )?;
         } else if metadata.is_file() {
             if is_floor_excluded_file(&relative_path) {
                 skipped_roots.push(floor_skipped_root(source_root, &source_path, &metadata)?);
                 continue;
             }
-            let link_count = metadata_link_count(&source_path, &metadata)?;
-            if link_count > 1 {
-                return Err(HarnessError::UnsupportedEntry {
-                    path: display_path(&source_path),
-                });
+            let topology = metadata_hard_link_topology(&source_path, &metadata)?;
+            if topology.link_count > 1 {
+                let Some(twin_paths) = topology.twin_paths else {
+                    // Unix nlink exposes the existence of aliases but not their paths.
+                    // Without a portable enumerator, containment cannot be proven, so
+                    // the rehearsal deliberately keeps failing closed on Unix.
+                    return Err(HarnessError::UnsupportedEntry {
+                        path: display_path(&source_path),
+                    });
+                };
+                if record_hard_link_topology(
+                    source_root,
+                    &source_path,
+                    &relative_path,
+                    topology.link_count,
+                    twin_paths,
+                    hard_links,
+                )? {
+                    return Err(HarnessError::UnsupportedEntry {
+                        path: display_path(&source_path),
+                    });
+                }
             }
             std::fs::copy(&source_path, &destination_path).map_err(|source| HarnessError::Io {
                 operation: "copy source file into clone",
@@ -1167,8 +1189,8 @@ fn is_internal_dohc_path(relative_path: &str) -> bool {
 
 fn new_hard_link_evidence() -> HardLinkEvidence {
     HardLinkEvidence {
-        clone_semantics: "Hard-linked source files are refused before copying so the rehearsal applies the same hard-link contract as production inventory and settle.".to_owned(),
-        real_cutover_flag: "A complete rehearsal contains no hard-linked source files; any link count above one fails closed before reset.".to_owned(),
+        clone_semantics: "Hard-linked source files whose twins all resolve inside the source tree are copied byte-for-byte into independent regular files. Outside-source twins, or hard links whose twins cannot be enumerated, are refused before copying.".to_owned(),
+        real_cutover_flag: "A complete rehearsal may contain recorded inside-source hard-link twins. Any observed outside-source twin is refused before reset because the real workspace would share file identity beyond the rehearsed source boundary.".to_owned(),
         hard_linked_source_file_count: 0,
         total_link_count: 0,
         total_twin_path_count: 0,
@@ -1183,14 +1205,30 @@ fn new_hard_link_evidence() -> HardLinkEvidence {
     }
 }
 
+struct SourceHardLinkTopology {
+    link_count: u64,
+    twin_paths: Option<Vec<PathBuf>>,
+}
+
 #[cfg(unix)]
-fn metadata_link_count(_path: &Path, metadata: &Metadata) -> Result<u64, HarnessError> {
+fn metadata_hard_link_topology(
+    _path: &Path,
+    metadata: &Metadata,
+) -> Result<SourceHardLinkTopology, HarnessError> {
     use std::os::unix::fs::MetadataExt as _;
-    Ok(metadata.nlink())
+    // POSIX nlink provides only a count. There is no portable API for finding
+    // the other directory entries, so callers must fail closed when nlink > 1.
+    Ok(SourceHardLinkTopology {
+        link_count: metadata.nlink(),
+        twin_paths: None,
+    })
 }
 
 #[cfg(windows)]
-fn metadata_link_count(path: &Path, _metadata: &Metadata) -> Result<u64, HarnessError> {
+fn metadata_hard_link_topology(
+    path: &Path,
+    _metadata: &Metadata,
+) -> Result<SourceHardLinkTopology, HarnessError> {
     let output = std::process::Command::new("fsutil")
         .args(["hardlink", "list"])
         .arg(path)
@@ -1209,10 +1247,151 @@ fn metadata_link_count(path: &Path, _metadata: &Metadata) -> Result<u64, Harness
             )),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
+    let listed_paths = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count() as u64)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| resolve_fsutil_hard_link_path(path, line))
+        .collect::<Result<Vec<_>, _>>()?;
+    if listed_paths.is_empty() {
+        return Err(hard_link_topology_error(
+            "fsutil returned no paths for a regular file",
+        ));
+    }
+    let resolved_source = canonicalize(path, "resolve source hard-link path")?;
+    let source_occurrences = listed_paths
+        .iter()
+        .filter(|listed| same_path(listed, &resolved_source))
+        .count();
+    if source_occurrences != 1 {
+        return Err(hard_link_topology_error(format!(
+            "fsutil returned the inspected path {source_occurrences} times"
+        )));
+    }
+    let link_count = u64::try_from(listed_paths.len())
+        .map_err(|_| hard_link_topology_error("hard-link path count overflow"))?;
+    let twin_paths = listed_paths
+        .into_iter()
+        .filter(|listed| !same_path(listed, &resolved_source))
+        .collect();
+    Ok(SourceHardLinkTopology {
+        link_count,
+        twin_paths: Some(twin_paths),
+    })
+}
+
+#[cfg(windows)]
+fn resolve_fsutil_hard_link_path(path: &Path, listed: &str) -> Result<PathBuf, HarnessError> {
+    let listed_path = Path::new(listed);
+    let unresolved = if matches!(listed_path.components().next(), Some(Component::Prefix(_))) {
+        listed_path.to_path_buf()
+    } else {
+        let volume_root = path
+            .ancestors()
+            .last()
+            .ok_or_else(|| hard_link_topology_error("source file has no volume root"))?;
+        volume_root.join(listed.trim_start_matches(['\\', '/']))
+    };
+    canonicalize(&unresolved, "resolve enumerated hard-link path")
+}
+
+#[cfg(windows)]
+fn hard_link_topology_error(detail: impl ToString) -> HarnessError {
+    HarnessError::Io {
+        operation: "inspect source hard-link topology",
+        source: std::io::Error::other(detail.to_string()),
+    }
+}
+
+// Only the Windows topology probe compares enumerated twin paths; Unix has no
+// portable enumerator and fails closed instead, so this is dead code there.
+#[cfg(windows)]
+fn same_path(left: &Path, right: &Path) -> bool {
+    comparable_components(left) == comparable_components(right)
+}
+
+fn record_hard_link_topology(
+    source_root: &Path,
+    source_path: &Path,
+    relative_path: &str,
+    link_count: u64,
+    twin_paths: Vec<PathBuf>,
+    evidence: &mut HardLinkEvidence,
+) -> Result<bool, HarnessError> {
+    let resolved_source_root = canonicalize(source_root, "resolve hard-link source root")?;
+    let expected_twin_count = link_count
+        .checked_sub(1)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| {
+            HarnessError::IncompleteOutcome("hard-link twin count overflow".to_owned())
+        })?;
+    if twin_paths.len() != expected_twin_count {
+        return Err(HarnessError::IncompleteOutcome(format!(
+            "hard-link topology for {} listed {} twins for link count {link_count}",
+            display_path(source_path),
+            twin_paths.len()
+        )));
+    }
+
+    let twin_paths = twin_paths
+        .into_iter()
+        .map(|resolved_path| {
+            let location = if is_within(&resolved_path, &resolved_source_root) {
+                HardLinkTwinLocation::InsideSourceTree
+            } else {
+                HardLinkTwinLocation::OutsideSourceTree
+            };
+            HardLinkTwinSample {
+                resolved_path: Some(display_path(&resolved_path)),
+                location,
+            }
+        })
+        .collect::<Vec<_>>();
+    let inside_count = twin_paths
+        .iter()
+        .filter(|twin| twin.location == HardLinkTwinLocation::InsideSourceTree)
+        .count();
+    let outside_count = twin_paths.len() - inside_count;
+
+    evidence.hard_linked_source_file_count += 1;
+    evidence.total_link_count = evidence
+        .total_link_count
+        .checked_add(link_count)
+        .ok_or_else(|| {
+            HarnessError::IncompleteOutcome("aggregate hard-link count overflow".to_owned())
+        })?;
+    evidence.total_twin_path_count += twin_paths.len();
+    evidence.inside_source_tree_twin_count += inside_count;
+    evidence.outside_source_tree_twin_count += outside_count;
+    if outside_count > 0 {
+        evidence.outside_source_tree_observed = true;
+        evidence.flagged_observation_for_ice = Some(
+            "Refused: at least one hard-link twin resolved outside the source tree, so the rehearsal could not prove the real reset boundary was self-contained.".to_owned(),
+        );
+    }
+
+    if evidence.files.len() < HARD_LINK_FILE_SAMPLE_LIMIT {
+        let sampled_twin_path_count = twin_paths.len().min(HARD_LINK_TWIN_PATH_SAMPLE_LIMIT);
+        evidence.files.push(HardLinkedSourceFile {
+            relative_path: relative_path.to_owned(),
+            link_count,
+            twin_path_count: twin_paths.len(),
+            inside_source_tree_twin_count: inside_count,
+            outside_source_tree_twin_count: outside_count,
+            sampled_twin_path_count,
+            omitted_twin_path_count: twin_paths.len() - sampled_twin_path_count,
+            twin_path_sample_limit: HARD_LINK_TWIN_PATH_SAMPLE_LIMIT,
+            twin_paths: twin_paths
+                .into_iter()
+                .take(HARD_LINK_TWIN_PATH_SAMPLE_LIMIT)
+                .collect(),
+        });
+        evidence.sampled_file_count = evidence.files.len();
+    } else {
+        evidence.omitted_file_count += 1;
+    }
+
+    Ok(outside_count > 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2583,11 +2762,48 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn hard_linked_source_files_are_refused_before_copying() {
+    fn inside_source_hard_link_twins_are_cloned_and_recorded() {
         let source = fixture_source();
         std::fs::hard_link(source.join("note.md"), source.join("note-alias.md"))
             .expect("hard-link fixture");
+        let clone_parent = ScratchDir::new().expect("clone parent");
+        let clone = clone_parent.join("clone");
+
+        let result = clone_tree(source.path(), &clone).expect("inside-source twins are safe");
+
+        assert_eq!(
+            std::fs::read(clone.join("note.md")).expect("cloned source name"),
+            std::fs::read(source.join("note.md")).expect("source bytes")
+        );
+        assert_eq!(
+            std::fs::read(clone.join("note-alias.md")).expect("cloned twin name"),
+            std::fs::read(source.join("note-alias.md")).expect("twin bytes")
+        );
+        assert_eq!(result.hard_links.hard_linked_source_file_count, 2);
+        assert_eq!(result.hard_links.total_link_count, 4);
+        assert_eq!(result.hard_links.total_twin_path_count, 2);
+        assert_eq!(result.hard_links.inside_source_tree_twin_count, 2);
+        assert_eq!(result.hard_links.outside_source_tree_twin_count, 0);
+        assert!(!result.hard_links.outside_source_tree_observed);
+        assert_eq!(result.hard_links.sampled_file_count, 2);
+        assert_eq!(result.hard_links.omitted_file_count, 0);
+        assert!(result.hard_links.files.iter().all(|file| {
+            file.inside_source_tree_twin_count == 1
+                && file.outside_source_tree_twin_count == 0
+                && file.twin_paths[0].location == HardLinkTwinLocation::InsideSourceTree
+        }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn outside_source_hard_link_twin_is_refused() {
+        let source = fixture_source();
+        let outside_parent = ScratchDir::new().expect("outside parent");
+        let outside_twin = outside_parent.join("outside-note.md");
+        std::fs::hard_link(source.join("note.md"), &outside_twin)
+            .expect("outside hard-link fixture");
         let clone_parent = ScratchDir::new().expect("clone parent");
         let clone = clone_parent.join("clone");
 
@@ -2595,12 +2811,27 @@ mod tests {
 
         assert!(
             matches!(result, Err(HarnessError::UnsupportedEntry { .. })),
-            "hard-linked source files must fail closed before std::fs::copy"
+            "a hard-link twin outside the source boundary must fail closed"
         );
-        assert!(
-            !clone.join("note.md").exists() && !clone.join("note-alias.md").exists(),
-            "neither hard-linked path may be copied into the rehearsal clone"
+        assert_eq!(
+            std::fs::read(&outside_twin).expect("outside twin remains readable"),
+            std::fs::read(source.join("note.md")).expect("source bytes remain readable")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_links_fail_closed_when_twin_paths_cannot_be_enumerated() {
+        let source = fixture_source();
+        std::fs::hard_link(source.join("note.md"), source.join("note-alias.md"))
+            .expect("hard-link fixture");
+        let clone_parent = ScratchDir::new().expect("clone parent");
+        let clone = clone_parent.join("clone");
+
+        assert!(matches!(
+            clone_tree(source.path(), &clone),
+            Err(HarnessError::UnsupportedEntry { .. })
+        ));
     }
 
     #[cfg(windows)]

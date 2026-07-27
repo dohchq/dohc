@@ -10,6 +10,13 @@ const requiredSteps = [
   "build --workspace",
   "test --workspace",
   "cargo-deny",
+  // cargo-audit was deliberately absent from this list because CI did not
+  // install the tool, so the gate probed for it and reported SKIP -- which
+  // meant every PR showed "cargo-audit=SKIP" beside a row of PASSes and no
+  // advisory scan ever ran. The workflow now installs a pinned cargo-audit,
+  // so a SKIP here is a regression in the install, not an honest absence,
+  // and must fail the gate rather than read as green.
+  "cargo-audit",
 ];
 
 export function requireCiPassVerdict(log) {
