@@ -2139,6 +2139,43 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn secret_parent_openat2_refuses_a_symlinked_component_directly() {
+        let scratch = Scratch::new("secret-openat2-no-symlinks");
+        let root = scratch.root.as_path();
+        let redirected_parent = root.join("real").join("nested");
+        std::fs::create_dir_all(&redirected_parent).expect("real tree");
+        let outside = Scratch::new("secret-openat2-outside");
+        std::os::unix::fs::symlink(Path::new("real"), root.join("link"))
+            .expect("create ancestor symlink");
+
+        let relative_parent = Path::new("link/nested");
+        let display_parent = root.join(relative_parent);
+        let redirected_target = redirected_parent.join(".env");
+        let outside_target = outside.root.join(".env");
+        let plaintext = b"SECRET=must-not-escape\n";
+        let opened = open_secret_parent_unix(root, relative_parent, &display_parent);
+        if let Ok(parent_fd) = &opened {
+            write_secret_temp_at_unix(parent_fd, OsStr::new(".env"), &redirected_target, plaintext)
+                .expect("a mistakenly accepted parent handle permits the secret write");
+        }
+
+        assert!(
+            !redirected_target.exists(),
+            "plaintext must not be written through a symlinked ancestor"
+        );
+        assert!(
+            !outside_target.exists(),
+            "plaintext must not be written anywhere outside the pinned root"
+        );
+        assert!(
+            matches!(opened, Err(MaterializeError::SymlinkTarget)),
+            "a symlinked ancestor must be refused by the Linux parent opener, got {:?}",
+            opened.map(|_| "Ok")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn secret_parent_walk_classifies_symlink_planted_before_reopen() {
         use std::os::fd::OwnedFd;
 
