@@ -19,21 +19,14 @@ import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { nativeTmpdir } from "./testTemp";
 
 const roots: string[] = [];
-const ORIGINAL_RUST_ENGINE_ADAPTER = process.env.DOHC_RUST_ENGINE_ADAPTER;
 
 afterEach(async () => {
-  if (ORIGINAL_RUST_ENGINE_ADAPTER === undefined) {
-    delete process.env.DOHC_RUST_ENGINE_ADAPTER;
-  } else {
-    process.env.DOHC_RUST_ENGINE_ADAPTER = ORIGINAL_RUST_ENGINE_ADAPTER;
-  }
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
 });
 
 it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", async () => {
-  process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
   const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-restart-"));
   roots.push(rootPath);
   const loopback = new VersionedLoopbackEngine();

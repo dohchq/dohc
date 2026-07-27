@@ -59,7 +59,6 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
 const roots: string[] = [];
 const ORIGINAL_KERNEL_SIDECAR = process.env.DOHC_KERNEL_SIDECAR;
 const ORIGINAL_KERNEL_BINARY_PATH = process.env.DOHC_KERNEL_BINARY_PATH;
-const ORIGINAL_RUST_ENGINE_ADAPTER = process.env.DOHC_RUST_ENGINE_ADAPTER;
 
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-capture-"));
@@ -77,11 +76,6 @@ afterEach(async () => {
   else process.env.DOHC_KERNEL_SIDECAR = ORIGINAL_KERNEL_SIDECAR;
   if (ORIGINAL_KERNEL_BINARY_PATH === undefined) delete process.env.DOHC_KERNEL_BINARY_PATH;
   else process.env.DOHC_KERNEL_BINARY_PATH = ORIGINAL_KERNEL_BINARY_PATH;
-  if (ORIGINAL_RUST_ENGINE_ADAPTER === undefined) {
-    delete process.env.DOHC_RUST_ENGINE_ADAPTER;
-  } else {
-    process.env.DOHC_RUST_ENGINE_ADAPTER = ORIGINAL_RUST_ENGINE_ADAPTER;
-  }
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -270,23 +264,6 @@ function readEngineMomentAuthors(rootPath: string): Array<Record<string, unknown
 }
 
 describe("workspaceEngineCapture batch capture", () => {
-  it("leaves the TypeScript stores untouched when Rust sessions exist but the flag is off", async () => {
-    const root = await tempRoot();
-    const loopback = new VersionedLoopbackEngine();
-    delete process.env.DOHC_RUST_ENGINE_ADAPTER;
-    const engine = createWorkspaceEngineCapture({
-      workspaceId: "engine-capture-test",
-      rootPath: root,
-      rustEngineSessions: mockLiveSessions(loopback),
-    });
-
-    engine.start();
-    await engine.flush();
-    await engine.stop();
-    expect(loopback.requests).toHaveLength(0);
-    expect(existsSync(join(root, ".dohc", "engine", "engine.db"))).toBe(true);
-  });
-
   it("uses the daemon as the sole capture and version-switch materialization owner", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
@@ -297,7 +274,6 @@ describe("workspaceEngineCapture batch capture", () => {
       path: "note.md",
       text: "main",
     });
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback, requests),
       daemonOwnsCapture: true,
@@ -364,7 +340,6 @@ describe("workspaceEngineCapture batch capture", () => {
       path: "just-saved.md",
       text: "ready for chat",
     });
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback, requests),
       daemonOwnsCapture: true,
@@ -395,7 +370,6 @@ describe("workspaceEngineCapture batch capture", () => {
       degraded: !settled,
     }));
     const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: sessions,
       daemonOwnsCapture: true,
@@ -422,7 +396,6 @@ describe("workspaceEngineCapture batch capture", () => {
       path: "note.md",
       text: "seed",
     });
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const baseDoc = new Y.Doc();
     baseDoc.getText("content").insert(0, "base");
     const staleInitialUpdate = Y.encodeStateAsUpdate(baseDoc);
@@ -511,7 +484,6 @@ describe("workspaceEngineCapture batch capture", () => {
       text: "VALUE=main\n",
     });
     await write(root, ".env", "VALUE=main\n");
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
       daemonOwnsCapture: true,
@@ -540,7 +512,6 @@ describe("workspaceEngineCapture batch capture", () => {
       const loopback = new VersionedLoopbackEngine();
       const rustEngineSessions =
         backend === "live" ? mockLiveSessions(loopback) : undefined;
-      if (backend === "live") process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
 
       await write(root, "notes.md", "main text\n");
       const engine = capture(root, {
@@ -580,7 +551,6 @@ describe("workspaceEngineCapture batch capture", () => {
   it("hydrates target text after the daemon metadata-only list before materialization", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
     });
@@ -616,7 +586,6 @@ describe("workspaceEngineCapture batch capture", () => {
   it("uses list metadata sha to avoid binary hydration when target bytes already match", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
     });
@@ -640,7 +609,6 @@ describe("workspaceEngineCapture batch capture", () => {
   it("validates an unknown switch target from metadata without attempting text hydration", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
     });
@@ -664,7 +632,6 @@ describe("workspaceEngineCapture batch capture", () => {
       path: "closed-period-delete.md",
       text: "gone from disk\n",
     });
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
     });
@@ -691,7 +658,6 @@ describe("workspaceEngineCapture batch capture", () => {
   it("uses previous-version metadata for deletion planning without hydrating its text", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
     });
@@ -2438,7 +2404,6 @@ describe("workspaceEngineCapture agent attribution", () => {
     const root = await tempRoot();
     const requests: Request[] = [];
     const loopback = new VersionedLoopbackEngine();
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback, requests),
       daemonOwnsCapture: true,
@@ -2468,7 +2433,6 @@ describe("workspaceEngineCapture agent attribution", () => {
     const requests: Request[] = [];
     const loopback = new VersionedLoopbackEngine();
     let settled = false;
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
         settled,

@@ -17,7 +17,6 @@ const binaryPath = fileURLToPath(
     import.meta.url,
   ),
 );
-const originalRustAdapter = process.env.DOHC_RUST_ENGINE_ADAPTER;
 const originalKernelSidecar = process.env.DOHC_KERNEL_SIDECAR;
 const roots: string[] = [];
 
@@ -48,11 +47,6 @@ async function waitForPathMoments(
 }
 
 afterEach(async () => {
-  if (originalRustAdapter === undefined) {
-    delete process.env.DOHC_RUST_ENGINE_ADAPTER;
-  } else {
-    process.env.DOHC_RUST_ENGINE_ADAPTER = originalRustAdapter;
-  }
   if (originalKernelSidecar === undefined) {
     delete process.env.DOHC_KERNEL_SIDECAR;
   } else {
@@ -68,7 +62,6 @@ afterEach(async () => {
 it.skipIf(!existsSync(binaryPath))(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     process.env.DOHC_KERNEL_SIDECAR = "0";
     const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-e2e-"));
     roots.push(root);

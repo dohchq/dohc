@@ -6,7 +6,6 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
-  createLinkedChatStore,
   type LinkedChatStore,
 } from "@dohc/workspace-engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -290,15 +289,14 @@ afterEach(async () => {
   );
 });
 
-for (const backend of ["legacy", "live"] as const) {
-  describe(`main chat IPC ${backend} backend`, () => {
+describe("main chat IPC live backend", () => {
     it("round_trips_channels_threads_messages_read_decision_reaction_bookmark_and_follow", async () => {
       const rootPath = await mkdtemp(
-        join(nativeTmpdir(), `dohc-main-chat-${backend}-`),
+        join(nativeTmpdir(), "dohc-main-chat-live-"),
       );
       roots.push(rootPath);
       const workspace = {
-        workspaceId: `workspace-${backend}`,
+        workspaceId: "workspace-live",
         rootPath,
       };
       const engine = new ChatsLoopbackEngine();
@@ -306,13 +304,8 @@ for (const backend of ["legacy", "live"] as const) {
       const sessions = new EngineWorkspaceSessions({
         currentClient: () => client,
       });
-      const legacyFactory = vi.fn(
-        (root: string): LinkedChatStore => createLinkedChatStore(root),
-      );
       const store = createDesktopLinkedChatStore(workspace, {
-        rustEngineEnabled: backend === "live",
-        sessions: backend === "live" ? sessions : null,
-        createLegacyStore: legacyFactory,
+        sessions,
       });
       const ipc = runtimeHarness();
       registerChatFlowHandlers({ workspace, store }, ipc);
@@ -424,37 +417,30 @@ for (const backend of ["legacy", "live"] as const) {
           state: "following",
         });
 
-        if (backend === "live") {
-          expect(legacyFactory).not.toHaveBeenCalled();
-          expect(client.requests.map((request) => request.method)).toEqual(
-            expect.arrayContaining([
-              "workspace.open",
-              "chats.channels.create",
-              "chats.channels.list",
-              "chats.threads.start",
-              "chats.threads.listForChannel",
-              "chats.messages.send",
-              "chats.messages.list",
-              "chats.readState.markThreadRead",
-              "chats.decisions.resolve",
-              "chats.reactions.set",
-              "chats.reactions.list",
-              "chats.bookmarks.save",
-              "chats.bookmarks.markReady",
-              "chats.follows.set",
-            ]),
-          );
-        } else {
-          expect(legacyFactory).toHaveBeenCalledOnce();
-          expect(client.requests).toEqual([]);
-        }
+        expect(client.requests.map((request) => request.method)).toEqual(
+          expect.arrayContaining([
+            "workspace.open",
+            "chats.channels.create",
+            "chats.channels.list",
+            "chats.threads.start",
+            "chats.threads.listForChannel",
+            "chats.messages.send",
+            "chats.messages.list",
+            "chats.readState.markThreadRead",
+            "chats.decisions.resolve",
+            "chats.reactions.set",
+            "chats.reactions.list",
+            "chats.bookmarks.save",
+            "chats.bookmarks.markReady",
+            "chats.follows.set",
+          ]),
+        );
       } finally {
         await store.close();
         await sessions.closeAll();
       }
     });
-  });
-}
+});
 
 describe("desktop linked chat factory", () => {
   it("keeps_file_thread_path_hints_on_the_live_list_threads_shape", async () => {
@@ -470,13 +456,8 @@ describe("desktop linked chat factory", () => {
     const sessions = new EngineWorkspaceSessions({
       currentClient: () => client,
     });
-    const forbiddenLegacyFactory = vi.fn((): LinkedChatStore => {
-      throw new Error("legacy factory must not run");
-    });
     const store = createDesktopLinkedChatStore(workspace, {
-      rustEngineEnabled: true,
       sessions,
-      createLegacyStore: forbiddenLegacyFactory,
     });
 
     try {
@@ -499,7 +480,6 @@ describe("desktop linked chat factory", () => {
           }),
         }),
       ]);
-      expect(forbiddenLegacyFactory).not.toHaveBeenCalled();
       expect(client.requests.map((request) => request.method)).toContain(
         "chats.threads.listForFile",
       );
@@ -554,7 +534,6 @@ describe("desktop linked chat factory", () => {
       currentClient: () => client,
     });
     const store = createDesktopLinkedChatStore(workspace, {
-      rustEngineEnabled: true,
       sessions,
     });
 
@@ -637,7 +616,6 @@ describe("desktop linked chat factory", () => {
       },
     );
     const store = createDesktopLinkedChatStore(workspace, {
-      rustEngineEnabled: true,
       sessions,
     });
 
@@ -683,7 +661,6 @@ describe("desktop linked chat factory", () => {
       currentClient: () => currentWriteClient,
     });
     const writeStore = createDesktopLinkedChatStore(workspace, {
-      rustEngineEnabled: true,
       sessions: writeSessions,
     });
 

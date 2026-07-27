@@ -601,9 +601,8 @@ export async function runEngineDaemonStartupSmoke(
   );
 }
 
-export function createRustEngineDaemonIfEnabled(
-  enabled: boolean,
+export function createRustEngineDaemon(
   options: EngineDaemonLifecycleOptions,
-): EngineDaemonLifecycle | null {
-  return enabled ? new EngineDaemonLifecycle(options) : null;
+): EngineDaemonLifecycle {
+  return new EngineDaemonLifecycle(options);
 }

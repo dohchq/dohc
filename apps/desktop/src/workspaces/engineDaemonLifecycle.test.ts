@@ -7,7 +7,7 @@ import type { Request, Response } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineClientSpawnOptions } from "./engineClient";
 import {
-  createRustEngineDaemonIfEnabled,
+  createRustEngineDaemon,
   defaultEngineBinaryPath,
   EngineDaemonLifecycle,
   runEngineDaemonStartupSmoke,
@@ -353,17 +353,6 @@ describe("Rust engine daemon lifecycle", () => {
     expect(stopped).toBe(true);
   });
 
-  it("does not construct or launch the daemon when the flag is off", () => {
-    const launch = vi.fn(async () => new FakeClient());
-    const lifecycle = createRustEngineDaemonIfEnabled(false, {
-      command: join(tmpdir(), "missing-is-irrelevant-while-disabled"),
-      launch,
-    });
-
-    expect(lifecycle).toBeNull();
-    expect(launch).not.toHaveBeenCalled();
-  });
-
   it("opens a workspace and completes a versions.active smoke round-trip", async () => {
     const client = new FakeClient((request) => {
       if (request.method === "workspace.open") {
@@ -599,16 +588,14 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it.runIf(process.env.DOHC_TEST_REAL_RUST_ENGINE === "1")(
-    "completes the flag-on startup smoke against the real Rust daemon",
+    "completes the startup smoke against the real Rust daemon",
     async () => {
-      const lifecycle = createRustEngineDaemonIfEnabled(true, {
+      const lifecycle = createRustEngineDaemon({
         command: defaultEngineBinaryPath({
           isPackaged: false,
           appPath: process.cwd(),
         }),
       });
-      expect(lifecycle).not.toBeNull();
-      if (!lifecycle) throw new Error("flag-on lifecycle was not created");
       try {
         await lifecycle.start();
         // A fresh shadow database currently has no active version. The null

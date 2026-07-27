@@ -6,12 +6,10 @@ import {
   type ChatFileMention as LiveChatFileMention,
 } from "@dohc/workspace-engine-client";
 import {
-  createLinkedChatStore,
   type ChatChannel,
   type ChatChannelSummary,
   type ChatFeedPage,
   type ChatFileMention,
-  type LinkedChatStore,
 } from "@dohc/workspace-engine";
 import type {
   EngineWorkspace,
@@ -27,9 +25,7 @@ export interface DesktopLinkedChatStore extends AwaitableLinkedChatStore {
 }
 
 export interface DesktopLinkedChatStoreOptions {
-  rustEngineEnabled: boolean;
-  sessions: EngineWorkspaceSessions | null;
-  createLegacyStore?: (rootPath: string) => LinkedChatStore;
+  sessions: EngineWorkspaceSessions;
 }
 
 function toStoreChannel(channel: LiveChatChannel): ChatChannel {
@@ -296,13 +292,5 @@ export function createDesktopLinkedChatStore(
   workspace: EngineWorkspace,
   options: DesktopLinkedChatStoreOptions,
 ): DesktopLinkedChatStore {
-  if (options.rustEngineEnabled && options.sessions) {
-    return createLiveLinkedChatStore(workspace, options.sessions);
-  }
-  return Object.assign(
-    (options.createLegacyStore ?? createLinkedChatStore)(workspace.rootPath),
-    {
-      ensureOpen: async () => undefined,
-    },
-  );
+  return createLiveLinkedChatStore(workspace, options.sessions);
 }
