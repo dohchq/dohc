@@ -23,8 +23,7 @@ name: PR checks
 
 on:
   pull_request:
-    branches:
-      - main
+  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -34,6 +33,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_DENY_VERSION: "0.20.2"
+
 jobs:
   javascript:
     name: typecheck + tests
@@ -41,6 +43,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
 
@@ -90,6 +94,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
 
@@ -116,12 +122,20 @@ jobs:
       # Pinned to the same version the macOS evidence workflow uses, so
       # "cargo-deny=PASS" means the same thing in both places.
       - name: Install pinned cargo-deny
-        run: cargo install cargo-deny --locked --force --version "$CARGO_DENY_VERSION"
-        env:
-          CARGO_DENY_VERSION: "0.20.2"
+        run: |
+          set -euo pipefail
+          cargo install cargo-deny --locked --force --version "$CARGO_DENY_VERSION"
+          RESOLVED_CARGO_DENY_VERSION="$(cargo-deny --version)"
+          if [ "$RESOLVED_CARGO_DENY_VERSION" != "cargo-deny $CARGO_DENY_VERSION" ]; then
+            echo "::error::expected cargo-deny $CARGO_DENY_VERSION, got $RESOLVED_CARGO_DENY_VERSION"
+            exit 1
+          fi
 
       # The same script the program runs locally, so a green CI run and a green
       # local gate mean the same thing. Linux also compiles and runs the
       # cfg(unix) code the canonical Windows gate cannot see at all.
       - name: Canonical engine gate
-        run: node tools/rust-engine-program/run-rust-checks.mjs
+        run: |
+          set -euo pipefail
+          node tools/rust-engine-program/run-rust-checks.mjs 2>&1 | tee pr-engine-gate.log
+          node tools/rust-engine-program/require-ci-pass-verdict.mjs pr-engine-gate.log

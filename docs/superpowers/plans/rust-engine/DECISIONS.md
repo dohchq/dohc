@@ -207,7 +207,11 @@ SQLite file immediately after a reset wipes the previous data. That is the
 single most direct route to corrupting real data post-flip.
 
 Consequence for the cutover: MCP writes MUST route through main before the
-flip. Tracked as shard R13b-S9.
+flip. Tracked as shard R13b-S9. The explicit pre-flip acceptance check is:
+`packages/mcp` no longer opens or writes `engine.db` (including through
+`withEngineStores`), and every MCP write tool routes through desktop main.
+Both halves must be proved before the flip; merely adding a proxy while
+retaining a direct-store fallback does not satisfy the check.
 
 Original finding follows.
 - **Finding (R13b-rest mapping pass):** `dohc-mcp` is a separate OS process
@@ -228,12 +232,21 @@ Original finding follows.
 
 ### Key-envelope custody over RPC — RESOLVED (Ice, 2026-07-27): DESKTOP-SIDE CUSTODY
 
-**Ruling: custody stays desktop-side. The daemon never sees the data key.**
+**Ruling: custody stays desktop-side. The daemon never sees the raw data key.**
 
 This keeps the "no daemon key custody" posture the program has held throughout,
 and unblocks the seven key-envelope call sites deferred out of #268 (S8). The
-daemon handles envelopes it cannot open; the desktop performs every wrap and
-unwrap.
+daemon handles envelopes/ciphertext it cannot open; the desktop performs every
+wrap and unwrap. Raw data-key material is forbidden from every RPC input,
+response, event, error, diagnostic, and log; only an opaque wrapped envelope or
+ciphertext reference may cross the process boundary.
+
+S8's pre-flip acceptance must include a boundary test that drives the real
+request, response, event, and error paths while capturing daemon stderr, uses a
+distinctive raw-key sentinel, and proves the sentinel appears in none of them.
+That test belongs to S8 because no key-envelope RPC surface exists yet; a
+source-only or synthetic test before those call sites exist would not prove the
+implemented boundary.
 
 Original finding follows.
 - The envelope crypto is byte-exact ported (`dohc-engine-crypto/envelope.rs`)
