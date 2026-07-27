@@ -2,14 +2,14 @@
  "seed": 8,
  "contentKind": "plaintext",
  "updates": [
-  "AQH9na3tCwAEAQlwbGFpblRleHQJ5pel5pys6KqeAA==",
-  "AQH9na3tCwPE/Z2t7QsB/Z2t7QsCBAl0YWIA",
-  "AQH9na3tCwfE/Z2t7QsG/Z2t7QsCBWNhZsOpAA==",
-  "AQH9na3tCwtE/Z2t7QsAA2HMgQA=",
-  "AAH9na3tCwEFAQ=="
+  "AQHJsp+eAwAEAQlwbGFpblRleHQJ5pel5pys6KqeAA==",
+  "AQHJsp+eAwPEybKfngMBybKfngMCBAl0YWIA",
+  "AQHJsp+eAwfEybKfngMGybKfngMCBWNhZsOpAA==",
+  "AQHJsp+eAwtEybKfngMAA2HMgQA=",
+  "AAHJsp+eAwEFAQ=="
  ],
- "mergedUpdateB64": "AQT9na3tCwAEAQlwbGFpblRleHQJ5pel5pys6KqexP2dre0LAf2dre0LAgQJdGFixP2dre0LBv2dre0LAgVjYWbDqUT9na3tCwADYcyBAf2dre0LAQUB",
- "stateVectorB64": "Af2dre0LDQ==",
+ "mergedUpdateB64": "AQTJsp+eAwAEAQlwbGFpblRleHQJ5pel5pys6KqexMmyn54DAcmyn54DAgQJdGFixMmyn54DBsmyn54DAgVjYWbDqUTJsp+eAwADYcyBAcmyn54DAQUB",
+ "stateVectorB64": "Acmyn54DDQ==",
  "expected": {
   "text": "á日本\ttbcafé語"
  }

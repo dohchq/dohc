@@ -4,7 +4,13 @@ import {
   validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
-import { classifyEngineFilePathForRead } from "@dohc/workspace-engine";
+// The engine path floor is a CROSS-PROCESS security contract, not engine
+// state: it has a deliberate Rust twin at crates/dohc-engine-files/src/policy.rs
+// so a relay and a desktop cannot disagree about which paths hold secrets.
+// It is imported directly rather than routed through the daemon because it is
+// a pure string decision on fail-closed paths, called up to ~2,000 times per
+// interaction here -- an RPC would add a failure mode where today there is none.
+import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
