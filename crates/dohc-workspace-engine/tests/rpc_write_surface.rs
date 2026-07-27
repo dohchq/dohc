@@ -6199,3 +6199,54 @@ async fn read_blob_canonicalizes_digests_and_rejects_broken_or_length_mismatched
         .expect_err("over-cap recorded/actual length mismatch is corruption");
     assert_eq!(mismatched.message, "state-corrupt");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_conflict_rpc_retries_replay_the_persisted_refusal() {
+    let (_scratch, transport, handle) = fixture("conflict-refusal-replay").await;
+    let workspace = "ws-rpcd-conflict-refusal-replay";
+
+    for (index, (method, op_kind)) in [
+        ("conflicts.open", "conflict.open"),
+        ("conflicts.resolve", "conflict.resolve"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let envelope = json!({
+            "workspaceId": workspace,
+            "originId": format!("direct-refusal-{index}"),
+            "originSeq": 0,
+            "opKind": op_kind,
+            "payload": {},
+            "recordedAtMs": 2_000,
+        });
+        let first = call(
+            &transport,
+            &handle,
+            2 + (index as u64 * 2),
+            method,
+            json!({ "envelope": envelope }),
+        )
+        .await;
+        let replay = call(
+            &transport,
+            &handle,
+            3 + (index as u64 * 2),
+            method,
+            json!({ "envelope": envelope }),
+        )
+        .await;
+
+        assert_eq!(first["status"], "refused");
+        assert_eq!(first["code"], "invalid-input");
+        assert_eq!(
+            first["reason"],
+            format!("{op_kind} payload is malformed"),
+            "MUTATION ({method}): the direct RPC must preserve the rejection explanation"
+        );
+        assert_eq!(
+            replay, first,
+            "MUTATION ({method}): formatting the ACKed replay as a bare skip loses the durable refusal"
+        );
+    }
+}

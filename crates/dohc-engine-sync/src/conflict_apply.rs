@@ -19,6 +19,7 @@ use dohc_engine_storage::{EngineStore, FaultInjector, Preimage};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
+use crate::error::local_corruption;
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 
 /// Result details callers surface instead of silently swallowing an unmatched
@@ -555,9 +556,7 @@ fn apply_mirrored_content(
     }
     let conflict = load_text_conflict_in_tx(tx, &envelope.workspace_id, conflict_id)
         .map_err(map_domain)?
-        .ok_or(SyncError::InvalidInput {
-            reason: "replicated conflict target disappeared",
-        })?;
+        .ok_or_else(|| local_corruption("replicated conflict target disappeared"))?;
     // Divergent-move refusal, mirroring the oracle: it refuses a divergent path
     // ONLY for an EXISTING incoming side (`incoming.exists && incoming.path !=
     // conflict.path`). An ABSENT incoming (a delete) has no meaningful path to
@@ -685,12 +684,9 @@ fn select_snapshot_by_path(
     };
     match content_kind.as_str() {
         "text" => {
-            let text = text.ok_or(SyncError::InvalidInput {
-                reason: "text snapshot is missing its blob",
-            })?;
-            let blob_sha256 = blob_sha256.ok_or(SyncError::InvalidInput {
-                reason: "text snapshot is missing its hash",
-            })?;
+            let text = text.ok_or_else(|| local_corruption("text snapshot is missing its blob"))?;
+            let blob_sha256 =
+                blob_sha256.ok_or_else(|| local_corruption("text snapshot is missing its hash"))?;
             Ok(ConflictFileState::text(
                 snapshot_path.clone(),
                 Some(TextSnapshot {
@@ -709,20 +705,19 @@ fn select_snapshot_by_path(
             ))
         }
         "binary" => {
-            let binary_sha256 = binary_sha256.ok_or(SyncError::InvalidInput {
-                reason: "binary snapshot is missing its blob",
-            })?;
+            let binary_sha256 = binary_sha256
+                .ok_or_else(|| local_corruption("binary snapshot is missing its blob"))?;
             if binary_byte_length.is_some_and(|byte_length| byte_length < 0)
                 || binary_actual_length.is_some() && binary_actual_length != binary_byte_length
             {
-                return Err(SyncError::InvalidInput {
-                    reason: "binary snapshot has an invalid byte length",
-                });
+                return Err(local_corruption(
+                    "binary snapshot has an invalid byte length",
+                ));
             }
             // A missing binary_blobs row is local hydration state, not a
             // malformed replicated payload. Preserve the snapshot's hash +
-            // identity for the exact-head gate; apply_mirrored_content then
-            // defers until the local blob is hydrated.
+            // identity for the exact-head gate and keep the byte length unknown;
+            // apply_mirrored_content then defers until the local blob is hydrated.
             Ok(ConflictFileState {
                 path: snapshot_path,
                 snapshot: None,
@@ -735,9 +730,7 @@ fn select_snapshot_by_path(
                 metadata_correlation_id: None,
             })
         }
-        _ => Err(SyncError::InvalidInput {
-            reason: "snapshot has an unknown content kind",
-        }),
+        _ => Err(local_corruption("snapshot has an unknown content kind")),
     }
 }
 
@@ -1143,6 +1136,9 @@ fn mirror_resolution(resolution: ConflictResolution) -> ConflictResolution {
 fn map_domain(error: DomainError) -> SyncError {
     match error {
         DomainError::Storage(storage) => SyncError::Storage(storage),
+        hard @ (DomainError::StateCorrupt { .. } | DomainError::Crypto(_)) => {
+            SyncError::Storage(dohc_engine_storage::StorageError::corrupt_public(hard))
+        }
         _ => SyncError::InvalidInput {
             reason: "replicated conflict operation is invalid",
         },
@@ -1165,6 +1161,16 @@ mod tests {
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
             .expect("workspace");
         (scratch, store)
+    }
+
+    #[test]
+    fn conflict_domain_corruption_maps_to_a_hard_sync_error() {
+        assert!(matches!(
+            map_domain(DomainError::StateCorrupt {
+                reason: "corrupt conflict test"
+            }),
+            SyncError::Storage(dohc_engine_storage::StorageError::StateCorrupt { .. })
+        ));
     }
 
     fn envelope(
@@ -1527,6 +1533,65 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_local_conflict_side_is_hard_and_unacked() {
+        let (_scratch, mut store) = store();
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "corrupt-side-peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("corrupt-side", "receiver current", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET incoming_blob_sha256=NULL \
+                     WHERE workspace_id='ws' AND conflict_id='corrupt-side'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("corrupt local conflict side");
+
+        let resolve = envelope(
+            "corrupt-side-peer",
+            1,
+            "conflict.resolve",
+            json!({
+                "conflictId": "corrupt-side",
+                "status": "resolved",
+                "chosenFrom": "current",
+                "resolution": "kept-current",
+                "updatedAtMs": 3_000,
+                "targetVersionId": "main"
+            }),
+        );
+        assert!(matches!(
+            apply_conflict_envelope(&mut store, &resolve, &NoFaults),
+            Err(SyncError::Storage(
+                dohc_engine_storage::StorageError::StateCorrupt { .. }
+            ))
+        ));
+        assert_eq!(
+            crate::read_replication_acked_seq(&store, "ws", "corrupt-side-peer").expect("ack"),
+            0,
+            "MUTATION: local conflict corruption must not retire the resolve"
+        );
+        assert_open_conflict(&store, "corrupt-side");
+        assert_eq!(
+            replication_counts(&store),
+            (1, 1, 1),
+            "the hard failure must not journal the resolve"
+        );
+    }
+
+    #[test]
     fn mirrored_path_change_resolve_is_acked_and_deferred() {
         let (_scratch, mut store) = store();
         seed_current(&mut store, "receiver current");
@@ -1750,7 +1815,7 @@ mod tests {
     }
 
     #[test]
-    fn conflict_open_rejects_terminal_status_or_resolution_before_log_and_ack() {
+    fn conflict_open_refuses_terminal_status_or_resolution_and_acks() {
         for (case, status, resolution) in [
             ("resolved-status", "resolved", None),
             ("premature-resolution", "open", Some("kept-current")),
@@ -1761,14 +1826,17 @@ mod tests {
             if let Some(resolution) = resolution {
                 payload["resolution"] = json!(resolution);
             }
-            let error = apply_conflict_envelope(
+            let outcome = apply_conflict_envelope(
                 &mut store,
                 &envelope("peer", 0, "conflict.open", payload),
                 &NoFaults,
             )
-            .expect_err("terminal conflict.open must fail");
-            assert!(matches!(error, SyncError::InvalidInput { .. }), "{case}");
-            assert_eq!(replication_counts(&store), (0, 0, 0), "{case}");
+            .expect("terminal conflict.open must be refused");
+            assert!(
+                matches!(outcome, ApplyOutcome::Refused(_)),
+                "{case}: {outcome:?}"
+            );
+            assert_eq!(replication_counts(&store), (0, 1, 1), "{case}");
         }
     }
 
@@ -1785,14 +1853,14 @@ mod tests {
             "latestMomentId": "moment-1",
             "metadata": { "origin": "sync" }
         });
-        let error = apply_conflict_envelope(
+        let outcome = apply_conflict_envelope(
             &mut store,
             &envelope("peer", 0, "conflict.open", payload),
             &NoFaults,
         )
-        .expect_err("missing text must fail");
-        assert!(matches!(error, SyncError::InvalidInput { .. }));
-        assert_eq!(replication_counts(&store), (0, 0, 0));
+        .expect("missing text must be refused");
+        assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+        assert_eq!(replication_counts(&store), (0, 1, 1));
     }
 
     #[test]
@@ -1911,7 +1979,7 @@ mod tests {
     }
 
     #[test]
-    fn conflict_open_with_binary_side_is_rejected_before_log_or_ack() {
+    fn conflict_open_with_binary_side_is_refused_and_acked() {
         let (_scratch, mut store) = store();
         let binary = envelope(
             "peer",
@@ -1919,17 +1987,17 @@ mod tests {
             "conflict.open",
             open_payload("binary-c", "sync", true),
         );
-        let error = apply_conflict_envelope(&mut store, &binary, &NoFaults)
-            .expect_err("binary side must fail closed");
-        assert!(matches!(error, SyncError::InvalidInput { .. }));
-        assert_eq!(replication_counts(&store), (0, 0, 0));
+        let outcome = apply_conflict_envelope(&mut store, &binary, &NoFaults)
+            .expect("binary side must be refused");
+        assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+        assert_eq!(replication_counts(&store), (0, 1, 1));
     }
 
     /// An invalid binary open that REUSES an already-open conflict id must not
-    /// slip through the duplicate-id shortcut: it is rejected fail-closed
-    /// before log/ack, not absorbed as an idempotent duplicate.
+    /// slip through the duplicate-id shortcut: it is refused without applying
+    /// the binary side, then recorded and acked.
     #[test]
-    fn duplicate_conflict_open_with_binary_side_is_rejected_before_log_or_ack() {
+    fn duplicate_conflict_open_with_binary_side_is_refused_and_acked() {
         let (_scratch, mut store) = store();
         apply_conflict_envelope(
             &mut store,
@@ -1944,7 +2012,7 @@ mod tests {
         .expect("valid text open applies");
         assert_eq!(replication_counts(&store), (1, 1, 1));
 
-        let error = apply_conflict_envelope(
+        let outcome = apply_conflict_envelope(
             &mut store,
             &envelope(
                 "peer",
@@ -1954,12 +2022,12 @@ mod tests {
             ),
             &NoFaults,
         )
-        .expect_err("invalid binary side on a duplicate id must fail closed");
-        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        .expect("invalid binary side on a duplicate id must be refused");
+        assert!(matches!(outcome, ApplyOutcome::Refused(_)));
         assert_eq!(
             replication_counts(&store),
-            (1, 1, 1),
-            "the rejected duplicate must not be logged or acked"
+            (1, 2, 1),
+            "the refused duplicate must not mutate the conflict"
         );
     }
 
@@ -2669,7 +2737,7 @@ mod tests {
     /// (BINCONFLICT adds local persist capability only, not replicated binary
     /// ingestion).
     #[test]
-    fn replicated_open_with_existing_binary_side_rejected_before_ack() {
+    fn replicated_open_with_existing_binary_side_is_refused_and_acked() {
         let (_scratch, mut store) = store();
         let payload = json!({
             "id": "bin-exists",
@@ -2696,13 +2764,13 @@ mod tests {
             "chosenFrom": "current",
             "metadata": { "origin": "sync" }
         });
-        let error = apply_conflict_envelope(
+        let outcome = apply_conflict_envelope(
             &mut store,
             &envelope("peer", 0, "conflict.open", payload),
             &NoFaults,
         )
-        .expect_err("existing binary side must fail closed");
-        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        .expect("existing binary side must be refused");
+        assert!(matches!(outcome, ApplyOutcome::Refused(_)));
         let counts: (i64, i64, i64) = store
             .read_with(|conn| {
                 Ok::<_, rusqlite::Error>((
@@ -2712,7 +2780,7 @@ mod tests {
                 ))
             })
             .expect("counts");
-        assert_eq!(counts, (0, 0, 0), "nothing may persist, log, or hydrate");
+        assert_eq!(counts, (0, 1, 0), "only the refusal envelope may persist");
     }
 
     /// M3 (rev2 PROBE A, INVERTED). An incoming binary DELETE (exists=0,

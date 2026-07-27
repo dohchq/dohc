@@ -1,0 +1,164 @@
+# The pull-request gate this repository did not have.
+#
+# Before this, PRs had NO automated checks at all: "Desktop Release" is
+# state=disabled_manually (turned off 2026-07-01 after three failures),
+# "Engine tests (native matrix)" is registered but its workflow file no longer
+# exists on main, and the macOS evidence run is workflow_dispatch only. Every
+# open PR showed CodeRabbit as its only check -- with ten PRs queued behind the
+# Rust-engine cutover.
+#
+# What that cost, concretely: PR #272 added a workspace package to
+# apps/desktop dependencies without adding it to mainBundledWorkspaceDeps.
+# electron-vite then externalizes it, and workspace packages ship raw
+# TypeScript with extensionless relative imports, so the main process dies at
+# startup with ERR_MODULE_NOT_FOUND. Typecheck and the unit suite were both
+# green, because vitest and tsc resolve TypeScript sources directly.
+#
+# Scope is deliberately correctness, not release. Packaging, signing and update
+# manifests stay in Desktop Release; reviving that pipeline is a separate job
+# and its July 1 logs have expired, so its failure cause is unknown. This
+# workflow only claims to answer: does the tree typecheck, do the tests pass,
+# and does the Rust engine gate hold.
+name: PR checks
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: pr-checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_DENY_VERSION: "0.20.2"
+
+jobs:
+  javascript:
+    name: typecheck + tests
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    # packages/workspace-auth exercises Better Auth against a REAL Postgres: it
+    # applies the actual 0002_better_auth.sql migration and drives session and
+    # authorization behaviour through it. Its suite self-skips when no database
+    # is reachable, which is right for local dev and WRONG for CI -- a Postgres
+    # that failed to start would silently skip the collab surface's
+    # authorization tests and report green. So CI provides the database, and
+    # DOHC_REQUIRE_POSTGRES makes an unreachable one a FAILURE rather than a skip.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: dohc
+          POSTGRES_PASSWORD: dohc
+          POSTGRES_DB: dohc_v2
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U dohc -d dohc_v2"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DOHC_REQUIRE_POSTGRES: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # package.json engines: ^20.19.0 || ^22.13.0 || >=24.0.0
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # packages/workspace-kernel-client's suite shells out to
+      # `cargo build --offline` to produce the kernel binary it drives. The
+      # --offline is deliberate -- it keeps the test hermetic -- but it only
+      # works against a populated registry, which a fresh runner does not have.
+      # Fetching here preserves the test's intent instead of relaxing it.
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
+
+      # crates/workspace-kernel is deliberately EXCLUDED from the cargo
+      # workspace (Cargo.toml documents why: build-workspace-kernel.mjs copies
+      # from a hard-coded crates/workspace-kernel/target/... path that workspace
+      # membership would relocate). So a root fetch does not cover it and its
+      # deps must be fetched through its own manifest.
+      - name: Fetch crate dependencies
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/workspace-kernel/Cargo.toml
+
+      # Runs every package, not just the one a PR touched. apps/site was broken
+      # on main for weeks precisely because a red typecheck there read as noise
+      # from whichever PR happened to be running.
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+  rust:
+    name: engine gate
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
+
+      # The gate's fixture-drift step regenerates the richdoc parity fixtures
+      # through the LIVE TypeScript oracle, so it needs the JS workspace
+      # installed. Without it that step reports SKIP rather than PASS -- which
+      # is honest, but it would mean the drift check never actually runs in CI,
+      # and drift going unnoticed is exactly what it exists to prevent.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          rustc -vV
+          cargo --version
+
+      # Pinned to the same version the macOS evidence workflow uses, so
+      # "cargo-deny=PASS" means the same thing in both places.
+      - name: Install pinned cargo-deny
+        run: |
+          set -euo pipefail
+          cargo install cargo-deny --locked --force --version "$CARGO_DENY_VERSION"
+          RESOLVED_CARGO_DENY_VERSION="$(cargo-deny --version)"
+          if [ "$RESOLVED_CARGO_DENY_VERSION" != "cargo-deny $CARGO_DENY_VERSION" ]; then
+            echo "::error::expected cargo-deny $CARGO_DENY_VERSION, got $RESOLVED_CARGO_DENY_VERSION"
+            exit 1
+          fi
+
+      # The same script the program runs locally, so a green CI run and a green
+      # local gate mean the same thing. Linux also compiles and runs the
+      # cfg(unix) code the canonical Windows gate cannot see at all.
+      - name: Canonical engine gate
+        run: |
+          set -euo pipefail
+          node tools/rust-engine-program/run-rust-checks.mjs 2>&1 | tee pr-engine-gate.log
+          node tools/rust-engine-program/require-ci-pass-verdict.mjs pr-engine-gate.log

@@ -7,8 +7,8 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::{
-    ApplyOutcome, ReplicationEnvelope, SyncError, apply_moment_envelope,
-    apply_replication_envelope, read_replication_acked_seq,
+    ApplyOutcome, RefusalReason, ReplicationEnvelope, ReplicationRefusal, SyncError,
+    apply_moment_envelope, apply_replication_envelope, read_replication_acked_seq,
 };
 
 fn test_store() -> (ScratchDir, EngineStore) {
@@ -312,6 +312,65 @@ fn conflict_ids(store: &EngineStore) -> Vec<String> {
             .collect()
         })
         .expect("conflict ids")
+}
+
+#[test]
+fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
+    let (_scratch, mut store) = test_store();
+    let malformed = envelope("malformed-moment-peer", 0, "ws", json!({}));
+
+    assert_eq!(
+        apply_replication_envelope(&mut store, &malformed, &NoFaults, &crate::NoLiveLeases)
+            .expect("malformed per-operation payload is a disposition"),
+        ApplyOutcome::Refused(ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: "malformed-moment-peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "moment.append".to_owned(),
+            reason: RefusalReason::InvalidInput {
+                reason: "moment.append payload is malformed".to_owned(),
+            },
+        }),
+        "MUTATION: parsing before apply_envelope_with returns a hard error and leaves seq 0 unacked"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "malformed-moment-peer").expect("refusal ack"),
+        0
+    );
+
+    let next = ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: "malformed-moment-peer".to_owned(),
+        origin_seq: 1,
+        op_kind: "chat.channel.create".to_owned(),
+        payload: json!({
+            "channelId": "after-malformed-moment",
+            "name": "Still moving",
+            "slug": "still-moving",
+            "kind": "channel",
+            "createdAtMs": 2_001
+        }),
+        recorded_at_ms: 2_001,
+    };
+    assert!(matches!(
+        apply_replication_envelope(&mut store, &next, &NoFaults, &crate::NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    let channel_rows: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_channels
+                 WHERE workspace_id='ws' AND channel_id='after-malformed-moment'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("next operation mutation");
+    assert_eq!(channel_rows, 1);
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "malformed-moment-peer").expect("next ack"),
+        1
+    );
 }
 
 #[test]
@@ -1081,7 +1140,7 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
 }
 
 #[test]
-fn moment_append_first_delivery_rejects_plaintext_id_collision_but_redelivery_skips() {
+fn moment_append_first_delivery_refuses_and_acks_plaintext_id_collision_but_redelivery_skips() {
     let (_scratch, mut store) = test_store();
     hydrate_texts(&mut store, &["first"]);
     let first = envelope(
@@ -1109,18 +1168,19 @@ fn moment_append_first_delivery_rejects_plaintext_id_collision_but_redelivery_sk
             "missing blob is never hydrated",
         ),
     );
-    // MUTATION: treating a same-table ID hit as idempotence acks this unrelated
-    // first-delivery coordinate; true replay was already skipped above by the
-    // replication coordinate before entering the moment applier.
+    // MUTATION: treating a same-table ID hit as idempotence lets this unrelated
+    // first-delivery coordinate claim another moment; true replay was already
+    // skipped above before entering the moment applier.
     assert!(matches!(
         apply_moment_envelope(&mut store, &duplicate_id, &NoFaults),
-        Err(SyncError::InvalidInput {
-            reason: "replicated plaintext moment id collides with existing history"
-        })
+        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { ref reason },
+            ..
+        })) if reason == "replicated plaintext moment id collides with existing history"
     ));
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "second-peer").expect("ack"),
-        -1
+        0
     );
     let journal_count: i64 = store
         .read_with(|conn| {
@@ -1132,7 +1192,7 @@ fn moment_append_first_delivery_rejects_plaintext_id_collision_but_redelivery_sk
             )
         })
         .expect("journal count");
-    assert_eq!(journal_count, 1);
+    assert_eq!(journal_count, 2);
 }
 
 #[test]
@@ -1200,7 +1260,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
 }
 
 #[test]
-fn moment_append_rejects_id_collision_with_secret_history() {
+fn moment_append_refuses_and_acks_id_collision_with_secret_history() {
     let (_scratch, mut store) = test_store();
     hydrate_texts(&mut store, &["incoming"]);
     store
@@ -1225,9 +1285,10 @@ fn moment_append_rejects_id_collision_with_secret_history() {
     // claim the same workspace-wide moment identity.
     assert!(matches!(
         apply_moment_envelope(&mut store, &op, &NoFaults),
-        Err(SyncError::InvalidInput {
-            reason: "replicated plaintext moment id collides with existing history"
-        })
+        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { ref reason },
+            ..
+        })) if reason == "replicated plaintext moment id collides with existing history"
     ));
     let rows: (i64, i64) = store
         .read_with(|conn| {
@@ -1250,12 +1311,12 @@ fn moment_append_rejects_id_collision_with_secret_history() {
     assert_eq!(rows, (0, 1));
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "plaintext-collision-peer").expect("ack"),
-        -1
+        0
     );
 }
 
 #[test]
-fn moment_append_accepts_only_oracle_metadata_origins_without_ack_on_rejection() {
+fn moment_append_accepts_only_oracle_metadata_origins_and_acks_refusals() {
     let (_scratch, mut accepted_store) = test_store();
     hydrate_texts(&mut accepted_store, &["accepted"]);
     for (index, origin) in ["api", "local-file", "restore", "sync", "unknown"]
@@ -1304,9 +1365,10 @@ fn moment_append_accepts_only_oracle_metadata_origins_without_ack_on_rejection()
         // and can make the local capture reconciler claim replicated content.
         assert!(matches!(
             apply_moment_envelope(&mut store, &op, &NoFaults),
-            Err(SyncError::InvalidInput {
-                reason: "moment.append payload is invalid"
-            })
+            Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { ref reason },
+                ..
+            })) if reason == "moment.append payload is invalid"
         ));
         let persisted: (i64, i64) = store
             .read_with(|conn| {
@@ -1329,7 +1391,7 @@ fn moment_append_accepts_only_oracle_metadata_origins_without_ack_on_rejection()
         assert_eq!(persisted, (0, 0), "{field}={reserved}");
         assert_eq!(
             read_replication_acked_seq(&store, "ws", &peer).expect("ack"),
-            -1,
+            0,
             "{field}={reserved}"
         );
     }
@@ -1344,16 +1406,60 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
     let op = envelope("peer", 0, "ws", payload);
     assert!(matches!(
         apply_replication_envelope(&mut store, &op, &NoFaults, &crate::NoLiveLeases),
-        Err(SyncError::InvalidInput { .. })
+        Err(SyncError::RetryableState {
+            reason: "moment.append target version is missing"
+        })
     ));
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
         -1
     );
+    let journaled: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id='ws' AND origin_id='peer'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("missing-version journal count");
+    assert_eq!(
+        journaled, 0,
+        "MUTATION: journaling the retryable failure permanently consumes the missing-version coordinate"
+    );
+
+    let version = ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: "version-peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({
+            "versionId": "missing",
+            "name": "Missing",
+            "kind": "named",
+            "forkVersionId": null,
+            "forkMomentId": null,
+            "createdAtMs": 1_500
+        }),
+        recorded_at_ms: 1_500,
+    };
+    assert!(matches!(
+        apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    assert!(matches!(
+        apply_replication_envelope(&mut store, &op, &NoFaults, &crate::NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "peer").expect("retry ack"),
+        0
+    );
 }
 
 #[test]
-fn moment_append_rejects_non_tracked_or_noncanonical_paths_before_mutation() {
+fn moment_append_refuses_non_tracked_or_noncanonical_paths_without_rows_and_acks() {
     let mut secret_after = absent_text_payload(
         "secret-after",
         "secret-after-object",
@@ -1446,13 +1552,15 @@ fn moment_append_rejects_non_tracked_or_noncanonical_paths_before_mutation() {
         let (_scratch, mut store) = test_store();
         hydrate_texts(&mut store, &["content"]);
         let op = envelope("peer", 0, "ws", payload);
-        let error = match apply_moment_envelope(&mut store, &op, &NoFaults) {
-            Ok(outcome) => panic!("{case} unexpectedly applied as {outcome:?}"),
-            Err(error) => error,
-        };
         assert!(
-            matches!(error, SyncError::InvalidInput { .. }),
-            "{case} must be malformed input, got {error:?}"
+            matches!(
+                apply_moment_envelope(&mut store, &op, &NoFaults),
+                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { .. },
+                    ..
+                }))
+            ),
+            "{case} must be refused"
         );
         let persisted: (i64, i64, i64) = store
             .read_with(|conn| {
@@ -1478,8 +1586,8 @@ fn moment_append_rejects_non_tracked_or_noncanonical_paths_before_mutation() {
         assert_eq!(persisted, (0, 0, 0), "{case} persisted poisoned rows");
         assert_eq!(
             read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
-            -1,
-            "{case} advanced the peer ack"
+            0,
+            "{case} did not advance the peer ack"
         );
     }
 
@@ -1861,7 +1969,7 @@ fn moment_append_search_index_respects_files_and_visibility_policy() {
 }
 
 #[test]
-fn moment_append_rejects_each_incomplete_payload_before_tuple_without_ack() {
+fn moment_append_refuses_each_incomplete_payload_before_tuple_without_rows_and_acks() {
     for (case, before_path, before_sha) in [
         ("path only", Some("doc.md"), None),
         ("digest only", None, Some(text_sha("before"))),
@@ -1876,9 +1984,12 @@ fn moment_append_rejects_each_incomplete_payload_before_tuple_without_ack() {
         assert!(
             matches!(
                 apply_moment_envelope(&mut store, &op, &NoFaults),
-                Err(SyncError::InvalidInput { .. })
+                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { .. },
+                    ..
+                }))
             ),
-            "{case} must be rejected"
+            "{case} must be refused"
         );
         let rows: i64 = store
             .read_with(|conn| {
@@ -1893,8 +2004,8 @@ fn moment_append_rejects_each_incomplete_payload_before_tuple_without_ack() {
         assert_eq!(rows, 0, "{case} mutated moment history");
         assert_eq!(
             read_replication_acked_seq(&store, "ws", "tuple-peer").expect("ack"),
-            -1,
-            "{case} advanced the peer ack"
+            0,
+            "{case} did not advance the peer ack"
         );
     }
 }
@@ -1961,7 +2072,7 @@ fn replicated_delete_after_path_divergent_rename_removes_the_live_alias() {
 }
 
 #[test]
-fn moment_append_rejects_overlong_moment_and_object_ids_without_ack() {
+fn moment_append_refuses_overlong_moment_and_object_ids_with_ack() {
     for (case, field) in [("moment id", "momentId"), ("object id", "objectId")] {
         let (_scratch, mut store) = test_store();
         hydrate_texts(&mut store, &["content"]);
@@ -1973,14 +2084,17 @@ fn moment_append_rejects_overlong_moment_and_object_ids_without_ack() {
         assert!(
             matches!(
                 apply_moment_envelope(&mut store, &op, &NoFaults),
-                Err(SyncError::InvalidInput { .. })
+                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { .. },
+                    ..
+                }))
             ),
-            "overlong {case} must be rejected"
+            "overlong {case} must be refused"
         );
         assert_eq!(
             read_replication_acked_seq(&store, "ws", "bounded-peer").expect("ack"),
-            -1,
-            "overlong {case} advanced the peer ack"
+            0,
+            "overlong {case} must not wedge the origin"
         );
     }
 }

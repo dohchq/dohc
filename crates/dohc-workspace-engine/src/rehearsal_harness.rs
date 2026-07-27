@@ -1249,7 +1249,15 @@ fn traversal_identity(path: &Path, metadata: &Metadata) -> Result<TraversalIdent
     #[cfg(target_os = "linux")]
     let mount_id = Some(linux_mount_id(path)?);
     #[cfg(not(target_os = "linux"))]
-    let mount_id = None;
+    let mount_id = {
+        // Only Linux resolves a mount id (from /proc/self/mountinfo); every other
+        // unix identifies the mount by st_dev alone. Bind the parameter so the
+        // signature stays uniform without tripping -D warnings off Linux -- which
+        // is a macOS-only failure the Windows gate cannot see and Linux CI cannot
+        // reproduce, because Linux genuinely uses it.
+        let _ = path;
+        None
+    };
 
     Ok(TraversalIdentity {
         device_id: Some(metadata.dev()),

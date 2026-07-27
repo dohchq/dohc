@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { actorFromSession, createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
@@ -11,6 +11,38 @@ const POSTGRES_URL =
 
 let pool: Pool;
 let auth: WorkspaceAuth;
+
+async function postgresReachable(): Promise<boolean> {
+  const probe = new Client({
+    connectionString: POSTGRES_URL,
+    connectionTimeoutMillis: 2000,
+  });
+  try {
+    await probe.connect();
+    await probe.end();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const pgAvailable = await postgresReachable();
+
+// Self-skipping is right for local dev, and WRONG anywhere this suite is the
+// thing standing between a change and the collab surface's authorization
+// behaviour. In CI a Postgres that failed to start would otherwise skip every
+// test here and report green -- a hollow pass. DOHC_REQUIRE_POSTGRES turns an
+// unreachable database into a failure instead.
+if (!pgAvailable && process.env.DOHC_REQUIRE_POSTGRES === "1") {
+  throw new Error(
+    `DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}. ` +
+      "These tests apply the real 0002_better_auth.sql migration and exercise " +
+      "session/authorization behaviour through it; skipping them here would " +
+      "report green without checking anything.",
+  );
+}
+
+const describeWithPostgres = describe.skipIf(!pgAvailable);
 
 const PASSWORD = "a-real-password-123";
 const unique = () => `ba-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -47,29 +79,31 @@ function miniHandler(resolve: ResolveActor, workspaceId: string) {
   };
 }
 
-beforeAll(async () => {
-  pool = new Pool({ connectionString: POSTGRES_URL });
-  const { readFile } = await import("node:fs/promises");
-  const migration = await readFile(
-    new URL(
-      "../../workspace-postgres/src/db/migrations/0002_better_auth.sql",
-      import.meta.url,
-    ),
-    "utf8",
-  );
-  await pool.query(migration);
-  auth = createWorkspaceAuth({
-    pool,
-    baseURL: "http://localhost:1786",
-    secret: "test-secret-0123456789abcdef0123456789abcdef",
+if (pgAvailable) {
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: POSTGRES_URL });
+    const { readFile } = await import("node:fs/promises");
+    const migration = await readFile(
+      new URL(
+        "../../workspace-postgres/src/db/migrations/0002_better_auth.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    await pool.query(migration);
+    auth = createWorkspaceAuth({
+      pool,
+      baseURL: "http://localhost:1786",
+      secret: "test-secret-0123456789abcdef0123456789abcdef",
+    });
   });
-});
 
-afterAll(async () => {
-  await pool.end();
-});
+  afterAll(async () => {
+    await pool.end();
+  });
+}
 
-describe("email/password against Postgres", () => {
+describeWithPostgres("email/password against Postgres", () => {
   it("signs up and signs in", async () => {
     const email = `${unique()}@dohc.test`;
     const signup = await signUp(email);
@@ -90,7 +124,7 @@ describe("email/password against Postgres", () => {
   });
 });
 
-describe("device authorization flow (desktop login)", () => {
+describeWithPostgres("device authorization flow (desktop login)", () => {
   it("issues a usable desktop session: request code, approve in browser session, poll succeeds, token authenticates", async () => {
     const email = `${unique()}@dohc.test`;
     const signup = await signUp(email);
@@ -190,7 +224,7 @@ describe("device authorization flow (desktop login)", () => {
   });
 });
 
-describe("session validation middleware shape", () => {
+describeWithPostgres("session validation middleware shape", () => {
   it("returns null for a missing or invalid bearer token", async () => {
     expect(
       await auth.api.getSession({ headers: { authorization: "Bearer not-a-token" } }),
@@ -228,7 +262,7 @@ describe("session validation middleware shape", () => {
   });
 });
 
-describe("browser cookie sessions (web client)", () => {
+describeWithPostgres("browser cookie sessions (web client)", () => {
   it("resolves the route-level actor from a signed-in cookie jar and 401s anonymous requests", async () => {
     const email = `${unique()}@dohc.test`;
     const signup = await signUp(email);
@@ -260,7 +294,7 @@ describe("browser cookie sessions (web client)", () => {
   });
 });
 
-describe("organization plugin (team workspaces)", () => {
+describeWithPostgres("organization plugin (team workspaces)", () => {
   it("creates an organization and lists the creator as a member", async () => {
     const email = `${unique()}@dohc.test`;
     await signUp(email);

@@ -1160,7 +1160,9 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(1);
     await flushMicrotasks(100);
 
-    expect(fixture.completeRunRequests).toBe(7);
+    await vi.waitFor(() => {
+      expect(fixture.completeRunRequests).toBe(7);
+    });
     expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       endedAtMs: fixture.now.value,
       exitCode: 0,
@@ -1781,9 +1783,10 @@ describe("chatDispatchService", () => {
     await activate(fixture);
 
     fixture.spawnCalls[0]!.process.emitExit(0);
-    await flushMicrotasks();
+    await vi.waitFor(() => {
+      expect(fixture.errors).toContain(teardownError);
+    });
 
-    expect(fixture.errors).toContain(teardownError);
     expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
 
     // A recovery scan retries only the retained finalized run's teardown path;
@@ -2521,7 +2524,9 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
     await flushMicrotasks(100);
 
-    expect(fixture.failRunRequests).toBe(7);
+    await vi.waitFor(() => {
+      expect(fixture.failRunRequests).toBe(7);
+    });
     expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       endedAtMs: fixture.now.value,
       exitCode: 124,
