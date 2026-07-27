@@ -207,10 +207,14 @@ export async function refreshSharedViewOnce(input: {
   workspaceId: string;
   relay: SyncRelayConnection;
   shareId: string;
+  // Factory-selected relay implementation. Omitted keeps the existing
+  // TypeScript path unchanged; the Rust adapter injects its daemon pull and
+  // opaque cursor commit as one inseparable operation pair.
+  pull?: typeof pullShareView;
 }): Promise<RefreshSharedViewOutcome> {
   let pull;
   try {
-    pull = await pullShareView({
+    pull = await (input.pull ?? pullShareView)({
       rootDir: input.rootDir,
       workspaceId: input.workspaceId,
       relay: input.relay,

@@ -22,6 +22,7 @@ export const mainBundledWorkspaceDeps = [
 
 export const preloadBundledRuntimeDeps = [
   // Sandboxed preloads cannot resolve app/workspace packages at runtime.
+  "@dohc/workspace-contracts",
   "@dohc/workspace-core",
   "zod",
 ];

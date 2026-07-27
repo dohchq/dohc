@@ -2476,3 +2476,61 @@ so if `packages/ydoc-projection` changes again the Rust projection will drift
 silently while the byte-for-byte parity test keeps passing against frozen
 expectations.
 
+## 2026-07-27 (later) — RPC-E and R13b-S8 land; the CI gap closes
+
+**RPC-E is done.** #263 merged: `crates/dohc-engine-sync-http` plus the
+`sync.*` / `keys.*` / `share.*` daemon dispatch arms. Until this landed the
+daemon had NO replication methods and the desktop could not drive replication
+through it at all.
+
+**R13b-S8 is done.** #280 merged. #268 was auto-closed by GitHub when #263's
+branch was deleted on merge (its base disappeared) -- the trap the handoff warns
+about. Recovered by extracting #268's unique 2,964-line delta and applying it to
+post-#263 `main` rather than rebasing, because #268's branch *contained* #263's
+content without descending from it. Both conflicts were resolved by KEEPING
+BEHAVIOUR: in `lib.rs` each side had added a different test, so taking either
+wholesale would have dropped coverage with no failure to reveal it.
+
+**The repository now has pull-request CI** (#275, in review). Before it, PRs had
+no automated checks at all: Desktop Release was `state=disabled_manually` since
+2026-07-01, the engine-tests workflow was registered but its file no longer
+existed on `main`, and the macOS run was dispatch-only. On its FIRST run the new
+gate independently reproduced two defects found by hand that day, and shortly
+after found a third nobody had found: see below.
+
+### The Linux inode-reuse bug (#279)
+
+A workspace root replaced underneath a running watcher left the watch bound to a
+dead inode while `disruption_count` read 0 and `is_unavailable` read false -- a
+dead watch that reports healthy, which defeats the capture driver's supervision
+loop because that loop polls exactly those two signals.
+
+Cause: on ext4, `rmdir` followed immediately by `mkdir` at the same path reuses
+the SAME inode number (5/5 in a direct probe). The identity check was therefore
+a use-after-free of an identifier. `WatchedRoot` now holds the root open on
+Unix, so the kernel cannot recycle it. Unix-only by design -- on Windows an open
+handle would block the very `rmdir` being observed.
+
+This was invisible to the canonical gate, which is Windows-only. It failed
+**0/20 on Linux**. An earlier note in this program had recorded the symptom as a
+`/mnt/c` artifact to ignore; that note was wrong and cost real time.
+
+### R15 re-verified by mutation, not by reading
+
+After R15-3 was found falsely marked done (#274), the other decisions were
+re-checked by BREAKING each guarantee and confirming a named test noticed.
+R15-4 passed cleanly (all four mutations caught). R15-1 and R15-5 did not, and
+#276 closed both gaps: ordinal 14's backfill had no test at all -- it could be
+inverted in the SECURITY direction, granting secret disk-ownership with no
+materialization proof, and ~450 tests stayed green -- and R15-5's Linux
+`RESOLVE_NO_SYMLINKS` refusal could be deleted with nothing noticing.
+
+The lesson is worth keeping: an earlier careful audit READ all of this code and
+concluded DONE for all three. Reading cannot find this class of defect.
+
+### Decisions resolved
+
+Ice ruled on 2026-07-27: the steady-state tail slope satisfies R15-2 (recorded
+with the basis, since the same run is over the bound on the whole-run fit); MCP
+proxies through desktop main; key-envelope custody stays desktop-side. Those were
+the last decision-shaped blockers on R15-6.

@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sendCliRequest } from "./client";
 import { DohcCliError } from "./errors";
+import { CLI_PROTOCOL_VERSION } from "./protocol";
 
 const TOKEN = "a".repeat(64);
 const cleanupDirs: string[] = [];
@@ -23,7 +24,7 @@ describe("sendCliRequest", () => {
   it("reads the boot token and validates a concrete success response", async () => {
     const stateDir = await tempStateDir();
     const transport = vi.fn(async () => ({
-      protocolVersion: 1,
+      protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
       result: {
         channels: [{ id: "ch_one", name: "One", slug: "one", kind: "channel" }],
@@ -31,7 +32,7 @@ describe("sendCliRequest", () => {
     }));
     const result = await sendCliRequest(
       {
-        protocolVersion: 1,
+        protocolVersion: CLI_PROTOCOL_VERSION,
         verb: "channels",
         args: { cwd: "/workspace", actor: "human" },
       },
@@ -44,7 +45,7 @@ describe("sendCliRequest", () => {
       join(stateDir, "dohc-cli.sock"),
       JSON.stringify({
         token: TOKEN,
-        protocolVersion: 1,
+        protocolVersion: CLI_PROTOCOL_VERSION,
         verb: "channels",
         args: { cwd: "/workspace", actor: "human" },
       }),
@@ -57,7 +58,7 @@ describe("sendCliRequest", () => {
     await expect(
       sendCliRequest(
         {
-          protocolVersion: 1,
+          protocolVersion: CLI_PROTOCOL_VERSION,
           verb: "channels",
           args: { cwd: "/workspace", actor: "human" },
         },
@@ -65,7 +66,7 @@ describe("sendCliRequest", () => {
           stateDir,
           platform: "linux",
           transport: async () => ({
-            protocolVersion: 2,
+            protocolVersion: CLI_PROTOCOL_VERSION + 1,
             status: "future-error-shape",
             detail: { restartRequired: true },
           }),
@@ -77,13 +78,13 @@ describe("sendCliRequest", () => {
   it("forwards an explicit response timeout without imposing a default", async () => {
     const stateDir = await tempStateDir();
     const transport = vi.fn(async () => ({
-      protocolVersion: 1,
+      protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
       result: { channels: [] },
     }));
     await sendCliRequest(
       {
-        protocolVersion: 1,
+        protocolVersion: CLI_PROTOCOL_VERSION,
         verb: "channels",
         args: { cwd: "/workspace", actor: "human" },
       },
@@ -101,7 +102,7 @@ describe("sendCliRequest", () => {
     await expect(
       sendCliRequest(
         {
-          protocolVersion: 1,
+          protocolVersion: CLI_PROTOCOL_VERSION,
           verb: "channels",
           args: { cwd: "/workspace", actor: "human" },
         },
@@ -109,7 +110,7 @@ describe("sendCliRequest", () => {
           stateDir,
           platform: "linux",
           transport: async () => ({
-            protocolVersion: 1,
+            protocolVersion: CLI_PROTOCOL_VERSION,
             ok: true,
             result: { channels: [{ id: 5 }] },
           }),
@@ -123,7 +124,7 @@ describe("sendCliRequest", () => {
     await expect(
       sendCliRequest(
         {
-          protocolVersion: 1,
+          protocolVersion: CLI_PROTOCOL_VERSION,
           verb: "channels",
           args: { cwd: "/workspace", actor: "human" },
         },
@@ -146,7 +147,7 @@ describe("sendCliRequest", () => {
     const attempted: string[] = [];
     const result = await sendCliRequest(
       {
-        protocolVersion: 1,
+        protocolVersion: CLI_PROTOCOL_VERSION,
         verb: "channels",
         args: { cwd: "/workspace", actor: "human" },
       },
@@ -160,7 +161,7 @@ describe("sendCliRequest", () => {
             throw new DohcCliError("desktop app not running");
           }
           return {
-            protocolVersion: 1,
+            protocolVersion: CLI_PROTOCOL_VERSION,
             ok: true,
             result: { channels: [] },
           };
