@@ -190,7 +190,30 @@ deferred ONLY under it; they are now in-scope-or-revisit:
 
 ## 2026-07-26 — R13b-rest surfaced decisions — OPEN (for Ice)
 
-### MCP transport to the daemon — OPEN
+### MCP transport to the daemon — RESOLVED (Ice, 2026-07-27): PROXY THROUGH DESKTOP MAIN
+
+**Ruling: option (a). MCP tool calls are proxied through desktop main, which
+already owns the daemon's stdio pipes. No socket, no named pipe, no second
+daemon client.**
+
+Why this and not the alternatives: it adds no new attack surface (decision #5
+closed the socket question deliberately, and a socket would reopen it), and it
+leaves exactly ONE writer on the daemon-owned `engine.db`. Today
+`packages/mcp/src/tools.ts` opens the engine stores per call
+(`withEngineStores`) and writes through them — `startChannelThread`,
+`sendMessage` — from a separate OS process. After the flip the daemon owns that
+database, so leaving MCP as a direct writer would put two processes on one
+SQLite file immediately after a reset wipes the previous data. That is the
+single most direct route to corrupting real data post-flip.
+
+Consequence for the cutover: MCP writes MUST route through main before the
+flip. Tracked as shard R13b-S9. The explicit pre-flip acceptance check is:
+`packages/mcp` no longer opens or writes `engine.db` (including through
+`withEngineStores`), and every MCP write tool routes through desktop main.
+Both halves must be proved before the flip; merely adding a proxy while
+retaining a direct-store fallback does not satisfy the check.
+
+Original finding follows.
 - **Finding (R13b-rest mapping pass):** `dohc-mcp` is a separate OS process
   spawned by the USER'S AGENT (per `mcpConfigFor`), not by desktop main. The
   daemon is a stdio child of desktop main with inherited pipes only (decision
@@ -207,7 +230,25 @@ deferred ONLY under it; they are now in-scope-or-revisit:
   without this decision. Proxy-through-main (a) is the posture-consistent
   default recommendation.
 
-### Key-envelope custody over RPC — OPEN
+### Key-envelope custody over RPC — RESOLVED (Ice, 2026-07-27): DESKTOP-SIDE CUSTODY
+
+**Ruling: custody stays desktop-side. The daemon never sees the raw data key.**
+
+This keeps the "no daemon key custody" posture the program has held throughout,
+and unblocks the seven key-envelope call sites deferred out of #268 (S8). The
+daemon handles envelopes/ciphertext it cannot open; the desktop performs every
+wrap and unwrap. Raw data-key material is forbidden from every RPC input,
+response, event, error, diagnostic, and log; only an opaque wrapped envelope or
+ciphertext reference may cross the process boundary.
+
+S8's pre-flip acceptance must include a boundary test that drives the real
+request, response, event, and error paths while capturing daemon stderr, uses a
+distinctive raw-key sentinel, and proves the sentinel appears in none of them.
+That test belongs to S8 because no key-envelope RPC surface exists yet; a
+source-only or synthetic test before those call sites exist would not prove the
+implemented boundary.
+
+Original finding follows.
 - The envelope crypto is byte-exact ported (`dohc-engine-crypto/envelope.rs`)
   but exposing wrap/unwrap over daemon RPC contradicts RPC_GAP's recorded
   "no daemon key custody" posture. Relay-sync shard (S8/RPC-E-4) needs a
