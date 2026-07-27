@@ -137,48 +137,69 @@ also hit the artifact-storage quota; those provenance and calibration caveats
 remain, but they are not an open decision about whether the tail satisfies
 R15-2.
 
-## 1c. macOS soak on FINAL main — R15-2 NOT SATISFIED (recorded 2026-07-27)
+### Correction to the BASIS of this decision (2026-07-27, after the ruling)
 
-The first macOS evidence run against final `main` (all 30 merges) **fails**, and it
-fails under the tail methodology Ice accepted, not merely under the old whole-run fit.
+The decision stands and is not reopened. Its stated basis was wrong, and the
+record must say so rather than leave a ruling resting on a measurement that did
+not measure what it claimed.
 
-```
-FAIL | cycles=11478 crashes=83 durationSecs=5525
-rssSlopeWholeB/s=29401.9  rssSlopeTailB/s=21171.3
-warmupDominatedWholeRunFit=false  drain=RETAINED
-```
+Every figure in the table above was fit over a workload with **no steady
+state**. Each phase-2 scenario keyed its object and path identities on the raw
+cycle counter, so every cycle created a new permanent object, path, blob and
+full-text-search entry -- roughly 92 KiB of durable content per switch cycle and
+25 permanent files per storm cycle, past 57,000 files by the end of a 90-minute
+run. Opening a workspace builds a manifest of every captured entry, so the
+process grew because the workload grew.
 
-The tail is **21,171 B/s against the unchanged 20,480 B/s bound** — over by ~3%.
+That also explains the "asymptotic approach to a plateau" reading above. The
+quarters halve in bytes per SECOND only because the cycle rate fell 65% as each
+reopen re-enumerated a linearly growing tree; normalized per unit of work the
+growth was flat-to-rising (16355, 19792, 9562, 20095 bytes per cycle, worst in
+the final quarter). The plateau was the daemon slowing down.
+
+Re-measured against a bounded live working set (#293), the same workload on the
+same machine gives a tail slope of **1,859 B/s** where the unbounded form gave
+9,984 B/s, with user-file growth of +25 instead of +26,525. **The conclusion
+Ice accepted -- that there is no leak -- is unchanged and now rests on a
+measurement that means what it says.**
+
+## 1c. macOS soak on FINAL main — the FAIL and the PASS are both void (2026-07-27)
+
+The first macOS evidence run against final `main` failed the tail bound at
+**21,171 B/s** against 20,480. A repeat of the same commit, same workload,
+**passed** at 16,996 B/s.
 
 | run | whole-run | tail | verdict |
 |---|---|---|---|
 | #267 branch, 90 min | 26,208 B/s | 14,255 B/s | PASS |
-| **final main, 92 min** | **29,402 B/s** | **21,171 B/s** | **FAIL** |
+| final main, 92 min | 29,402 B/s | 21,171 B/s | FAIL |
+| final main, repeat | 28,754 B/s | 16,996 B/s | PASS |
 
-### What this does and does not establish
+**Neither is evidence.** A gate that reverses on identical code and an identical
+workload is not measuring the code. Investigating instead of re-running found
+why: the workload permanently accumulated content, so the trend fit measured
+that accumulation, and the bytes/second bound was flattered by the throughput
+decay the accumulation caused. The full account is in the correction to section
+1b.
 
-- **It does establish that R15-2 is not satisfied on final code.** Whatever the cause,
-  there is no passing macOS soak against what would actually be flipped.
-- **It does NOT establish a regression.** One sample on each side cannot distinguish a
-  real increase caused by the day's merges from ordinary variance on a shared macOS
-  runner. A repeat run against the same commit is required before attributing it, and
-  attributing it from n=1 would be exactly the kind of confident-but-unfounded claim
-  this program has already been burned by.
-- `warmupDominatedWholeRunFit=false` is worth noting: unlike the earlier run, the
-  whole-run fit is NOT inflated by warm-up here, so the curve is flatter — a more
-  leak-like shape than the clean asymptotic decay recorded in section 1b.
+Recording this explicitly because the tempting reading was available and wrong:
+the second run is green, and taking it would have closed R15-2 on a check that
+does not measure a leak -- the same failure mode this program has now hit
+several times.
 
-### What IS newly true
+### What changed
 
-**Evidence is finally banked.** #267 writes the evidence JSON to the step summary and
-run log before attempting the artifact upload, so this run left recoverable evidence
-rather than losing it to the account-wide artifact quota. Every previous macOS run
-produced evidence and banked none.
+#293 bounds the phase-2 live working set and makes the runner **record its own
+precondition**: user files at workload start and end, `INVALID` above the bound,
+and `rssDisposition` plus both RSS assertions serialized as `null` on a run whose
+working set ran away, so such a trend can be cited in neither direction. A
+genuine daemon failure still reports `FAIL`, since a workload cannot invalidate
+a handle leak or a dirty shutdown.
 
 ### Consequence
 
-R15-2 remains **NOT MET**. This is independent of the rehearsal blocker recorded in
-`DECISIONS.md`; either one alone is sufficient reason not to flip.
+R15-2 is **pending a macOS run under the corrected methodology** against main
+including #293. The two runs above cannot satisfy it and cannot refute it.
 
 ## 2. Differential (TS-vs-Rust capture parity) — PASS
 - 10/10 scenarios green on BOTH engines; goldens committed
@@ -188,8 +209,11 @@ R15-2 remains **NOT MET**. This is independent of the rehearsal blocker recorded
 
 ## 3. Gate discipline — PASS
 - Full-workspace gate (fmt / clippy -D warnings / build / test --workspace /
-  cargo-deny; cargo-audit SKIP where not installed) on EVERY pushed head across the
-  program; PASS verdict line pasted per shard in EXECUTION_LOG.
+  cargo-deny; cargo-audit) on EVERY pushed head across the program; PASS verdict
+  line pasted per shard in EXECUTION_LOG. CI reported `cargo-audit=SKIP` on every
+  PR until #295, because the workflow never installed the tool and the verdict
+  checker did not require it -- the advisory scan has only actually run in the PR
+  gate since that merge.
 - **Canonical GATE6 gate on main (19fc994b):**
   `2026-07-24T14:02:58Z | run-rust-checks | win32/x64 | PASS | fmt --check=PASS
   clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS
