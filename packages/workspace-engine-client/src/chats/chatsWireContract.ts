@@ -368,6 +368,10 @@ export type ChatReadStateMarkParams = ChatsJsonObject & {
   expectedRevision?: number;
   nowMs?: number;
 };
+export type ChatUnreadFileThreadsParams = ChatsJsonObject & {
+  pageLimit?: number;
+  afterThreadId?: string;
+};
 export type ChatDecisionResolveParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
@@ -605,7 +609,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.messagesList]: ChatMessagesListParams;
   [CHATS_METHOD.readStateGet]: ChatThreadParams;
   [CHATS_METHOD.readStateMarkThreadRead]: ChatReadStateMarkParams;
-  [CHATS_METHOD.readStateListUnreadFileThreads]: ChatEmptyParams;
+  [CHATS_METHOD.readStateListUnreadFileThreads]: ChatUnreadFileThreadsParams;
   [CHATS_METHOD.decisionResolve]: ChatDecisionResolveParams;
   [CHATS_METHOD.decisionsListForThread]: ChatThreadPageParams;
   [CHATS_METHOD.reactionSet]: ChatReactionSetParams;

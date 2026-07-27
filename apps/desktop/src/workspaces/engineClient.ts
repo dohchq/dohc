@@ -667,6 +667,14 @@ export class EngineClient implements EngineTransport {
     });
   }
 
+  async cancelRequest(callerId: number): Promise<void> {
+    const pending = [...this.pending.entries()].find(
+      ([, request]) => request.callerId === callerId,
+    );
+    if (!pending) return;
+    await this.writeEnvelope({ type: "cancel", id: pending[0] });
+  }
+
   onEvent(handler: (event: Event) => void): () => void {
     this.eventHandlers.add(handler);
     return () => this.eventHandlers.delete(handler);

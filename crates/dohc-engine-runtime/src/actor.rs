@@ -1155,6 +1155,26 @@ impl WorkspaceActor {
         generation: u64,
         now_ms: i64,
     ) -> Result<Self, RuntimeError> {
+        Self::spawn_with_mode(db_path, identity, generation, now_ms, false)
+    }
+
+    /// Spawn an actor whose store connection is query-only and never runs the
+    /// writer open ritual.
+    pub(crate) fn spawn_read_only(
+        db_path: PathBuf,
+        identity: EngineDbIdentity,
+        generation: u64,
+    ) -> Result<Self, RuntimeError> {
+        Self::spawn_with_mode(db_path, identity, generation, 0, true)
+    }
+
+    fn spawn_with_mode(
+        db_path: PathBuf,
+        identity: EngineDbIdentity,
+        generation: u64,
+        now_ms: i64,
+        read_only: bool,
+    ) -> Result<Self, RuntimeError> {
         let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
         // Reserve the dedicated Close slot up front (the channel is empty, so
         // this cannot fail); `close` sends through it without contending with
@@ -1168,7 +1188,7 @@ impl WorkspaceActor {
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
-            .spawn(move || worker_main(db_path, now_ms, rx, worker_state, startup_tx))
+            .spawn(move || worker_main(db_path, now_ms, read_only, rx, worker_state, startup_tx))
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
@@ -5124,6 +5144,7 @@ fn switch_active_version_on_store(
 fn worker_main(
     db_path: PathBuf,
     now_ms: i64,
+    read_only: bool,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     startup_tx: std::sync::mpsc::SyncSender<Result<(), StorageError>>,
@@ -5141,7 +5162,11 @@ fn worker_main(
     }
     let _closed_guard = ClosedGuard(Arc::clone(&state));
 
-    let mut store = match EngineStore::open(&db_path, now_ms) {
+    let mut store = match if read_only {
+        EngineStore::open_read_only(&db_path)
+    } else {
+        EngineStore::open(&db_path, now_ms)
+    } {
         Ok(store) => store,
         Err(err) => {
             let _ = startup_tx.send(Err(err));

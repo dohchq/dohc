@@ -119,6 +119,15 @@ fn write_file(root: &Path, path: &str, bytes: &[u8]) {
 async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    std::fs::create_dir_all(db_path.parent().expect("engine parent")).expect("engine directory");
+    let mut store = EngineStore::open(&db_path, 1).expect("fixture store");
+    assert!(
+        store
+            .bind_shadow_clone_token(TOKEN)
+            .expect("bind shadow token")
+    );
+    drop(store);
     write_file(scratch.path(), "must-stay-on-disk.md", b"typescript-owned");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -142,19 +151,28 @@ async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
-    assert_eq!(
-        read_text(&transport, &handle, 2, "must-stay-on-disk.md").await,
-        None,
-        "a daemon-only read open must not baseline-capture TypeScript-owned disk state"
-    );
-
     transport
         .call(
             RequestContext::unbounded(),
-            request(3, "workspace.close", Some(handle), json!({})),
+            request(2, "workspace.close", Some(handle), json!({})),
         )
         .await
         .expect("workspace close");
+
+    let store = EngineStore::open_read_only(&db_path).expect("reopen read-only");
+    let captured: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE path = 'must-stay-on-disk.md'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("captured snapshot count");
+    assert_eq!(
+        captured, 0,
+        "a daemon-only read open must not baseline-capture TypeScript-owned disk state"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

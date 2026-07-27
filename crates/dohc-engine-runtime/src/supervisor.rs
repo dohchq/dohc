@@ -32,6 +32,12 @@ enum Slot {
     Active(WorkspaceActor),
 }
 
+#[derive(Clone, Copy)]
+enum ActorOpenMode {
+    ReadWrite,
+    ReadOnly,
+}
+
 impl Slot {
     /// Whether this slot is a transient placeholder that a waiter must wait out.
     fn is_busy(&self) -> bool {
@@ -127,13 +133,32 @@ impl WorkspaceSupervisor {
     /// without opening a second connection. A dead actor (its worker panicked)
     /// is evicted and re-opened.
     pub fn open(&self, db_path: &Path, now_ms: i64) -> Result<SupervisorOpen, RuntimeError> {
-        ensure_parent_dir(db_path)?;
+        self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite)
+    }
 
+    /// Open an existing workspace through a read-only store connection. This
+    /// path never creates the parent, the database, or migration state.
+    pub fn open_read_only(&self, db_path: &Path) -> Result<SupervisorOpen, RuntimeError> {
+        self.open_with_mode(db_path, 0, ActorOpenMode::ReadOnly)
+    }
+
+    fn open_with_mode(
+        &self,
+        db_path: &Path,
+        now_ms: i64,
+        mode: ActorOpenMode,
+    ) -> Result<SupervisorOpen, RuntimeError> {
+        if matches!(mode, ActorOpenMode::ReadWrite) {
+            ensure_parent_dir(db_path)?;
+        }
         let mut dead: Option<WorkspaceActor> = None;
         let identity;
         {
             let mut guard = lock(&self.registry);
-            identity = EngineDbIdentity::resolve_or_create(db_path)?;
+            identity = match mode {
+                ActorOpenMode::ReadWrite => EngineDbIdentity::resolve_or_create(db_path)?,
+                ActorOpenMode::ReadOnly => EngineDbIdentity::of_existing(db_path)?,
+            };
             loop {
                 let action = match guard.get(&identity) {
                     Some(Slot::Active(actor)) => {
@@ -177,7 +202,14 @@ impl WorkspaceSupervisor {
         // Release the evicted actor's worker outside the lock.
         drop(dead);
 
-        let spawned = WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms);
+        let spawned = match mode {
+            ActorOpenMode::ReadWrite => {
+                WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms)
+            }
+            ActorOpenMode::ReadOnly => {
+                WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1)
+            }
+        };
         self.finalize_reservation(identity, spawned)
             .map(|actor| SupervisorOpen {
                 actor,

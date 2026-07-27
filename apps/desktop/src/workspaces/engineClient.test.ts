@@ -405,6 +405,36 @@ describe("EngineClient", () => {
     transport.close();
   });
 
+  it("cancels the wire request behind a caller id", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const envelopes: Envelope[] = [];
+    peer.onEnvelope = (envelope) => envelopes.push(envelope);
+
+    const operation = transport.sendRequest(request(4_242, "slow.open"));
+    await transport.cancelRequest(4_242);
+
+    expect(envelopes).toMatchObject([
+      { type: "request", id: 1, method: "slow.open" },
+      { type: "cancel", id: 1 },
+    ]);
+    peer.send({
+      type: "error",
+      id: 1,
+      error: {
+        code: "CANCELLED",
+        message: "request cancelled",
+        retry: "no",
+      },
+    });
+    await expect(operation).rejects.toMatchObject({
+      wireError: { code: "CANCELLED" },
+    });
+    transport.close();
+  });
+
   it("rejects a matching wire error with the generated WireError payload", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);

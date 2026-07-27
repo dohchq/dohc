@@ -25,6 +25,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface EngineDaemonClient {
   sendRequest(request: Request): Promise<Response>;
+  cancelRequest?(requestId: number): Promise<void>;
   close(): void;
   waitForExit?(): Promise<void>;
 }
@@ -363,9 +364,15 @@ export class EngineDaemonLifecycle {
   ): Promise<Response> {
     const timeoutMs =
       this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const boundedRequest = {
+      ...request,
+      deadlineMs: request.deadlineMs ?? timeoutMs,
+    };
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
+        void client.cancelRequest?.(request.id).catch(() => undefined);
+        if (method === "workspace.open") client.close();
         reject(
           new EngineDaemonUnavailableError(
             `Rust engine ${method} timed out after ${timeoutMs}ms.`,
@@ -375,7 +382,7 @@ export class EngineDaemonLifecycle {
       timeout.unref();
     });
     try {
-      return await Promise.race([client.sendRequest(request), deadline]);
+      return await Promise.race([client.sendRequest(boundedRequest), deadline]);
     } finally {
       if (timeout) clearTimeout(timeout);
     }
