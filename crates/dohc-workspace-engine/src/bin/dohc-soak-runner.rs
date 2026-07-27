@@ -77,51 +77,95 @@ const DEFAULT_FULL_SOAK_MINUTES: u64 = 60;
 /// content changes on every write — while bounding the durable content the
 /// workload can ever create.
 const IDENTITY_RING: u64 = 8;
-/// The durable growth a state-neutral phase-2 workload may still produce:
-/// append-only moment rows, WAL, and free-list slack. Bytes, per workspace.
-/// Well above observed steady-state noise and far below the ~92 KiB PER CYCLE
-/// the unbounded workload used to add.
-const MAX_DURABLE_GROWTH_BYTES: u64 = 32 * 1024 * 1024;
+/// How many scenarios the phase-2 loop rotates through (`cycle % 5`). The
+/// content discriminator below divides by this, so a scenario's successive
+/// visits are what alternate — deriving it from IDENTITY_RING instead made
+/// the property depend on `gcd(scenarios, ring)` being right, a coupling
+/// between two constants a thousand lines apart that nothing asserted.
+const SCENARIO_ROTATION: u64 = 5;
+/// Distinct content variants per identity. Two would be enough to keep
+/// successive writes from being byte-identical, but a read that is stale by
+/// TWO visits would then carry the expected bytes and pass. Four means a
+/// probe only accepts content at most three visits old, while still bounding
+/// the workload to `IDENTITY_RING * CONTENT_VARIANTS` distinct payloads.
+const CONTENT_VARIANTS: u64 = 4;
+/// How much the phase-2 LIVE WORKING SET may grow, in user files across all
+/// phase-2 roots.
+///
+/// Not a byte budget. Durable bytes grow no matter what the workload does:
+/// `moments` is append-only, every write needs a fresh `momentId` (reusing
+/// one is short-circuited as a replay), and nothing prunes history — so
+/// demanding that bytes stop growing would demand the workload stop working.
+/// Bytes also do not drive RSS: no `cache_size` pragma is set, so SQLite's
+/// page cache stays at its 2 MB default and a larger database does not become
+/// a larger process.
+///
+/// What DOES drive RSS is the live working set, because opening a workspace
+/// loads a manifest of every captured entry. The old workload grew that set
+/// by 25 files per storm cycle, past 57,000 files, so each reopen allocated a
+/// manifest proportional to a linearly growing tree and the allocator's high
+/// water mark tracked it. That is a structural bound, independent of machine
+/// speed and run length, which an absolute byte cap could never be.
+const MAX_WORKING_SET_FILE_GROWTH: u64 = 64;
 
-/// The identity this cycle writes to, and a content discriminator that flips
-/// between successive visits to that identity. Without the flip, every write
-/// to a rotating path would carry byte-identical content, and a store that
-/// short-circuits unchanged writes would turn the whole scenario into a no-op
-/// that still reported cycles.
+/// The identity this cycle writes to, and a content discriminator that
+/// advances on each successive visit to that identity. Without it, every
+/// write to a rotating path would carry byte-identical content, and a store
+/// that short-circuits unchanged writes would turn the scenario into a no-op
+/// that still counted cycles.
 fn identity_slot(n: u64) -> (u64, u64) {
-    (n % IDENTITY_RING, (n / IDENTITY_RING) % 2)
+    (
+        n % IDENTITY_RING,
+        (n / SCENARIO_ROTATION) % CONTENT_VARIANTS,
+    )
 }
 
-/// Total bytes on disk under the phase-2 workspace roots: the engine
-/// databases and every user file the workload wrote.
+/// What the phase-2 roots hold: user files (the live working set that every
+/// workspace open builds a manifest from) counted separately from total bytes
+/// on disk (diagnostic only — see MAX_WORKING_SET_FILE_GROWTH for why bytes
+/// are not the bound).
 ///
-/// This exists because an RSS slope is only leak evidence if the workload is
-/// state-neutral. When phase 2 permanently accumulated user content, a growing
-/// database and its indexes legitimately occupied more memory, and the trend
-/// fit reported that as a leak. Measuring durable growth turns the workload's
-/// state-neutrality from an assumption into recorded, checkable evidence.
-fn durable_bytes(roots: &[&Path]) -> u64 {
-    fn walk(dir: &Path, total: &mut u64) {
+/// This exists because an RSS slope is only leak evidence if the thing that
+/// drives RSS stays bounded. It turns that from an assumption into recorded,
+/// checkable evidence. Note both counts are taken with the daemon LIVE, so
+/// databases are open and their WAL is uncheckpointed at both endpoints.
+#[derive(Clone, Copy, Default)]
+struct WorkingSet {
+    user_files: u64,
+    total_bytes: u64,
+}
+
+fn working_set(roots: &[&Path]) -> WorkingSet {
+    fn walk(dir: &Path, in_engine_dir: bool, set: &mut WorkingSet) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
+            // `file_type` does not follow links on either platform, so a
+            // directory symlink or junction reports false for is_dir and no
+            // cycle is reachable.
             match entry.file_type() {
-                Ok(file_type) if file_type.is_dir() => walk(&entry.path(), total),
+                Ok(file_type) if file_type.is_dir() => {
+                    let engine = in_engine_dir || entry.file_name() == ".dohc";
+                    walk(&entry.path(), engine, set);
+                }
                 Ok(file_type) if file_type.is_file() => {
+                    if !in_engine_dir {
+                        set.user_files = set.user_files.saturating_add(1);
+                    }
                     if let Ok(metadata) = entry.metadata() {
-                        *total = total.saturating_add(metadata.len());
+                        set.total_bytes = set.total_bytes.saturating_add(metadata.len());
                     }
                 }
                 _ => {}
             }
         }
     }
-    let mut total = 0;
+    let mut set = WorkingSet::default();
     for root in roots {
-        walk(root, &mut total);
+        walk(root, false, &mut set);
     }
-    total
+    set
 }
 
 struct Options {
@@ -860,10 +904,11 @@ async fn scenario_two_workspace_switch(
 ) -> bool {
     let handle_a = open(daemon, root_a, "soak-switch-a").await;
     // An in-flight write on A while B opens and closes. The payload is
-    // deliberately bulky — but bounded by the DOP1 wire limit on string
-    // fields (64 KiB), which the first smoke of this scenario tripped at
-    // 256 KiB. ~45 KiB keeps headroom while still straddling the switch
-    // more often than a one-liner.
+    // deliberately bulky so it straddles the switch more often than a
+    // one-liner would. The binding limit is the desktop capture text cap
+    // (MAX_DESKTOP_CAPTURE_TEXT_BYTES, 128 KiB) -- NOT the DOP1 wire string
+    // limit an earlier comment here cited as 64 KiB, which is in fact 8 MiB
+    // (WireLimits::SPIKE_DEFAULTS.max_string_bytes).
     let (slot, variant) = identity_slot(n);
     let text = format!("in-flight during switch {slot} variant {variant}\n").repeat(1600);
     let (_, mut in_flight) = daemon
@@ -913,10 +958,14 @@ async fn scenario_watcher_storm(daemon: &Daemon, root: &Path, n: u64) {
     // root stays 25 files instead of growing by 25 every cycle — which had it
     // past 57,000 files by the end of a 90-minute run, so each reopen's full
     // enumerate-and-hash reconciliation scanned a linearly growing tree.
+    // The body carries the VARIANT, not the raw cycle. Cycle-unique bodies
+    // would mint 25 new content-addressed blobs and 25 new moments every
+    // cycle; four variants across 25 files bound the workload to 100 distinct
+    // payloads that dedupe by hash after the first pass.
     let (_, variant) = identity_slot(n);
     for burst in 0..25 {
         let path = root.join(format!("storm/burst-{burst}.md"));
-        let body = format!("storm cycle {n} variant {variant} file {burst}");
+        let body = format!("storm variant {variant} file {burst}");
         std::fs::write(&path, &body).unwrap_or_else(|_| {
             std::fs::create_dir_all(root.join("storm")).expect("storm dir");
             std::fs::write(&path, &body).expect("storm write");
@@ -936,7 +985,7 @@ async fn scenario_watcher_storm(daemon: &Daemon, root: &Path, n: u64) {
     // wrote. The probe must match THIS cycle's bytes, exactly as the crash
     // probe does.
     let probe = "storm/burst-0.md".to_owned();
-    let expected = format!("storm cycle {n} variant {variant} file 0");
+    let expected = format!("storm variant {variant} file 0");
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let (_, rx) = daemon
@@ -974,6 +1023,13 @@ async fn scenario_watcher_storm(daemon: &Daemon, root: &Path, n: u64) {
 /// recovery was never actually exercised is visible, not assumed.
 async fn scenario_cancel_storm(daemon: &Daemon, root: &Path, n: u64) -> u64 {
     let handle = open(daemon, root, "soak-cancel").await;
+    // The seed path PERSISTS across cycles now, so the recovery read below
+    // would be satisfied by the previous cycle's bytes. Deriving the path,
+    // the written text and the expected text from one place keeps the
+    // assertion pinned to THIS cycle's write.
+    let (slot, variant) = identity_slot(n);
+    let seed_path = format!("cancel-seed-{slot}.md");
+    let seed_text = format!("recovery probe {variant}");
     // Seed one real write so the post-storm recovery read proves a genuine
     // round-trip: without it the workspace has no "main" version and even a
     // healthy read errors InvalidParams (version not found), which is
@@ -984,9 +1040,9 @@ async fn scenario_cancel_storm(daemon: &Daemon, root: &Path, n: u64) -> u64 {
             Some(handle.clone()),
             json!({
                 "versionId": "main",
-                "objectId": format!("soak-cancel-object-{}", n % IDENTITY_RING),
-                "path": format!("cancel-seed-{}.md", n % IDENTITY_RING),
-                "text": format!("recovery probe {}", (n / IDENTITY_RING) % 2),
+                "objectId": format!("soak-cancel-object-{slot}"),
+                "path": seed_path,
+                "text": seed_text,
                 "momentId": format!("soak-cancel-moment-{n}"),
                 "metadataOrigin": "api",
                 "nowMs": 1
@@ -1024,7 +1080,7 @@ async fn scenario_cancel_storm(daemon: &Daemon, root: &Path, n: u64) -> u64 {
         .begin(
             "versionedText.read",
             Some(handle.clone()),
-            json!({ "versionId": "main", "path": format!("cancel-seed-{n}.md") }),
+            json!({ "versionId": "main", "path": seed_path }),
         )
         .await;
     let recovered = tokio::time::timeout(Duration::from_secs(30), rx)
@@ -1034,8 +1090,8 @@ async fn scenario_cancel_storm(daemon: &Daemon, root: &Path, n: u64) -> u64 {
         .expect("post-storm recovery read must succeed");
     assert_eq!(
         recovered["text"],
-        json!("recovery probe"),
-        "post-storm read must return the seeded content"
+        json!(seed_text),
+        "post-storm read must return THIS cycle's seeded content"
     );
     close(daemon, handle).await;
     cancellations_observed
@@ -1218,12 +1274,20 @@ async fn main() {
         &root_cancel,
         &root_editor,
     ];
-    let durable_base = durable_bytes(&workload_roots);
+    // Every phase-2 root is opened once BEFORE the baseline. Warming only
+    // root_cycle left the other five without an engine.db, so their one-time
+    // schema creation — 40+ tables, indexes and FTS shadow tables apiece —
+    // landed inside the measured window and was charged to workload growth.
+    for root in workload_roots {
+        scenario_open_close(&daemon, root).await;
+    }
+    let working_base = working_set(&workload_roots);
     timeline.begin_workload();
     eprintln!(
         "soak: phase 2 — leak-trend soak on one process \
          (baseline rss={rss_base} handles={handles_base} threads={threads_base} \
-          durable={durable_base})"
+          userFiles={} bytes={})",
+        working_base.user_files, working_base.total_bytes
     );
     let mut cycle: u64 = 0;
     let mut hard_capped = false;
@@ -1280,9 +1344,14 @@ async fn main() {
     // an unaided idle drain. The drain samples are deliberately separate:
     // folding them into the workload fit would hide the slope under test.
     let workload_duration_secs = timeline.workload_elapsed().as_secs_f64();
-    let durable_end = durable_bytes(&workload_roots);
-    let durable_growth_bytes = durable_end.saturating_sub(durable_base);
-    let state_neutral = durable_growth_bytes <= MAX_DURABLE_GROWTH_BYTES;
+    let working_end = working_set(&workload_roots);
+    let working_set_file_growth = working_end
+        .user_files
+        .saturating_sub(working_base.user_files);
+    let durable_growth_bytes = working_end
+        .total_bytes
+        .saturating_sub(working_base.total_bytes);
+    let bounded_working_set = working_set_file_growth <= MAX_WORKING_SET_FILE_GROWTH;
     let mut drain_samples = Vec::new();
     if push_process_sample(
         &mut drain_samples,
@@ -1343,17 +1412,24 @@ async fn main() {
     let trend_evaluated = trend.disposition != RssTrendDisposition::NotEvaluated;
     let rss_disposition =
         RssDisposition::from_trend_and_drain(trend.disposition, drain_disposition);
-    let rss_ok = rss_disposition.is_acceptable();
+    // When the precondition fails the RSS reading is not evidence, so it must
+    // not decide FAIL either. It is reported as null below, never as a bare
+    // boolean a reader could quote.
+    let rss_ok = rss_disposition.is_acceptable() || !bounded_working_set;
 
     let clean_shutdown = daemon.shutdown().await;
 
-    // State-neutrality gates the RSS verdict in BOTH directions. If phase 2
-    // permanently accumulated content, the trend fit measured that content,
-    // so it can be cited neither as a leak nor as the absence of one.
-    let verdict = if !state_neutral {
-        "INVALID(workload-not-state-neutral)"
-    } else if !(handles_ok && threads_ok && rss_ok && clean_shutdown) {
+    // A genuine daemon failure is reported as FAIL even when the workload's
+    // working set ran away: a handle leak, a thread leak or a dirty shutdown
+    // are conclusions the workload cannot invalidate, and burying them under
+    // INVALID would invite "fix the workload and re-run" while a real defect
+    // went unread. Only the RSS-derived part of the verdict is gated, and
+    // rss_ok is forced true below when the precondition fails so it can
+    // contribute in neither direction.
+    let verdict = if !(handles_ok && threads_ok && rss_ok && clean_shutdown) {
         "FAIL"
+    } else if !bounded_working_set {
+        "INVALID(workload-working-set-unbounded)"
     } else if hard_capped {
         // The requested targets were NOT met — evidence, but not the tier's.
         "PASS-INCOMPLETE(hard-cap)"
@@ -1434,19 +1510,42 @@ async fn main() {
         },
         // An over-bound fit whose unaided drain returns most growth is a
         // retention signal, distinct from both PASS and leak-shaped FAIL.
-        "rssDisposition": rss_disposition,
+        // Tri-state, for the same reason the two assertions below are: on a
+        // run whose working set ran away this is not a result, and a reader
+        // grepping for it must find null rather than "PASS".
+        "rssDisposition": if bounded_working_set {
+            json!(rss_disposition)
+        } else {
+            json!(null)
+        },
         // The RSS trend's PRECONDITION, recorded rather than assumed: bytes on
         // disk under the phase-2 roots at the start and end of the workload.
         // A workload that permanently accumulates content makes the trend
         // uninterpretable, so this is evidence a reader can check, not a claim.
-        "workloadStateNeutrality": {
-            "stateNeutral": state_neutral,
-            "durableBytesAtWorkloadStart": durable_base,
-            "durableBytesAtWorkloadEnd": durable_end,
-            "durableGrowthBytes": durable_growth_bytes,
-            "maxDurableGrowthBytes": MAX_DURABLE_GROWTH_BYTES,
+        "workloadWorkingSet": {
+            "boundedWorkingSet": bounded_working_set,
+            "userFilesAtWorkloadStart": working_base.user_files,
+            "userFilesAtWorkloadEnd": working_end.user_files,
+            "userFileGrowth": working_set_file_growth,
+            "maxUserFileGrowth": MAX_WORKING_SET_FILE_GROWTH,
             "identityRing": IDENTITY_RING,
-            "interpretation": "Each phase-2 scenario rotates through IDENTITY_RING object/path identities and rewrites them with changed content, so request volume is undiminished while durable content stays bounded. Growth beyond maxDurableGrowthBytes means the trend fit measured accumulating content and INVALIDATES the RSS verdict in both directions.",
+            "scenarioRotation": SCENARIO_ROTATION,
+            "contentVariants": CONTENT_VARIANTS,
+            // Diagnostic ONLY, deliberately not the bound. `moments` is
+            // append-only and every write needs a fresh momentId, so durable
+            // bytes grow whenever the workload works; and with no cache_size
+            // pragma SQLite's page cache stays at its 2 MB default, so a
+            // larger database is not a larger process. Both endpoints are
+            // sampled with the daemon LIVE and the WAL uncheckpointed.
+            "durableBytesAtWorkloadStart": working_base.total_bytes,
+            "durableBytesAtWorkloadEnd": working_end.total_bytes,
+            "durableGrowthBytes": durable_growth_bytes,
+            "durableGrowthBytesPerCycle": if cycle > 0 {
+                json!(durable_growth_bytes as f64 / cycle as f64)
+            } else {
+                json!(null)
+            },
+            "interpretation": "The RSS trend's precondition. Opening a workspace builds a manifest of every captured entry, so the LIVE WORKING SET -- user files -- is what makes the process larger; the old workload grew it by 25 files per storm cycle past 57,000 files. Each scenario now rotates through identityRing identities and contentVariants payloads, so request volume is undiminished while the working set stays bounded. Growth beyond maxUserFileGrowth means the trend fit measured a growing workload and the RSS fields are reported as null rather than as a result. This bounds what drives RSS; it makes no claim about durable byte growth, which is append-only by design and tracked separately for the postCutoverContinuous tier.",
         },
         "warmupDominatedWholeRunFit": trend.warmup_dominated_whole_run_fit,
         "final": { "rss": rss_end, "handles": handles_end, "threads": threads_end },
@@ -1465,12 +1564,13 @@ async fn main() {
                 process_sampling.handle_thread_slack_calibrated_for_platform,
             // Tri-state: null when the trend was not evaluated, so a
             // scenarios-only artifact can never read as leak evidence.
-            "rssTailSlopeWithinThreshold": if trend_evaluated {
+            "workloadWorkingSetBounded": bounded_working_set,
+            "rssTailSlopeWithinThreshold": if trend_evaluated && bounded_working_set {
                 json!(trend.tail_slope_bytes_per_sec <= MAX_RSS_SLOPE_BYTES_PER_SEC)
             } else {
                 json!(null)
             },
-            "rssAcceptedByTailSlopeOrDrainReclamation": if trend_evaluated {
+            "rssAcceptedByTailSlopeOrDrainReclamation": if trend_evaluated && bounded_working_set {
                 json!(rss_ok)
             } else {
                 json!(null)
@@ -1502,7 +1602,7 @@ async fn main() {
          rssDisposition={} rssSlopeWholeB/s={:.1} rssSlopeTailB/s={:.1} \
          warmupDominatedWholeRunFit={} drain={} rssDrain {}->{} min={} \
          drop={} ({}) handles {}->{} threads {}->{} handleThreadSlackCalibration={} \
-         stateNeutral={} durableGrowthBytes={}",
+         workingSetBounded={} userFileGrowth={} durableGrowthBytes={}",
         chrono_like_now(),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -1538,7 +1638,8 @@ async fn main() {
         } else {
             "UNCALIBRATED"
         },
-        state_neutral,
+        bounded_working_set,
+        working_set_file_growth,
         durable_growth_bytes,
     );
     // PASS and the explicitly named retention signal exit 0. The latter is
@@ -1609,6 +1710,7 @@ fn chrono_like_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dohc_engine_testkit::ScratchDir;
 
     fn rss_samples(values: &[u64]) -> Vec<Sample> {
         values
@@ -1858,6 +1960,71 @@ mod tests {
         assert_eq!(rss_drain_delta(Some(1_000), Some(1_250)), Some(250));
         assert_eq!(rss_drain_delta(Some(1_250), Some(1_000)), Some(-250));
         assert_eq!(rss_drain_delta(None, Some(1_000)), None);
+    }
+
+    /// The property the whole state-neutrality fix rests on: a scenario's
+    /// successive visits must carry DIFFERENT content, or a store that
+    /// short-circuits an unchanged write turns the scenario into a no-op that
+    /// still counts cycles. Each scenario runs at one residue of
+    /// SCENARIO_ROTATION, so this walks the actual visit sequence.
+    #[test]
+    fn every_scenario_sees_a_fresh_variant_on_each_visit_to_an_identity() {
+        for scenario in 0..SCENARIO_ROTATION {
+            let visits: Vec<(u64, u64)> = (0..400)
+                .map(|visit| visit * SCENARIO_ROTATION + scenario)
+                .map(identity_slot)
+                .collect();
+            for pair in visits.windows(2) {
+                assert_ne!(
+                    pair[0].1, pair[1].1,
+                    "scenario {scenario} repeated variant {} on consecutive visits",
+                    pair[0].1
+                );
+            }
+            // And the identities themselves stay inside the ring.
+            assert!(visits.iter().all(|(slot, _)| *slot < IDENTITY_RING));
+            let distinct: std::collections::HashSet<u64> =
+                visits.iter().map(|(slot, _)| *slot).collect();
+            assert_eq!(
+                distinct.len() as u64,
+                IDENTITY_RING,
+                "scenario {scenario} must exercise the whole ring"
+            );
+        }
+    }
+
+    /// A read stale by k visits carries the variant from k visits ago. With
+    /// CONTENT_VARIANTS = 4 a probe rejects anything up to three visits old;
+    /// with two variants an every-other-visit staleness would have passed.
+    #[test]
+    fn a_stale_read_is_rejected_until_the_variants_wrap() {
+        let visit_variant = |visit: u64| identity_slot(visit * SCENARIO_ROTATION).1;
+        for stale_by in 1..CONTENT_VARIANTS {
+            assert_ne!(
+                visit_variant(64),
+                visit_variant(64 - stale_by),
+                "content stale by {stale_by} visit(s) must not satisfy the probe"
+            );
+        }
+        assert_eq!(visit_variant(64), visit_variant(64 - CONTENT_VARIANTS));
+    }
+
+    /// The working-set walk must count user files while ignoring the engine's
+    /// own database, and must not be fooled into counting `.dohc` content as
+    /// user files just because it sits below a nested directory.
+    #[test]
+    fn working_set_counts_user_files_and_excludes_the_engine_directory() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = scratch.path();
+        std::fs::create_dir_all(root.join("storm")).expect("storm dir");
+        std::fs::write(root.join("storm/burst-0.md"), "a").expect("user file");
+        std::fs::write(root.join("top.md"), "bb").expect("user file");
+        std::fs::create_dir_all(root.join(".dohc").join("engine")).expect("engine dir");
+        std::fs::write(root.join(".dohc/engine/engine.db"), "cccc").expect("db");
+
+        let set = working_set(&[root]);
+        assert_eq!(set.user_files, 2, "only the two user files count");
+        assert_eq!(set.total_bytes, 7, "bytes still cover the engine directory");
     }
 
     #[test]
