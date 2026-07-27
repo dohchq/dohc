@@ -65,6 +65,14 @@ jobs:
           --health-retries 20
     env:
       DOHC_REQUIRE_POSTGRES: "1"
+      DOHC_REQUIRE_ENGINE_E2E: "1"
+      # engineRelayClient.e2e gates on its own variable, so it kept skipping
+      # even once the daemon was built. Pointing it at the same binary is what
+      # makes the relay push/pull path actually covered in CI.
+      # Absolute: vitest runs with each package's directory as cwd, and the
+      # test resolve()s this against cwd, so a repo-relative path would look
+      # for the binary under apps/desktop/.
+      DOHC_TEST_RUST_ENGINE_BIN: "${{ github.workspace }}/target/debug/dohc-workspace-engine"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -102,6 +110,16 @@ jobs:
           set -euo pipefail
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/workspace-kernel/Cargo.toml
+
+      # The desktop capture e2e drives a REAL daemon over stdio; without this
+      # binary it self-skips. It skipped on every platform since the day it was
+      # written -- CI never built a debug daemon, and its path was hardcoded to
+      # `.exe`, which Linux cannot match -- so the only end-to-end coverage of
+      # the TypeScript desktop capture path never ran. When first forced to run
+      # it failed, on a real defect (see #298). DOHC_REQUIRE_ENGINE_E2E turns a
+      # missing binary here into a failure rather than a silent skip.
+      - name: Build the engine daemon for the desktop e2e
+        run: cargo build -p dohc-workspace-engine --bin dohc-workspace-engine
 
       # Runs every package, not just the one a PR touched. apps/site was broken
       # on main for weeks precisely because a red typecheck there read as noise
