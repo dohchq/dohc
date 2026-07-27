@@ -9,9 +9,9 @@
 // Requirements: Node >= 22, zero npm dependencies. Windows-first — works from
 // PowerShell and Git Bash (spawns through the platform shell).
 //
-// Steps: cargo fmt --check, cargo clippy -D warnings, cargo build --workspace,
-// cargo test --workspace, then cargo-deny / cargo-audit IF installed
-// (skip-with-warning when absent, never fail on a missing tool).
+// Steps: fixture drift, cargo fmt --check, cargo clippy -D warnings, cargo
+// build --workspace, cargo test --workspace, then cargo-deny / cargo-audit IF
+// installed (skip-with-warning when absent, never fail on a missing tool).
 //
 // Usage:
 //   node tools/rust-engine-program/run-rust-checks.mjs
@@ -44,6 +44,12 @@ function toolAvailable(probe) {
 }
 
 const required = [
+  {
+    name: "fixture drift",
+    cmd: "node tools/rust-engine-program/check-fixture-drift.mjs",
+    skipCode: 2,
+    skipReason: "yjs/tsx unavailable; fixture drift not checked",
+  },
   { name: "fmt --check", cmd: "cargo fmt --all --check" },
   {
     name: "clippy -D warnings",
@@ -69,6 +75,15 @@ console.log(`repo: ${repoRoot}\n`);
 for (const step of required) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
+  if (r.code === step.skipCode) {
+    console.warn(`  ${step.name} — SKIPPED (${step.skipReason}).`);
+    results.push({
+      name: step.name,
+      status: "SKIP",
+      reason: step.skipReason,
+    });
+    continue;
+  }
   if (!r.ok) failed = true;
   results.push({
     name: step.name,
@@ -93,10 +108,16 @@ for (const step of optional) {
 
 // Summary + pasteable evidence line.
 const stamp = new Date().toISOString();
-const summary = results.map((r) => `${r.name}=${r.status}`).join(" ");
+const summary = results
+  .map((r) => `${r.name}=${r.status}${r.reason ? `[${r.reason}]` : ""}`)
+  .join(" ");
 
 console.log(`\n== summary ==`);
-for (const r of results) console.log(`  ${r.status.padEnd(4)} ${r.name}`);
+for (const r of results) {
+  console.log(
+    `  ${r.status.padEnd(4)} ${r.name}${r.reason ? ` — ${r.reason}` : ""}`,
+  );
+}
 
 const verdict = failed ? "FAIL" : "PASS";
 console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
