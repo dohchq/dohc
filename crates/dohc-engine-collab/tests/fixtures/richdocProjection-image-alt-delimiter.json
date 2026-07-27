@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-image-alt-delimiter",
  "updates": [
-  "AQXcxOnJBAAHAQRib2R5AwlwYXJhZ3JhcGgHANzE6ckEAAMFaW1hZ2UoANzE6ckEAQNzcmMBdxBhc3NldHMvaW1hZ2UucG5nKADcxOnJBAEDYWx0AXcMbGVmdCBdIHJpZ2h0KADcxOnJBAEFdGl0bGUBfgA=",
-  "AQHcxOnJBAUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcTaW1hZ2UtYWx0LWRlbGltaXRlcgA="
+  "AQX2n5YYAAcBBGJvZHkDCXBhcmFncmFwaAcA9p+WGAADBWltYWdlKAD2n5YYAQNzcmMBdxBhc3NldHMvaW1hZ2UucG5nKAD2n5YYAQNhbHQBdwxsZWZ0IF0gcmlnaHQoAPaflhgBBXRpdGxlAX4A",
+  "AQH2n5YYBSgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxNpbWFnZS1hbHQtZGVsaW1pdGVyAA=="
  ],
- "mergedUpdateB64": "AQbcxOnJBAAHAQRib2R5AwlwYXJhZ3JhcGgHANzE6ckEAAMFaW1hZ2UoANzE6ckEAQNzcmMBdxBhc3NldHMvaW1hZ2UucG5nKADcxOnJBAEDYWx0AXcMbGVmdCBdIHJpZ2h0KADcxOnJBAEFdGl0bGUBfigBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxNpbWFnZS1hbHQtZGVsaW1pdGVyAA==",
- "stateVectorB64": "AdzE6ckEBg==",
+ "mergedUpdateB64": "AQb2n5YYAAcBBGJvZHkDCXBhcmFncmFwaAcA9p+WGAADBWltYWdlKAD2n5YYAQNzcmMBdxBhc3NldHMvaW1hZ2UucG5nKAD2n5YYAQNhbHQBdwxsZWZ0IF0gcmlnaHQoAPaflhgBBXRpdGxlAX4oAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcTaW1hZ2UtYWx0LWRlbGltaXRlcgA=",
+ "stateVectorB64": "AfaflhgG",
  "coverage": {
   "nodes": [
    "doc",

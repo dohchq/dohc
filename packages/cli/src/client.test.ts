@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sendCliRequest } from "./client";
 import { DohcCliError } from "./errors";
@@ -36,7 +36,7 @@ describe("sendCliRequest", () => {
         verb: "channels",
         args: { cwd: "/workspace", actor: "human" },
       },
-      { stateDir, transport },
+      { stateDir, transport, platform: "linux" },
     );
     expect(result).toEqual({
       channels: [{ id: "ch_one", name: "One", slug: "one", kind: "channel" }],
@@ -64,6 +64,7 @@ describe("sendCliRequest", () => {
         },
         {
           stateDir,
+          platform: "linux",
           transport: async () => ({
             protocolVersion: CLI_PROTOCOL_VERSION + 1,
             status: "future-error-shape",
@@ -87,7 +88,7 @@ describe("sendCliRequest", () => {
         verb: "channels",
         args: { cwd: "/workspace", actor: "human" },
       },
-      { stateDir, timeoutMs: 1_234, transport },
+      { stateDir, timeoutMs: 1_234, transport, platform: "linux" },
     );
     expect(transport).toHaveBeenCalledWith(
       join(stateDir, "dohc-cli.sock"),
@@ -107,6 +108,7 @@ describe("sendCliRequest", () => {
         },
         {
           stateDir,
+          platform: "linux",
           transport: async () => ({
             protocolVersion: CLI_PROTOCOL_VERSION,
             ok: true,
@@ -126,7 +128,7 @@ describe("sendCliRequest", () => {
           verb: "channels",
           args: { cwd: "/workspace", actor: "human" },
         },
-        { stateDir },
+        { stateDir, platform: "linux" },
       ),
     ).rejects.toThrow("desktop app not running");
   });
