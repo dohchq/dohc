@@ -63,9 +63,10 @@ pub fn apply_shared_envelope(
     dense.origin_id = format!("shared:{}:{}", boundary.share_id, source_origin_id);
     dense.origin_seq = dense_seq;
 
+    let mut replay_refusals = Vec::new();
     let outcome = apply_envelope_with(store, &dense, faults, |tx, op| {
         enforce_shared_channel_boundary(tx, boundary, op)?;
-        crate::apply::apply_chat_tx(tx, op)?;
+        replay_refusals = crate::apply::apply_chat_tx(tx, op)?;
         advance_shared_peer_tx(
             tx,
             &op.workspace_id,
@@ -76,7 +77,8 @@ pub fn apply_shared_envelope(
     })?;
     let advance_source = match &outcome {
         ApplyOutcome::Applied(_) | ApplyOutcome::Crashed { .. } => false,
-        ApplyOutcome::Skipped => true,
+        ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => true,
+        ApplyOutcome::WithRefusals { .. } => unreachable!("refusals are attached below"),
     };
     if advance_source {
         match store.write_with(faults, |tx| {
@@ -93,7 +95,7 @@ pub fn apply_shared_envelope(
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
     }
-    Ok(outcome)
+    Ok(outcome.with_refusals(replay_refusals))
 }
 
 /// Fail-closed SharedChannel scoping. Every admitted op must positively bind to

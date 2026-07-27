@@ -9381,12 +9381,46 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
                 "pendingResolve": result.pending_resolve
             })
         }
+        ApplyOutcome::Refused(refusal) => json!({
+            "replicated": true,
+            "status": "refused",
+            "workspaceId": refusal.workspace_id,
+            "originId": refusal.origin_id,
+            "originSeq": refusal.origin_seq,
+            "opKind": refusal.op_kind,
+            "code": refusal.reason.code(),
+            "reason": refusal.reason.message()
+        }),
         ApplyOutcome::Skipped => json!({ "replicated": true, "status": "skipped" }),
         ApplyOutcome::Crashed { committed } => json!({
             "replicated": true,
             "status": "crashed",
             "committed": committed
         }),
+        ApplyOutcome::WithRefusals { outcome, refusals } => {
+            let mut value = replicated_conflict_json(*outcome);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "refusals".to_owned(),
+                    Value::Array(
+                        refusals
+                            .into_iter()
+                            .map(|refusal| {
+                                json!({
+                                    "workspaceId": refusal.workspace_id,
+                                    "originId": refusal.origin_id,
+                                    "originSeq": refusal.origin_seq,
+                                    "opKind": refusal.op_kind,
+                                    "code": refusal.reason.code(),
+                                    "reason": refusal.reason.message()
+                                })
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            value
+        }
     }
 }
 
@@ -9448,17 +9482,20 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             fetched,
             has_more,
             applied,
+            refused,
             skipped,
             conflicts_opened,
             pending_cursor,
             changed_paths,
             pending_resolves,
+            refusals,
         } => json!({
             "status": "complete",
             "pushed": pushed,
             "fetched": fetched,
             "hasMore": has_more,
             "applied": applied,
+            "refused": refused,
             "skipped": skipped,
             "conflictsOpened": conflicts_opened,
             "nextCursor": pending_cursor.as_ref().map(|cursor| cursor.cursor),
@@ -9469,20 +9506,31 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "contentKind": change.content_kind,
             })).collect::<Vec<_>>(),
             "pendingResolves": pending_resolves,
+            "refusals": refusals.into_iter().map(|refusal| json!({
+                "workspaceId": refusal.workspace_id,
+                "originId": refusal.origin_id,
+                "originSeq": refusal.origin_seq,
+                "opKind": refusal.op_kind,
+                "code": refusal.reason.code(),
+                "reason": refusal.reason.message(),
+            })).collect::<Vec<_>>(),
         }),
         SyncPassOutcome::CrashedAfterRemoteCommit => {
             json!({ "status": "crashedAfterRemoteCommit" })
         }
         SyncPassOutcome::CrashedAfterApply {
             applied,
+            refused,
             skipped,
             conflicts_opened,
             pending_cursor,
             changed_paths,
             pending_resolves,
+            refusals,
         } => json!({
             "status": "crashedAfterApply",
             "applied": applied,
+            "refused": refused,
             "skipped": skipped,
             "conflictsOpened": conflicts_opened,
             "nextCursor": pending_cursor.cursor,
@@ -9493,6 +9541,14 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "contentKind": change.content_kind,
             })).collect::<Vec<_>>(),
             "pendingResolves": pending_resolves,
+            "refusals": refusals.into_iter().map(|refusal| json!({
+                "workspaceId": refusal.workspace_id,
+                "originId": refusal.origin_id,
+                "originSeq": refusal.origin_seq,
+                "opKind": refusal.op_kind,
+                "code": refusal.reason.code(),
+                "reason": refusal.reason.message(),
+            })).collect::<Vec<_>>(),
         }),
     }
 }
@@ -9864,6 +9920,9 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         SyncError::Storage(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
+        // Retryable state conditions are transient by definition; Internal is
+        // the retry-eligible class on this surface (InvalidParams is terminal).
+        | SyncError::RetryableState { .. }
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
         | SyncError::UnsupportedOperation
@@ -10301,17 +10360,48 @@ mod tests {
     }
 
     #[test]
+    fn replicated_conflict_json_surfaces_an_acked_refusal() {
+        let value = replicated_conflict_json(ApplyOutcome::Refused(
+            dohc_engine_sync::ReplicationRefusal {
+                workspace_id: "ws".to_owned(),
+                origin_id: "peer".to_owned(),
+                origin_seq: 7,
+                op_kind: "conflict.open".to_owned(),
+                reason: dohc_engine_sync::RefusalReason::InvalidInput {
+                    reason: "conflict.open must describe an unresolved conflict".to_owned(),
+                },
+            },
+        ));
+
+        assert_eq!(
+            value,
+            json!({
+                "replicated": true,
+                "status": "refused",
+                "workspaceId": "ws",
+                "originId": "peer",
+                "originSeq": 7,
+                "opKind": "conflict.open",
+                "code": "invalid-input",
+                "reason": "conflict.open must describe an unresolved conflict"
+            })
+        );
+    }
+
+    #[test]
     fn sync_outcome_json_surfaces_an_undrained_complete_pass() {
         let value = sync_outcome_json(SyncPassOutcome::Complete {
             pushed: 0,
             fetched: 500,
             has_more: true,
             applied: 500,
+            refused: 0,
             skipped: 0,
             conflicts_opened: 0,
             pending_cursor: None,
             changed_paths: Vec::new(),
             pending_resolves: Vec::new(),
+            refusals: Vec::new(),
         });
 
         assert_eq!(value["status"], "complete");

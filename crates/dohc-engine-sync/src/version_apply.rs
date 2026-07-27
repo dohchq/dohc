@@ -144,7 +144,7 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
             )
             .optional()
             .map_err(SyncError::corrupt)?
-            .ok_or(SyncError::InvalidInput {
+            .ok_or(SyncError::RetryableState {
                 reason: "version.create source version is missing",
             })
             .map(Some)?,

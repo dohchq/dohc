@@ -12,6 +12,8 @@ pub enum SyncError {
     SequenceGap,
     #[error("replication coordinate contains different content")]
     CoordinateDiverged,
+    #[error("replication state is not ready: {reason}")]
+    RetryableState { reason: &'static str },
     #[error("operation kind is not owned by this apply surface")]
     UnsupportedOperation,
     #[error("replicated operation is outside the share boundary")]
@@ -28,6 +30,7 @@ impl SyncError {
             SyncError::Storage(err) => err.code(),
             SyncError::InvalidInput { .. } => "invalid-input",
             SyncError::SequenceGap | SyncError::CoordinateDiverged => "state-corrupt",
+            SyncError::RetryableState { .. } => "retryable-state",
             SyncError::UnsupportedOperation => "invalid-input",
             SyncError::ShareBoundaryViolation => "share-boundary-violation",
             SyncError::BlobInvalid => "invalid-input",
@@ -42,6 +45,10 @@ impl SyncError {
     pub(crate) fn corrupt(err: impl std::error::Error + Send + Sync + 'static) -> Self {
         SyncError::Storage(StorageError::corrupt_public(err))
     }
+}
+
+pub(crate) fn local_corruption(reason: &'static str) -> SyncError {
+    SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(reason)))
 }
 
 /// Relay transport errors preserve the TS class-per-condition contract while

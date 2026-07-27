@@ -336,6 +336,9 @@ export interface WorkspaceEngineCapture {
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
+  // Reverse lookup for projections that must name a linked object's current
+  // active-version path after renames.
+  filePathForObjectId(objectId: string): Promise<string | null>;
   // Writes a generated Markdown artifact through this capture's canonical
   // VersionedTextStore and then materializes it to disk on the SAME serialized
   // chain as capture/version work. `expectedObjectId` is the update authority:
@@ -2427,6 +2430,17 @@ export function createWorkspaceEngineCapture(
         path,
       });
       return snapshot?.objectId ?? null;
+    },
+
+    async filePathForObjectId(objectId) {
+      await chain;
+      const engine = await engineStore();
+      const activeVersionId = await activeVersionIdOf(engine);
+      const files = await engine.listTextFiles({
+        workspaceId,
+        versionId: activeVersionId,
+      });
+      return files.find((file) => file.objectId === objectId)?.path ?? null;
     },
 
     writeGeneratedTextFile(input) {

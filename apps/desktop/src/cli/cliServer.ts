@@ -14,6 +14,7 @@ import {
 } from "@dohc/cli/protocol";
 import { renderShowMarkdown } from "@dohc/cli/render";
 import { formatMessageHandle } from "@dohc/cli/thread-markdown";
+import { validateUserReadPath } from "@dohc/workspace-core";
 import {
   AgentDispatchStoreError,
   LINKED_CHAT_STORE_RELATIVE_PATH,
@@ -23,6 +24,8 @@ import {
   type ChatMessage,
   type ChatThread,
   type LinkedChatStore,
+  type VersionedTextMoment,
+  type VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
 import {
   MAX_GRANULAR_CHAT_QUERY_CHARS,
@@ -63,6 +66,7 @@ export const CLI_ENDPOINT_FILE = "dohc-cli-endpoint";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_FTS_CANDIDATES = 50_000;
+const LIST_MOMENTS_HARD_LIMIT = 500;
 const MAX_SOCKET_CONNECTIONS = 64;
 const REQUEST_DEADLINE_MS = 15_000;
 const REGEX_SCAN_TIMEOUT_MS = 5_000;
@@ -144,6 +148,9 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
   fileObjectIdForPath(path: string): Promise<string | null>;
+  filePathForObjectId(objectId: string): Promise<string | null>;
+  listMoments(input: { limit: number }): Promise<VersionedTextMomentSummary[]>;
+  readMoment(momentId: string): Promise<VersionedTextMoment | null>;
   assertWritable(target: { channelId: string } | { threadId: string }): Promise<void>;
   daemonReads?: {
     queryChatMessagesGranular(input: {
@@ -304,6 +311,57 @@ function authorForActor(identity: CliMainIdentity, actor: CliActor): CliAuthor {
   return actor === "agent"
     ? { kind: "agent", displayName: identity.displayName }
     : { kind: "human", displayName: identity.displayName };
+}
+
+function rawChatThread(thread: ChatThread) {
+  return {
+    id: thread.id,
+    title: thread.title,
+    createdAtMs: thread.createdAtMs,
+    updatedAtMs: thread.updatedAtMs,
+    ...(thread.linkedFile?.pathHint
+      ? { linkedPathHint: thread.linkedFile.pathHint }
+      : {}),
+  };
+}
+
+function rawChatMessage(message: ChatMessage) {
+  return {
+    id: message.id,
+    threadId: message.threadId,
+    authorKind: message.author.kind,
+    authorDisplayName: message.author.displayName,
+    body: message.body,
+    createdAtMs: message.createdAtMs,
+  };
+}
+
+function rawMomentSummary(
+  moment: Pick<
+    VersionedTextMomentSummary,
+    "id" | "recordedAtMs" | "operation" | "path" | "versionId" | "metadata" | "author"
+  >,
+  includeFiles: boolean,
+) {
+  return {
+    id: moment.id,
+    recordedAtMs: moment.recordedAtMs,
+    source: "workspace-engine" as const,
+    operation: moment.operation,
+    path: moment.path,
+    versionId: moment.versionId,
+    ...(moment.metadata.summary ? { summary: moment.metadata.summary } : {}),
+    ...(moment.author ? { author: moment.author } : {}),
+    fileCount: 1 as const,
+    ...(includeFiles
+      ? { files: [{ path: moment.path, operation: moment.operation }] }
+      : {}),
+  };
+}
+
+function mcpFailure(error: unknown, fallback: string) {
+  const reason = error instanceof Error ? error.message : fallback;
+  return { ok: false as const, reason };
 }
 
 async function loadChannels(
@@ -1290,6 +1348,244 @@ async function dispatch(
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): Promise<unknown> {
+  switch (request.verb) {
+    case "moments": {
+      const includeFiles = request.args.includeFiles ?? false;
+      const sinceMs = request.args.sinceMs;
+      const limit = Math.min(
+        LIST_MOMENTS_HARD_LIMIT,
+        Math.max(1, Math.floor(request.args.limit ?? 50)),
+      );
+      const moments = await context.listMoments({ limit: LIST_MOMENTS_HARD_LIMIT });
+      const selectedMoments = sinceMs === undefined
+        ? moments
+        : moments.filter((moment) => moment.recordedAtMs > sinceMs);
+      const merged = selectedMoments
+        .map((moment) => rawMomentSummary(moment, includeFiles))
+        .sort((left, right) =>
+          right.recordedAtMs - left.recordedAtMs ||
+          left.id.localeCompare(right.id),
+        );
+      const selected = merged.slice(0, limit);
+      return {
+        changes: selected,
+        count: selected.length,
+        totalAvailable: merged.length,
+        hasMore: merged.length > selected.length,
+        cursorMs: selected.reduce(
+          (max, entry) => Math.max(max, entry.recordedAtMs),
+          sinceMs ?? 0,
+        ),
+      };
+    }
+
+    case "moment": {
+      const moment = await context.readMoment(request.args.id);
+      if (!moment) {
+        return {
+          ok: false as const,
+          reason: `change not found: ${request.args.id}`,
+        };
+      }
+      return {
+        ok: true as const,
+        change: {
+          ...rawMomentSummary(moment, true),
+          before: moment.payload.before,
+          after: moment.payload.after,
+        },
+      };
+    }
+
+    case "fileChats": {
+      const validated = validateUserReadPath(request.args.path);
+      if (!validated.ok) {
+        return {
+          ok: false as const,
+          reason: `path rejected (${validated.reason}): ${request.args.path}`,
+        };
+      }
+      try {
+        const fileObjectId = await context.fileObjectIdForPath(validated.normalized);
+        const threads = fileObjectId
+          ? await context.store.listThreadsForFile({
+              workspaceId: context.workspaceId,
+              objectId: fileObjectId,
+            })
+          : [];
+        return {
+          ok: true as const,
+          path: validated.normalized,
+          fileObjectId,
+          threads: threads.map(rawChatThread),
+        };
+      } catch (error) {
+        return mcpFailure(error, `failed to list chats for: ${request.args.path}`);
+      }
+    }
+
+    case "chat": {
+      try {
+        const messages = await context.store.listMessages({
+          workspaceId: context.workspaceId,
+          threadId: request.args.threadId,
+        });
+        const threads = await context.store.listThreads({
+          workspaceId: context.workspaceId,
+        });
+        const thread = threads.find(
+          (candidate) => candidate.id === request.args.threadId,
+        );
+        if (!thread) {
+          return {
+            ok: false as const,
+            reason: `chat thread not found: ${request.args.threadId}`,
+          };
+        }
+        const currentPath = thread.linkedFile
+          ? await context.filePathForObjectId(thread.linkedFile.objectId)
+          : null;
+        const projection = await context.store.getThreadProjection({
+          workspaceId: context.workspaceId,
+          threadId: thread.id,
+          linkedFileAccess: currentPath
+            ? { kind: "allowed", path: currentPath }
+            : { kind: "unknown" },
+        });
+        return {
+          ok: true as const,
+          thread: rawChatThread(thread),
+          messages: messages.map(rawChatMessage),
+          projection: {
+            path: projection.path,
+            readOnly: projection.readOnly,
+            text: projection.text,
+          },
+        };
+      } catch (error) {
+        return mcpFailure(error, `failed to read chat: ${request.args.threadId}`);
+      }
+    }
+
+    case "channelsFull": {
+      try {
+        const before = await context.store.listChannels({
+          workspaceId: context.workspaceId,
+        });
+        if (!context.readOnly) {
+          await context.store.ensureGeneralChannel({
+            workspaceId: context.workspaceId,
+          });
+        }
+        const fullChannels = await context.store.listChannels({
+          workspaceId: context.workspaceId,
+        });
+        if (fullChannels.length !== before.length) {
+          await notifyWrite(options, context);
+        }
+        const withThreads = [];
+        for (const channel of fullChannels) {
+          const threads = await context.store.listChannelThreads({
+            workspaceId: context.workspaceId,
+            channelId: channel.id,
+          });
+          withThreads.push({
+            id: channel.id,
+            name: channel.name,
+            slug: channel.slug,
+            kind: channel.kind,
+            threadCount: channel.threadCount,
+            threads: threads.map((entry) => ({
+              id: entry.thread.id,
+              title: entry.thread.title,
+              messageCount: entry.messageCount,
+              updatedAtMs: entry.thread.updatedAtMs,
+            })),
+          });
+        }
+        return { ok: true as const, channels: withThreads };
+      } catch (error) {
+        return mcpFailure(error, "failed to list channels");
+      }
+    }
+
+    case "startChannelChat": {
+      try {
+        const requested = request.args.channel.replace(/^#/u, "").trim();
+        const bySlug = await context.store.findChannelBySlug({
+          workspaceId: context.workspaceId,
+          slug: requested,
+        });
+        const channel = bySlug ??
+          (await context.store.listChannels({
+            workspaceId: context.workspaceId,
+          })).find(
+            (candidate) =>
+              candidate.id === requested || candidate.name === requested,
+          );
+        if (!channel) {
+          return {
+            ok: false as const,
+            reason: `channel not found: ${request.args.channel}`,
+          };
+        }
+        await context.assertWritable({ channelId: channel.id });
+        const identity = await options.identity();
+        const started = await context.store.startChannelThread({
+          workspaceId: context.workspaceId,
+          channelId: channel.id,
+          ...(request.args.title !== undefined
+            ? { title: request.args.title }
+            : {}),
+          author: authorForActor(identity, request.args.actor),
+          ...(identity.authorUserId
+            ? { authorUserId: identity.authorUserId }
+            : {}),
+          body: request.args.body,
+        });
+        await notifyWrite(options, context);
+        return {
+          ok: true as const,
+          channel: {
+            id: channel.id,
+            name: channel.name,
+            slug: channel.slug,
+          },
+          thread: rawChatThread(started.thread),
+          message: rawChatMessage(started.message),
+        };
+      } catch (error) {
+        return mcpFailure(
+          error,
+          `failed to start a chat in: ${request.args.channel}`,
+        );
+      }
+    }
+
+    case "replyToChat": {
+      try {
+        await context.assertWritable({ threadId: request.args.threadId });
+        const identity = await options.identity();
+        const message = await context.store.sendMessage({
+          workspaceId: context.workspaceId,
+          threadId: request.args.threadId,
+          author: authorForActor(identity, request.args.actor),
+          ...(identity.authorUserId
+            ? { authorUserId: identity.authorUserId }
+            : {}),
+          body: request.args.body,
+        });
+        await notifyWrite(options, context);
+        return { ok: true as const, message: rawChatMessage(message) };
+      } catch (error) {
+        return mcpFailure(
+          error,
+          `failed to reply to chat: ${request.args.threadId}`,
+        );
+      }
+    }
+  }
+
   const loadedChannels = await loadChannels(context);
   const channels = loadedChannels.channels;
   if (loadedChannels.provisioned) await notifyWrite(options, context);
@@ -1780,7 +2076,15 @@ async function workspaceContextForRequest(
 ): Promise<CliWorkspaceContext> {
   const workspace = resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
-  if (workspace.readOnly) {
+  const writeRequest =
+    request.verb === "post" ||
+    request.verb === "reply" ||
+    request.verb === "react" ||
+    request.verb === "export" ||
+    request.verb === "startChannelChat" ||
+    request.verb === "replyToChat" ||
+    (request.verb === "show" && !request.args.peek);
+  if (workspace.readOnly && writeRequest) {
     throw new CliCommandError("chats are not available in a read-only shared view");
   }
   return options.openWorkspace(workspace);

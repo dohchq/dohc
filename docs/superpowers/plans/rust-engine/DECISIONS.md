@@ -190,7 +190,30 @@ deferred ONLY under it; they are now in-scope-or-revisit:
 
 ## 2026-07-26 — R13b-rest surfaced decisions — OPEN (for Ice)
 
-### MCP transport to the daemon — OPEN
+### MCP transport to the daemon — RESOLVED (Ice, 2026-07-27): PROXY THROUGH DESKTOP MAIN
+
+**Ruling: option (a). MCP tool calls are proxied through desktop main, which
+already owns the daemon's stdio pipes. No socket, no named pipe, no second
+daemon client.**
+
+Why this and not the alternatives: it adds no new attack surface (decision #5
+closed the socket question deliberately, and a socket would reopen it), and it
+leaves exactly ONE writer on the daemon-owned `engine.db`. Today
+`packages/mcp/src/tools.ts` opens the engine stores per call
+(`withEngineStores`) and writes through them — `startChannelThread`,
+`sendMessage` — from a separate OS process. After the flip the daemon owns that
+database, so leaving MCP as a direct writer would put two processes on one
+SQLite file immediately after a reset wipes the previous data. That is the
+single most direct route to corrupting real data post-flip.
+
+Consequence for the cutover: MCP writes MUST route through main before the
+flip. Tracked as shard R13b-S9. The explicit pre-flip acceptance check is:
+`packages/mcp` no longer opens or writes `engine.db` (including through
+`withEngineStores`), and every MCP write tool routes through desktop main.
+Both halves must be proved before the flip; merely adding a proxy while
+retaining a direct-store fallback does not satisfy the check.
+
+Original finding follows.
 - **Finding (R13b-rest mapping pass):** `dohc-mcp` is a separate OS process
   spawned by the USER'S AGENT (per `mcpConfigFor`), not by desktop main. The
   daemon is a stdio child of desktop main with inherited pipes only (decision
@@ -207,7 +230,25 @@ deferred ONLY under it; they are now in-scope-or-revisit:
   without this decision. Proxy-through-main (a) is the posture-consistent
   default recommendation.
 
-### Key-envelope custody over RPC — OPEN
+### Key-envelope custody over RPC — RESOLVED (Ice, 2026-07-27): DESKTOP-SIDE CUSTODY
+
+**Ruling: custody stays desktop-side. The daemon never sees the raw data key.**
+
+This keeps the "no daemon key custody" posture the program has held throughout,
+and unblocks the seven key-envelope call sites deferred out of #268 (S8). The
+daemon handles envelopes/ciphertext it cannot open; the desktop performs every
+wrap and unwrap. Raw data-key material is forbidden from every RPC input,
+response, event, error, diagnostic, and log; only an opaque wrapped envelope or
+ciphertext reference may cross the process boundary.
+
+S8's pre-flip acceptance must include a boundary test that drives the real
+request, response, event, and error paths while capturing daemon stderr, uses a
+distinctive raw-key sentinel, and proves the sentinel appears in none of them.
+That test belongs to S8 because no key-envelope RPC surface exists yet; a
+source-only or synthetic test before those call sites exist would not prove the
+implemented boundary.
+
+Original finding follows.
 - The envelope crypto is byte-exact ported (`dohc-engine-crypto/envelope.rs`)
   but exposing wrap/unwrap over daemon RPC contradicts RPC_GAP's recorded
   "no daemon key custody" posture. Relay-sync shard (S8/RPC-E-4) needs a
@@ -215,3 +256,83 @@ deferred ONLY under it; they are now in-scope-or-revisit:
   envelope ops stay in TS/desktop, only ciphertext crosses the RPC), or
   grant the daemon custody. Desktop-side custody is the posture-consistent
   default recommendation.
+
+## RESOLVED (Ice, 2026-07-27) — the steady-state tail slope SATISFIES R15-2
+
+**Ice accepted the tail verdict.** R15-2's soak criterion is met by the
+post-warm-up tail slope against the unchanged 20 KiB/s bound.
+
+Recorded plainly so the basis is auditable later: the same run measures
+**26208 B/s on the whole-run fit (over the bound) and 14255 B/s on the tail
+(under it)**, over 460 samples spanning 2823 s. This is a PASS *because* the
+verdict window changed, not because the engine's memory behaviour changed. A
+synthetic constant-slope leak still fails the tail test, so leak detection is
+preserved.
+
+The original question and its evidence follow.
+
+R15-2 authorized the flip on a passing full-mode gate **and** cutoverBlocking
+soak on the Blacksmith macOS runner. The gate half passes and earned its keep
+(#256, #260, #261, #264 all came out of it). The soak half has failed ten times
+out of ten, always on the RSS growth bound.
+
+The 90-minute run diagnosed why: growth is asymptotic, not linear. Quarter
+slopes halve (72.8 -> 35.4 -> 16.9 -> 6.7 KB/s), the last quarter is under the
+20 KiB/s bound, RSS ends below its peak, threads end lower than they started.
+That is allocator fragmentation approaching a plateau, not a constant-rate leak.
+The whole-run linear fit is dominated by warm-up and reports FAIL for a process
+whose steady-state growth is inside the bound.
+
+PR #267 therefore changes the verdict to evaluate the post-warm-up tail against
+the same unchanged 20 KiB/s bound. A synthetic constant-slope leak still fails
+that test.
+
+**The question:** is that an accepted methodology correction, or a post-hoc
+narrowing of the criterion you authorized?
+
+- **Accept the tail verdict** — the diagnosis is sound and a leak would still be
+  caught; the flip proceeds once a run goes green under it.
+- **Require a whole-run fit under the bound** — then the plateau height itself
+  must come down, which is real allocator work (arena tuning / periodic
+  `malloc_zone_pressure_relief`), not a measurement change.
+- **Accept the growth explicitly as a known residual** — flip anyway, on the
+  record, with the ~184 MB plateau documented.
+
+**Program recommendation: accept the tail verdict**, because the physics
+supports it and detection is provably preserved. Stated plainly so it is your
+call and not a decision the program made for you by editing a threshold.
+
+Also unresolved and blocking regardless of the above: no soak evidence JSON has
+ever been banked (the GitHub artifact quota was full on every run), so there is
+no macOS evidence artifact on file — only the Windows one.
+
+
+## RESOLVED (program, 2026-07-27) — a divergent second Y.Doc base is a HARD error, never acked
+
+Two reviewers on #245 asked for opposite things, so this is recorded rather than
+silently settled inside a fix round.
+
+- One asked that `CollabError::BaseStateDiverged` be mapped to `InvalidInput`,
+  grouping it with the payload-invalid variants so the envelope is journaled and
+  acked like any other bad payload.
+- The other pointed out that doing so acks a divergent second base, after which
+  that peer's later updates are permanently stuck in `MissingDependencies`.
+
+The tie-break is the engine's own documented invariant, in `claim_base_in_tx`
+(`crates/dohc-engine-collab/src/durable.rs`): *"Silently resuming (and acking) a
+DIFFERENT base would drop a divergent lineage while the relay cursor advances
+past it, leaving that peer's later updates missing an unrecoverable dependency."*
+
+A divergent base is not a malformed payload. It is evidence that two peers built
+on different lineages, which is local-state disagreement, and acking it advances
+the cursor past the only coordinate that could ever explain the divergence. The
+mapping is therefore `BaseStateDiverged => SyncError::CoordinateDiverged` — a
+hard error with no ack and no journal row, proven by
+`divergent_second_ydoc_base_is_hard_unacked_and_unjournaled`.
+
+**Consequence to be aware of:** a genuinely divergent peer now stalls loudly
+instead of silently dropping its lineage. That is the intended trade — a stall
+is recoverable and visible, an advanced cursor over a dropped lineage is
+neither. If you would rather take the silent-drop behaviour for liveness, say
+so and this flips; the program's judgement is that data-loss-by-ack is the worse
+failure during a cutover.

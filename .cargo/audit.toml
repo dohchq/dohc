@@ -1,0 +1,8 @@
+# `time` is present only through ureq's disabled cookie-store feature:
+# dohc-engine-sync-http uses ureq with `default-features = false` and enables
+# only JSON + rustls, and `cargo tree -i time --workspace -e all` is empty.
+# The fixed time release also requires Rust 1.88, above this workspace's 1.85
+# contract. Keep auditing the lockfile while documenting this unreachable
+# advisory until ureq removes or upgrades its optional cookie dependency.
+[advisories]
+ignore = ["RUSTSEC-2026-0009"]

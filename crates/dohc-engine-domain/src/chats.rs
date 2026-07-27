@@ -6923,6 +6923,20 @@ struct PendingAttachmentAdd {
     created_at_ms: i64,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingMessageAppend {
+    message_id: String,
+    thread_id: String,
+    author_kind: String,
+    author_display_name: String,
+    author_user_id: Option<String>,
+    parent_message_id: Option<String>,
+    origin: Option<String>,
+    body: String,
+    created_at_ms: i64,
+}
+
 #[derive(Debug)]
 struct PendingChatOperation {
     origin_id: String,
@@ -6940,7 +6954,15 @@ struct PendingChatDependency {
 enum PendingReplayOutcome {
     Applied,
     Deferred,
-    Refused,
+    Refused(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingChatRefusal {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub op_kind: String,
+    pub reason: &'static str,
 }
 
 /// Replay only parked chat coordinates whose dependency was changed by one
@@ -6950,7 +6972,8 @@ pub fn replay_pending_chat_coordinates_for_change(
     workspace_id: &str,
     op_kind: &str,
     payload: &serde_json::Value,
-) -> Result<(), DomainError> {
+) -> Result<Vec<PendingChatRefusal>, DomainError> {
+    let mut refusals = Vec::new();
     let mut dependencies = changed_chat_dependencies(tx, workspace_id, op_kind, payload)?;
     while let Some(dependency) = dependencies.pop() {
         let pending = pending_chat_operations(tx, workspace_id, &dependency)?;
@@ -6961,20 +6984,24 @@ pub fn replay_pending_chat_coordinates_for_change(
                 params![workspace_id, operation.origin_id, operation.origin_seq],
             )
             .map_err(DomainError::sql_persist)?;
-            if matches!(
-                replay_pending_chat_operation(tx, workspace_id, &operation)?,
-                PendingReplayOutcome::Applied
-            ) {
-                dependencies.extend(changed_chat_dependencies(
-                    tx,
-                    workspace_id,
-                    &operation.op_kind,
-                    &operation.payload,
-                )?);
+            match replay_pending_chat_operation(tx, workspace_id, &operation)? {
+                PendingReplayOutcome::Applied => {
+                    dependencies.extend(changed_chat_dependencies(
+                        tx,
+                        workspace_id,
+                        &operation.op_kind,
+                        &operation.payload,
+                    )?);
+                }
+                PendingReplayOutcome::Deferred => {}
+                PendingReplayOutcome::Refused(reason) => {
+                    persist_pending_chat_refusal(tx, workspace_id, &operation, reason)?;
+                    refusals.push(pending_chat_refusal(&operation, reason));
+                }
             }
         }
     }
-    Ok(())
+    Ok(refusals)
 }
 
 /// Re-evaluate every parked coordinate in one workspace against the committed
@@ -6983,16 +7010,17 @@ pub fn replay_pending_chat_coordinates_for_change(
 pub fn replay_ready_pending_chat_coordinates(
     tx: &Transaction<'_>,
     workspace_id: &str,
-) -> Result<(), DomainError> {
+) -> Result<Vec<PendingChatRefusal>, DomainError> {
     let has_pending: bool = tx
         .query_row(PENDING_CHAT_WORKSPACE_EXISTS_SQL, [workspace_id], |row| {
             row.get(0)
         })
         .map_err(DomainError::sql_corrupt)?;
     if !has_pending {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
+    let mut refusals = Vec::new();
     loop {
         let pending = pending_chat_operations_for_workspace(tx, workspace_id)?;
         let mut applied = false;
@@ -7003,15 +7031,51 @@ pub fn replay_ready_pending_chat_coordinates(
                     delete_pending_chat_operation(tx, workspace_id, &operation)?;
                     applied = true;
                 }
-                PendingReplayOutcome::Refused => {
+                PendingReplayOutcome::Refused(reason) => {
+                    persist_pending_chat_refusal(tx, workspace_id, &operation, reason)?;
                     delete_pending_chat_operation(tx, workspace_id, &operation)?;
+                    refusals.push(pending_chat_refusal(&operation, reason));
                 }
             }
         }
         if !applied {
-            return Ok(());
+            return Ok(refusals);
         }
     }
+}
+
+fn pending_chat_refusal(
+    operation: &PendingChatOperation,
+    reason: &'static str,
+) -> PendingChatRefusal {
+    PendingChatRefusal {
+        origin_id: operation.origin_id.clone(),
+        origin_seq: operation.origin_seq,
+        op_kind: operation.op_kind.clone(),
+        reason,
+    }
+}
+
+fn persist_pending_chat_refusal(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    operation: &PendingChatOperation,
+    reason: &'static str,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO replication_pending_refusals \
+         (workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) \
+         VALUES (?1,?2,?3,?4,'invalid-input',?5)",
+        params![
+            workspace_id,
+            operation.origin_id,
+            operation.origin_seq,
+            operation.op_kind,
+            reason
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
 }
 
 fn pending_chat_operations_for_workspace(
@@ -7138,7 +7202,9 @@ fn replay_pending_chat_operation(
                 "channel" => FollowTargetKind::Channel,
                 "thread" => FollowTargetKind::Thread,
                 _ => {
-                    return Ok(PendingReplayOutcome::Refused);
+                    return Ok(PendingReplayOutcome::Refused(
+                        "chat follow payload is invalid",
+                    ));
                 }
             };
             match resolve_follow_target(tx, workspace_id, target_kind, &payload.target_id)? {
@@ -7152,7 +7218,9 @@ fn replay_pending_chat_operation(
                     )?;
                     Ok(PendingReplayOutcome::Deferred)
                 }
-                FollowTargetResolution::Disallowed => Ok(PendingReplayOutcome::Refused),
+                FollowTargetResolution::Disallowed => Ok(PendingReplayOutcome::Refused(
+                    "chat follow target is not followable",
+                )),
                 FollowTargetResolution::Followable => {
                     tx.execute(
                         "INSERT INTO chat_follows \
@@ -7201,7 +7269,9 @@ fn replay_pending_chat_operation(
                     )?;
                     Ok(PendingReplayOutcome::Deferred)
                 }
-                FeedCoordinateResolution::Disallowed => Ok(PendingReplayOutcome::Refused),
+                FeedCoordinateResolution::Disallowed => Ok(PendingReplayOutcome::Refused(
+                    "chat feed read coordinate is not visible",
+                )),
                 FeedCoordinateResolution::Visible => {
                     tx.execute(
                         "INSERT INTO chat_feed_read_state \
@@ -7248,7 +7318,9 @@ fn replay_pending_chat_operation(
                     )?;
                     Ok(PendingReplayOutcome::Deferred)
                 }
-                ThreadMessageResolution::DifferentThread => Ok(PendingReplayOutcome::Refused),
+                ThreadMessageResolution::DifferentThread => Ok(PendingReplayOutcome::Refused(
+                    "chat attachment target message belongs to another thread",
+                )),
                 ThreadMessageResolution::Present => {
                     tx.execute(
                         "INSERT OR IGNORE INTO chat_attachments \
@@ -7279,8 +7351,166 @@ fn replay_pending_chat_operation(
                 }
             }
         }
-        _ => Ok(PendingReplayOutcome::Refused),
+        "chat.message.append" => {
+            let payload: PendingMessageAppend = serde_json::from_value(operation.payload.clone())
+                .map_err(|_| DomainError::StateCorrupt {
+                reason: "pending chat message payload is corrupt",
+            })?;
+            let thread_exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chat_threads \
+                     WHERE workspace_id=?1 AND thread_id=?2)",
+                    params![workspace_id, payload.thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if !thread_exists {
+                park_pending_chat_operation(
+                    tx,
+                    workspace_id,
+                    operation,
+                    "message-thread",
+                    &payload.thread_id,
+                )?;
+                return Ok(PendingReplayOutcome::Deferred);
+            }
+            apply_pending_message(tx, workspace_id, payload)?;
+            Ok(PendingReplayOutcome::Applied)
+        }
+        _ => Ok(PendingReplayOutcome::Refused(
+            "pending chat operation kind is invalid",
+        )),
     }
+}
+
+fn apply_pending_message(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload: PendingMessageAppend,
+) -> Result<(), DomainError> {
+    let author_display_name =
+        normalize_display_name(&payload.author_display_name).map_err(|_| {
+            DomainError::StateCorrupt {
+                reason: "pending chat message display name is invalid",
+            }
+        })?;
+    let author_user_id =
+        normalize_author_user_id(payload.author_user_id.as_deref()).map_err(|_| {
+            DomainError::StateCorrupt {
+                reason: "pending chat message author id is invalid",
+            }
+        })?;
+    if author_user_id != payload.author_user_id {
+        return Err(DomainError::StateCorrupt {
+            reason: "pending chat message author id changed during replay",
+        });
+    }
+    let body = normalize_body(&payload.body).map_err(|_| DomainError::StateCorrupt {
+        reason: "pending chat message body is invalid",
+    })?;
+    let previous: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(message_order), -1) FROM chat_messages \
+             WHERE workspace_id=?1 AND thread_id=?2",
+            params![workspace_id, payload.thread_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let order = previous.checked_add(1).ok_or(DomainError::StateCorrupt {
+        reason: "pending chat message order overflowed",
+    })?;
+    let parent_exists = if let Some(parent) = &payload.parent_message_id {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_messages \
+             WHERE workspace_id=?1 AND thread_id=?2 AND message_id=?3)",
+            params![workspace_id, payload.thread_id, parent],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(DomainError::sql_corrupt)?
+    } else {
+        false
+    };
+    let stored_parent = if parent_exists {
+        payload.parent_message_id.as_deref()
+    } else {
+        None
+    };
+    let inserted = tx
+        .execute(
+            "INSERT OR IGNORE INTO chat_messages \
+             (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name, \
+              author_user_id,parent_message_id,origin,body,created_at_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                workspace_id,
+                payload.thread_id,
+                order,
+                payload.message_id,
+                payload.author_kind,
+                author_display_name,
+                author_user_id,
+                stored_parent,
+                payload.origin,
+                body,
+                payload.created_at_ms
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+    if inserted == 0 {
+        return Ok(());
+    }
+    for handle in parse_mention_handles(&body) {
+        tx.execute(
+            "INSERT OR IGNORE INTO chat_mentions \
+             (workspace_id,thread_id,message_id,handle,author_kind,created_at_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                workspace_id,
+                payload.thread_id,
+                payload.message_id,
+                handle,
+                payload.author_kind,
+                payload.created_at_ms
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    if let Some(parent) = payload
+        .parent_message_id
+        .as_deref()
+        .filter(|_| !parent_exists)
+        && parent != payload.message_id
+    {
+        tx.execute(
+            "INSERT OR IGNORE INTO chat_pending_message_parents \
+             (workspace_id,child_message_id,thread_id,parent_message_id) \
+             VALUES (?1,?2,?3,?4)",
+            params![workspace_id, payload.message_id, payload.thread_id, parent],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    tx.execute(
+        "UPDATE chat_messages SET parent_message_id=?3 \
+         WHERE workspace_id=?1 AND thread_id=?2 AND message_id IN (\
+           SELECT child_message_id FROM chat_pending_message_parents \
+           WHERE workspace_id=?1 AND thread_id=?2 AND parent_message_id=?3)",
+        params![workspace_id, payload.thread_id, payload.message_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "DELETE FROM chat_pending_message_parents \
+         WHERE workspace_id=?1 AND thread_id=?2 AND parent_message_id=?3",
+        params![workspace_id, payload.thread_id, payload.message_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "UPDATE chat_threads SET updated_at_ms=MAX(updated_at_ms,?3) \
+         WHERE workspace_id=?1 AND thread_id=?2",
+        params![workspace_id, payload.thread_id, payload.created_at_ms],
+    )
+    .map_err(DomainError::sql_persist)?;
+    mark_live_bookmarks_pending(tx, workspace_id, &payload.thread_id, payload.created_at_ms)?;
+    Ok(())
 }
 
 fn park_pending_chat_operation(
@@ -7372,10 +7602,12 @@ fn changed_chat_dependencies(
         }
         "chat.thread.create" => {
             if let Some(thread_id) = payload.get("threadId").and_then(serde_json::Value::as_str) {
-                dependencies.push(PendingChatDependency {
-                    kind: "follow-target",
-                    id: thread_id.to_owned(),
-                });
+                for kind in ["follow-target", "message-thread"] {
+                    dependencies.push(PendingChatDependency {
+                        kind,
+                        id: thread_id.to_owned(),
+                    });
+                }
             }
         }
         "chat.message.append" => {
@@ -8072,7 +8304,7 @@ fn journal_local_op_in_tx(
         payload,
         recorded_at_ms,
     )?;
-    replay_pending_chat_coordinates_for_change(tx, workspace_id, op_kind, payload)
+    replay_pending_chat_coordinates_for_change(tx, workspace_id, op_kind, payload).map(|_| ())
 }
 
 fn require_feed_read_state(

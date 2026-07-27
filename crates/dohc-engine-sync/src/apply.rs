@@ -14,29 +14,129 @@ use dohc_engine_domain::{
     resolve_thread_message, validate_addressable_plaintext_path,
 };
 
+use crate::error::local_corruption;
 use crate::journal::{ack_tx, crashes, read_ack_tx};
 use crate::{ReplicationEnvelope, SyncError};
+
+const DIRECT_RPC_REFUSAL_REPORT_ID: &str = "direct-rpc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome<T> {
     Applied(T),
+    Refused(ReplicationRefusal),
     Skipped,
-    Crashed { committed: bool },
+    Crashed {
+        committed: bool,
+    },
+    /// The envelope has the nested primary disposition, and applying it also
+    /// surfaced refusals for older coordinates that were durably deferred.
+    WithRefusals {
+        outcome: Box<ApplyOutcome<T>>,
+        refusals: Vec<ReplicationRefusal>,
+    },
+}
+
+impl<T> ApplyOutcome<T> {
+    pub(crate) fn map<U>(self, map: impl FnOnce(T) -> U) -> ApplyOutcome<U> {
+        match self {
+            Self::Applied(value) => ApplyOutcome::Applied(map(value)),
+            Self::Refused(refusal) => ApplyOutcome::Refused(refusal),
+            Self::Skipped => ApplyOutcome::Skipped,
+            Self::Crashed { committed } => ApplyOutcome::Crashed { committed },
+            Self::WithRefusals { outcome, refusals } => ApplyOutcome::WithRefusals {
+                outcome: Box::new(outcome.map(map)),
+                refusals,
+            },
+        }
+    }
+
+    pub(crate) fn with_refusals(self, refusals: Vec<ReplicationRefusal>) -> Self {
+        if refusals.is_empty() {
+            self
+        } else {
+            Self::WithRefusals {
+                outcome: Box::new(self),
+                refusals,
+            }
+        }
+    }
+
+    pub(crate) fn into_primary_and_refusals(self) -> (Self, Vec<ReplicationRefusal>) {
+        match self {
+            Self::WithRefusals { outcome, refusals } => {
+                let (primary, mut nested) = outcome.into_primary_and_refusals();
+                nested.extend(refusals);
+                (primary, nested)
+            }
+            primary => (primary, Vec::new()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicationRefusal {
+    pub workspace_id: String,
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub op_kind: String,
+    pub reason: RefusalReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefusalReason {
+    InvalidInput { reason: String },
+}
+
+impl RefusalReason {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidInput { .. } => "invalid-input",
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::InvalidInput { reason } => reason,
+        }
+    }
 }
 
 enum Admission<T> {
     Applied(T),
+    Refused(ReplicationRefusal),
     Skipped,
 }
 
-/// Validate and atomically apply one imported coordinate. `mutation` must make
-/// the domain change using the supplied transaction; the imported log row and
-/// monotonic peer ack are committed in that same transaction.
+pub(crate) enum MutationOutcome<T> {
+    Applied(T),
+    RefusedRetainingMutation { reason: &'static str },
+}
+
+/// Validate and atomically handle one imported coordinate. Ordinary
+/// mutation-level invalid input is rolled back to a savepoint, then journaled
+/// and acked as a refusal. `RefusedRetainingMutation` is the deliberate
+/// exception: its domain mutation stays committed while only its nested
+/// projection savepoint is rolled back. Structural, ordering, storage, and
+/// hydration failures abort.
 pub fn apply_envelope_with<T>(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
     mutation: impl FnOnce(&Transaction<'_>, &ReplicationEnvelope) -> Result<T, SyncError>,
+) -> Result<ApplyOutcome<T>, SyncError> {
+    apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
+        mutation(tx, op).map(MutationOutcome::Applied)
+    })
+}
+
+pub(crate) fn apply_envelope_with_mutation_outcome<T>(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    mutation: impl FnOnce(
+        &Transaction<'_>,
+        &ReplicationEnvelope,
+    ) -> Result<MutationOutcome<T>, SyncError>,
 ) -> Result<ApplyOutcome<T>, SyncError> {
     envelope.validate()?;
     let payload_json = envelope.payload_json()?;
@@ -83,7 +183,48 @@ pub fn apply_envelope_with<T>(
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
             return Ok(Admission::Skipped);
         }
-        let value = mutation(tx, envelope)?;
+        tx.execute_batch("SAVEPOINT dohc_replication_mutation")
+            .map_err(SyncError::persist)?;
+        let admission = match mutation(tx, envelope) {
+            Ok(MutationOutcome::Applied(value)) => {
+                tx.execute_batch("RELEASE dohc_replication_mutation")
+                    .map_err(SyncError::persist)?;
+                Admission::Applied(value)
+            }
+            Ok(MutationOutcome::RefusedRetainingMutation { reason }) => {
+                tx.execute_batch("RELEASE dohc_replication_mutation")
+                    .map_err(SyncError::persist)?;
+                Admission::Refused(ReplicationRefusal {
+                    workspace_id: envelope.workspace_id.clone(),
+                    origin_id: envelope.origin_id.clone(),
+                    origin_seq: envelope.origin_seq,
+                    op_kind: envelope.op_kind.clone(),
+                    reason: RefusalReason::InvalidInput {
+                        reason: reason.to_owned(),
+                    },
+                })
+            }
+            Err(error) => {
+                let Some(reason) = refusal_reason(&error) else {
+                    return Err(error);
+                };
+                tx.execute_batch(
+                    "ROLLBACK TO dohc_replication_mutation; \
+                     RELEASE dohc_replication_mutation",
+                )
+                .map_err(SyncError::persist)?;
+                Admission::Refused(ReplicationRefusal {
+                    workspace_id: envelope.workspace_id.clone(),
+                    origin_id: envelope.origin_id.clone(),
+                    origin_seq: envelope.origin_seq,
+                    op_kind: envelope.op_kind.clone(),
+                    reason,
+                })
+            }
+        };
+        if let Admission::Refused(refusal) = &admission {
+            persist_refusal(tx, refusal)?;
+        }
         tx.execute(
             "INSERT INTO replication_log \
              (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \
@@ -102,14 +243,176 @@ pub fn apply_envelope_with<T>(
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);
         }
-        Ok(Admission::Applied(value))
+        Ok(admission)
     });
     match result {
         Ok(TxnOutcome::Committed(Admission::Applied(value))) => Ok(ApplyOutcome::Applied(value)),
+        Ok(TxnOutcome::Committed(Admission::Refused(refusal))) => {
+            Ok(ApplyOutcome::Refused(refusal))
+        }
         Ok(TxnOutcome::Committed(Admission::Skipped)) => Ok(ApplyOutcome::Skipped),
         Ok(TxnOutcome::Crashed { committed }) => Ok(ApplyOutcome::Crashed { committed }),
         Err(SyncError::FaultCrash) => Ok(ApplyOutcome::Crashed { committed: false }),
         Err(err) => Err(err),
+    }
+}
+
+fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
+    match error {
+        SyncError::InvalidInput { reason } => Some(RefusalReason::InvalidInput {
+            reason: (*reason).to_owned(),
+        }),
+        SyncError::UnsupportedOperation => Some(RefusalReason::InvalidInput {
+            reason: "operation kind is not supported by this client".to_owned(),
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) fn persist_refusal(
+    tx: &Transaction<'_>,
+    refusal: &ReplicationRefusal,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT INTO replication_pending_refusals \
+         (workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) \
+         VALUES (?1,?2,?3,?4,?5,?6)",
+        params![
+            refusal.workspace_id,
+            refusal.origin_id,
+            refusal.origin_seq,
+            refusal.op_kind,
+            refusal.reason.code(),
+            refusal.reason.message(),
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+pub fn read_replayed_refusal(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Option<ReplicationRefusal>, SyncError> {
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT op_kind, reason_code, reason_message \
+             FROM replication_pending_refusals \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![
+                envelope.workspace_id,
+                envelope.origin_id,
+                envelope.origin_seq
+            ],
+            |row| {
+                let op_kind: String = row.get(0)?;
+                let code: String = row.get(1)?;
+                let message: String = row.get(2)?;
+                let reason = match (code.as_str(), message.as_str()) {
+                    ("invalid-input", _) => RefusalReason::InvalidInput { reason: message },
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                Ok(ReplicationRefusal {
+                    workspace_id: envelope.workspace_id.clone(),
+                    origin_id: envelope.origin_id.clone(),
+                    origin_seq: envelope.origin_seq,
+                    op_kind,
+                    reason,
+                })
+            },
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+    })
+}
+
+pub fn retain_refusal_for_direct_retry(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+) -> Result<(), SyncError> {
+    match store.write_with(faults, |tx| {
+        tx.execute(
+            "UPDATE replication_pending_refusals SET report_id=?4 \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![
+                envelope.workspace_id,
+                envelope.origin_id,
+                envelope.origin_seq,
+                DIRECT_RPC_REFUSAL_REPORT_ID
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
+}
+
+pub(crate) fn claim_pending_refusals(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(Vec<ReplicationRefusal>, Option<String>), SyncError> {
+    match store.write_with(faults, |tx| {
+        let report_id: Option<String> = tx
+            .query_row(
+                "SELECT CASE WHEN EXISTS(SELECT 1 FROM replication_pending_refusals \
+                 WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?2) \
+                 THEN lower(hex(randomblob(16))) END",
+                params![workspace_id, DIRECT_RPC_REFUSAL_REPORT_ID],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        let Some(report_id) = report_id else {
+            return Ok::<_, SyncError>((Vec::new(), None));
+        };
+        // A new pull supersedes any older uncommitted report. Retagging every
+        // pending row makes crash retry reconstruct all unread refusals, while
+        // the old cursor's report token can no longer sweep them.
+        tx.execute(
+            "UPDATE replication_pending_refusals SET report_id=?2 \
+             WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?3",
+            params![workspace_id, report_id, DIRECT_RPC_REFUSAL_REPORT_ID],
+        )
+        .map_err(SyncError::persist)?;
+        let refusals = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT origin_id, origin_seq, op_kind, reason_code, reason_message \
+                 FROM replication_pending_refusals \
+                 WHERE workspace_id=?1 AND report_id=?2 \
+                 ORDER BY origin_id, origin_seq",
+                )
+                .map_err(SyncError::corrupt)?;
+            let rows = stmt
+                .query_map(params![workspace_id, report_id], |row| {
+                    let origin_id: String = row.get(0)?;
+                    let origin_seq: i64 = row.get(1)?;
+                    let op_kind: String = row.get(2)?;
+                    let code: String = row.get(3)?;
+                    let message: String = row.get(4)?;
+                    let reason = match (code.as_str(), message.as_str()) {
+                        ("invalid-input", _) => RefusalReason::InvalidInput { reason: message },
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    };
+                    Ok(ReplicationRefusal {
+                        workspace_id: workspace_id.to_owned(),
+                        origin_id,
+                        origin_seq,
+                        op_kind,
+                        reason,
+                    })
+                })
+                .map_err(SyncError::corrupt)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(SyncError::corrupt)?
+        };
+        Ok((refusals, Some(report_id)))
+    })? {
+        TxnOutcome::Committed(claimed) => Ok(claimed),
+        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
     }
 }
 
@@ -137,7 +440,21 @@ pub fn apply_chat_envelope(
     if !envelope.op_kind.starts_with("chat.") {
         return Err(SyncError::UnsupportedOperation);
     }
-    apply_envelope_with(store, envelope, faults, apply_chat_tx)
+    apply_envelope_with(store, envelope, faults, apply_chat_tx).map(|outcome| {
+        let (primary, nested_refusals) = outcome.into_primary_and_refusals();
+        match primary {
+            ApplyOutcome::Applied(replay_refusals) => ApplyOutcome::Applied(())
+                .with_refusals(nested_refusals.into_iter().chain(replay_refusals).collect()),
+            ApplyOutcome::Refused(refusal) => {
+                ApplyOutcome::Refused(refusal).with_refusals(nested_refusals)
+            }
+            ApplyOutcome::Skipped => ApplyOutcome::Skipped.with_refusals(nested_refusals),
+            ApplyOutcome::Crashed { committed } => {
+                ApplyOutcome::Crashed { committed }.with_refusals(nested_refusals)
+            }
+            ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+        }
+    })
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(value: &serde_json::Value) -> Result<T, SyncError> {
@@ -156,6 +473,9 @@ where
 fn map_chat_rule(error: DomainError, reason: &'static str) -> SyncError {
     match error {
         DomainError::Storage(storage) => SyncError::Storage(storage),
+        hard @ (DomainError::StateCorrupt { .. } | DomainError::Crypto(_)) => {
+            SyncError::Storage(dohc_engine_storage::StorageError::corrupt_public(hard))
+        }
         _ => SyncError::InvalidInput { reason },
     }
 }
@@ -287,11 +607,22 @@ struct AttachmentAdd {
 pub(crate) fn apply_chat_tx(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
-) -> Result<(), SyncError> {
+) -> Result<Vec<ReplicationRefusal>, SyncError> {
     apply_chat_mutation(tx, op)?;
-    replay_ready_pending_chat_coordinates(tx, &op.workspace_id)
+    let replay_refusals = replay_ready_pending_chat_coordinates(tx, &op.workspace_id)
         .map_err(|error| map_chat_rule(error, "pending chat coordinate replay failed"))?;
-    Ok(())
+    Ok(replay_refusals
+        .into_iter()
+        .map(|refusal| ReplicationRefusal {
+            workspace_id: op.workspace_id.clone(),
+            origin_id: refusal.origin_id,
+            origin_seq: refusal.origin_seq,
+            op_kind: refusal.op_kind,
+            reason: RefusalReason::InvalidInput {
+                reason: refusal.reason.to_owned(),
+            },
+        })
+        .collect())
 }
 
 fn apply_chat_mutation(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
@@ -678,9 +1009,9 @@ fn resolve_or_create_placeholder(
                         && name == AGENT_CHANNEL_NAME
                         && slug == &canonical_agent_slug
             ) {
-                return Err(SyncError::InvalidInput {
-                    reason: "reserved agent-channel invariant violated",
-                });
+                return Err(local_corruption(
+                    "reserved agent-channel mapping is corrupt",
+                ));
             }
         }
         return Ok(channel_id);
@@ -718,9 +1049,9 @@ fn resolve_or_create_placeholder(
             .map_err(SyncError::corrupt)?
     {
         if kind != "agent" || name != AGENT_CHANNEL_NAME {
-            return Err(SyncError::InvalidInput {
-                reason: "reserved agent-channel invariant violated",
-            });
+            return Err(local_corruption(
+                "reserved agent-channel slug owner is corrupt",
+            ));
         }
         tx.execute(
             "INSERT OR IGNORE INTO chat_channel_wire_ids \
@@ -837,9 +1168,7 @@ fn apply_message(
         )
         .map_err(SyncError::corrupt)?;
     if !thread_exists {
-        return Err(SyncError::InvalidInput {
-            reason: "chat message thread is missing",
-        });
+        return park_chat_coordinate(tx, op, "message-thread", &payload.thread_id);
     }
     let previous: i64 = tx
         .query_row(
