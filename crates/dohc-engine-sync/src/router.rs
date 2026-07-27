@@ -16,6 +16,7 @@ use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, 
 pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
     pub conflicts_opened: i64,
+    pub materialization_changes: Vec<crate::MomentMaterializationChange>,
 }
 
 impl RoutedApply {
@@ -24,6 +25,33 @@ impl RoutedApply {
         self.conflict
             .as_ref()
             .and_then(|result| result.pending_resolve.as_ref())
+    }
+}
+
+pub(crate) fn redelivered_materialization_changes(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    match envelope.op_kind.as_str() {
+        "moment.append" => {
+            crate::moment_apply::redelivered_materialization_changes(store, envelope)
+        }
+        "ydoc.update" => crate::ydoc_apply::redelivered_materialization_changes(store, envelope),
+        "conflict.resolve" => {
+            crate::conflict_apply::redelivered_materialization_changes(store, envelope)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+pub(crate) fn redelivered_conflicts_opened(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<i64, SyncError> {
+    match envelope.op_kind.as_str() {
+        "conflict.open" => crate::conflict_apply::redelivered_conflicts_opened(store, envelope),
+        "moment.append" => crate::moment_apply::redelivered_conflicts_opened(store, envelope),
+        _ => Ok(0),
     }
 }
 
@@ -87,6 +115,7 @@ pub fn apply_replication_envelope(
                 RoutedApply {
                     conflict: Some(conflict),
                     conflicts_opened,
+                    ..RoutedApply::default()
                 }
             },
         ),
@@ -97,9 +126,10 @@ pub fn apply_replication_envelope(
             store, envelope, faults,
         )),
         OwnedRoute::Moment => map_applied(
-            crate::apply_moment_envelope(store, envelope, faults),
-            |conflicts_opened| RoutedApply {
-                conflicts_opened,
+            crate::moment_apply::apply_moment_envelope_detailed(store, envelope, faults),
+            |moment| RoutedApply {
+                conflicts_opened: moment.conflicts_opened,
+                materialization_changes: moment.materialization_changes,
                 ..RoutedApply::default()
             },
         ),

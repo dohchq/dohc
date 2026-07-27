@@ -2,7 +2,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CliRequestWithoutToken } from "./protocol";
+import {
+  CLI_PROTOCOL_VERSION,
+  type CliRequestWithoutToken,
+} from "./protocol";
 import { executeCli } from "./index";
 
 // buildCliRequest resolves the incoming cwd, and resolve() is drive-qualified on
@@ -80,7 +83,7 @@ describe("executeCli", () => {
     });
     expect(requests).toEqual([
       {
-        protocolVersion: 1,
+        protocolVersion: CLI_PROTOCOL_VERSION,
         verb: "reply",
         args: {
           cwd: PROJECT,
@@ -123,7 +126,7 @@ describe("executeCli", () => {
   ] as const)("uses the configured response timeout %s", async (timeoutMs, expectedTimeoutMs) => {
     const stateDir = await tempStateDir();
     const transport = vi.fn(async () => ({
-      protocolVersion: 1,
+      protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
       result: { channels: [] },
     }));
@@ -242,7 +245,7 @@ describe("executeCli", () => {
       request,
     });
     expect(request).toHaveBeenCalledWith({
-      protocolVersion: 1,
+      protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "show",
       args: { cwd: WORKSPACE, actor: "human", target: "th_o", peek: true },
     });
