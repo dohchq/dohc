@@ -29,8 +29,8 @@
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::{
-    GranularChatMessageSearchResult, SearchResult, delete_file_search_index,
-    ensure_search_index_for_version, query_chat_messages_granular, search_workspace,
+    GranularChatMessageSearchBatch, SearchResult, delete_file_search_index,
+    ensure_search_index_for_version, query_chat_messages_granular_bounded, search_workspace,
     upsert_file_search_index,
 };
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
@@ -684,7 +684,8 @@ enum Command {
         workspace_id: String,
         query: String,
         limit: i64,
-        reply: oneshot::Sender<Result<Vec<GranularChatMessageSearchResult>, RuntimeError>>,
+        materialized_byte_budget: usize,
+        reply: oneshot::Sender<Result<GranularChatMessageSearchBatch, RuntimeError>>,
     },
     EnsureSearchIndex {
         root_dir: PathBuf,
@@ -858,6 +859,8 @@ enum Command {
     },
     ChatReadStateListUnreadFileThreads {
         workspace_id: String,
+        after_thread_id: Option<String>,
+        limit: i64,
         reply: oneshot::Sender<Result<Vec<UnreadFileThread>, RuntimeError>>,
     },
     ChatAgentUnreadThreads {
@@ -2860,13 +2863,15 @@ impl ActorHandle {
         workspace_id: String,
         query: String,
         limit: i64,
-    ) -> Result<Vec<GranularChatMessageSearchResult>, RuntimeError> {
+        materialized_byte_budget: usize,
+    ) -> Result<GranularChatMessageSearchBatch, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::SearchQueryChatMessagesGranular {
                 workspace_id,
                 query,
                 limit,
+                materialized_byte_budget,
                 reply,
             })
             .await
@@ -3407,11 +3412,15 @@ impl ActorHandle {
     pub async fn chat_read_state_list_unread_file_threads(
         &self,
         workspace_id: String,
+        after_thread_id: Option<String>,
+        limit: i64,
     ) -> Result<Vec<UnreadFileThread>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ChatReadStateListUnreadFileThreads {
                 workspace_id,
+                after_thread_id,
+                limit,
                 reply,
             })
             .await
@@ -6421,10 +6430,12 @@ fn worker_main(
             }
             Command::ChatReadStateListUnreadFileThreads {
                 workspace_id,
+                after_thread_id,
+                limit,
                 reply,
             } => {
                 let outcome = LinkedChatStore::new(&mut store)
-                    .list_unread_file_threads(&workspace_id)
+                    .list_unread_file_threads(&workspace_id, after_thread_id.as_deref(), limit)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
@@ -7067,11 +7078,18 @@ fn worker_main(
                 workspace_id,
                 query,
                 limit,
+                materialized_byte_budget,
                 reply,
             } => {
                 let outcome = store
                     .read_with(|conn| {
-                        query_chat_messages_granular(conn, &workspace_id, &query, limit)
+                        query_chat_messages_granular_bounded(
+                            conn,
+                            &workspace_id,
+                            &query,
+                            limit,
+                            materialized_byte_budget,
+                        )
                     })
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);

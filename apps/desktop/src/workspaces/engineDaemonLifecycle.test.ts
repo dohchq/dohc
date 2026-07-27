@@ -439,6 +439,7 @@ describe("Rust engine daemon lifecycle", () => {
       rootDir: "C:\\workspace",
       workspaceId: "workspace",
       recoverRunningDispatches: false,
+      skipStartupMaintenance: true,
     });
     expect(client.requests[1]?.workspace).toBe("cli-handle");
     await lifecycle.stop();

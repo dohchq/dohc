@@ -2095,13 +2095,16 @@ async function openCliWorkspace(
                 ),
               );
             },
-            async listUnreadFileThreads() {
+            async listUnreadFileThreads(input: {
+              pageLimit: number;
+              afterThreadId?: string;
+            }) {
               return decodeUnreadFileThreads(
                 await daemon.requestWorkspace(
                   workspace.rootPath,
                   workspace.workspaceId,
                   CHATS_METHOD.readStateListUnreadFileThreads,
-                  {},
+                  input,
                 ),
               );
             },

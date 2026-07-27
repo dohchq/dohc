@@ -4196,6 +4196,89 @@ async fn unread_file_thread_arm_coalesces_missing_state_and_tracks_mutations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unread_file_threads_are_keyset_paginated() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-cli-unread-pages").await;
+    let mut id = 10;
+
+    for index in 1..=3 {
+        let thread_id = format!("file-thread-{index}");
+        call_with_idempotency(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.threads.create",
+            &format!("create-{thread_id}"),
+            json!({
+                "threadId": thread_id,
+                "title": format!("File thread {index}"),
+                "linkedFile": { "objectId": format!("object-{index}") },
+                "nowMs": 10 + index,
+            }),
+        )
+        .await;
+        call_with_idempotency(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.messages.send",
+            &format!("send-{thread_id}"),
+            json!({
+                "threadId": thread_id,
+                "messageId": format!("message-{index}"),
+                "authorKind": "agent",
+                "authorDisplayName": "Agent",
+                "body": "unread",
+                "nowMs": 20 + index,
+            }),
+        )
+        .await;
+    }
+
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.readState.listUnreadFileThreads",
+        json!({ "pageLimit": 2 }),
+    )
+    .await;
+    assert_eq!(
+        first
+            .as_array()
+            .expect("first unread page")
+            .iter()
+            .map(|row| row["threadId"].as_str().expect("thread id"))
+            .collect::<Vec<_>>(),
+        vec!["file-thread-1", "file-thread-2"],
+        "the first response must stop at its bounded page size"
+    );
+
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.readState.listUnreadFileThreads",
+        json!({
+            "pageLimit": 2,
+            "afterThreadId": "file-thread-2",
+        }),
+    )
+    .await;
+    assert_eq!(
+        second
+            .as_array()
+            .expect("second unread page")
+            .iter()
+            .map(|row| row["threadId"].as_str().expect("thread id"))
+            .collect::<Vec<_>>(),
+        vec!["file-thread-3"],
+        "the keyset coordinate must continue without overlap"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unread_file_thread_arm_fails_closed_on_non_safe_read_state() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

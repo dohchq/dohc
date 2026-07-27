@@ -39,8 +39,8 @@ pub use policy::{
     policy_glob_matches, read_engine_search_policy, resolve_effective_policy, validate_policy_glob,
 };
 pub use query::{
-    GranularChatMessageSearchResult, SearchCandidate, query_chat_messages_granular,
-    query_search_index,
+    GranularChatMessageSearchBatch, GranularChatMessageSearchResult, SearchCandidate,
+    query_chat_messages_granular, query_chat_messages_granular_bounded, query_search_index,
 };
 
 use rusqlite::Connection;

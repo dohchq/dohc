@@ -23,6 +23,7 @@ use crate::search::{
     MAX_FTS_FETCH, MAX_GRANULAR_CHAT_RESULT_LIMIT, MAX_QUERY_CHARS, MAX_RESULT_LIMIT,
     MIN_TRIGRAM_QUERY_CHARS, SearchError, THREAD_HEADER_MESSAGE_ID,
 };
+use dohc_engine_domain::is_js_trim_ws;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::Path;
@@ -71,6 +72,14 @@ pub struct GranularChatMessageSearchResult {
     pub text: String,
 }
 
+/// A granular result batch whose owned strings were bounded while rows were
+/// stepped, before they crossed the store-actor boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GranularChatMessageSearchBatch {
+    pub results: Vec<GranularChatMessageSearchResult>,
+    pub saturated_by_bytes: bool,
+}
+
 /// How a raw query classifies against the trigram/length bounds.
 enum QueryTerm {
     /// Under [`MIN_TRIGRAM_QUERY_CHARS`]: the trigram index cannot serve it. The
@@ -90,7 +99,7 @@ enum QueryTerm {
 /// length bound is set far above any real query, so normal search is
 /// byte-identical to TS.
 fn classify_query(query: &str) -> QueryTerm {
-    let normalized = query.trim();
+    let normalized = query.trim_matches(is_js_trim_ws);
     let char_count = normalized.chars().count();
     if char_count < MIN_TRIGRAM_QUERY_CHARS {
         return QueryTerm::TooShort;
@@ -237,25 +246,65 @@ pub fn query_chat_messages_granular(
     query: &str,
     limit: i64,
 ) -> Result<Vec<GranularChatMessageSearchResult>, SearchError> {
+    Ok(query_chat_messages_granular_bounded(conn, workspace_id, query, limit, usize::MAX)?.results)
+}
+
+/// The daemon-facing granular reader. SQLite byte lengths are inspected before
+/// any matching text is copied into an owned `String`, so a broad query cannot
+/// accumulate an unbounded actor message before the wire layer applies its
+/// exact serialized-byte cut.
+pub fn query_chat_messages_granular_bounded(
+    conn: &Connection,
+    workspace_id: &str,
+    query: &str,
+    limit: i64,
+    materialized_byte_budget: usize,
+) -> Result<GranularChatMessageSearchBatch, SearchError> {
     let Some(limit) = clamp_limit(limit, MAX_GRANULAR_CHAT_RESULT_LIMIT) else {
-        return Ok(Vec::new());
+        return Ok(GranularChatMessageSearchBatch {
+            results: Vec::new(),
+            saturated_by_bytes: false,
+        });
     };
     let QueryTerm::Match(match_expr) = classify_query(query) else {
         // Too short or too long: nothing to serve (no fallback surface here).
-        return Ok(Vec::new());
+        return Ok(GranularChatMessageSearchBatch {
+            results: Vec::new(),
+            saturated_by_bytes: false,
+        });
     };
     let mut stmt = conn.prepare(
-        "SELECT thread_id, message_id, text FROM engine_search_chat_messages_fts \
+        "SELECT length(CAST(thread_id AS BLOB)), \
+                length(CAST(message_id AS BLOB)), \
+                length(CAST(text AS BLOB)), \
+                thread_id, message_id, text \
+         FROM engine_search_chat_messages_fts \
          WHERE engine_search_chat_messages_fts MATCH ?1 AND workspace_id = ?2 \
          ORDER BY rowid LIMIT ?3",
     )?;
     let cap = i64::try_from(limit).unwrap_or(i64::MAX);
     let mut rows = stmt.query(params![match_expr, workspace_id, cap])?;
     let mut out: Vec<GranularChatMessageSearchResult> = Vec::new();
+    let mut materialized_bytes = 0usize;
+    let mut saturated_by_bytes = false;
     while let Some(row) = rows.next()? {
-        let thread_id: String = row.get(0)?;
-        let message_id: String = row.get(1)?;
-        let text: String = row.get(2)?;
+        let thread_id_bytes = usize::try_from(row.get::<_, i64>(0)?)
+            .map_err(|_| SearchError::Corrupt("negative granular thread-id length"))?;
+        let message_id_bytes = usize::try_from(row.get::<_, i64>(1)?)
+            .map_err(|_| SearchError::Corrupt("negative granular message-id length"))?;
+        let text_bytes = usize::try_from(row.get::<_, i64>(2)?)
+            .map_err(|_| SearchError::Corrupt("negative granular text length"))?;
+        let row_bytes = thread_id_bytes
+            .saturating_add(message_id_bytes)
+            .saturating_add(text_bytes);
+        if row_bytes > materialized_byte_budget.saturating_sub(materialized_bytes) {
+            saturated_by_bytes = true;
+            break;
+        }
+        let thread_id: String = row.get(3)?;
+        let message_id: String = row.get(4)?;
+        let text: String = row.get(5)?;
+        materialized_bytes = materialized_bytes.saturating_add(row_bytes);
         out.push(GranularChatMessageSearchResult {
             thread_id,
             message_id: if message_id == THREAD_HEADER_MESSAGE_ID {
@@ -266,7 +315,10 @@ pub fn query_chat_messages_granular(
             text,
         });
     }
-    Ok(out)
+    Ok(GranularChatMessageSearchBatch {
+        results: out,
+        saturated_by_bytes,
+    })
 }
 
 #[cfg(test)]
@@ -283,6 +335,18 @@ mod tests {
     fn quotes_and_escapes() {
         assert!(matches!(classify_query("abc"), QueryTerm::Match(t) if t == "\"abc\""));
         assert!(matches!(classify_query("a\"b\"c"), QueryTerm::Match(t) if t == "\"a\"\"b\"\"c\""));
+    }
+
+    #[test]
+    fn query_trim_matches_ecmascript_whitespace() {
+        assert!(matches!(
+            classify_query("\u{0085}ab"),
+            QueryTerm::Match(t) if t == "\"\u{0085}ab\""
+        ));
+        assert!(matches!(
+            classify_query("\u{feff}ab\u{feff}"),
+            QueryTerm::TooShort
+        ));
     }
 
     #[test]

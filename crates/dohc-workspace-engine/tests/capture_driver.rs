@@ -115,6 +115,48 @@ fn write_file(root: &Path, path: &str, bytes: &[u8]) {
     std::fs::write(absolute, bytes).expect("write file");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "must-stay-on-disk.md", b"typescript-owned");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                    "recoverRunningDispatches": false,
+                    "skipStartupMaintenance": true,
+                }),
+            ),
+        )
+        .await
+        .expect("maintenance-free workspace open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    assert_eq!(
+        read_text(&transport, &handle, 2, "must-stay-on-disk.md").await,
+        None,
+        "a daemon-only read open must not baseline-capture TypeScript-owned disk state"
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("workspace close");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn autonomous_capture_notices_external_disk_changes() {
     let scratch = ScratchDir::new().expect("scratch");

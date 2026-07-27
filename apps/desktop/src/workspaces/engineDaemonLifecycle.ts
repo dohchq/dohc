@@ -227,6 +227,7 @@ export class EngineDaemonLifecycle {
             rootDir,
             workspaceId,
             recoverRunningDispatches: false,
+            skipStartupMaintenance: true,
           },
         },
         "workspace.open",

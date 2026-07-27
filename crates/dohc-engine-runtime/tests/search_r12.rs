@@ -14,7 +14,8 @@ use dohc_engine_domain::{
 };
 use dohc_engine_runtime::search::{
     SearchCandidate, SearchSurface, ensure_search_index_for_version, query_chat_messages_granular,
-    query_search_index, search_workspace, upsert_file_search_index,
+    query_chat_messages_granular_bounded, query_search_index, search_workspace,
+    upsert_file_search_index,
 };
 use dohc_engine_storage::{
     EngineStore, FaultPoint, NoFaults, Preimage, TxnOutcome, hex_sha256, put_binary_blob,
@@ -131,6 +132,53 @@ fn run_search(
     store
         .read_with(|conn| search_workspace(conn, root, WS, V, query, Some(100), 999))
         .expect("search")
+}
+
+#[test]
+fn granular_chat_query_bounds_owned_rows_before_actor_delivery() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let body = format!("needle {}", "x".repeat(8 * 1024));
+    start_thread(&mut store, "channel-budget", "thread-budget", &body, 10);
+    for index in 1..10 {
+        send(
+            &mut store,
+            "thread-budget",
+            &format!("message-budget-{index}"),
+            &body,
+            10 + index,
+        );
+    }
+    ensure_index(&mut store, &root, 30);
+
+    let byte_budget = 20 * 1024;
+    let batch = store
+        .read_with(|conn| {
+            query_chat_messages_granular_bounded(conn, WS, "needle", 50_000, byte_budget)
+        })
+        .expect("bounded granular query");
+    let owned_bytes: usize = batch
+        .results
+        .iter()
+        .map(|row| {
+            row.thread_id.len() + row.message_id.as_ref().map_or(0, String::len) + row.text.len()
+        })
+        .sum();
+
+    assert!(
+        batch.saturated_by_bytes,
+        "the query must report that matching rows remain after the byte cut"
+    );
+    assert!(
+        batch.results.len() < 10,
+        "the actor result must not own every broad-query match"
+    );
+    assert!(
+        owned_bytes <= byte_budget,
+        "owned row bytes {owned_bytes} exceeded materialization budget {byte_budget}"
+    );
 }
 
 // -------------------------------------------------------- 1. index+query round-trip

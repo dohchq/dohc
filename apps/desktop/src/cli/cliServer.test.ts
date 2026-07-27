@@ -994,7 +994,7 @@ describe("CLI socket server", () => {
     }
   });
 
-  it("uses the daemon unread-file aggregate for the human inbox", async () => {
+  it("paginates the daemon unread-file aggregate for the human inbox", async () => {
     if (!store) throw new Error("Store is not available");
     const fileThread = await store.createThread({
       workspaceId: WORKSPACE_ID,
@@ -1013,15 +1013,22 @@ describe("CLI socket server", () => {
       async queryChatMessagesGranular() {
         return { results: [], saturated: false };
       },
-      async listUnreadFileThreads() {
+      async listUnreadFileThreads(input) {
         unreadCalls += 1;
-        return unread
-          ? [{
+        if (!unread) return [];
+        if (!input.afterThreadId) {
+          return Array.from({ length: 500 }, (_, index) => ({
+            threadId: `page-${index.toString().padStart(4, "0")}`,
+            messageCount: 1,
+            lastReadSequence: 0,
+          }));
+        }
+        expect(input.afterThreadId).toBe("page-0499");
+        return [{
               threadId: fileThread.id,
               messageCount: 1,
               lastReadSequence: 0,
-            }]
-          : [];
+        }];
       },
     };
     try {
@@ -1034,7 +1041,7 @@ describe("CLI socket server", () => {
         cwd: workspaceRoot,
         actor: "human",
       })).threads.map((thread) => thread.id)).not.toContain(cliThreadId(fileThread.id));
-      expect(unreadCalls).toBe(2);
+      expect(unreadCalls).toBe(3);
     } finally {
       delete context.daemonReads;
     }

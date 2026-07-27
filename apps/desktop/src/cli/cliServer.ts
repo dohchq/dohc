@@ -133,7 +133,10 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
       query: string;
       limit: number;
     }): Promise<CliGranularChatMessageSearchResponse>;
-    listUnreadFileThreads(): Promise<CliUnreadFileThread[]>;
+    listUnreadFileThreads(input: {
+      pageLimit: number;
+      afterThreadId?: string;
+    }): Promise<CliUnreadFileThread[]>;
   };
 }
 
@@ -739,8 +742,21 @@ async function humanUnreadFileThreadIds(
   context: CliWorkspaceContext,
 ): Promise<Set<string>> {
   if (context.daemonReads) {
-    const rows = await context.daemonReads.listUnreadFileThreads();
-    return new Set(rows.map((row) => row.threadId));
+    const threadIds = new Set<string>();
+    let afterThreadId: string | undefined;
+    for (;;) {
+      const rows = await context.daemonReads.listUnreadFileThreads({
+        pageLimit: 500,
+        ...(afterThreadId ? { afterThreadId } : {}),
+      });
+      for (const row of rows) threadIds.add(row.threadId);
+      if (rows.length < 500) return threadIds;
+      const next = rows.at(-1)?.threadId;
+      if (!next || next === afterThreadId) {
+        throw new Error("Daemon unread-file pagination did not advance.");
+      }
+      afterThreadId = next;
+    }
   }
   const { DatabaseSync } = nodeSqlite();
   let db: EngineSqliteDb | null = null;

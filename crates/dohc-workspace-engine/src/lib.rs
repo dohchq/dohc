@@ -1139,63 +1139,71 @@ impl EngineService {
             supervisor: self.supervisor,
             db_path: Some(db_path.clone()),
         };
-        // Mandatory readiness barrier: derived mention rows must exist before
-        // this workspace can expose a mention read or advance the dispatch
-        // scan cursor past an older `@agent` message.
-        Self::read_under_ctx(
-            &cancellation,
-            "workspace.open (mention backfill)",
-            actor.chat_mentions_backfill(params.workspace_id.clone(), cancellation.token.clone()),
-        )
-        .await?;
-        // Startup replay BEFORE the files layer exists: jobs left pending by
-        // a crash, a transient settle failure, or a pulled replication apply
-        // land on disk while nothing is watching (no suppression window),
-        // and the baseline reconcile below then scans the POST-replay disk.
-        actor
-            .materialize_replay_pending(root.clone(), now_ms)
-            .await
-            .map_err(map_runtime)?;
-        // The files layer spawns ONLY here — after the shadow binding
-        // succeeded — so an unmarked or mismatched root can never grow a
-        // watcher or files actor (the shadow-scope dormancy invariant).
         let capture_apply_gate = Arc::new(tokio::sync::Mutex::new(()));
-        let capture = capture_driver::CaptureDriver::spawn(
-            root.clone(),
-            actor.clone(),
-            params.workspace_id.clone(),
-            self.self_writes.scoped(&root),
-            Arc::clone(&capture_apply_gate),
-            #[cfg(feature = "harness")]
-            self.capture_apply_probe.clone(),
-        );
-        // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
-        // disk state) must apply before the handle is handed out, or a
-        // caller's first write could later be overwritten by a capture of
-        // stale disk bytes.
-        //
-        // CANCELLATION: nothing owns the store actor yet (the handle is
-        // inserted below), so an abort here would leak it. The `open_guard`
-        // armed above the startup replay closes the actor on an early drop
-        // and is disarmed once the handle is inserted; `CaptureDriver`'s own
-        // Drop cancels the files layer.
-        if params.recover_running_dispatches.unwrap_or(true) {
-            // Cancellation-aware like every other actor wait in this flow:
-            // a caller abort stops WAITING promptly (the actor still finishes
-            // the reclaim it already accepted — it is idempotent on the next
-            // open) and the open_guard above closes the actor on early drop.
+        let capture = if params.skip_startup_maintenance {
+            None
+        } else {
+            // Mandatory readiness barrier: derived mention rows must exist before
+            // this workspace can expose a mention read or advance the dispatch
+            // scan cursor past an older `@agent` message.
             Self::read_under_ctx(
                 &cancellation,
-                "workspace.open (dispatch reclaim)",
-                actor.chat_dispatch_reclaim_running(
+                "workspace.open (mention backfill)",
+                actor.chat_mentions_backfill(
                     params.workspace_id.clone(),
-                    CHAT_DISPATCH_MAX_ATTEMPTS,
-                    now_ms,
+                    cancellation.token.clone(),
                 ),
             )
             .await?;
-        }
-        capture.wait_for_baseline().await;
+            // Startup replay BEFORE the files layer exists: jobs left pending by
+            // a crash, a transient settle failure, or a pulled replication apply
+            // land on disk while nothing is watching (no suppression window),
+            // and the baseline reconcile below then scans the POST-replay disk.
+            actor
+                .materialize_replay_pending(root.clone(), now_ms)
+                .await
+                .map_err(map_runtime)?;
+            // The files layer spawns ONLY here — after the shadow binding
+            // succeeded — so an unmarked or mismatched root can never grow a
+            // watcher or files actor (the shadow-scope dormancy invariant).
+            let capture = capture_driver::CaptureDriver::spawn(
+                root.clone(),
+                actor.clone(),
+                params.workspace_id.clone(),
+                self.self_writes.scoped(&root),
+                Arc::clone(&capture_apply_gate),
+                #[cfg(feature = "harness")]
+                self.capture_apply_probe.clone(),
+            );
+            // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
+            // disk state) must apply before the handle is handed out, or a
+            // caller's first write could later be overwritten by a capture of
+            // stale disk bytes.
+            //
+            // CANCELLATION: nothing owns the store actor yet (the handle is
+            // inserted below), so an abort here would leak it. The `open_guard`
+            // armed above the startup replay closes the actor on an early drop
+            // and is disarmed once the handle is inserted; `CaptureDriver`'s own
+            // Drop cancels the files layer.
+            if params.recover_running_dispatches.unwrap_or(true) {
+                // Cancellation-aware like every other actor wait in this flow:
+                // a caller abort stops WAITING promptly (the actor still finishes
+                // the reclaim it already accepted — it is idempotent on the next
+                // open) and the open_guard above closes the actor on early drop.
+                Self::read_under_ctx(
+                    &cancellation,
+                    "workspace.open (dispatch reclaim)",
+                    actor.chat_dispatch_reclaim_running(
+                        params.workspace_id.clone(),
+                        CHAT_DISPATCH_MAX_ATTEMPTS,
+                        now_ms,
+                    ),
+                )
+                .await?;
+            }
+            capture.wait_for_baseline().await;
+            Some(capture)
+        };
         open_guard.disarm();
         lock(&self.handles).insert(
             handle.clone(),
@@ -1204,7 +1212,7 @@ impl EngineService {
                 db_path,
                 workspace_id: params.workspace_id,
                 actor,
-                capture: Arc::new(Mutex::new(Some(capture))),
+                capture: Arc::new(Mutex::new(capture)),
                 capture_apply_gate,
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
@@ -4426,14 +4434,18 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let _: EmptyParams = parse(params)?;
+        let params: UnreadFileThreadPageParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        let page_limit = chat_page_limit(params.page_limit)?;
         let cancellation = OperationCancellation::new(ctx);
         let rows = Self::read_under_ctx(
             &cancellation,
             "chats.readState.listUnreadFileThreads",
-            open.actor
-                .chat_read_state_list_unread_file_threads(open.workspace_id),
+            open.actor.chat_read_state_list_unread_file_threads(
+                open.workspace_id,
+                params.after_thread_id,
+                page_limit,
+            ),
         )
         .await?;
         Ok(Value::Array(
@@ -6364,18 +6376,20 @@ impl EngineService {
             .min(dohc_engine_runtime::search::MAX_GRANULAR_CHAT_RESULT_LIMIT);
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let rows = Self::read_under_ctx(
+        let batch = Self::read_under_ctx(
             &cancellation,
             "search.queryChatMessagesGranular",
             open.actor.search_query_chat_messages_granular(
                 open.workspace_id,
                 params.query,
                 params.limit,
+                GRANULAR_CHAT_RESPONSE_BYTE_BUDGET,
             ),
         )
         .await?;
-        let saturated_by_limit = params.limit > 0 && rows.len() == effective_limit;
-        let row_values: Vec<Value> = rows
+        let saturated_by_limit = params.limit > 0 && batch.results.len() == effective_limit;
+        let row_values: Vec<Value> = batch
+            .results
             .into_iter()
             .map(|row| {
                 json!({
@@ -6394,7 +6408,9 @@ impl EngineService {
         }
         Ok(json!({
             "results": &row_values[..included],
-            "saturated": saturated_by_limit || included < row_values.len(),
+            "saturated": batch.saturated_by_bytes
+                || saturated_by_limit
+                || included < row_values.len(),
         }))
     }
 
@@ -6747,6 +6763,8 @@ struct WorkspaceOpenParams {
     workspace_id: String,
     #[serde(default)]
     recover_running_dispatches: Option<bool>,
+    #[serde(default)]
+    skip_startup_maintenance: bool,
 }
 
 #[derive(Deserialize)]
@@ -7513,6 +7531,14 @@ struct ChatPageParams {
     page_limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UnreadFileThreadPageParams {
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    after_thread_id: Option<String>,
 }
 
 #[derive(Deserialize)]
