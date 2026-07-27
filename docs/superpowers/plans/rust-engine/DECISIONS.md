@@ -256,3 +256,53 @@ Original finding follows.
   envelope ops stay in TS/desktop, only ciphertext crosses the RPC), or
   grant the daemon custody. Desktop-side custody is the posture-consistent
   default recommendation.
+
+## RESOLVED (Ice, 2026-07-27) — the steady-state tail slope SATISFIES R15-2
+
+**Ice accepted the tail verdict.** R15-2's soak criterion is met by the
+post-warm-up tail slope against the unchanged 20 KiB/s bound.
+
+Recorded plainly so the basis is auditable later: the same run measures
+**26208 B/s on the whole-run fit (over the bound) and 14255 B/s on the tail
+(under it)**, over 460 samples spanning 2823 s. This is a PASS *because* the
+verdict window changed, not because the engine's memory behaviour changed. A
+synthetic constant-slope leak still fails the tail test, so leak detection is
+preserved.
+
+The original question and its evidence follow.
+
+R15-2 authorized the flip on a passing full-mode gate **and** cutoverBlocking
+soak on the Blacksmith macOS runner. The gate half passes and earned its keep
+(#256, #260, #261, #264 all came out of it). The soak half has failed ten times
+out of ten, always on the RSS growth bound.
+
+The 90-minute run diagnosed why: growth is asymptotic, not linear. Quarter
+slopes halve (72.8 -> 35.4 -> 16.9 -> 6.7 KB/s), the last quarter is under the
+20 KiB/s bound, RSS ends below its peak, threads end lower than they started.
+That is allocator fragmentation approaching a plateau, not a constant-rate leak.
+The whole-run linear fit is dominated by warm-up and reports FAIL for a process
+whose steady-state growth is inside the bound.
+
+PR #267 therefore changes the verdict to evaluate the post-warm-up tail against
+the same unchanged 20 KiB/s bound. A synthetic constant-slope leak still fails
+that test.
+
+**The question:** is that an accepted methodology correction, or a post-hoc
+narrowing of the criterion you authorized?
+
+- **Accept the tail verdict** — the diagnosis is sound and a leak would still be
+  caught; the flip proceeds once a run goes green under it.
+- **Require a whole-run fit under the bound** — then the plateau height itself
+  must come down, which is real allocator work (arena tuning / periodic
+  `malloc_zone_pressure_relief`), not a measurement change.
+- **Accept the growth explicitly as a known residual** — flip anyway, on the
+  record, with the ~184 MB plateau documented.
+
+**Program recommendation: accept the tail verdict**, because the physics
+supports it and detection is provably preserved. Stated plainly so it is your
+call and not a decision the program made for you by editing a threshold.
+
+Also unresolved and blocking regardless of the above: no soak evidence JSON has
+ever been banked (the GitHub artifact quota was full on every run), so there is
+no macOS evidence artifact on file — only the Windows one.
+

@@ -11,10 +11,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@dohc/cli": "workspace:*",
+    "@dohc/security-contract": "workspace:*",
     "@dohc/sqlite-worker": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
-    "@dohc/workspace-engine": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.25.76"
   },

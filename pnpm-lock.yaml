@@ -327,6 +327,12 @@ importers:
 
   packages/mcp:
     dependencies:
+      '@dohc/cli':
+        specifier: workspace:*
+        version: link:../cli
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../security-contract
       '@dohc/sqlite-worker':
         specifier: workspace:*
         version: link:../../services/sqlite-worker
@@ -336,9 +342,6 @@ importers:
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../workspace-core
-      '@dohc/workspace-engine':
-        specifier: workspace:*
-        version: link:../workspace-engine
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)

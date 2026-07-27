@@ -24,6 +24,8 @@ import {
   createLinkedChatStore,
   type AgentDispatchStore,
   type LinkedChatStore,
+  type VersionedTextMoment,
+  type VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nativeTmpdir } from "../workspaces/testTemp";
@@ -58,6 +60,62 @@ interface CallCounts {
   identity: number;
   writable: number;
   writes: number;
+}
+
+function momentFixtures(
+  workspaceId: string,
+  suffix: string,
+  recordedAtMs: number,
+): {
+  summary: VersionedTextMomentSummary;
+  detail: VersionedTextMoment;
+} {
+  const summary: VersionedTextMomentSummary = {
+    id: `moment_${suffix}`,
+    workspaceId,
+    versionId: `version_${suffix}`,
+    objectId: `object_${suffix}`,
+    path: `${suffix}.md`,
+    recordedAtMs,
+    operation: "write",
+    contentKind: "text",
+    byteLength: suffix.length,
+    metadata: {
+      origin: "local-file",
+      summary: `Updated ${suffix}`,
+    },
+    author: {
+      kind: "agent",
+      agentId: `agent_${suffix}`,
+      onBehalfOf: `user_${suffix}`,
+      agentRunId: `run_${suffix}`,
+    },
+    momentOrder: 1,
+  };
+  return {
+    summary,
+    detail: {
+      id: summary.id,
+      workspaceId,
+      versionId: summary.versionId,
+      objectId: summary.objectId,
+      path: summary.path,
+      recordedAtMs,
+      operation: summary.operation,
+      payload: {
+        before: null,
+        after: {
+          path: summary.path,
+          contentKind: "text",
+          sha256: `sha256-${suffix}`,
+          byteLength: suffix.length,
+          text: `# ${suffix}\n`,
+        },
+      },
+      metadata: summary.metadata,
+      author: summary.author,
+    },
+  };
 }
 
 function readSocketResponse(
@@ -207,6 +265,7 @@ describe("CLI socket server", () => {
       writes: 0,
     };
     errors = [];
+    const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
 
     context = {
       ...registryWorkspace,
@@ -215,6 +274,15 @@ describe("CLI socket server", () => {
       readOnly: false,
       async fileObjectIdForPath(path) {
         return path === "tracked.md" ? "object_tracked" : null;
+      },
+      async filePathForObjectId(objectId) {
+        return objectId === "object_tracked" ? "tracked.md" : null;
+      },
+      async listMoments() {
+        return [moments.summary];
+      },
+      async readMoment(momentId) {
+        return momentId === moments.detail.id ? moments.detail : null;
       },
       async assertWritable() {
         calls.writable += 1;
@@ -355,6 +423,454 @@ describe("CLI socket server", () => {
     expect(calls.openWorkspace).toBe(0);
   });
 
+  it("returns MCP-shaped history and chats with full engine ids and no CLI origin", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const linkedThread = await store.createThread({
+      workspaceId: WORKSPACE_ID,
+      title: "Tracked file discussion",
+      linkedFile: {
+        objectId: "object_tracked",
+        pathHint: "before-rename.md",
+      },
+    });
+    const linkedMessage = await store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: linkedThread.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Read this linked chat",
+    });
+    context.filePathForObjectId = async (objectId) =>
+      objectId === "object_tracked" ? "tracked.md" : null;
+
+    const moments = await invoke("moments", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      includeFiles: true,
+    });
+    expect(moments).toMatchObject({
+      count: 1,
+      totalAvailable: 1,
+      hasMore: false,
+      cursorMs: SERVER_NOW_MS,
+      changes: [{
+        id: "moment_primary",
+        path: "primary.md",
+        summary: "Updated primary",
+        files: [{ path: "primary.md", operation: "write" }],
+      }],
+    });
+    const moment = await invoke("moment", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      id: "moment_primary",
+    });
+    expect(moment).toMatchObject({
+      ok: true,
+      change: {
+        id: "moment_primary",
+        before: null,
+        after: { path: "primary.md", text: "# primary\n" },
+      },
+    });
+
+    const fileChats = await invoke("fileChats", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "tracked.md",
+    });
+    expect(fileChats).toMatchObject({
+      ok: true,
+      path: "tracked.md",
+      fileObjectId: "object_tracked",
+      threads: [{
+        id: linkedThread.id,
+        title: "Tracked file discussion",
+        linkedPathHint: "before-rename.md",
+      }],
+    });
+    const chat = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: linkedThread.id,
+    });
+    expect(chat).toMatchObject({
+      ok: true,
+      thread: { id: linkedThread.id },
+      messages: [{
+        id: linkedMessage.id,
+        threadId: linkedThread.id,
+        authorKind: "human",
+        authorDisplayName: "Ice",
+      }],
+      projection: {
+        readOnly: true,
+        text: expect.stringContaining("tracked.md"),
+      },
+    });
+
+    const emptyChannels = await invoke("channelsFull", {
+      cwd: workspaceRoot,
+      actor: "agent",
+    });
+    expect(emptyChannels).toMatchObject({
+      ok: true,
+      channels: [{
+        id: general.id,
+        threadCount: 0,
+        threads: [],
+      }],
+    });
+    const started = await invoke("startChannelChat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      channel: general.id,
+      title: "Raw id contract",
+      body: "Opening without a CLI origin",
+    });
+    expect(started).toMatchObject({
+      ok: true,
+      channel: { id: general.id, name: "general", slug: "general" },
+      thread: { title: "Raw id contract" },
+      message: {
+        authorKind: "agent",
+        authorDisplayName: "Ice",
+        body: "Opening without a CLI origin",
+      },
+    });
+    if (!started.ok) throw new Error(started.reason);
+    const replied = await invoke("replyToChat", {
+      cwd: workspaceRoot,
+      actor: "human",
+      threadId: started.thread.id,
+      body: "Reply without a CLI origin",
+    });
+    expect(replied).toMatchObject({
+      ok: true,
+      message: {
+        threadId: started.thread.id,
+        authorKind: "human",
+        authorDisplayName: "Ice",
+        body: "Reply without a CLI origin",
+      },
+    });
+    if (!replied.ok) throw new Error(replied.reason);
+
+    const fullChannels = await invoke("channelsFull", {
+      cwd: workspaceRoot,
+      actor: "agent",
+    });
+    expect(fullChannels).toMatchObject({
+      ok: true,
+      channels: [{
+        id: general.id,
+        threadCount: 1,
+        threads: [{
+          id: started.thread.id,
+          title: "Raw id contract",
+          messageCount: 2,
+          updatedAtMs: replied.message.createdAtMs,
+        }],
+      }],
+    });
+
+    expect(general.id).toMatch(/^channel_/u);
+    expect(linkedThread.id).toMatch(/^thread_/u);
+    expect(linkedMessage.id).toMatch(/^message_/u);
+    expect(started.channel.id).toMatch(/^channel_/u);
+    expect(started.thread.id).toMatch(/^thread_/u);
+    expect(started.message.id).toMatch(/^message_/u);
+    expect(replied.message.id).toMatch(/^message_/u);
+
+    const persisted = await store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+    });
+    expect(persisted.map((message) => ({
+      kind: message.author.kind,
+      displayName: message.author.displayName,
+      authorUserId: message.authorUserId,
+      origin: message.origin,
+    }))).toEqual([
+      {
+        kind: "agent",
+        displayName: "Ice",
+        authorUserId: "verified-user-id",
+        origin: undefined,
+      },
+      {
+        kind: "human",
+        displayName: "Ice",
+        authorUserId: "verified-user-id",
+        origin: undefined,
+      },
+    ]);
+  });
+
+  it("scopes every MCP-shaped verb to the cwd workspace", async () => {
+    if (!store) throw new Error("Store is not available");
+    const scopedWorkspaceId = "workspace-cli-scoped";
+    const scopedRoot = join(workspaceRoot, "scoped");
+    await mkdir(scopedRoot, { recursive: true });
+    const scopedWorkspace: CliRegistryWorkspace = {
+      workspaceId: scopedWorkspaceId,
+      rootPath: scopedRoot,
+    };
+    const primaryGeneral = await store.ensureGeneralChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: primaryGeneral.id,
+      title: "Primary-only channel chat",
+      author: { kind: "human", displayName: "Primary" },
+      body: "Must not leak",
+    });
+    const scopedGeneral = await store.ensureGeneralChannel({
+      workspaceId: scopedWorkspaceId,
+    });
+    const scopedChannelChat = await store.startChannelThread({
+      workspaceId: scopedWorkspaceId,
+      channelId: scopedGeneral.id,
+      title: "Scoped channel chat",
+      author: { kind: "human", displayName: "Scoped" },
+      body: "Visible only in scoped workspace",
+    });
+    const scopedFileThread = await store.createThread({
+      workspaceId: scopedWorkspaceId,
+      title: "Scoped file chat",
+      linkedFile: {
+        objectId: "object_scoped",
+        pathHint: "scoped.md",
+      },
+    });
+    await store.sendMessage({
+      workspaceId: scopedWorkspaceId,
+      threadId: scopedFileThread.id,
+      author: { kind: "human", displayName: "Scoped" },
+      body: "Scoped file message",
+    });
+    const scopedMoments = momentFixtures(
+      scopedWorkspaceId,
+      "scoped",
+      SERVER_NOW_MS + 1,
+    );
+    const scopedContext: CliWorkspaceContext = {
+      ...context,
+      ...scopedWorkspace,
+      async fileObjectIdForPath(path) {
+        return path === "scoped.md" ? "object_scoped" : null;
+      },
+      async filePathForObjectId(objectId) {
+        return objectId === "object_scoped" ? "scoped.md" : null;
+      },
+      async listMoments() {
+        return [scopedMoments.summary];
+      },
+      async readMoment(momentId) {
+        return momentId === scopedMoments.detail.id
+          ? scopedMoments.detail
+          : null;
+      },
+    };
+    serverOptions.listWorkspaces = () => [registryWorkspace, scopedWorkspace];
+    serverOptions.openWorkspace = async (workspace) => {
+      calls.openWorkspace += 1;
+      return workspace.workspaceId === scopedWorkspaceId
+        ? scopedContext
+        : context;
+    };
+
+    const moments = await invoke("moments", {
+      cwd: scopedRoot,
+      actor: "agent",
+    });
+    expect(moments.changes.map((change) => change.path)).toEqual(["scoped.md"]);
+    await expect(invoke("moment", {
+      cwd: scopedRoot,
+      actor: "agent",
+      id: scopedMoments.detail.id,
+    })).resolves.toMatchObject({
+      ok: true,
+      change: { path: "scoped.md" },
+    });
+    await expect(invoke("fileChats", {
+      cwd: scopedRoot,
+      actor: "agent",
+      path: "scoped.md",
+    })).resolves.toMatchObject({
+      ok: true,
+      fileObjectId: "object_scoped",
+      threads: [{ id: scopedFileThread.id }],
+    });
+    await expect(invoke("chat", {
+      cwd: scopedRoot,
+      actor: "agent",
+      threadId: scopedFileThread.id,
+    })).resolves.toMatchObject({
+      ok: true,
+      thread: { id: scopedFileThread.id },
+      projection: { text: expect.stringContaining("scoped.md") },
+    });
+    const channels = await invoke("channelsFull", {
+      cwd: scopedRoot,
+      actor: "agent",
+    });
+    expect(channels).toMatchObject({
+      ok: true,
+      channels: [{
+        id: scopedGeneral.id,
+        threads: [{ id: scopedChannelChat.thread.id }],
+      }],
+    });
+    expect(
+      channels.ok
+        ? channels.channels.flatMap((channel) =>
+            channel.threads.map((thread) => thread.title)
+          )
+        : [],
+    ).not.toContain("Primary-only channel chat");
+
+    const started = await invoke("startChannelChat", {
+      cwd: scopedRoot,
+      actor: "agent",
+      channel: scopedGeneral.id,
+      body: "Scoped opening",
+    });
+    if (!started.ok) throw new Error(started.reason);
+    const replied = await invoke("replyToChat", {
+      cwd: scopedRoot,
+      actor: "agent",
+      threadId: started.thread.id,
+      body: "Scoped reply",
+    });
+    expect(replied).toMatchObject({
+      ok: true,
+      message: { threadId: started.thread.id },
+    });
+    expect(
+      (await store.listThreads({ workspaceId: WORKSPACE_ID }))
+        .map((thread) => thread.id),
+    ).not.toContain(started.thread.id);
+    expect(await store.listMessages({
+      workspaceId: scopedWorkspaceId,
+      threadId: started.thread.id,
+    })).toHaveLength(2);
+  });
+
+  it("returns MCP write failures when assertWritable refuses the target", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const existing = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Existing message",
+    });
+    context.assertWritable = async () => {
+      calls.writable += 1;
+      throw new Error("This shared channel is read-only.");
+    };
+
+    await expect(invoke("startChannelChat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      channel: general.id,
+      body: "Must not land",
+    })).resolves.toEqual({
+      ok: false,
+      reason: "This shared channel is read-only.",
+    });
+    await expect(invoke("replyToChat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: existing.thread.id,
+      body: "Must not land",
+    })).resolves.toEqual({
+      ok: false,
+      reason: "This shared channel is read-only.",
+    });
+    expect(calls.writable).toBe(2);
+    expect(calls.identity).toBe(0);
+    expect(calls.writes).toBe(0);
+    expect(await store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: existing.thread.id,
+    })).toHaveLength(1);
+  });
+
+  it("keeps MCP chat reads available in read-only workspaces while refusing writes", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const channelChat = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      title: "Readable shared chat",
+      author: { kind: "human", displayName: "Ice" },
+      body: "Shared channel message",
+    });
+    const fileThread = await store.createThread({
+      workspaceId: WORKSPACE_ID,
+      title: "Readable shared file chat",
+      linkedFile: {
+        objectId: "object_tracked",
+        pathHint: "tracked.md",
+      },
+    });
+    await store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: fileThread.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Shared file message",
+    });
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+
+    await expect(invoke("fileChats", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "tracked.md",
+    })).resolves.toMatchObject({
+      ok: true,
+      threads: [{ id: fileThread.id }],
+    });
+    await expect(invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: fileThread.id,
+    })).resolves.toMatchObject({
+      ok: true,
+      messages: [{ threadId: fileThread.id }],
+    });
+    await expect(invoke("channelsFull", {
+      cwd: workspaceRoot,
+      actor: "agent",
+    })).resolves.toMatchObject({
+      ok: true,
+      channels: [{
+        id: general.id,
+        threads: [{ id: channelChat.thread.id }],
+      }],
+    });
+
+    const openCallsAfterReads = calls.openWorkspace;
+    await expect(invoke("startChannelChat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      channel: general.id,
+      body: "Forbidden",
+    })).rejects.toThrow("chats are not available in a read-only shared view");
+    await expect(invoke("replyToChat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: channelChat.thread.id,
+      body: "Forbidden",
+    })).rejects.toThrow("chats are not available in a read-only shared view");
+    expect(calls.openWorkspace).toBe(openCallsAfterReads);
+    expect(calls.identity).toBe(0);
+    expect(calls.writes).toBe(0);
+  });
+
   it("does not provision or write chats in a read-only workspace", async () => {
     if (!store) throw new Error("Store is not available");
     await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
@@ -401,7 +917,7 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
-  it("rejects a nested read-only workspace instead of resolving its writable parent", async () => {
+  it("serves reads from a nested read-only workspace without escalating to its writable parent", async () => {
     if (!store) throw new Error("Store is not available");
     const sharedRoot = join(workspaceRoot, "shared-view");
     await mkdir(sharedRoot, { recursive: true });
@@ -410,21 +926,29 @@ describe("CLI socket server", () => {
       rootPath: sharedRoot,
       readOnly: true,
     };
+    await store.ensureGeneralChannel({
+      workspaceId: sharedWorkspace.workspaceId,
+    });
     serverOptions.listWorkspaces = () => [registryWorkspace, sharedWorkspace];
+    const openedWorkspaceIds: string[] = [];
+    serverOptions.openWorkspace = async (workspace) => {
+      calls.openWorkspace += 1;
+      openedWorkspaceIds.push(workspace.workspaceId);
+      return {
+        ...context,
+        ...sharedWorkspace,
+        readOnly: true,
+      };
+    };
     const openCallsBefore = calls.openWorkspace;
 
-    const response = await rawRequest({
-      token,
-      protocolVersion: CLI_PROTOCOL_VERSION,
-      verb: "channels",
-      args: { cwd: sharedRoot, actor: "human" },
+    const response = await invoke("channels", {
+      cwd: sharedRoot,
+      actor: "human",
     });
-    expect(response).toEqual({
-      protocolVersion: CLI_PROTOCOL_VERSION,
-      ok: false,
-      error: "dohc: chats are not available in a read-only shared view",
-    });
-    expect(calls.openWorkspace).toBe(openCallsBefore);
+    expect(response.channels.map((channel) => channel.slug)).toEqual(["general"]);
+    expect(calls.openWorkspace).toBe(openCallsBefore + 1);
+    expect(openedWorkspaceIds).toEqual([sharedWorkspace.workspaceId]);
     expect(await store.listThreads({ workspaceId: WORKSPACE_ID })).toEqual([]);
     await expect(stat(join(sharedRoot, "AGENTS.md"))).rejects.toMatchObject({
       code: "ENOENT",

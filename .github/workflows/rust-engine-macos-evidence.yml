@@ -39,10 +39,17 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full = the 30-60min cutoverBlocking soak (BANKABLE evidence). quick = short smoke, NON-GATING, cannot satisfy GATE6."
+        description: "full = the 60-90min cutoverBlocking soak (BANKABLE evidence). quick = short smoke, NON-GATING, cannot satisfy GATE6."
         type: choice
         default: full
         options: [full, quick]
+      soak_minutes:
+        description: "Full-mode soak duration. Bounded so the 2x runner hard cap plus gate/build/drain fit the job timeout."
+        type: choice
+        default: "60"
+        options:
+          - "60"
+          - "90"
 
 permissions:
   contents: read
@@ -65,7 +72,10 @@ jobs:
     # macos-15 rather than -latest so a rolling OS bump cannot silently change
     # what the cited evidence ran on.
     runs-on: blacksmith-6vcpu-macos-15
-    timeout-minutes: 150
+    # The runner can use up to 2x the requested duration while satisfying both
+    # its cycle and time targets. At the 90-minute maximum, 240 minutes leaves
+    # 60 minutes for setup, the full gate, release builds, and idle drain.
+    timeout-minutes: 240
     permissions:
       contents: read
     steps:
@@ -160,12 +170,20 @@ jobs:
       - name: Soak (${{ inputs.mode }} mode; self-describing evidence JSON)
         env:
           SOAK_MODE: ${{ inputs.mode }}
+          SOAK_MINUTES: ${{ inputs.soak_minutes }}
         run: |
-          set -o pipefail
+          set -euo pipefail
           mkdir -p tools/rust-engine-program/soak-evidence
           if [ "$SOAK_MODE" = "full" ]; then
             EVIDENCE_TIER="cutoverBlocking"
-            ARGS="--minutes 30 --cycles 1000"
+            case "$SOAK_MINUTES" in
+              60|90) ;;
+              *)
+                echo "::error::full-mode soak_minutes must be 60 or 90; got '$SOAK_MINUTES'"
+                exit 1
+                ;;
+            esac
+            ARGS="--minutes $SOAK_MINUTES --cycles 1000"
           else
             EVIDENCE_TIER="quick-smoke"
             echo "::warning::quick mode is NON-GATING — it cannot satisfy the GATE6 cutoverBlocking evidence."
@@ -192,8 +210,110 @@ jobs:
             exit 1
           fi
 
+      - name: Print the RSS trend shape and idle-drain result
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -z "${SOAK_EVIDENCE_PATH:-}" ] || [ ! -s "$SOAK_EVIDENCE_PATH" ]; then
+            echo "no evidence json to summarize"
+            exit 0
+          fi
+          node -e '
+            const fs = require("fs");
+            const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const s = d.samples || [];
+            const mb = (x) => (x / 1e6).toFixed(1);
+            console.log(
+              "RSS TREND FITS: whole-run=" +
+                Math.round(d.rssSlopeBytesPerSecWholeRun) +
+                " B/s tail=" +
+                Math.round(d.rssSlopeBytesPerSecTail) +
+                " B/s (" +
+                d.trendTailSamples +
+                " samples / " +
+                Math.round(d.trendFitSpanSecsTail) +
+                "s)"
+            );
+            if (s.length < 8) {
+              console.log("too few samples to shape-check: " + s.length);
+            } else {
+              console.log("RSS TREND SHAPE (informational per-quarter least-squares fits):");
+              d.workloadTrendByQuarter.forEach((quarter, i) => {
+                const cycleRate = quarter.cycleRatePerSec == null
+                  ? "n/a"
+                  : quarter.cycleRatePerSec.toFixed(3);
+                const bytesPerCycle = quarter.rssSlopeBytesPerCycle == null
+                  ? "n/a"
+                  : Math.round(quarter.rssSlopeBytesPerCycle);
+                console.log(
+                  "  quarter " +
+                    (i + 1) +
+                    ": rss=" +
+                    Math.round(quarter.rssSlopeBytesPerSec) +
+                    " B/s workload=" +
+                    cycleRate +
+                    " cycles/s normalized=" +
+                    bytesPerCycle +
+                    " B/cycle cycles=" +
+                    quarter.cyclesCompletedStart +
+                    "->" +
+                    quarter.cyclesCompletedEnd
+                );
+              });
+              console.log("  rss first=" + mb(s[0].rss_bytes) + "MB last=" + mb(s[s.length - 1].rss_bytes) + "MB peak=" + mb(Math.max.apply(null, s.map((x) => x.rss_bytes))) + "MB samples=" + s.length);
+              console.log("  handles " + s[0].handles + "->" + s[s.length - 1].handles + " threads " + s[0].threads + "->" + s[s.length - 1].threads);
+            }
+            const drain = d.drain;
+            if (!drain) {
+              console.log("IDLE DRAIN: missing from evidence");
+            } else {
+              const dropPercent = drain.rssDropPercentOfRunGrowth == null
+                ? "n/a (no positive run growth)"
+                : drain.rssDropPercentOfRunGrowth.toFixed(1) + "% of run growth";
+              console.log("IDLE DRAIN (" + drain.windowSecs + "s, unaided): " + drain.drainDisposition);
+              console.log("  rss start=" + mb(drain.rssAtStartBytes) + "MB end=" + mb(drain.rssAtEndBytes) + "MB min=" + mb(drain.rssMinBytes) + "MB drop=" + mb(drain.rssDropBytes) + "MB (" + dropPercent + ")");
+              console.log("  samples=" + drain.samplesCollected + " allocatorReleaseRequested=" + drain.allocatorReleaseRequested);
+            }
+            console.log("RSS DISPOSITION (final-half B/s threshold): " + d.rssDisposition);
+            console.log("WARMUP-DOMINATED WHOLE-RUN FIT: " + d.warmupDominatedWholeRunFit);
+            console.log("RUN VERDICT: " + d.verdict);
+          ' "$SOAK_EVIDENCE_PATH"
+
+      # The artifact quota is account-wide, so uploads can fail for reasons this
+      # repo cannot fix -- and every macOS run so far has hit exactly that,
+      # leaving the evidence produced but unbanked. Emit the JSON into the run's
+      # own durable record BEFORE attempting the upload, so a quota failure
+      # costs convenience rather than the evidence itself.
+      - name: Bank the evidence JSON in the run record
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -z "${SOAK_EVIDENCE_PATH:-}" ] || [ ! -s "$SOAK_EVIDENCE_PATH" ]; then
+            echo "no evidence json to bank"
+            exit 0
+          fi
+          {
+            echo "### macOS soak evidence — \`$SOAK_EVIDENCE_PATH\`"
+            echo
+            echo "Commit this to \`tools/rust-engine-program/soak-evidence/\` to bank it."
+            echo
+            echo '```json'
+            cat "$SOAK_EVIDENCE_PATH"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "--- BEGIN SOAK EVIDENCE JSON ---"
+          cat "$SOAK_EVIDENCE_PATH"
+          echo
+          echo "--- END SOAK EVIDENCE JSON ---"
+
       - name: Upload macOS evidence artifacts
         if: always()
+        # The evidence is already in the step summary and the log by now, so a
+        # quota failure here costs convenience, not evidence. Without this the
+        # whole run reports failure even when the gate and soak both passed --
+        # which is exactly how ten macOS runs came to be recorded as failures.
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-engine-macos-evidence-${{ inputs.mode }}-${{ job.status }}
