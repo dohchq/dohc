@@ -11,12 +11,28 @@ import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { nativeTmpdir } from "./testTemp";
 
+// The binary name is platform-dependent. Hardcoding `.exe` meant this test
+// could not run on Linux or macOS at all, and CI does not build a debug daemon
+// on any platform -- so the one end-to-end test of the desktop capture path
+// against a real daemon SKIPPED everywhere, from the day it was written.
 const binaryPath = fileURLToPath(
   new URL(
-    "../../../../target/debug/dohc-workspace-engine.exe",
+    `../../../../target/debug/dohc-workspace-engine${
+      process.platform === "win32" ? ".exe" : ""
+    }`,
     import.meta.url,
   ),
 );
+// A skip is right for a developer who has not built the daemon and wrong for
+// CI, where it is the difference between this test guarding the cutover path
+// and reporting green without running. Same pattern as DOHC_REQUIRE_POSTGRES.
+const engineBinaryPresent = existsSync(binaryPath);
+if (!engineBinaryPresent && process.env.DOHC_REQUIRE_ENGINE_E2E === "1") {
+  throw new Error(
+    `DOHC_REQUIRE_ENGINE_E2E=1 but no engine binary at ${binaryPath}. ` +
+      "Build it with: cargo build -p dohc-workspace-engine --bin dohc-workspace-engine",
+  );
+}
 const originalKernelSidecar = process.env.DOHC_KERNEL_SIDECAR;
 const roots: string[] = [];
 
@@ -59,7 +75,7 @@ afterEach(async () => {
   );
 });
 
-it.skipIf(!existsSync(binaryPath))(
+it.skipIf(!engineBinaryPresent)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
     process.env.DOHC_KERNEL_SIDECAR = "0";

@@ -225,7 +225,22 @@ describe("EngineRelayClient real daemon", () => {
         ).toContain("relay-e2e-channel");
         await pulled.commitFetchCursor();
 
-        await receiver.sessions.closeAll();
+        // `closeAll()` is a ONE-WAY door: it clears `acceptingRuns`, which
+        // nothing ever restores, so every later `acquire()` throws
+        // "Rust engine workspace sessions are closed." (asserted as a contract
+        // in engineWorkspaceSessions.test.ts). This test called it and then
+        // kept using the same object, so it could never have passed — and the
+        // `DOHC_TEST_RUST_ENGINE_BIN` gate meant nobody found out. Production
+        // is unaffected: closeAllRelayTransportWorkspaces fans out over the
+        // non-terminal closeWorkspace().
+        //
+        // Scope, stated honestly: this re-opens the workspace against the
+        // SAME running daemon, so it proves the pull survives a session
+        // close/re-open, not that it survives a process restart. Restarting
+        // the daemon would prove more, but EngineDaemonLifecycle.stop() is
+        // itself terminal ("already stopping"), so that needs a second
+        // lifecycle rather than a contortion of this one.
+        await receiver.sessions.closeWorkspace(workspaceId);
         expect(
           await channelIds(receiver.sessions, workspaceId, receiverRoot),
         ).toContain("relay-e2e-channel");

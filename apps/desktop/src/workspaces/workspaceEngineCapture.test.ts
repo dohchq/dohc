@@ -2444,15 +2444,27 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     await engine.setActiveAgentRun(run);
     await expect(engine.setActiveAgentRun(null)).rejects.toThrow("did not settle");
-    expect(
-      requests
-        .filter(
-          (request) =>
-            request.method === "capture.flush" ||
-            request.method === "capture.setAuthor",
-        )
-        .map((request) => request.method),
-    ).toEqual(["capture.setAuthor", "capture.flush"]);
+    const methods = requests
+      .filter(
+        (request) =>
+          request.method === "capture.flush" ||
+          request.method === "capture.setAuthor",
+      )
+      .map((request) => request.method);
+    // The guarantee is that authorship is never CLEARED behind an unsettled
+    // flush — not how many times the flush was asked. flushCapture now polls
+    // for quiescence, as the daemon documents and every Rust consumer does,
+    // so pinning the exact call count would fail on the retries while proving
+    // nothing extra. Pin the guarantee instead: the run was stamped once, the
+    // clear never happened, and nothing but flushes ran in between.
+    expect(methods[0]).toBe("capture.setAuthor");
+    expect(methods.filter((method) => method === "capture.setAuthor")).toEqual([
+      "capture.setAuthor",
+    ]);
+    expect(methods.slice(1).every((method) => method === "capture.flush")).toBe(
+      true,
+    );
+    expect(methods.length).toBeGreaterThan(1);
 
     settled = true;
     await engine.setActiveAgentRun(null);

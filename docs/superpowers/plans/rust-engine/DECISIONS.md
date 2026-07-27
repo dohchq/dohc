@@ -269,6 +269,36 @@ verdict window changed, not because the engine's memory behaviour changed. A
 synthetic constant-slope leak still fails the tail test, so leak detection is
 preserved.
 
+### The BASIS of this ruling was wrong (recorded 2026-07-27, after the ruling)
+
+The ruling stands and is not reopened. What follows corrects the evidence it
+rested on, because leaving a decision resting on a measurement that did not
+measure what it claimed is worse than a decision made on thin evidence.
+
+Every number above -- the whole-run fit, the tail, and the "quarter slopes
+halve" diagnosis -- was fit over a workload with **no steady state**. Each
+phase-2 scenario keyed its object and path identities on the raw cycle counter,
+so every cycle created a new permanent object, path, blob and FTS entry: about
+92 KiB of durable content per switch cycle and 25 permanent files per storm
+cycle, past 57,000 files. Opening a workspace builds a manifest of every
+captured entry, so the process grew because the workload grew. The quarters
+halve in bytes per SECOND only because the cycle rate fell 65% as each reopen
+re-enumerated a linearly growing tree; per unit of work the growth was
+flat-to-rising, worst in the final quarter. The "asymptotic plateau" was the
+daemon slowing down.
+
+Two runs of identical code on final main then straddled the bound in opposite
+directions -- 21,171 B/s FAIL, 16,996 B/s PASS -- which is what a measurement of
+the wrong thing looks like.
+
+#293 bounds the live working set and makes the runner record its own
+precondition. On the same machine and budget the tail slope falls from 9,984
+B/s to **1,859 B/s**, with user-file growth of +25 instead of +26,525.
+
+**The conclusion Ice accepted -- no leak -- is unchanged, and now rests on a
+measurement that means what it says.** R15-2 is satisfied by a macOS run under
+the corrected methodology, not by either of the two void runs above.
+
 The original question and its evidence follow.
 
 R15-2 authorized the flip on a passing full-mode gate **and** cutoverBlocking

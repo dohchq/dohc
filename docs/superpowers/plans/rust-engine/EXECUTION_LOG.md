@@ -2631,3 +2631,119 @@ The repository also had **no automated checks on pull requests at all** until to
 gate added in #275 has already caught two real regressions — the Linux inode-reuse bug,
 and a three-way integration break where each PR was green alone and `main` was red.
 
+
+## 2026-07-28 — both evidence gates re-examined; one closed, one voided and rebuilt
+
+Neither remaining gate was closed by running it again. Both turned out to be measuring
+something other than what they claimed.
+
+### The rehearsal gate — CLOSED (#292)
+
+`clone_tree` failed closed on any source file with `link_count > 1`, so the clone-reset
+rehearsal could not run at all on a workspace containing a JS project: pnpm hard-links by
+default. Three files under `sites/dohc-workspace-demo/vendor/dohc-sdk` tripped it, and
+every twin resolved inside the source tree.
+
+Narrowed to what is actually unsafe. An inside-tree twin is not an aliasing escape — the
+clone copies bytes and each name gets its own copy. An outside twin still fails closed,
+and Unix still fails closed because `nlink` exposes that aliases exist but not where, and
+faking containment would be worse than refusing.
+
+Evidence, reproduced across two independent runs against the real dogfood workspace:
+
+```
+outcome: complete    paths 27/27    records 27/27
+content_identities_verified 27     mismatches []     projections_settled true
+source_unchanged.verified true     sha256 identical before and after
+hard_linked_source_file_count 3    inside 3    outside 0
+```
+
+`backup-reuse-foreign-clone` on a repeat run is correct behaviour, not a defect: the check
+fires in `Settled`, before the destructive move-aside in `BackedUp`, so a stale recovery
+dir refuses before anything is destroyed. Repeat rehearsals need a fresh recovery dir.
+
+### The soak gate — the FAIL and the PASS were both void (#293)
+
+The macOS soak failed the tail bound at 21,171 B/s. A repeat of the same commit passed at
+16,996 B/s. Same code, same workload, opposite verdicts — which is what a measurement of
+the wrong thing looks like.
+
+Every phase-2 scenario keyed its object and path identities on the raw cycle counter, so
+each cycle created a NEW permanent object, path, blob and FTS entry: ~92 KiB of durable
+content per switch cycle, 25 permanent files per storm cycle, past 57,000 files. Opening a
+workspace builds a manifest of every captured entry, so the process grew because the
+workload grew. Measured directly: workspace `a` reached a 106 MB `engine.db` (34.8 MB
+`blobs.text`, 35.0 MB FTS) while workspace `b` — its partner in the same scenario, opened
+and closed but never written — stayed at 774 KB.
+
+The recorded "quarter slopes halve, so it is an asymptotic plateau" diagnosis was the
+daemon slowing down. Bytes per SECOND fell only because the cycle rate fell 65% as each
+reopen re-enumerated a linearly growing tree; per unit of work, growth was flat-to-RISING
+(16355, 19792, 9562, 20095 bytes/cycle, worst in the final quarter).
+
+Two false starts worth recording, because both were plausible:
+
+- **Durable bytes are the wrong bound.** The first fix gated on them and reported INVALID
+  on itself — 70 MB over 7,804 cycles. `moments` is append-only and every write needs a
+  fresh `momentId`, so bytes grow whenever the workload works. Bytes also do not drive
+  RSS: no `cache_size` pragma is set anywhere, so SQLite's page cache stays at its 2 MB
+  default and a larger database is not a larger process.
+- **Two of four candidate causes did not survive checking.** `moments` is NOT unindexed
+  (`idx_moments_workspace_order`, plus `UNIQUE(workspace_id, moment_order)`), and
+  `PRAGMA quick_check` does NOT run on every open — `probe_integrity_ok` fires only in the
+  unrecognized-`user_version` arm of `classify_fingerprint`.
+
+The bound is now the LIVE WORKING SET in user files, which is what the manifest scales
+with, and is structural rather than a function of machine speed and run length. A/B on one
+machine, same runner and budget:
+
+```
+unbounded   userFileGrowth +26,525   RSS tail 9,984 B/s   end 44.3 MB
+bounded     userFileGrowth +25       RSS tail 1,859 B/s   end 21.8 MB
+```
+
+The runner now records its own precondition and serializes `rssDisposition` and both RSS
+assertions as `null` when it fails, so such a trend can be cited in neither direction. A
+genuine daemon failure still reports FAIL, since a workload cannot invalidate a handle
+leak or a dirty shutdown.
+
+### Found while auditing
+
+- **#294** — the stale-actor eviction path removed the handle and its Y.Doc sessions but
+  left the handle's pending cursors, which nothing could then remove: `consume_pending_cursor`
+  matches on the handle and every rebind mints a fresh one. Not consumable, just permanent.
+  The normal close path three lines away always dropped them. The program's recurring shape:
+  enforced on the normal path, skipped on the error path beside it.
+- **#295** — CI had never run `cargo-audit`. The workflow did not install it, so the gate
+  probed, reported SKIP, and `requiredSteps` did not object. Both halves fixed together,
+  because either alone still reads green.
+- **The only end-to-end test of the TypeScript desktop capture path against a real daemon
+  has never run in CI** — `it.skipIf(!existsSync(binaryPath))` against a hardcoded `.exe`,
+  which CI never builds and Linux cannot match. It FAILS when forced to run, on `main` as
+  well as on the flip branch, and not for want of retry budget. Under investigation; the
+  cutover makes that path the only path.
+
+### Gate evidence
+
+```
+2026-07-27T15:38:41.002Z | run-rust-checks | win32/x64 | PASS | fixture drift=PASS
+fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS
+cargo-deny=PASS cargo-audit=PASS
+```
+
+First fully-green canonical gate of the program with **no SKIP rows**: `fixture drift` and
+`cargo-audit` had both been skipping.
+
+### The pattern, restated
+
+Ten instances in two days of a check reporting green while verifying nothing. The two
+newest are the most expensive: a cutover-blocking soak that measured its own workload, and
+the cutover's only end-to-end test skipping itself out of existence.
+
+Two rules earned today:
+
+- **A check that reverses on identical code is evidence in NEITHER direction.** When a
+  re-run flips red to green, that is not luck to bank — it is proof the check is not
+  measuring the code.
+- **Normalize per unit of work.** Bytes per second falls when throughput falls, so the
+  bound is flattered exactly when things are getting worse.
