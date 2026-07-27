@@ -670,3 +670,34 @@ Regressions include
 `overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal`,
 `collision_slug_truncation_is_bounded_and_does_not_leave_a_dash_boundary`, and
 `noncolliding_channel_apply_does_not_rewrite_unchanged_slugs`.
+
+## Dispatch future size is a shared, unbounded budget (recorded 2026-07-27)
+
+`EngineService::dispatch` awaits every RPC branch directly, so its generated state
+machine must be large enough for the LARGEST branch even when the active method is
+something else entirely. Any RPC payload moved BY VALUE into an async fn lives in that
+future, and therefore inflates the stack cost of every unrelated call.
+
+This bit twice in one day. Adding a single `Option<i64>` to `ConflictFileState` grew
+`TextConflict` to 1,464 bytes, which overflowed the debug test stack in
+`chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle` -- a CHAT test,
+during a plain `workspace.open`, with nothing conflict-related in sight. Measured with
+`-Zprint-type-sizes`:
+
+| future | before boxing | after |
+|---|---|---|
+| `ActorHandle::conflict_open` | 2,408 B | 952 B |
+| `EngineService::conflicts_open` | 5,456 B | 4,000 B |
+| `EngineService::dispatch` | 5,808 B | 4,352 B |
+| in-process transport `call` | 6,160 B | 4,704 B |
+
+The fix is to box a large payload BEFORE the async boundary, not inside the async fn
+(where it is already too late -- the value has been moved into the future).
+
+A sibling audit at the time found every other actor command payload between 32 and 280
+bytes, so `TextConflict` was the sole outlier. **The fragility is structural, not
+fixed:** the next innocuous field addition to any RPC payload will look exactly as
+harmless as `Option<i64>` did, and will again surface as an unrelated test overflowing.
+If a stack overflow appears in a test that has nothing to do with the code you changed,
+check payload sizes with `-Zprint-type-sizes` before looking anywhere else.
+
