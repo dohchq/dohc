@@ -9181,6 +9181,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "applied": applied,
             "skipped": skipped,
             "conflictsOpened": conflicts_opened,
+            "nextCursor": pending_cursor.as_ref().map(|cursor| cursor.cursor),
             "pendingCursor": pending_cursor.as_ref().map(relay_cursor_json),
             "changedPaths": changed_paths.iter().map(|change| json!({
                 "path": change.path,
@@ -9204,6 +9205,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "applied": applied,
             "skipped": skipped,
             "conflictsOpened": conflicts_opened,
+            "nextCursor": pending_cursor.cursor,
             "pendingCursor": relay_cursor_json(&pending_cursor),
             "changedPaths": changed_paths.iter().map(|change| json!({
                 "path": change.path,
@@ -9237,6 +9239,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         }),
         RelayOperationOutcome::SharedChannelPulled(outcome) => json!({
             "fetched": outcome.fetched,
+            "hasMore": outcome.has_more,
             "applied": outcome.applied,
             "refused": outcome.refused,
             "rejections": outcome.rejections.iter().map(|rejection| json!({
@@ -9256,6 +9259,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "hasMore": outcome.has_more,
             "applied": outcome.applied,
             "skipped": outcome.skipped,
+            "nextCursor": outcome.pending_cursor.cursor,
             "changedPaths": outcome.changed_paths.into_iter().map(|change| json!({
                 "path": change.path,
                 "operation": change.operation,
@@ -9394,6 +9398,12 @@ fn map_runtime(error: RuntimeError) -> WireError {
     }
     if matches!(&error, RuntimeError::Collab(CollabError::UnsettledClose)) {
         return wire(ErrorCode::InvalidParams, "ydoc-unsettled-close");
+    }
+    if matches!(&error, RuntimeError::Relay(RelayError::OriginDiverged)) {
+        return wire(ErrorCode::InvalidParams, "relay-origin-diverged");
+    }
+    if matches!(&error, RuntimeError::Relay(RelayError::ShareReadOnly)) {
+        return wire(ErrorCode::InvalidParams, "share-read-only");
     }
     if let RuntimeError::Domain(domain) = &error {
         let message = match domain {
@@ -9851,6 +9861,23 @@ mod tests {
         assert_eq!(
             value["hasMore"], true,
             "MUTATION: omitting hasMore hides that the pending cursor is only a bounded prefix"
+        );
+    }
+
+    #[test]
+    fn relay_refusal_messages_preserve_recovery_meaning() {
+        let origin = map_runtime(RuntimeError::Relay(RelayError::OriginDiverged));
+        assert_eq!(origin.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            origin.message, "relay-origin-diverged",
+            "MUTATION: a generic INVALID_PARAMS would re-baseline on protocol errors"
+        );
+
+        let read_only = map_runtime(RuntimeError::Relay(RelayError::ShareReadOnly));
+        assert_eq!(read_only.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            read_only.message, "share-read-only",
+            "MUTATION: a generic INVALID_PARAMS would permanently downgrade writable shares"
         );
     }
 

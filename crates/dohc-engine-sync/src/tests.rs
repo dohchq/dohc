@@ -7343,6 +7343,10 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
         .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
         .expect("bounded shared-channel page");
     assert_eq!((first.fetched, first.next_cursor), (0, 1));
+    assert!(
+        first.has_more,
+        "MUTATION: dropping has_more prevents the desktop adapter from draining page two"
+    );
     assert_eq!(
         *client
             .transport()
@@ -7426,6 +7430,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
         first,
         SharedChannelPullOutcome {
             fetched: 1,
+            has_more: true,
             applied: 0,
             refused: 1,
             rejections: vec![SharedChannelRejection {
@@ -7675,7 +7680,10 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
         .pull_share_view(&mut engine, "ws", "share", &NoFaults)
         .expect("bounded share-view page");
     assert_eq!((first.fetched, first.pending_cursor.cursor), (0, 1));
-    assert!(first.has_more);
+    assert!(
+        first.has_more,
+        "MUTATION: dropping has_more prevents the desktop adapter from draining page two"
+    );
     assert_eq!(
         *client
             .transport()
