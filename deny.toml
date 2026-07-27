@@ -49,6 +49,9 @@ allow = [
     # CC0-1.0: public-domain dedication with a permissive fallback. Enters via
     # the R07 notify watcher crate itself.
     "CC0-1.0",
+    # CDLA-Permissive-2.0: permissive data license for the Mozilla CA root
+    # dataset bundled by webpki-roots (ureq -> rustls).
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 # Our own workspace crates are unpublished (publish = false) and carry no

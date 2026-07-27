@@ -189,7 +189,7 @@ export class EngineWorkspaceSessions {
     workspace: EngineWorkspace,
   ): Promise<EngineWorkspaceBinding> {
     const entry = this.entry(workspace.workspaceId);
-    for (;;) {
+    for (let attempt = 1; ; attempt += 1) {
       const client = this.source.currentClient();
       if (entry.binding?.client === client) return entry.binding;
       if (entry.binding?.client !== client) entry.binding = null;
@@ -205,6 +205,13 @@ export class EngineWorkspaceSessions {
       }
       if (this.source.currentClient() !== client) {
         await this.closeBinding(binding).catch(() => undefined);
+        if (attempt >= this.transportRebindAttempts) {
+          throw new EngineWorkspaceRebindError(
+            workspace.workspaceId,
+            new Error("Rust engine client changed on every open attempt."),
+          );
+        }
+        await this.sleep(transportBackoffMs(attempt));
         continue;
       }
       entry.binding = binding;
