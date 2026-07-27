@@ -39,16 +39,15 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full = the 30-90min cutoverBlocking soak (BANKABLE evidence). quick = short smoke, NON-GATING, cannot satisfy GATE6."
+        description: "full = the 60-90min cutoverBlocking soak (BANKABLE evidence). quick = short smoke, NON-GATING, cannot satisfy GATE6."
         type: choice
         default: full
         options: [full, quick]
       soak_minutes:
         description: "Full-mode soak duration. Bounded so the 2x runner hard cap plus gate/build/drain fit the job timeout."
         type: choice
-        default: "30"
+        default: "60"
         options:
-          - "30"
           - "60"
           - "90"
 
@@ -178,9 +177,9 @@ jobs:
           if [ "$SOAK_MODE" = "full" ]; then
             EVIDENCE_TIER="cutoverBlocking"
             case "$SOAK_MINUTES" in
-              30|60|90) ;;
+              60|90) ;;
               *)
-                echo "::error::full-mode soak_minutes must be 30, 60, or 90; got '$SOAK_MINUTES'"
+                echo "::error::full-mode soak_minutes must be 60 or 90; got '$SOAK_MINUTES'"
                 exit 1
                 ;;
             esac

@@ -77,12 +77,11 @@ R16 (legacy deletion) is POST-cutover by design.
   conclusions require bounds calibrated on that platform. The existing
   WSL-Linux result remains scenario/portability evidence under this caveat.
 
-## 1b. macOS soak RSS growth — DIAGNOSED, **STILL OPEN**, awaiting Ice's ruling
+## 1b. macOS soak RSS growth — **RESOLVED**
 
-**Status correction (2026-07-27).** An earlier revision of this section marked
-this finding RESOLVED. That was an overclaim and is retracted here. The
-*diagnosis* below is well-evidenced; the *criterion* is not met, and the reason
-it would now read as met is that I changed the criterion.
+**Decision (Ice, 2026-07-27).** Ice accepted the steady-state tail verdict
+against the unchanged 20 KiB/s bound. R15-2's RSS soak criterion is met on that
+basis; `DECISIONS.md` records the ruling and its exact measurements.
 
 ### What the evidence shows
 
@@ -98,35 +97,18 @@ started (12 -> 9). A constant-rate leak against a constant cycle rate holds a
 constant slope; this does not. The shape is an asymptotic approach to a
 plateau, consistent with allocator fragmentation under `libmalloc`.
 
-### Why this is NOT closed
+### Basis and remaining caveats
 
-1. **No macOS soak run has ever concluded `success`.** Ten completed runs of
-   `rust-engine-macos-evidence.yml`, ten failures. The criterion Ice authorized
-   at R15-2 was a passing full-mode gate **and** cutoverBlocking soak on the
-   Blacksmith macOS runner. The gate half is genuinely met, with real evidence
-   (it found four merged bugs: #256, #260, #261, #264). The soak half is 0-for-10.
-2. **The tail-window verdict is a change to the pass criterion, not a bug fix.**
-   The 20 KiB/s bound is unchanged, but it is now applied to the post-warm-up
-   tail rather than the whole run. That is defensible on the physics and it is
-   still a narrower claim than the one Ice signed off on. Presenting a
-   recomputation of a failed run's trace under a new classifier as a PASS would
-   be exactly the "hollow green" this program has already been burned by.
-3. **No evidence JSON is banked.** Every artifact upload failed on
-   `Artifact storage quota has been hit`. The only banked soak evidence in
-   `tools/rust-engine-program/soak-evidence/` is the WINDOWS run.
-4. The absolute plateau height (~184 MB after 10,858 cycles at ~2 cycles/s) was
-   never calibrated for macOS, and `handleSlack`/`threadSlack` are
-   Windows-calibrated (see section 1).
+The ruling deliberately changes the verdict window, not the observed memory
+behaviour: the accepted run's whole-run fit remains over the bound while its
+post-warm-up tail is under it. A synthetic constant-rate leak still fails the
+tail classifier, preserving the intended leak signal.
 
-### The decision Ice owns
-
-**Does the steady-state tail slope satisfy R15-2, or must a whole-run fit come
-in under the bound before the flip?** The program should not answer this for
-him. Recorded as an open decision in `DECISIONS.md`.
-
-Until it is answered, this criterion is **NOT MET** and GATE6 remains open on
-it. What can be stated without a ruling: there is no evidence of a constant-rate
-leak, and good evidence against one.
+This RSS decision does not calibrate the absolute macOS plateau height or the
+Windows-derived handle/thread slack (see section 1). Historical workflow runs
+also hit the artifact-storage quota; those provenance and calibration caveats
+remain, but they are not an open decision about whether the tail satisfies
+R15-2.
 
 ## 2. Differential (TS-vs-Rust capture parity) — PASS
 - 10/10 scenarios green on BOTH engines; goldens committed
@@ -288,7 +270,7 @@ cutover sequencing decision exposed by RPC-E-3 and remains for Ice.
    (quick|full input) and the local `tools/rust-engine-program/
    macos-evidence.sh` (run on a Mac). Each reproduces the full-workspace gate +
    the cutoverBlocking soak and emits the verdict logs + soak-evidence JSON.
-   Both DEFAULT TO `full` (the bankable 30-90min soak); `quick` is explicitly
+   Both DEFAULT TO `full` (the bankable 60-90min soak); `quick` is explicitly
    NON-GATING (the runner exits 0 with PASS-SCENARIOS-ONLY(trend-not-evaluated),
    which CANNOT satisfy this packet's soak evidence). Both install cargo-deny and
    FAIL on a `cargo-deny=SKIP` gate line, and both build the daemon + runner

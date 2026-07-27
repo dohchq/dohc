@@ -14,7 +14,7 @@
 //! runner writes shadow markers, so production builds never compile it.
 //!
 //!   cargo run --features harness --bin dohc-soak-runner -- \
-//!       [--minutes 30] [--cycles 1000] [--quick] [--daemon <path>] \
+//!       [--minutes 60] [--cycles 1000] [--quick] [--daemon <path>] \
 //!       [--evidence <out.json>]
 //!
 //! Prints an EXECUTION_LOG-style evidence line and writes the full sample
@@ -68,6 +68,7 @@ const MIN_TREND_SAMPLES: usize = 24;
 /// page-cache fill on a healthy daemon). Below this span the trend is
 /// reported as NOT EVALUATED — never as leak evidence in either direction.
 const MIN_TREND_SPAN_SECS: f64 = 900.0;
+const DEFAULT_FULL_SOAK_MINUTES: u64 = 60;
 
 struct Options {
     minutes: u64,
@@ -79,8 +80,36 @@ struct Options {
     quick: bool,
 }
 
+struct SoakTimeline {
+    run_started: Instant,
+    workload_started: Option<Instant>,
+}
+
+impl SoakTimeline {
+    fn new() -> Self {
+        Self {
+            run_started: Instant::now(),
+            workload_started: None,
+        }
+    }
+
+    fn begin_workload(&mut self) {
+        self.workload_started = Some(Instant::now());
+    }
+
+    fn run_elapsed(&self) -> Duration {
+        self.run_started.elapsed()
+    }
+
+    fn workload_elapsed(&self) -> Duration {
+        self.workload_started
+            .expect("phase-2 workload clock has started")
+            .elapsed()
+    }
+}
+
 fn parse_options() -> Options {
-    let mut minutes = 30_u64;
+    let mut minutes = DEFAULT_FULL_SOAK_MINUTES;
     let mut cycles = 1000_u64;
     let mut daemon: Option<PathBuf> = None;
     let mut evidence = PathBuf::from("soak-evidence.json");
@@ -341,6 +370,25 @@ struct Sample {
     threads: u64,
 }
 
+fn push_process_sample(
+    samples: &mut Vec<Sample>,
+    process_sample: Option<(u64, u64, u64)>,
+    at_secs: f64,
+    cycles_completed: u64,
+) -> bool {
+    let Some((rss_bytes, handles, threads)) = process_sample else {
+        return false;
+    };
+    samples.push(Sample {
+        at_secs,
+        cycles_completed,
+        rss_bytes,
+        handles,
+        threads,
+    });
+    true
+}
+
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProcessSamplingMetadata {
@@ -497,13 +545,12 @@ fn linear_slope(
 }
 
 /// Least-squares slope of RSS over time, bytes/second.
-fn rss_slope(samples: &[Sample]) -> f64 {
+fn rss_slope(samples: &[Sample]) -> Option<f64> {
     linear_slope(
         samples,
         |sample| sample.at_secs,
         |sample| sample.rss_bytes as f64,
     )
-    .unwrap_or(0.0)
 }
 
 fn trend_span_secs(samples: &[Sample]) -> f64 {
@@ -519,7 +566,7 @@ fn trend_tail(samples: &[Sample]) -> &[Sample] {
     &samples[samples.len() / 2..]
 }
 
-fn rss_slopes_by_quarter(samples: &[Sample]) -> Vec<f64> {
+fn rss_slopes_by_quarter(samples: &[Sample]) -> Vec<Option<f64>> {
     (0..4)
         .map(|quarter| {
             let start = quarter * samples.len() / 4;
@@ -535,7 +582,7 @@ struct WorkloadQuarterTrend {
     samples: usize,
     cycles_completed_start: u64,
     cycles_completed_end: u64,
-    rss_slope_bytes_per_sec: f64,
+    rss_slope_bytes_per_sec: Option<f64>,
     cycle_rate_per_sec: Option<f64>,
     rss_slope_bytes_per_cycle: Option<f64>,
 }
@@ -591,9 +638,9 @@ struct RssTrendClassification {
 }
 
 fn classify_rss_trend(samples: &[Sample]) -> RssTrendClassification {
-    let whole_run_slope_bytes_per_sec = rss_slope(samples);
+    let whole_run_slope_bytes_per_sec = rss_slope(samples).unwrap_or(0.0);
     let tail = trend_tail(samples);
-    let tail_slope_bytes_per_sec = rss_slope(tail);
+    let tail_slope_bytes_per_sec = rss_slope(tail).unwrap_or(0.0);
     let tail_span_secs = trend_span_secs(tail);
     let evaluated = tail.len() >= MIN_TREND_SAMPLES && tail_span_secs >= MIN_TREND_SPAN_SECS;
     let disposition = if !evaluated {
@@ -623,6 +670,45 @@ enum DrainDisposition {
     NotEvaluated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING-KEBAB-CASE")]
+enum RssDisposition {
+    Pass,
+    Fail,
+    NotEvaluated,
+    RetainedReclaimed,
+}
+
+impl RssDisposition {
+    fn from_trend_and_drain(trend: RssTrendDisposition, drain: DrainDisposition) -> RssDisposition {
+        match trend {
+            RssTrendDisposition::NotEvaluated => RssDisposition::NotEvaluated,
+            RssTrendDisposition::Pass => RssDisposition::Pass,
+            RssTrendDisposition::Fail if drain == DrainDisposition::Reclaimed => {
+                RssDisposition::RetainedReclaimed
+            }
+            RssTrendDisposition::Fail => RssDisposition::Fail,
+        }
+    }
+
+    fn is_acceptable(self) -> bool {
+        self != RssDisposition::Fail
+    }
+
+    fn is_retention_signal(self) -> bool {
+        self == RssDisposition::RetainedReclaimed
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            RssDisposition::Pass => "PASS",
+            RssDisposition::Fail => "FAIL",
+            RssDisposition::NotEvaluated => "NOT-EVALUATED",
+            RssDisposition::RetainedReclaimed => "RETAINED-RECLAIMED",
+        }
+    }
+}
+
 fn classify_drain(baseline_rss: u64, samples: &[Sample]) -> DrainDisposition {
     if samples.len() < MIN_DRAIN_SAMPLES {
         return DrainDisposition::NotEvaluated;
@@ -643,6 +729,13 @@ fn classify_drain(baseline_rss: u64, samples: &[Sample]) -> DrainDisposition {
     } else {
         DrainDisposition::Retained
     }
+}
+
+fn rss_drain_delta(start: Option<u64>, end: Option<u64>) -> Option<i64> {
+    start.zip(end).map(|(start, end)| {
+        let delta = i128::from(end) - i128::from(start);
+        delta.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+    })
 }
 
 // ----------------------------------------------------------------- scenarios
@@ -935,7 +1028,7 @@ async fn main() {
         "cutoverBlocking"
     };
     let process_sampling = process_sampling_metadata();
-    let started = Instant::now();
+    let mut timeline = SoakTimeline::new();
     let budget = Duration::from_secs(options.minutes * 60);
     eprintln!(
         "soak: {tier} tier — {} cycles / {} min budget, daemon {}",
@@ -985,7 +1078,7 @@ async fn main() {
     let crash_cycles = (options.cycles / 12).max(3);
     eprintln!("soak: phase 1 — {crash_cycles} crash/restart recovery cycles");
     for cycle in 0..crash_cycles {
-        if started.elapsed() > budget {
+        if timeline.run_elapsed() > budget {
             break;
         }
         let handle = open(&daemon, &root_crash, "soak-crash").await;
@@ -1049,6 +1142,7 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     let (rss_base, handles_base, threads_base) =
         sample_process(daemon.pid()).expect("phase-2 baseline sample");
+    timeline.begin_workload();
     eprintln!(
         "soak: phase 2 — leak-trend soak on one process \
          (baseline rss={rss_base} handles={handles_base} threads={threads_base})"
@@ -1057,24 +1151,21 @@ async fn main() {
     let mut hard_capped = false;
     let mut cancellations_observed: u64 = 0;
     loop {
-        if cycle >= options.cycles && started.elapsed() >= budget {
+        if cycle >= options.cycles && timeline.workload_elapsed() >= budget {
             break;
         }
-        if started.elapsed() > budget * 2 {
+        if timeline.workload_elapsed() > budget * 2 {
             eprintln!("soak: hard wall-clock cap reached at cycle {cycle}");
             hard_capped = true;
             break;
         }
         if last_sample.elapsed() >= SAMPLE_EVERY {
-            if let Some((rss, handles, threads)) = sample_process(daemon.pid()) {
-                samples.push(Sample {
-                    at_secs: started.elapsed().as_secs_f64(),
-                    cycles_completed: cycle,
-                    rss_bytes: rss,
-                    handles,
-                    threads,
-                });
-            }
+            push_process_sample(
+                &mut samples,
+                sample_process(daemon.pid()),
+                timeline.workload_elapsed().as_secs_f64(),
+                cycle,
+            );
             last_sample = Instant::now();
         }
         match cycle % 5 {
@@ -1110,17 +1201,21 @@ async fn main() {
     // workload endpoint in the trend series, then keep THIS process alive for
     // an unaided idle drain. The drain samples are deliberately separate:
     // folding them into the workload fit would hide the slope under test.
-    let workload_duration_secs = started.elapsed().as_secs_f64();
-    let (rss_drain_start, handles_drain_start, threads_drain_start) =
-        sample_process(daemon.pid()).expect("drain start process sample");
-    let drain_start_sample = Sample {
-        at_secs: started.elapsed().as_secs_f64(),
-        cycles_completed: cycle,
-        rss_bytes: rss_drain_start,
-        handles: handles_drain_start,
-        threads: threads_drain_start,
-    };
-    samples.push(drain_start_sample.clone());
+    let workload_duration_secs = timeline.workload_elapsed().as_secs_f64();
+    let mut drain_samples = Vec::new();
+    if push_process_sample(
+        &mut drain_samples,
+        sample_process(daemon.pid()),
+        workload_duration_secs,
+        cycle,
+    ) {
+        samples.push(
+            drain_samples
+                .last()
+                .expect("sample was just appended")
+                .clone(),
+        );
+    }
     let trend = classify_rss_trend(&samples);
     let quarter_slopes = rss_slopes_by_quarter(&samples);
     let workload_quarter_trends = workload_trends_by_quarter(&samples);
@@ -1129,54 +1224,45 @@ async fn main() {
         DRAIN_WINDOW.as_secs()
     );
     let drain_started = Instant::now();
-    let mut drain_samples = vec![drain_start_sample];
     while let Some(remaining) = DRAIN_WINDOW.checked_sub(drain_started.elapsed()) {
         if remaining.is_zero() {
             break;
         }
         tokio::time::sleep(remaining.min(SAMPLE_EVERY)).await;
-        let (rss, handles, threads) =
-            sample_process(daemon.pid()).expect("idle-drain process sample");
-        drain_samples.push(Sample {
-            at_secs: started.elapsed().as_secs_f64(),
-            cycles_completed: cycle,
-            rss_bytes: rss,
-            handles,
-            threads,
-        });
+        push_process_sample(
+            &mut drain_samples,
+            sample_process(daemon.pid()),
+            timeline.workload_elapsed().as_secs_f64(),
+            cycle,
+        );
     }
-    let drain_end_sample = drain_samples.last().expect("drain end sample");
-    let (rss_end, handles_end, threads_end) = (
-        drain_end_sample.rss_bytes,
-        drain_end_sample.handles,
-        drain_end_sample.threads,
-    );
-    let rss_drain_min = drain_samples
-        .iter()
-        .map(|sample| sample.rss_bytes)
-        .min()
-        .expect("drain minimum");
-    let run_growth_bytes = rss_drain_start.saturating_sub(rss_base);
-    let rss_drop_bytes = rss_drain_start.saturating_sub(rss_end);
-    let rss_drop_percent_of_run_growth =
-        (run_growth_bytes > 0).then(|| 100.0 * rss_drop_bytes as f64 / run_growth_bytes as f64);
+    let rss_drain_start = drain_samples.first().map(|sample| sample.rss_bytes);
+    let rss_end = drain_samples.last().map(|sample| sample.rss_bytes);
+    let handles_drain_start = drain_samples.first().map(|sample| sample.handles);
+    let handles_end = drain_samples.last().map(|sample| sample.handles);
+    let threads_drain_start = drain_samples.first().map(|sample| sample.threads);
+    let threads_end = drain_samples.last().map(|sample| sample.threads);
+    let rss_drain_min = drain_samples.iter().map(|sample| sample.rss_bytes).min();
+    let run_growth_bytes = rss_drain_start.map(|start| start.saturating_sub(rss_base));
+    // Signed idle change: positive means RSS GREW while idle, negative means
+    // it fell. Keep rssDropBytes for compatible consumers, but never make
+    // growth indistinguishable from a flat zero-drop drain.
+    let rss_delta_bytes = rss_drain_delta(rss_drain_start, rss_end);
+    let rss_drop_bytes = rss_delta_bytes.map(|delta| delta.saturating_neg().max(0) as u64);
+    let rss_drop_percent_of_run_growth = run_growth_bytes
+        .zip(rss_drop_bytes)
+        .and_then(|(growth, drop)| (growth > 0).then(|| 100.0 * drop as f64 / growth as f64));
     let drain_disposition = classify_drain(rss_base, &drain_samples);
     let (handle_base, thread_base) = (handles_base, threads_base);
-    let handles_ok = handles_end as i64 <= handle_base as i64 + HANDLE_SLACK;
-    let threads_ok = threads_end as i64 <= thread_base as i64 + THREAD_SLACK;
+    let handles_ok = handles_end.is_some_and(|end| end as i64 <= handle_base as i64 + HANDLE_SLACK);
+    let threads_ok = threads_end.is_some_and(|end| end as i64 <= thread_base as i64 + THREAD_SLACK);
     // The tail fit is evaluated-and-ok, evaluated-and-over-bound, or NOT
     // EVALUATED. The combined RSS disposition further separates an
     // over-bound tail whose idle drain reclaims most growth.
     let trend_evaluated = trend.disposition != RssTrendDisposition::NotEvaluated;
-    let rss_disposition = match trend.disposition {
-        RssTrendDisposition::NotEvaluated => "NOT-EVALUATED",
-        RssTrendDisposition::Pass => "PASS",
-        RssTrendDisposition::Fail if drain_disposition == DrainDisposition::Reclaimed => {
-            "RETAINED-RECLAIMED"
-        }
-        RssTrendDisposition::Fail => "FAIL",
-    };
-    let rss_ok = rss_disposition != "FAIL";
+    let rss_disposition =
+        RssDisposition::from_trend_and_drain(trend.disposition, drain_disposition);
+    let rss_ok = rss_disposition.is_acceptable();
 
     let clean_shutdown = daemon.shutdown().await;
 
@@ -1189,7 +1275,7 @@ async fn main() {
         "PASS-INCOMPLETE(crash-prelude)"
     } else if !trend_evaluated {
         "PASS-SCENARIOS-ONLY(trend-not-evaluated)"
-    } else if rss_disposition == "RETAINED-RECLAIMED" {
+    } else if rss_disposition.is_retention_signal() {
         "PASS-RETENTION-SIGNAL(rss-drain-reclaimed)"
     } else {
         "PASS"
@@ -1209,7 +1295,7 @@ async fn main() {
         "cancelStormCancellationsObserved": cancellations_observed,
         "crashRestarts": crashes,
         "crashCyclesPlanned": crash_cycles,
-        "durationSecs": started.elapsed().as_secs(),
+        "durationSecs": timeline.run_elapsed().as_secs(),
         "workloadDurationSecs": workload_duration_secs,
         // Platform-specific provenance for every numeric process metric. In
         // particular, a within-slack macOS/Linux result must travel with the
@@ -1230,6 +1316,7 @@ async fn main() {
             "rssMinBytes": rss_drain_min,
             "runGrowthBytes": run_growth_bytes,
             "rssDropBytes": rss_drop_bytes,
+            "rssDeltaBytes": rss_delta_bytes,
             "rssDropPercentOfRunGrowth": rss_drop_percent_of_run_growth,
             "handlesAtStart": handles_drain_start,
             "handlesAtEnd": handles_end,
@@ -1325,8 +1412,8 @@ async fn main() {
         // tally would inflate it).
         cycle,
         crashes,
-        started.elapsed().as_secs(),
-        rss_disposition,
+        timeline.run_elapsed().as_secs(),
+        rss_disposition.as_str(),
         trend.whole_run_slope_bytes_per_sec,
         trend.tail_slope_bytes_per_sec,
         trend.warmup_dominated_whole_run_fit,
@@ -1335,17 +1422,17 @@ async fn main() {
             DrainDisposition::Retained => "RETAINED",
             DrainDisposition::NotEvaluated => "NOT-EVALUATED",
         },
-        rss_drain_start,
-        rss_end,
-        rss_drain_min,
-        rss_drop_bytes,
+        rss_drain_start.map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
+        rss_end.map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
+        rss_drain_min.map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
+        rss_drop_bytes.map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
         rss_drop_percent_of_run_growth
             .map(|percent| format!("{percent:.1}% of run growth"))
             .unwrap_or_else(|| "no positive run growth".to_owned()),
         handle_base,
-        handles_end,
+        handles_end.map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
         thread_base,
-        threads_end,
+        threads_end.map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
         if process_sampling.handle_thread_slack_calibrated_for_platform {
             "CALIBRATED"
         } else {
@@ -1505,6 +1592,64 @@ mod tests {
     }
 
     #[test]
+    fn trend_classifier_not_evaluated_when_dense_tail_span_is_too_short() {
+        let samples = synthetic_trend(48, 30.0, |seconds| {
+            12_000_000.0 + seconds * (MAX_RSS_SLOPE_BYTES_PER_SEC + 8_192.0)
+        });
+
+        let trend = classify_rss_trend(&samples);
+
+        assert!(trend.tail_samples >= MIN_TREND_SAMPLES);
+        assert!(trend.tail_span_secs < MIN_TREND_SPAN_SECS);
+        assert_eq!(trend.disposition, RssTrendDisposition::NotEvaluated);
+    }
+
+    #[test]
+    fn minimum_full_mode_budget_is_bankable_by_phase_two_clock_contract() {
+        let workflow = include_str!("../../../../.github/workflows/rust-engine-macos-evidence.yml");
+        let local_script = include_str!("../../../../tools/rust-engine-program/macos-evidence.sh");
+        let config: Value = serde_json::from_str(include_str!(
+            "../../../../tools/rust-engine-program/soak-config.json"
+        ))
+        .expect("soak config JSON");
+        assert!(workflow.contains("default: \"60\""));
+        assert!(!workflow.contains("          - \"30\""));
+        assert!(local_script.contains("SOAK_ARGS=(--minutes 60 --cycles 1000)"));
+        assert_eq!(DEFAULT_FULL_SOAK_MINUTES, 60);
+        assert_eq!(
+            config["tiers"]["cutoverBlocking"]["durationMinutesRange"],
+            json!([60, 90])
+        );
+
+        let now = Instant::now();
+        let timeline = SoakTimeline {
+            run_started: now - Duration::from_secs(40 * 60),
+            workload_started: Some(now - Duration::from_secs(30 * 60)),
+        };
+        assert!(timeline.workload_elapsed() < Duration::from_secs(31 * 60));
+
+        // At the minimum dispatchable budget, the final-half window has twice
+        // the required span at the normal cadence.
+        let samples = synthetic_trend(721, SAMPLE_EVERY.as_secs_f64(), |_| 12_000_000.0);
+        let trend = classify_rss_trend(&samples);
+        assert!(trend.tail_span_secs >= MIN_TREND_SPAN_SECS);
+        assert_eq!(trend.disposition, RssTrendDisposition::Pass);
+    }
+
+    #[test]
+    fn workload_duration_excludes_warmup_and_crash_prelude() {
+        let now = Instant::now();
+        let timeline = SoakTimeline {
+            run_started: now - Duration::from_secs(2_400),
+            workload_started: Some(now - Duration::from_secs(1_800)),
+        };
+
+        assert!(timeline.run_elapsed() >= Duration::from_secs(2_400));
+        assert!(timeline.workload_elapsed() >= Duration::from_secs(1_800));
+        assert!(timeline.workload_elapsed() < Duration::from_secs(1_801));
+    }
+
+    #[test]
     fn quarter_rss_trends_are_least_squares_fits_not_endpoint_secants() {
         let mut samples = synthetic_trend(16, 1.0, |_| 1_000.0);
         for (offset, rss_bytes) in [1_000, 2_000, 2_100, 999].into_iter().enumerate() {
@@ -1514,7 +1659,26 @@ mod tests {
         let quarter_slopes = rss_slopes_by_quarter(&samples);
 
         assert!(samples[11].rss_bytes < samples[8].rss_bytes);
-        assert!(quarter_slopes[2] > 0.0);
+        assert!(quarter_slopes[2].is_some_and(|slope| slope > 0.0));
+    }
+
+    #[test]
+    fn unfittable_quarter_slopes_serialize_as_null_not_flat_zero() {
+        let samples = synthetic_trend(8, 1.0, |seconds| 1_000.0 + seconds * 100.0);
+
+        let quarter_slopes = rss_slopes_by_quarter(&samples);
+        let workload_trends = workload_trends_by_quarter(&samples);
+
+        assert!(quarter_slopes.iter().all(Option::is_none));
+        assert!(
+            workload_trends
+                .iter()
+                .all(|trend| trend.rss_slope_bytes_per_sec.is_none())
+        );
+        assert_eq!(
+            serde_json::to_value(&quarter_slopes).expect("serialize slopes"),
+            json!([null, null, null, null])
+        );
     }
 
     #[test]
@@ -1567,5 +1731,55 @@ mod tests {
         let samples = rss_samples(&[500, 100, 480, 490, 500]);
 
         assert_eq!(classify_drain(100, &samples), DrainDisposition::Retained);
+    }
+
+    #[test]
+    fn drain_sampling_skips_transient_failures_without_panicking() {
+        let mut samples = Vec::new();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(!push_process_sample(&mut samples, None, 1.0, 7));
+        }));
+
+        assert!(
+            outcome.is_ok(),
+            "a missing process sample must degrade evidence, not panic"
+        );
+        assert!(samples.is_empty());
+        assert_eq!(
+            classify_drain(100, &samples),
+            DrainDisposition::NotEvaluated
+        );
+    }
+
+    #[test]
+    fn drain_rss_delta_preserves_idle_growth_signal() {
+        assert_eq!(rss_drain_delta(Some(1_000), Some(1_250)), Some(250));
+        assert_eq!(rss_drain_delta(Some(1_250), Some(1_000)), Some(-250));
+        assert_eq!(rss_drain_delta(None, Some(1_000)), None);
+    }
+
+    #[test]
+    fn rss_disposition_enum_drives_acceptance_and_retention_verdicts() {
+        assert!(RssDisposition::Pass.is_acceptable());
+        assert!(RssDisposition::NotEvaluated.is_acceptable());
+        assert!(RssDisposition::RetainedReclaimed.is_acceptable());
+        assert!(!RssDisposition::Fail.is_acceptable());
+        assert!(RssDisposition::RetainedReclaimed.is_retention_signal());
+        assert!(!RssDisposition::Pass.is_retention_signal());
+        assert_eq!(
+            serde_json::to_value(RssDisposition::RetainedReclaimed)
+                .expect("serialize RSS disposition"),
+            json!("RETAINED-RECLAIMED")
+        );
+    }
+
+    #[test]
+    fn gate6_packet_tracks_the_resolved_r15_2_decision() {
+        let packet = include_str!("../../../../docs/superpowers/plans/rust-engine/GATE6_PACKET.md");
+
+        assert!(packet.contains("RSS growth — **RESOLVED**"));
+        assert!(packet.contains("Ice accepted the steady-state tail verdict"));
+        assert!(!packet.contains("awaiting Ice's ruling"));
+        assert!(!packet.contains("Recorded as an open decision"));
     }
 }

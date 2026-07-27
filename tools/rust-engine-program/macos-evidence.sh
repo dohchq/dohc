@@ -9,7 +9,7 @@
 #
 #   tools/rust-engine-program/macos-evidence.sh [full|quick]
 #
-#   full (default): a 30 min cutoverBlocking soak — the BANKABLE evidence.
+#   full (default): a 60 min cutoverBlocking soak — the BANKABLE evidence.
 #   quick:          short smoke. NON-GATING: the runner exits 0 with verdict
 #                   PASS-SCENARIOS-ONLY(trend-not-evaluated); it CANNOT satisfy
 #                   the GATE6 cutoverBlocking evidence. Use for a fast sanity run.
@@ -81,7 +81,7 @@ cargo build --release --features harness --bin dohc-soak-runner
 mkdir -p tools/rust-engine-program/soak-evidence
 if [ "$MODE" = "full" ]; then
   EVIDENCE_TIER="cutoverBlocking"
-  SOAK_ARGS=(--minutes 30 --cycles 1000)
+  SOAK_ARGS=(--minutes 60 --cycles 1000)
 else
   EVIDENCE_TIER="quick-smoke"
   echo "WARNING: quick mode is NON-GATING — it cannot satisfy the GATE6 cutoverBlocking evidence." >&2
