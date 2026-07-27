@@ -23,11 +23,19 @@ import {
   type VersionedTextReadValue,
 } from "@dohc/workspace-engine-client";
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   EngineWorkspaceSessions,
   type EngineWorkspace,
   type EngineWorkspaceBinding,
 } from "./engineWorkspaceSessions";
+
+// A manifest rebuild after a version switch costs ONE unsettled pass, so this
+// budget is generous by two orders of magnitude. It is bounded rather than
+// unbounded because a workspace under genuinely continuous mutation can keep
+// missing quiescence, and that must still surface as an error rather than hang.
+const FLUSH_SETTLE_ATTEMPTS = 50;
+const FLUSH_SETTLE_POLL_MS = 20;
 
 export interface CaptureTextFileMetadata {
   path: string;
@@ -884,14 +892,33 @@ export function createCaptureLiveStores(
     },
 
     async flushCapture() {
-      await runRead(async (adapter) => {
-        const outcome = await adapter.flushCapture();
-        if (!outcome.settled) {
-          throw new Error(
-            `Engine capture for ${workspace.workspaceId} did not settle.`,
-          );
-        }
-      });
+      // `settled: false` is not an error. The daemon documents it as "state
+      // not comparable" — a layer down, a teardown race, or a workspace under
+      // continuous mutation — and expects the caller to poll. Every Rust-side
+      // consumer does (`flush_until_settled`); this one threw on the first
+      // unsettled answer.
+      //
+      // That made a normal sequence fail in the user's face. A version switch
+      // whose pre-switch reconcile saw change calls `request_manifest_refresh`,
+      // which bumps the driver's refresh epoch, so the next pass classifies the
+      // layer as PolicyChanged and drops it to rebuild the manifest — one
+      // deliberate unsettled pass, `running: false` with `degraded: false`.
+      // A second switch straight after the first therefore threw
+      // "did not settle" at whoever asked for it.
+      let outcome = await runRead(async (adapter) => await adapter.flushCapture());
+      for (
+        let attempt = 0;
+        !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS;
+        attempt += 1
+      ) {
+        await delay(FLUSH_SETTLE_POLL_MS);
+        outcome = await runRead(async (adapter) => await adapter.flushCapture());
+      }
+      if (!outcome.settled) {
+        throw new Error(
+          `Engine capture for ${workspace.workspaceId} did not settle.`,
+        );
+      }
     },
 
     async watcherStatus() {
