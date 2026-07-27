@@ -2,9 +2,20 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
+
+// prepareWorkspace lstats the workspace root and requires a real directory, so a
+// synthetic path fails ENOENT on every platform.
+const chatReadyRoot = mkdtempSync(join(tmpdir(), "dohc-chat-ready-"));
+
+afterAll(() => {
+  rmSync(chatReadyRoot, { recursive: true, force: true });
+});
 
 describe("live linked chat store", () => {
   it("opens the engine workspace when dispatch schema readiness is requested", async () => {
@@ -25,7 +36,7 @@ describe("live linked chat store", () => {
     const store = createLiveLinkedChatStore(
       {
         workspaceId: "workspace-chat-ready",
-        rootPath: "C:/workspace-chat-ready",
+        rootPath: chatReadyRoot,
       },
       sessions,
     );
