@@ -166,8 +166,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo install cargo-audit --locked --force --version "$CARGO_AUDIT_VERSION"
-          RESOLVED_CARGO_AUDIT_VERSION="$(cargo audit --version)"
-          if [ "$RESOLVED_CARGO_AUDIT_VERSION" != "cargo-audit $CARGO_AUDIT_VERSION" ]; then
+          # `cargo audit --version` prints "cargo-audit-audit <version>" --
+          # the cargo subcommand prefix is doubled -- so the version field is
+          # compared rather than the whole line.
+          RESOLVED_CARGO_AUDIT_VERSION="$(cargo audit --version | awk '{print $NF}')"
+          if [ "$RESOLVED_CARGO_AUDIT_VERSION" != "$CARGO_AUDIT_VERSION" ]; then
             echo "::error::expected cargo-audit $CARGO_AUDIT_VERSION, got $RESOLVED_CARGO_AUDIT_VERSION"
             exit 1
           fi

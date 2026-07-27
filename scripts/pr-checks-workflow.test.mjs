@@ -58,7 +58,7 @@ test("PR workflow validates the canonical verdict and installed cargo-deny versi
   );
   assert.match(
     workflow,
-    /RESOLVED_CARGO_AUDIT_VERSION[\s\S]*"cargo-audit \$CARGO_AUDIT_VERSION"/,
+    /RESOLVED_CARGO_AUDIT_VERSION[\s\S]*"\$CARGO_AUDIT_VERSION"/,
   );
 });
 
