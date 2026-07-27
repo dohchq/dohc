@@ -52,6 +52,22 @@ const TEST_SDK_PACKAGE_JSON_PATH =
   process.env.DOHC_TEST_SDK_PACKAGE_JSON?.trim() ||
   join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
 
+const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (request) => {
+  if (request.verb === "moments") {
+    return {
+      changes: [],
+      count: 0,
+      totalAvailable: 0,
+      hasMore: false,
+      cursorMs: request.args.sinceMs ?? 0,
+    };
+  }
+  if (request.verb === "moment") {
+    return { ok: false, reason: `change not found: ${request.args.id}` };
+  }
+  throw new Error(`unexpected CLI verb in file-tools suite: ${request.verb}`);
+};
+
 async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
   const base = await mkdtemp(join(tmpdir(), "dohc-mcp-test-"));
   const root = join(base, "ws");
@@ -59,7 +75,12 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
   await mkdir(root, { recursive: true });
   await mkdir(home, { recursive: true });
   try {
-    return await fn({ root, home, sdkPackageJsonPath: TEST_SDK_PACKAGE_JSON_PATH });
+    return await fn({
+      root,
+      home,
+      sdkPackageJsonPath: TEST_SDK_PACKAGE_JSON_PATH,
+      request: emptyDesktopHistoryRequest,
+    });
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -643,8 +664,8 @@ describe("mcp tools operate on allowed paths", () => {
         writeWorkspaceFile(ctx, { path: "notes/plan.txt", content: "draft\n" }),
       ).resolves.toMatchObject({ ok: true, recordedBy: "workspace-engine" });
 
-      // No engine store in this MCP-only workspace, so history is empty — the
-      // relic is not surfaced, and an unknown id is honestly not found.
+      // Desktop main is the sole history authority. Its injected empty result
+      // does not surface the relic, and an unknown id is honestly not found.
       await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
         count: 0,
         totalAvailable: 0,

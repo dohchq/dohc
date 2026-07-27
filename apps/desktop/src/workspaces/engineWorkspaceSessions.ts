@@ -5,7 +5,10 @@ import {
   decodeWorkspaceResult,
   type WorkspaceHandle,
 } from "@dohc/workspace-engine-client";
-import type { EngineDaemonClient } from "./engineDaemonLifecycle";
+import {
+  EngineDaemonUnavailableError,
+  type EngineDaemonClient,
+} from "./engineDaemonLifecycle";
 
 export interface EngineWorkspace {
   workspaceId: string;
@@ -27,6 +30,9 @@ interface SessionEntry {
     client: EngineDaemonClient;
     promise: Promise<EngineWorkspaceBinding>;
   } | null;
+  closing: Promise<void> | null;
+  activeRuns: number;
+  idleWaiters: Set<() => void>;
 }
 
 export interface EngineWorkspaceRunOptions {
@@ -58,6 +64,13 @@ export class EngineWorkspaceRebindError extends Error {
   }
 }
 
+export class EngineWorkspaceSessionsClosedError extends Error {
+  constructor() {
+    super("Rust engine workspace sessions are closed.");
+    this.name = "EngineWorkspaceSessionsClosedError";
+  }
+}
+
 function requiresReconnect(error: unknown): boolean {
   return (
     error instanceof DaemonRefusalError &&
@@ -71,6 +84,12 @@ function isTransportError(error: unknown): boolean {
     error !== null &&
     "code" in error &&
     error.code === "transport-error"
+  );
+}
+
+function daemonMayBeRelaunching(error: unknown): boolean {
+  return (
+    isTransportError(error) || error instanceof EngineDaemonUnavailableError
   );
 }
 
@@ -91,6 +110,7 @@ export class EngineWorkspaceSessions {
   private readonly entries = new Map<string, SessionEntry>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private acceptingRuns = true;
 
   constructor(
     private readonly source: EngineDaemonClientSource,
@@ -106,68 +126,68 @@ export class EngineWorkspaceSessions {
     operation: (binding: EngineWorkspaceBinding) => Promise<T>,
     options: EngineWorkspaceRunOptions = {},
   ): Promise<T> {
-    const maxAttempts = options.retryTransportErrors
-      ? this.transportRebindAttempts
-      : 2;
-    let rebindStarted = false;
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      let binding: EngineWorkspaceBinding;
-      try {
-        binding = await this.open(workspace);
-      } catch (reopenError) {
-        if (
-          rebindStarted &&
-          options.retryTransportErrors &&
-          attempt < maxAttempts
-        ) {
-          lastError = reopenError;
-          await this.sleep(transportBackoffMs(attempt));
-          continue;
-        }
-        if (!rebindStarted) throw reopenError;
-        throw new EngineWorkspaceRebindError(
-          workspace.workspaceId,
-          reopenError,
+    const entry = await this.acquire(workspace.workspaceId);
+    try {
+      const maxAttempts = options.retryTransportErrors
+        ? this.transportRebindAttempts
+        : 2;
+      let rebindStarted = false;
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const binding = await this.openForRun(
+          workspace,
+          entry,
+          options,
+          rebindStarted,
         );
-      }
-      try {
-        return await operation(binding);
-      } catch (error) {
-        const retryAfterReconnect = requiresReconnect(error);
-        const retryAfterTransport =
-          options.retryTransportErrors === true && isTransportError(error);
-        if (
-          (!retryAfterReconnect && !retryAfterTransport) ||
-          attempt >= maxAttempts
-        ) {
-          throw error;
+        try {
+          return await operation(binding);
+        } catch (error) {
+          const retryAfterReconnect = requiresReconnect(error);
+          const retryAfterTransport =
+            options.retryTransportErrors === true && isTransportError(error);
+          if (
+            (!retryAfterReconnect && !retryAfterTransport) ||
+            attempt >= maxAttempts
+          ) {
+            throw error;
+          }
+          if (entry.binding === binding) entry.binding = null;
+          rebindStarted = true;
+          lastError = error;
+          if (retryAfterTransport) {
+            await this.sleep(transportBackoffMs(attempt));
+          }
         }
-        const entry = this.entry(workspace.workspaceId);
-        if (entry.binding === binding) entry.binding = null;
-        rebindStarted = true;
-        lastError = error;
-        if (retryAfterTransport) {
-          await this.sleep(transportBackoffMs(attempt));
-        }
       }
+      throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
+    } finally {
+      this.release(entry);
     }
-    throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
   }
 
   async closeWorkspace(workspaceId: string): Promise<void> {
     const entry = this.entries.get(workspaceId);
     if (!entry) return;
-    this.entries.delete(workspaceId);
-    let binding = entry.binding;
-    if (!binding && entry.opening) {
-      binding = await entry.opening.promise.catch(() => null);
+    if (entry.closing) {
+      await entry.closing;
+      return;
     }
-    if (!binding) return;
-    await this.closeBinding(binding);
+
+    const closing = this.closeEntry(entry);
+    entry.closing = closing;
+    try {
+      await closing;
+    } finally {
+      if (entry.closing === closing) entry.closing = null;
+      if (this.entries.get(workspaceId) === entry) {
+        this.entries.delete(workspaceId);
+      }
+    }
   }
 
   async closeAll(): Promise<void> {
+    this.acceptingRuns = false;
     const workspaceIds = [...this.entries.keys()];
     await Promise.allSettled(
       workspaceIds.map(async (workspaceId) => {
@@ -179,16 +199,91 @@ export class EngineWorkspaceSessions {
   private entry(workspaceId: string): SessionEntry {
     let entry = this.entries.get(workspaceId);
     if (!entry) {
-      entry = { binding: null, opening: null };
+      entry = {
+        binding: null,
+        opening: null,
+        closing: null,
+        activeRuns: 0,
+        idleWaiters: new Set(),
+      };
       this.entries.set(workspaceId, entry);
     }
     return entry;
   }
 
+  private async acquire(workspaceId: string): Promise<SessionEntry> {
+    for (;;) {
+      if (!this.acceptingRuns) {
+        throw new EngineWorkspaceSessionsClosedError();
+      }
+      const entry = this.entry(workspaceId);
+      if (entry.closing) {
+        await entry.closing;
+        continue;
+      }
+      entry.activeRuns += 1;
+      return entry;
+    }
+  }
+
+  private release(entry: SessionEntry): void {
+    entry.activeRuns -= 1;
+    if (entry.activeRuns !== 0) return;
+    const waiters = [...entry.idleWaiters];
+    entry.idleWaiters.clear();
+    for (const resolve of waiters) resolve();
+  }
+
+  private async waitForIdle(entry: SessionEntry): Promise<void> {
+    if (entry.activeRuns === 0) return;
+    await new Promise<void>((resolve) => {
+      entry.idleWaiters.add(resolve);
+    });
+  }
+
+  private async closeEntry(entry: SessionEntry): Promise<void> {
+    await this.waitForIdle(entry);
+    let binding = entry.binding;
+    if (!binding && entry.opening) {
+      binding = await entry.opening.promise.catch(() => null);
+    }
+    entry.binding = null;
+    entry.opening = null;
+    if (binding) await this.closeBinding(binding);
+  }
+
+  private async openForRun(
+    workspace: EngineWorkspace,
+    entry: SessionEntry,
+    options: EngineWorkspaceRunOptions,
+    rebindStarted: boolean,
+  ): Promise<EngineWorkspaceBinding> {
+    const maxAttempts = options.retryTransportErrors
+      ? this.transportRebindAttempts
+      : 2;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.open(workspace, entry);
+      } catch (error) {
+        if (error instanceof EngineWorkspaceRebindError) throw error;
+        lastError = error;
+        if (attempt >= maxAttempts) break;
+        if (daemonMayBeRelaunching(error)) {
+          await this.sleep(transportBackoffMs(attempt));
+        }
+      }
+    }
+    if (rebindStarted) {
+      throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
+    }
+    throw lastError;
+  }
+
   private async open(
     workspace: EngineWorkspace,
+    entry: SessionEntry,
   ): Promise<EngineWorkspaceBinding> {
-    const entry = this.entry(workspace.workspaceId);
     for (let attempt = 1; ; attempt += 1) {
       const client = this.source.currentClient();
       if (entry.binding?.client === client) return entry.binding;

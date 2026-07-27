@@ -104,6 +104,39 @@ R16 (legacy deletion) is POST-cutover by design.
   conclusions require bounds calibrated on that platform. The existing
   WSL-Linux result remains scenario/portability evidence under this caveat.
 
+## 1b. macOS soak RSS growth — **RESOLVED**
+
+**Decision (Ice, 2026-07-27).** Ice accepted the steady-state tail verdict
+against the unchanged 20 KiB/s bound. R15-2's RSS soak criterion is met on that
+basis; `DECISIONS.md` records the ruling and its exact measurements.
+
+### What the evidence shows
+
+| run | quarter slopes (B/s) | whole-run fit | RSS |
+|---|---|---|---|
+| macOS 30 min (x3) | +133k, +57k, +27k, +36k | +43-46 KB/s | 11.7 -> 122 MB |
+| **macOS 90 min** | **+72.8k, +35.4k, +16.9k, +6.7k** | +25.8 KB/s | 11.9 -> 183.9 MB (peak 184.8, ended BELOW peak) |
+| Windows 30 min | +49k, +13k, -31k, +4k | +13.2 KB/s | 8.8 -> 41.6 MB |
+
+Each macOS quarter roughly halves and the final quarter (6.7 KB/s) is under the
+20 KiB/s bound. Handles were flat (11 -> 11) and threads ended lower than they
+started (12 -> 9). A constant-rate leak against a constant cycle rate holds a
+constant slope; this does not. The shape is an asymptotic approach to a
+plateau, consistent with allocator fragmentation under `libmalloc`.
+
+### Basis and remaining caveats
+
+The ruling deliberately changes the verdict window, not the observed memory
+behaviour: the accepted run's whole-run fit remains over the bound while its
+post-warm-up tail is under it. A synthetic constant-rate leak still fails the
+tail classifier, preserving the intended leak signal.
+
+This RSS decision does not calibrate the absolute macOS plateau height or the
+Windows-derived handle/thread slack (see section 1). Historical workflow runs
+also hit the artifact-storage quota; those provenance and calibration caveats
+remain, but they are not an open decision about whether the tail satisfies
+R15-2.
+
 ## 2. Differential (TS-vs-Rust capture parity) — PASS
 - 10/10 scenarios green on BOTH engines; goldens committed
   (capture-fixtures.json / capture-goldens.json); tamper-check proves the compare
@@ -264,7 +297,7 @@ cutover sequencing decision exposed by RPC-E-3 and remains for Ice.
    (quick|full input) and the local `tools/rust-engine-program/
    macos-evidence.sh` (run on a Mac). Each reproduces the full-workspace gate +
    the cutoverBlocking soak and emits the verdict logs + soak-evidence JSON.
-   Both DEFAULT TO `full` (the bankable 30-60min soak); `quick` is explicitly
+   Both DEFAULT TO `full` (the bankable 60-90min soak); `quick` is explicitly
    NON-GATING (the runner exits 0 with PASS-SCENARIOS-ONLY(trend-not-evaluated),
    which CANNOT satisfy this packet's soak evidence). Both install cargo-deny and
    FAIL on a `cargo-deny=SKIP` gate line, and both build the daemon + runner
