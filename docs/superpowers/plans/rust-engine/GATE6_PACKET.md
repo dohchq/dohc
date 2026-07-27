@@ -1,10 +1,10 @@
 # GATE 6 — release-candidate evidence packet
 
-**Status: PACKET ASSEMBLED 2026-07-24 — REHEARSAL CRITERION EVIDENCED
-2026-07-26.** GATE6 is the release-CANDIDATE gate. Ice explicitly authorized the
-cutover on 2026-07-25 (`DECISIONS.md`, R15 go/no-go). The remaining criterion —
-an end-to-end **clone-reset rehearsal on REAL dogfood workspace byte-clones** —
-is now RECORDED, both halves:
+**Status: PACKET ASSEMBLED 2026-07-24 — REHEARSAL CRITERION REOPENED
+2026-07-27.** GATE6 is the release-CANDIDATE gate. Ice explicitly authorized the
+cutover on 2026-07-25 (`DECISIONS.md`, R15 go/no-go). The required end-to-end
+**clone-reset rehearsal on REAL dogfood workspace byte-clones** remains open.
+The superseded 2026-07-26 run recorded both halves:
 
 - **Reset.** The rehearsal ran `not-started → complete` against a byte-clone of
   `C:/Users/ice/dohc/personal` (restore-tested backup, handle move-aside, fresh
@@ -18,22 +18,27 @@ is now RECORDED, both halves:
   floor. An incomplete recapture fails the harness and banks no complete
   evidence (fixture-tested).
 
-Evidence: `REHEARSAL_EVIDENCE-2026-07-26.json` (schema 4) in this directory. It
-also records the preserved TypeScript store byte-clone, floor skips, hardlink
-clone semantics, the 17 `ui-state.json.tmp-*` orphans found in real data, and
-per-phase timings.
+Historical evidence: `REHEARSAL_EVIDENCE-2026-07-26.json` (schema 4) in this
+directory. It also records the preserved TypeScript store byte-clone, floor
+skips, the 16 `ui-state.json.tmp-*` orphans found in real data, and per-phase
+timings. It is retained for audit but is not release-gate evidence: it records
+three hard-linked source files that the harness de-linked while production
+inventory and settle would refuse. The corrected harness now refuses such a
+source before copying, so a new qualifying run requires those aliases to be
+resolved first.
 
-Four real-data findings were closed to get here: pnpm-junction floor exclusion,
-pnpm-hardlink clone semantics (copy as independent inodes, record topology),
-the missing recapture proof itself (codex review, PR #259), and the
-TS-authored live-DB reset interpretation — **the last remains FLAGGED for Ice's
+Three implementation findings were closed here: pnpm-junction floor exclusion,
+hardlink refusal parity, and the missing recapture proof itself (codex review,
+PR #259). The dogfood hardlinks are now an explicit rehearsal-input blocker.
+The TS-authored live-DB reset interpretation also remains **FLAGGED for Ice's
 post-hoc review**, since it encodes what "rehearsal on a TS-authored workspace"
 means for a Rust reset.
 
-**WHAT GATE6 ASSERTS:** NO GATE6-BLOCKING IMPLEMENTATION SHARD REMAINS, and the
-engine is EVIDENCED (gate/soak/differential green, every claim below carrying its
-evidence and limitations). Every dependency (R14 robustness, R10b relay-epoch,
-R15-REHEARSE, and all RPC shards A/B/C/D/B2/D2) is `gate passed` / `done`.
+**WHAT THIS PACKET ASSERTS:** the gate/soak/differential evidence and completed
+dependencies remain recorded below, but GATE6 is not satisfied until a new
+rehearsal succeeds under hardlink-refusing semantics. Every dependency (R14
+robustness, R10b relay-epoch, R15-REHEARSE, and all RPC shards A/B/C/D/B2/D2) is
+`gate passed` / `done`.
 This is NOT "code-complete": cutover implementation remains in flight
 (R13b-rest, RPC-E, switch-time re-materialization wiring, richdoc full-fidelity
 projection) — see §0.

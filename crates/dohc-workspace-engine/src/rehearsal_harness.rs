@@ -32,8 +32,6 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-#[cfg(unix)]
-use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
@@ -54,7 +52,6 @@ const SQLITE_SOURCE_FILES: [&str; 4] = [
 ];
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const HARD_LINK_FILE_SAMPLE_LIMIT: usize = 128;
-const HARD_LINK_TWIN_SAMPLE_LIMIT: usize = 32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessConfig<'a> {
@@ -1063,18 +1060,19 @@ fn issue_token() -> Result<String, HarnessError> {
 
 fn clone_tree(source: &Path, destination: &Path) -> Result<CloneTreeResult, HarnessError> {
     create_private_dir(destination, "create private clone root")?;
+    let source_metadata = symlink_metadata(source, "inspect source root during clone")?;
+    let source_identity = traversal_identity(source, &source_metadata)?;
     let mut skipped_roots = Vec::new();
-    let mut hard_links = new_hard_link_evidence();
     clone_directory(
         source,
         source,
         destination,
+        source_identity,
         &mut skipped_roots,
-        &mut hard_links,
     )?;
     Ok(CloneTreeResult {
         floor_skips: summarize_floor_skips(skipped_roots),
-        hard_links,
+        hard_links: new_hard_link_evidence(),
     })
 }
 
@@ -1082,11 +1080,14 @@ fn clone_directory(
     source_root: &Path,
     source: &Path,
     destination: &Path,
+    source_identity: TraversalIdentity,
     skipped_roots: &mut Vec<FloorSkippedRoot>,
-    hard_links: &mut HardLinkEvidence,
 ) -> Result<(), HarnessError> {
     let metadata = symlink_metadata(source, "inspect source directory during clone")?;
-    if !metadata.is_dir() || metadata_is_traversal_alias(&metadata) {
+    if !metadata.is_dir()
+        || metadata_is_traversal_alias(&metadata)
+        || traversal_identity_crosses_root(source_identity, traversal_identity(source, &metadata)?)
+    {
         return Err(HarnessError::UnsupportedEntry {
             path: display_path(source),
         });
@@ -1096,6 +1097,14 @@ fn clone_directory(
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let metadata = symlink_metadata(&source_path, "inspect source entry during clone")?;
+        if traversal_identity_crosses_root(
+            source_identity,
+            traversal_identity(&source_path, &metadata)?,
+        ) {
+            return Err(HarnessError::UnsupportedEntry {
+                path: display_path(&source_path),
+            });
+        }
         let relative_path =
             portable_relative(source_path.strip_prefix(source_root).map_err(|_| {
                 HarnessError::IncompleteOutcome("clone path escaped source root".to_owned())
@@ -1115,8 +1124,8 @@ fn clone_directory(
                 source_root,
                 &source_path,
                 &destination_path,
+                source_identity,
                 skipped_roots,
-                hard_links,
             )?;
         } else if metadata.is_file() {
             if is_floor_excluded_file(&relative_path) {
@@ -1125,21 +1134,14 @@ fn clone_directory(
             }
             let link_count = metadata_link_count(&source_path, &metadata)?;
             if link_count > 1 {
-                // A byte copy of a hard-linked source file creates a new file
-                // identity. It cannot alias either the in-tree name or an
-                // out-of-tree twin, so reset operations confined to the clone
-                // cannot reach either source path. Out-of-tree twins remain
-                // material to a future reset of the real tree, so their
-                // topology is counted and prominently flagged in evidence.
-                let topology =
-                    source_hard_link_topology(source_root, &source_path, &metadata, link_count)?;
-                record_hard_link(hard_links, &relative_path, topology);
+                return Err(HarnessError::UnsupportedEntry {
+                    path: display_path(&source_path),
+                });
             }
             std::fs::copy(&source_path, &destination_path).map_err(|source| HarnessError::Io {
                 operation: "copy source file into clone",
                 source,
             })?;
-            verify_independent_regular_copy(&destination_path)?;
             preserve_times(&metadata, &destination_path)?;
         } else {
             return Err(HarnessError::UnsupportedEntry {
@@ -1161,8 +1163,8 @@ fn is_internal_dohc_path(relative_path: &str) -> bool {
 
 fn new_hard_link_evidence() -> HardLinkEvidence {
     HardLinkEvidence {
-        clone_semantics: "Hard-linked source files are copied byte-for-byte into independent regular files. The clone therefore shares no file identity with any source twin, and clone reset cannot mutate a twin.".to_owned(),
-        real_cutover_flag: "OUTSIDE-source twins do not endanger the byte clone, but are flagged because a reset performed on the real source tree must account for their shared source identity.".to_owned(),
+        clone_semantics: "Hard-linked source files are refused before copying so the rehearsal applies the same hard-link contract as production inventory and settle.".to_owned(),
+        real_cutover_flag: "A complete rehearsal contains no hard-linked source files; any link count above one fails closed before reset.".to_owned(),
         hard_linked_source_file_count: 0,
         total_link_count: 0,
         total_twin_path_count: 0,
@@ -1177,81 +1179,6 @@ fn new_hard_link_evidence() -> HardLinkEvidence {
     }
 }
 
-struct HardLinkTopology {
-    link_count: u64,
-    twins: Vec<HardLinkTwinSample>,
-}
-
-fn record_hard_link(
-    evidence: &mut HardLinkEvidence,
-    relative_path: &str,
-    topology: HardLinkTopology,
-) {
-    let inside_count = topology
-        .twins
-        .iter()
-        .filter(|twin| twin.location == HardLinkTwinLocation::InsideSourceTree)
-        .count();
-    let outside_count = topology.twins.len().saturating_sub(inside_count);
-    evidence.hard_linked_source_file_count =
-        evidence.hard_linked_source_file_count.saturating_add(1);
-    evidence.total_link_count = evidence
-        .total_link_count
-        .saturating_add(topology.link_count);
-    evidence.total_twin_path_count = evidence
-        .total_twin_path_count
-        .saturating_add(topology.twins.len());
-    evidence.inside_source_tree_twin_count = evidence
-        .inside_source_tree_twin_count
-        .saturating_add(inside_count);
-    evidence.outside_source_tree_twin_count = evidence
-        .outside_source_tree_twin_count
-        .saturating_add(outside_count);
-    evidence.outside_source_tree_observed |= outside_count > 0;
-    if evidence.outside_source_tree_observed {
-        evidence.flagged_observation_for_ice = Some(format!(
-            "FLAGGED FOR ICE: {} outside-source hard-link twin observation(s) are safe for this independent byte clone but must be accounted for by the real cutover reset.",
-            evidence.outside_source_tree_twin_count
-        ));
-    }
-
-    if evidence.files.len() >= HARD_LINK_FILE_SAMPLE_LIMIT {
-        evidence.omitted_file_count = evidence.omitted_file_count.saturating_add(1);
-        return;
-    }
-    let twin_path_count = topology.twins.len();
-    let twins = topology
-        .twins
-        .into_iter()
-        .take(HARD_LINK_TWIN_SAMPLE_LIMIT)
-        .collect::<Vec<_>>();
-    evidence.files.push(HardLinkedSourceFile {
-        relative_path: relative_path.to_owned(),
-        link_count: topology.link_count,
-        twin_path_count,
-        inside_source_tree_twin_count: inside_count,
-        outside_source_tree_twin_count: outside_count,
-        sampled_twin_path_count: twins.len(),
-        omitted_twin_path_count: twin_path_count.saturating_sub(twins.len()),
-        twin_path_sample_limit: HARD_LINK_TWIN_SAMPLE_LIMIT,
-        twin_paths: twins,
-    });
-    evidence.sampled_file_count = evidence.files.len();
-}
-
-fn verify_independent_regular_copy(destination: &Path) -> Result<(), HarnessError> {
-    let metadata = symlink_metadata(destination, "inspect copied clone file")?;
-    if !metadata.is_file()
-        || metadata_is_traversal_alias(&metadata)
-        || metadata_link_count(destination, &metadata)? != 1
-    {
-        return Err(HarnessError::UnsupportedEntry {
-            path: display_path(destination),
-        });
-    }
-    Ok(())
-}
-
 #[cfg(unix)]
 fn metadata_link_count(_path: &Path, metadata: &Metadata) -> Result<u64, HarnessError> {
     use std::os::unix::fs::MetadataExt as _;
@@ -1260,55 +1187,6 @@ fn metadata_link_count(_path: &Path, metadata: &Metadata) -> Result<u64, Harness
 
 #[cfg(windows)]
 fn metadata_link_count(path: &Path, _metadata: &Metadata) -> Result<u64, HarnessError> {
-    Ok(windows_hard_link_paths(path)?.len() as u64)
-}
-
-#[cfg(windows)]
-fn source_hard_link_topology(
-    source_root: &Path,
-    path: &Path,
-    _metadata: &Metadata,
-    link_count: u64,
-) -> Result<HardLinkTopology, HarnessError> {
-    let listed_paths = windows_hard_link_paths(path)?;
-    if listed_paths.len() as u64 != link_count {
-        return Err(HarnessError::Io {
-            operation: "inspect source hard-link topology",
-            source: std::io::Error::other(format!(
-                "link-count query reported {link_count}, but the topology query resolved {} paths",
-                listed_paths.len()
-            )),
-        });
-    }
-    let source_path = canonicalize(path, "canonicalize hard-linked source file")?;
-    let mut twins = Vec::with_capacity(listed_paths.len().saturating_sub(1));
-    for listed in listed_paths {
-        let resolved = canonicalize(&listed, "canonicalize hard-link twin")?;
-        if paths_equal(&resolved, &source_path) {
-            continue;
-        }
-        twins.push(HardLinkTwinSample {
-            location: if is_within(&resolved, source_root) {
-                HardLinkTwinLocation::InsideSourceTree
-            } else {
-                HardLinkTwinLocation::OutsideSourceTree
-            },
-            resolved_path: Some(display_path(&resolved)),
-        });
-    }
-    if twins.len() != link_count.saturating_sub(1) as usize {
-        return Err(HarnessError::Io {
-            operation: "inspect source hard-link topology",
-            source: std::io::Error::other(
-                "hard-link listing did not contain exactly one source path",
-            ),
-        });
-    }
-    Ok(HardLinkTopology { link_count, twins })
-}
-
-#[cfg(windows)]
-fn windows_hard_link_paths(path: &Path) -> Result<Vec<PathBuf>, HarnessError> {
     let output = std::process::Command::new("fsutil")
         .args(["hardlink", "list"])
         .arg(path)
@@ -1327,131 +1205,118 @@ fn windows_hard_link_paths(path: &Path) -> Result<Vec<PathBuf>, HarnessError> {
             )),
         });
     }
-    String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| resolve_windows_hard_link_path(path, line.trim()))
-        .collect::<Result<Vec<_>, _>>()
+        .count() as u64)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TraversalIdentity {
+    device_id: Option<u64>,
+    mount_id: Option<u64>,
+}
+
+fn traversal_identity_crosses_root(root: TraversalIdentity, candidate: TraversalIdentity) -> bool {
+    root.device_id
+        .zip(candidate.device_id)
+        .is_some_and(|(root, candidate)| root != candidate)
+        || root
+            .mount_id
+            .zip(candidate.mount_id)
+            .is_some_and(|(root, candidate)| root != candidate)
 }
 
 #[cfg(windows)]
-fn resolve_windows_hard_link_path(source: &Path, listed: &str) -> Result<PathBuf, HarnessError> {
-    use std::path::Prefix;
-
-    let listed_path = Path::new(listed);
-    if matches!(listed_path.components().next(), Some(Component::Prefix(_))) {
-        return Ok(listed_path.to_path_buf());
-    }
-    let prefix = source
-        .components()
-        .find_map(|component| match component {
-            Component::Prefix(prefix) => Some(prefix.kind()),
-            _ => None,
-        })
-        .ok_or_else(|| HarnessError::Io {
-            operation: "resolve source hard-link path",
-            source: std::io::Error::other("source path has no Windows volume prefix"),
-        })?;
-    match prefix {
-        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
-            Ok(PathBuf::from(format!("{}:{}", char::from(drive), listed)))
-        }
-        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
-            let mut path = PathBuf::from(r"\\");
-            path.push(server);
-            path.push(share);
-            path.push(listed.trim_start_matches(['\\', '/']));
-            Ok(path)
-        }
-        _ => Err(HarnessError::Io {
-            operation: "resolve source hard-link path",
-            source: std::io::Error::other("unsupported Windows hard-link volume prefix"),
-        }),
-    }
+fn traversal_identity(
+    _path: &Path,
+    _metadata: &Metadata,
+) -> Result<TraversalIdentity, HarnessError> {
+    Ok(TraversalIdentity {
+        device_id: None,
+        mount_id: None,
+    })
 }
 
 #[cfg(unix)]
-fn source_hard_link_topology(
-    source_root: &Path,
-    path: &Path,
-    metadata: &Metadata,
-    link_count: u64,
-) -> Result<HardLinkTopology, HarnessError> {
+fn traversal_identity(path: &Path, metadata: &Metadata) -> Result<TraversalIdentity, HarnessError> {
     use std::os::unix::fs::MetadataExt as _;
 
-    fn walk(
-        directory: &Path,
-        device: u64,
-        inode: u64,
-        visited_directories: &mut BTreeSet<(u64, u64)>,
-        matches: &mut Vec<PathBuf>,
-    ) -> Result<(), HarnessError> {
-        let directory_metadata = symlink_metadata(directory, "inspect hard-link search directory")?;
-        if directory_metadata.dev() != device
-            || !visited_directories.insert((directory_metadata.dev(), directory_metadata.ino()))
-        {
-            return Ok(());
-        }
-        for entry in read_dir_sorted(directory)? {
-            let candidate = entry.path();
-            let candidate_metadata =
-                symlink_metadata(&candidate, "inspect hard-link search entry")?;
-            if metadata_is_traversal_alias(&candidate_metadata) {
-                continue;
-            }
-            if candidate_metadata.is_dir() {
-                walk(&candidate, device, inode, visited_directories, matches)?;
-            } else if candidate_metadata.is_file()
-                && candidate_metadata.dev() == device
-                && candidate_metadata.ino() == inode
-            {
-                matches.push(candidate);
-            }
-        }
-        Ok(())
-    }
+    #[cfg(target_os = "linux")]
+    let mount_id = Some(linux_mount_id(path)?);
+    #[cfg(not(target_os = "linux"))]
+    let mount_id = None;
 
-    let canonical_source = canonicalize(path, "canonicalize hard-linked source file")?;
-    let mut matches = Vec::new();
-    walk(
-        source_root,
-        metadata.dev(),
-        metadata.ino(),
-        &mut BTreeSet::new(),
-        &mut matches,
-    )?;
-    let mut saw_source = false;
-    let mut twins = Vec::new();
-    for candidate in matches {
-        let resolved = canonicalize(&candidate, "canonicalize hard-link twin")?;
-        if paths_equal(&resolved, &canonical_source) {
-            saw_source = true;
-        } else {
-            twins.push(HardLinkTwinSample {
-                resolved_path: Some(display_path(&resolved)),
-                location: HardLinkTwinLocation::InsideSourceTree,
-            });
+    Ok(TraversalIdentity {
+        device_id: Some(metadata.dev()),
+        mount_id,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mount_id(path: &Path) -> Result<u64, HarnessError> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let mountinfo = std::fs::read("/proc/self/mountinfo").map_err(|source| HarnessError::Io {
+        operation: "inspect source mount identity",
+        source,
+    })?;
+    let mut containing_mount = None::<(usize, u64)>;
+    for line in mountinfo.split(|byte| *byte == b'\n') {
+        let fields = line
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+        if fields.len() < 5 {
+            continue;
+        }
+        let mount_id = std::str::from_utf8(fields[0])
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| HarnessError::Io {
+                operation: "inspect source mount identity",
+                source: std::io::Error::other("mountinfo contains an invalid mount ID"),
+            })?;
+        let mount_path = PathBuf::from(OsString::from_vec(decode_mountinfo_field(fields[4])?));
+        if path.starts_with(&mount_path) {
+            let depth = mount_path.components().count();
+            if containing_mount.is_none_or(|(current_depth, _)| depth > current_depth) {
+                containing_mount = Some((depth, mount_id));
+            }
         }
     }
-    if !saw_source || twins.len() >= link_count as usize {
-        return Err(HarnessError::Io {
-            operation: "inspect source hard-link topology",
-            source: std::io::Error::other("in-tree hard-link scan did not find the source exactly"),
-        });
+    containing_mount
+        .map(|(_, mount_id)| mount_id)
+        .ok_or_else(|| HarnessError::Io {
+            operation: "inspect source mount identity",
+            source: std::io::Error::other("mountinfo does not contain the source path"),
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_field(field: &[u8]) -> Result<Vec<u8>, HarnessError> {
+    let mut decoded = Vec::with_capacity(field.len());
+    let mut index = 0;
+    while index < field.len() {
+        if field[index] != b'\\' {
+            decoded.push(field[index]);
+            index += 1;
+            continue;
+        }
+        let digits = field
+            .get(index + 1..index + 4)
+            .filter(|digits| digits.iter().all(|digit| matches!(digit, b'0'..=b'7')))
+            .ok_or_else(|| HarnessError::Io {
+                operation: "inspect source mount identity",
+                source: std::io::Error::other("mountinfo contains an invalid path escape"),
+            })?;
+        let value = digits
+            .iter()
+            .fold(0_u8, |value, digit| (value << 3) | (digit - b'0'));
+        decoded.push(value);
+        index += 4;
     }
-    // POSIX exposes nlink and inode identity but no reverse inode-to-path API.
-    // A complete no-follow walk classified every discoverable in-tree name;
-    // the remaining nlink entries are therefore outside the source tree. Their
-    // exact names are unavailable, which is represented explicitly as null
-    // rather than silently truncating or pretending the topology was resolved.
-    let outside_count = link_count
-        .saturating_sub(1)
-        .saturating_sub(twins.len() as u64);
-    twins.extend((0..outside_count).map(|_| HardLinkTwinSample {
-        resolved_path: None,
-        location: HardLinkTwinLocation::OutsideSourceTree,
-    }));
-    Ok(HardLinkTopology { link_count, twins })
+    Ok(decoded)
 }
 
 #[cfg(windows)]
@@ -1501,9 +1366,10 @@ fn snapshot_tree(root: &Path) -> Result<TreeSnapshot, HarnessError> {
             path: display_path(root),
         });
     }
+    let root_identity = traversal_identity(root, &metadata)?;
     let mut entries = Vec::new();
     snapshot_entry(root, root, &metadata, &mut entries)?;
-    snapshot_directory(root, root, &mut entries)?;
+    snapshot_directory(root, root, root_identity, &mut entries)?;
     let summary = summarize(&entries);
     Ok(TreeSnapshot { entries, summary })
 }
@@ -1515,9 +1381,10 @@ fn snapshot_source_tree(root: &Path) -> Result<TreeSnapshot, HarnessError> {
             path: display_path(root),
         });
     }
+    let root_identity = traversal_identity(root, &metadata)?;
     let mut entries = Vec::new();
     snapshot_entry(root, root, &metadata, &mut entries)?;
-    snapshot_source_directory(root, root, &mut entries)?;
+    snapshot_source_directory(root, root, root_identity, &mut entries)?;
     let summary = summarize(&entries);
     Ok(TreeSnapshot { entries, summary })
 }
@@ -1525,11 +1392,17 @@ fn snapshot_source_tree(root: &Path) -> Result<TreeSnapshot, HarnessError> {
 fn snapshot_source_directory(
     root: &Path,
     directory: &Path,
+    root_identity: TraversalIdentity,
     output: &mut Vec<TreeEntry>,
 ) -> Result<(), HarnessError> {
     for entry in read_dir_sorted(directory)? {
         let path = entry.path();
         let metadata = symlink_metadata(&path, "inspect source snapshot entry")?;
+        if traversal_identity_crosses_root(root_identity, traversal_identity(&path, &metadata)?) {
+            return Err(HarnessError::UnsupportedEntry {
+                path: display_path(&path),
+            });
+        }
         if is_floor_excluded_directory_name(&entry.file_name(), &metadata) {
             snapshot_floor_skipped_root(root, &path, &metadata, output)?;
             continue;
@@ -1547,7 +1420,7 @@ fn snapshot_source_directory(
         }
         snapshot_entry(root, &path, &metadata, output)?;
         if metadata.is_dir() {
-            snapshot_source_directory(root, &path, output)?;
+            snapshot_source_directory(root, &path, root_identity, output)?;
         }
     }
     Ok(())
@@ -1556,14 +1429,20 @@ fn snapshot_source_directory(
 fn snapshot_directory(
     root: &Path,
     directory: &Path,
+    root_identity: TraversalIdentity,
     output: &mut Vec<TreeEntry>,
 ) -> Result<(), HarnessError> {
     for entry in read_dir_sorted(directory)? {
         let path = entry.path();
         let metadata = symlink_metadata(&path, "inspect snapshot entry")?;
+        if traversal_identity_crosses_root(root_identity, traversal_identity(&path, &metadata)?) {
+            return Err(HarnessError::UnsupportedEntry {
+                path: display_path(&path),
+            });
+        }
         snapshot_entry(root, &path, &metadata, output)?;
         if metadata.is_dir() {
-            snapshot_directory(root, &path, output)?;
+            snapshot_directory(root, &path, root_identity, output)?;
         }
     }
     Ok(())
@@ -1656,6 +1535,7 @@ fn skipped_content_proof(
     path: &Path,
     metadata: &Metadata,
 ) -> Result<SkippedContentProof, HarnessError> {
+    let root_identity = traversal_identity(path, metadata)?;
     let mut hasher = Sha256::new();
     let mut file_count = 0_usize;
     let mut total_file_bytes = 0_u64;
@@ -1663,6 +1543,7 @@ fn skipped_content_proof(
         path,
         path,
         metadata,
+        root_identity,
         &mut hasher,
         &mut file_count,
         &mut total_file_bytes,
@@ -1678,6 +1559,7 @@ fn hash_skipped_content(
     root: &Path,
     path: &Path,
     metadata: &Metadata,
+    root_identity: TraversalIdentity,
     hasher: &mut Sha256,
     file_count: &mut usize,
     total_file_bytes: &mut u64,
@@ -1717,10 +1599,19 @@ fn hash_skipped_content(
         for entry in read_dir_sorted(path)? {
             let child = entry.path();
             let child_metadata = symlink_metadata(&child, "inspect floor-skipped proof entry")?;
+            if traversal_identity_crosses_root(
+                root_identity,
+                traversal_identity(&child, &child_metadata)?,
+            ) {
+                return Err(HarnessError::UnsupportedEntry {
+                    path: display_path(&child),
+                });
+            }
             hash_skipped_content(
                 root,
                 &child,
                 &child_metadata,
+                root_identity,
                 hasher,
                 file_count,
                 total_file_bytes,
@@ -2077,10 +1968,6 @@ fn is_within(candidate: &Path, parent: &Path) -> bool {
     candidate.starts_with(&parent)
 }
 
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    comparable_components(left) == comparable_components(right)
-}
-
 fn comparable_components(path: &Path) -> Vec<String> {
     path.components()
         .map(|component| {
@@ -2285,6 +2172,32 @@ mod tests {
     }
 
     #[test]
+    fn unix_mount_identity_boundary_is_refused_before_traversal() {
+        let source = TraversalIdentity {
+            device_id: Some(41),
+            mount_id: Some(7),
+        };
+        let bind_mount = TraversalIdentity {
+            device_id: Some(41),
+            mount_id: Some(8),
+        };
+        let filesystem_mount = TraversalIdentity {
+            device_id: Some(42),
+            mount_id: Some(9),
+        };
+
+        assert!(
+            traversal_identity_crosses_root(source, bind_mount),
+            "a bind mount must be refused even when st_dev is unchanged"
+        );
+        assert!(
+            traversal_identity_crosses_root(source, filesystem_mount),
+            "a child filesystem mount must be refused when st_dev changes"
+        );
+        assert!(!traversal_identity_crosses_root(source, source));
+    }
+
+    #[test]
     fn scratch_and_recovery_inside_source_are_refused_before_creation() {
         let source = fixture_source();
         let outside = ScratchDir::new().expect("outside");
@@ -2415,6 +2328,34 @@ mod tests {
         assert_eq!(banked["schema_version"], 4);
         assert_eq!(banked["recapture"]["verdict"], "complete");
         assert_eq!(banked["recapture"]["paths_recaptured"], 1);
+    }
+
+    #[test]
+    fn gate6_orphan_claim_matches_banked_schema4_evidence() {
+        let evidence: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/superpowers/plans/rust-engine/REHEARSAL_EVIDENCE-2026-07-26.json"
+        ))
+        .expect("parse banked evidence");
+        assert_eq!(evidence["schema_version"], 4);
+        let orphan_count = evidence["ui_state_tmp_orphans"]
+            .as_array()
+            .expect("orphan evidence array")
+            .len();
+        let packet = include_str!("../../../docs/superpowers/plans/rust-engine/GATE6_PACKET.md");
+        let harness = include_str!("../REHEARSAL_HARNESS.md");
+
+        assert!(
+            packet.contains(&format!(
+                "the {orphan_count} `ui-state.json.tmp-*` orphans found in real data"
+            )),
+            "the release packet's orphan count must be derived from the banked artifact"
+        );
+        assert!(
+            harness.contains(&format!(
+                "banked dogfood evidence contains {orphan_count} such UI-state temp orphans"
+            )),
+            "the harness guide's real-data count must match the banked artifact"
+        );
     }
 
     #[test]
@@ -2576,182 +2517,22 @@ mod tests {
     }
 
     #[test]
-    fn hard_links_clone_independently_record_topology_and_floor_directory_aliases() {
+    fn hard_linked_source_files_are_refused_before_copying() {
         let source = fixture_source();
-        let external = ScratchDir::new().expect("external hard-link and junction targets");
-        std::fs::write(
-            source.join("inside-primary.md"),
-            b"inside hard-link bytes\n",
-        )
-        .expect("inside primary");
-        std::fs::hard_link(
-            source.join("inside-primary.md"),
-            source.join("inside-twin.md"),
-        )
-        .expect("inside hard-link fixture");
-        std::fs::write(
-            source.join("outside-primary.md"),
-            b"outside hard-link bytes\n",
-        )
-        .expect("outside primary");
-        std::fs::hard_link(
-            source.join("outside-primary.md"),
-            external.join("outside-twin.md"),
-        )
-        .expect("outside hard-link fixture");
+        std::fs::hard_link(source.join("note.md"), source.join("note-alias.md"))
+            .expect("hard-link fixture");
+        let clone_parent = ScratchDir::new().expect("clone parent");
+        let clone = clone_parent.join("clone");
 
-        let alias_target = external.join("junction-target");
-        std::fs::create_dir(&alias_target).expect("junction target");
-        std::fs::write(alias_target.join("package.js"), b"outside traversal\n")
-            .expect("junction target contents");
-        let floor_alias = source.join("node_modules");
-        #[cfg(windows)]
-        {
-            let status = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(&floor_alias)
-                .arg(&alias_target)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .expect("spawn directory junction fixture");
-            assert!(status.success(), "directory junction fixture must exist");
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&alias_target, &floor_alias).expect("directory symlink fixture");
+        let result = clone_tree(source.path(), &clone);
 
-        let scratch_parent = ScratchDir::new().expect("scratch parent");
-        let recovery_parent = ScratchDir::new().expect("recovery parent");
-        let scratch = scratch_parent.join("clones");
-        let recovery = recovery_parent.join("artifacts");
-
-        let evidence = run(HarnessConfig {
-            source: source.path(),
-            scratch: &scratch,
-            recovery: &recovery,
-        })
-        .expect("hard links must copy safely");
-
-        assert_eq!(evidence.hard_links.hard_linked_source_file_count, 3);
-        assert_eq!(evidence.hard_links.total_link_count, 6);
-        assert_eq!(evidence.hard_links.total_twin_path_count, 3);
-        assert_eq!(evidence.hard_links.inside_source_tree_twin_count, 2);
-        assert_eq!(evidence.hard_links.outside_source_tree_twin_count, 1);
-        assert!(evidence.hard_links.outside_source_tree_observed);
         assert!(
-            evidence
-                .hard_links
-                .flagged_observation_for_ice
-                .as_deref()
-                .is_some_and(|flag| flag.contains("real cutover reset"))
-        );
-        assert_eq!(evidence.hard_links.sampled_file_count, 3);
-        assert_eq!(evidence.hard_links.omitted_file_count, 0);
-        let outside_record = evidence
-            .hard_links
-            .files
-            .iter()
-            .find(|entry| entry.relative_path == "outside-primary.md")
-            .expect("outside topology record");
-        assert_eq!(outside_record.link_count, 2);
-        assert_eq!(outside_record.outside_source_tree_twin_count, 1);
-        assert_eq!(outside_record.omitted_twin_path_count, 0);
-        assert_eq!(
-            outside_record.twin_paths[0].location,
-            HardLinkTwinLocation::OutsideSourceTree
-        );
-        assert_eq!(evidence.floor_skips.alias_root_count, 1);
-        assert_eq!(evidence.floor_skips.roots[0].relative_path, "node_modules");
-        assert!(
-            !Path::new(&evidence.clone_path)
-                .join("node_modules")
-                .exists(),
-            "a floor-excluded junction must never be traversed into the clone"
-        );
-
-        // This deliberately mutates one cloned path. If clone_tree ever
-        // preserves either the source hard link or the in-clone pair, these
-        // byte assertions fail and expose the aliasing regression.
-        let clone_root = Path::new(&evidence.clone_path);
-        std::fs::write(clone_root.join("inside-primary.md"), b"clone mutation\n")
-            .expect("mutate independent clone");
-        assert_eq!(
-            std::fs::read(source.join("inside-primary.md")).expect("source primary"),
-            b"inside hard-link bytes\n"
-        );
-        assert_eq!(
-            std::fs::read(source.join("inside-twin.md")).expect("source inside twin"),
-            b"inside hard-link bytes\n"
-        );
-        assert_eq!(
-            std::fs::read(clone_root.join("inside-twin.md")).expect("clone inside twin"),
-            b"inside hard-link bytes\n"
-        );
-        assert_eq!(
-            std::fs::read(source.join("outside-primary.md")).expect("source outside primary"),
-            b"outside hard-link bytes\n"
-        );
-        assert_eq!(
-            std::fs::read(external.join("outside-twin.md")).expect("outside twin"),
-            b"outside hard-link bytes\n"
-        );
-
-        let banked: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(recovery.join(EVIDENCE_FILE)).expect("read evidence"),
-        )
-        .expect("parse evidence");
-        assert_eq!(banked["hard_links"]["outside_source_tree_observed"], true);
-        assert!(
-            banked["hard_links"]["flagged_observation_for_ice"]
-                .as_str()
-                .is_some_and(|flag| flag.starts_with("FLAGGED FOR ICE:"))
-        );
-        assert_eq!(banked["hard_links"]["outside_source_tree_twin_count"], 1);
-        assert_eq!(banked["hard_links"]["omitted_file_count"], 0);
-    }
-
-    #[test]
-    fn hard_link_evidence_truncation_is_explicit_and_totals_remain_complete() {
-        let mut evidence = new_hard_link_evidence();
-        for file_index in 0..=HARD_LINK_FILE_SAMPLE_LIMIT {
-            let twins = (0..=HARD_LINK_TWIN_SAMPLE_LIMIT)
-                .map(|twin_index| HardLinkTwinSample {
-                    resolved_path: Some(format!("twin-{file_index}-{twin_index}")),
-                    location: if twin_index % 2 == 0 {
-                        HardLinkTwinLocation::InsideSourceTree
-                    } else {
-                        HardLinkTwinLocation::OutsideSourceTree
-                    },
-                })
-                .collect::<Vec<_>>();
-            record_hard_link(
-                &mut evidence,
-                &format!("file-{file_index}"),
-                HardLinkTopology {
-                    link_count: twins.len() as u64 + 1,
-                    twins,
-                },
-            );
-        }
-
-        assert_eq!(
-            evidence.hard_linked_source_file_count,
-            HARD_LINK_FILE_SAMPLE_LIMIT + 1
-        );
-        assert_eq!(evidence.sampled_file_count, HARD_LINK_FILE_SAMPLE_LIMIT);
-        assert_eq!(evidence.omitted_file_count, 1);
-        assert_eq!(
-            evidence.total_twin_path_count,
-            (HARD_LINK_FILE_SAMPLE_LIMIT + 1) * (HARD_LINK_TWIN_SAMPLE_LIMIT + 1)
+            matches!(result, Err(HarnessError::UnsupportedEntry { .. })),
+            "hard-linked source files must fail closed before std::fs::copy"
         );
         assert!(
-            evidence
-                .files
-                .iter()
-                .all(
-                    |file| file.sampled_twin_path_count == HARD_LINK_TWIN_SAMPLE_LIMIT
-                        && file.omitted_twin_path_count == 1
-                )
+            !clone.join("note.md").exists() && !clone.join("note-alias.md").exists(),
+            "neither hard-linked path may be copied into the rehearsal clone"
         );
     }
 
