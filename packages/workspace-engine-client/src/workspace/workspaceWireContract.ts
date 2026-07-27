@@ -29,6 +29,7 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
         agentRunId?: string;
       })
     | null;
+  recoverRunningDispatches?: boolean;
 };
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type ConflictListParams = WorkspaceJsonObject & {

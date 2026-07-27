@@ -1,17 +1,44 @@
 # GATE 6 — release-candidate evidence packet
 
-**Status: PACKET ASSEMBLED 2026-07-24 — GATE NOT YET CLOSED.** GATE6 is the
-release-CANDIDATE gate. Ice explicitly authorized the cutover on 2026-07-25
-(`DECISIONS.md`, R15 go/no-go), so one criterion remains: an end-to-end
-**clone-reset rehearsal on REAL dogfood workspace byte-clones**. The machinery is
-built + gate-verified by its rehearsal-on-clones test suite, but it has NOT been
-run against Ice's real data. Do NOT treat `SHARDS.tsv`/this packet as gate-closed
-until that rehearsal is recorded.
+**Status: PACKET ASSEMBLED 2026-07-24 — REHEARSAL CRITERION REOPENED
+2026-07-27.** GATE6 is the release-CANDIDATE gate. Ice explicitly authorized the
+cutover on 2026-07-25 (`DECISIONS.md`, R15 go/no-go). The required end-to-end
+**clone-reset rehearsal on REAL dogfood workspace byte-clones** remains open.
+The superseded 2026-07-26 run recorded both halves:
 
-**WHAT GATE6 ASSERTS:** NO GATE6-BLOCKING IMPLEMENTATION SHARD REMAINS, and the
-engine is EVIDENCED (gate/soak/differential green, every claim below carrying its
-evidence and limitations). Every dependency (R14 robustness, R10b relay-epoch,
-R15-REHEARSE, and all RPC shards A/B/C/D/B2/D2) is `gate passed` / `done`.
+- **Reset.** The rehearsal ran `not-started → complete` against a byte-clone of
+  `C:/Users/ice/dohc/personal` (restore-tested backup, handle move-aside, fresh
+  store init), with the source verified byte-identical before and after
+  (snapshot sha equal, `source_unchanged.verified = true`).
+- **Recapture.** The production capture/projection flow was driven against the
+  reset clone and compared to the pre-reset inventory:
+  **27/27 paths, 27/27 records, 27 content identities verified, projections
+  settled, zero mismatches.** The 27 is independently corroborated: the source
+  tree contains exactly 27 user-content files outside `.dohc` and the capture
+  floor. An incomplete recapture fails the harness and banks no complete
+  evidence (fixture-tested).
+
+Historical evidence: `REHEARSAL_EVIDENCE-2026-07-26.json` (schema 4) in this
+directory. It also records the preserved TypeScript store byte-clone, floor
+skips, the 16 `ui-state.json.tmp-*` orphans found in real data, and per-phase
+timings. It is retained for audit but is not release-gate evidence: it records
+three hard-linked source files that the harness de-linked while production
+inventory and settle would refuse. The corrected harness now refuses such a
+source before copying, so a new qualifying run requires those aliases to be
+resolved first.
+
+Three implementation findings were closed here: pnpm-junction floor exclusion,
+hardlink refusal parity, and the missing recapture proof itself (codex review,
+PR #259). The dogfood hardlinks are now an explicit rehearsal-input blocker.
+The TS-authored live-DB reset interpretation also remains **FLAGGED for Ice's
+post-hoc review**, since it encodes what "rehearsal on a TS-authored workspace"
+means for a Rust reset.
+
+**WHAT THIS PACKET ASSERTS:** the gate/soak/differential evidence and completed
+dependencies remain recorded below, but GATE6 is not satisfied until a new
+rehearsal succeeds under hardlink-refusing semantics. Every dependency (R14
+robustness, R10b relay-epoch, R15-REHEARSE, and all RPC shards A/B/C/D/B2/D2) is
+`gate passed` / `done`.
 This is NOT "code-complete": cutover implementation remains in flight
 (R13b-rest, RPC-E, switch-time re-materialization wiring, richdoc full-fidelity
 projection) — see §0.
@@ -76,6 +103,39 @@ R16 (legacy deletion) is POST-cutover by design.
   its resource-leak verdict bankable. Bankable per-platform handle/thread
   conclusions require bounds calibrated on that platform. The existing
   WSL-Linux result remains scenario/portability evidence under this caveat.
+
+## 1b. macOS soak RSS growth — **RESOLVED**
+
+**Decision (Ice, 2026-07-27).** Ice accepted the steady-state tail verdict
+against the unchanged 20 KiB/s bound. R15-2's RSS soak criterion is met on that
+basis; `DECISIONS.md` records the ruling and its exact measurements.
+
+### What the evidence shows
+
+| run | quarter slopes (B/s) | whole-run fit | RSS |
+|---|---|---|---|
+| macOS 30 min (x3) | +133k, +57k, +27k, +36k | +43-46 KB/s | 11.7 -> 122 MB |
+| **macOS 90 min** | **+72.8k, +35.4k, +16.9k, +6.7k** | +25.8 KB/s | 11.9 -> 183.9 MB (peak 184.8, ended BELOW peak) |
+| Windows 30 min | +49k, +13k, -31k, +4k | +13.2 KB/s | 8.8 -> 41.6 MB |
+
+Each macOS quarter roughly halves and the final quarter (6.7 KB/s) is under the
+20 KiB/s bound. Handles were flat (11 -> 11) and threads ended lower than they
+started (12 -> 9). A constant-rate leak against a constant cycle rate holds a
+constant slope; this does not. The shape is an asymptotic approach to a
+plateau, consistent with allocator fragmentation under `libmalloc`.
+
+### Basis and remaining caveats
+
+The ruling deliberately changes the verdict window, not the observed memory
+behaviour: the accepted run's whole-run fit remains over the bound while its
+post-warm-up tail is under it. A synthetic constant-rate leak still fails the
+tail classifier, preserving the intended leak signal.
+
+This RSS decision does not calibrate the absolute macOS plateau height or the
+Windows-derived handle/thread slack (see section 1). Historical workflow runs
+also hit the artifact-storage quota; those provenance and calibration caveats
+remain, but they are not an open decision about whether the tail satisfies
+R15-2.
 
 ## 2. Differential (TS-vs-Rust capture parity) — PASS
 - 10/10 scenarios green on BOTH engines; goldens committed
@@ -237,7 +297,7 @@ cutover sequencing decision exposed by RPC-E-3 and remains for Ice.
    (quick|full input) and the local `tools/rust-engine-program/
    macos-evidence.sh` (run on a Mac). Each reproduces the full-workspace gate +
    the cutoverBlocking soak and emits the verdict logs + soak-evidence JSON.
-   Both DEFAULT TO `full` (the bankable 30-60min soak); `quick` is explicitly
+   Both DEFAULT TO `full` (the bankable 60-90min soak); `quick` is explicitly
    NON-GATING (the runner exits 0 with PASS-SCENARIOS-ONLY(trend-not-evaluated),
    which CANNOT satisfy this packet's soak evidence). Both install cargo-deny and
    FAIL on a `cargo-deny=SKIP` gate line, and both build the daemon + runner

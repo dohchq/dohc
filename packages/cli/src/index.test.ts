@@ -1,9 +1,20 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CliRequestWithoutToken } from "./protocol";
+import {
+  CLI_PROTOCOL_VERSION,
+  type CliRequestWithoutToken,
+} from "./protocol";
 import { executeCli } from "./index";
+
+// buildCliRequest resolves the incoming cwd, and resolve() is drive-qualified on
+// Windows ("/workspace" -> "C:\workspace"), so asserting a hard-coded POSIX
+// literal only ever passed on POSIX hosts. The INPUTS below stay unresolved and
+// only these EXPECTATIONS are resolved -- feeding an already-resolved path in
+// would make the assertion pass even if the CLI stopped resolving at all.
+const WORKSPACE = resolve("/workspace");
+const PROJECT = resolve("/workspace/project");
 
 const TOKEN = "a".repeat(64);
 const cleanupDirs: string[] = [];
@@ -72,10 +83,10 @@ describe("executeCli", () => {
     });
     expect(requests).toEqual([
       {
-        protocolVersion: 1,
+        protocolVersion: CLI_PROTOCOL_VERSION,
         verb: "reply",
         args: {
-          cwd: "/workspace/project",
+          cwd: PROJECT,
           actor: "agent",
           runId: "run_ambient",
           thread: "th_8f",
@@ -115,7 +126,7 @@ describe("executeCli", () => {
   ] as const)("uses the configured response timeout %s", async (timeoutMs, expectedTimeoutMs) => {
     const stateDir = await tempStateDir();
     const transport = vi.fn(async () => ({
-      protocolVersion: 1,
+      protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
       result: { channels: [] },
     }));
@@ -127,6 +138,9 @@ describe("executeCli", () => {
         stateDir,
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         transport,
+        // `transport` is mocked, so no socket is opened; state the platform the
+        // test exercises rather than inheriting the host's win32 refusal.
+        platform: "linux",
       },
     });
 
@@ -178,7 +192,7 @@ describe("executeCli", () => {
       {
         verb: "post",
         args: {
-          cwd: "/workspace",
+          cwd: WORKSPACE,
           actor: "human",
           runId: "run_env",
           channel: "general",
@@ -191,7 +205,7 @@ describe("executeCli", () => {
       {
         verb: "react",
         args: {
-          cwd: "/workspace",
+          cwd: WORKSPACE,
           actor: "agent",
           runId: "run_env",
           message: "msg_post",
@@ -200,7 +214,7 @@ describe("executeCli", () => {
       },
       {
         verb: "channels",
-        args: { cwd: "/workspace", actor: "human" },
+        args: { cwd: WORKSPACE, actor: "human" },
       },
     ]);
   });
@@ -231,9 +245,9 @@ describe("executeCli", () => {
       request,
     });
     expect(request).toHaveBeenCalledWith({
-      protocolVersion: 1,
+      protocolVersion: CLI_PROTOCOL_VERSION,
       verb: "show",
-      args: { cwd: "/workspace", actor: "human", target: "th_o", peek: true },
+      args: { cwd: WORKSPACE, actor: "human", target: "th_o", peek: true },
     });
     expect(result.stdout).toContain("msg_one");
   });

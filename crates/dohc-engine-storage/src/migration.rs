@@ -1686,6 +1686,16 @@ UPDATE moments SET
 
 pub(crate) const MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID: &str = "v1-moment-rollback-preimage";
 
+/// Ordinal 20. Shared-channel pushes previously retained only the last physical
+/// journal coordinate. New writes pair it with the corresponding dense shared
+/// coordinate; existing rows remain NULL and bootstrap once on their next push.
+const V1_SHARED_CHANNEL_DENSE_PUSH_DDL: &str = "\
+ALTER TABLE shared_channel_push_state ADD COLUMN dense_seq INTEGER
+    CHECK (dense_seq IS NULL OR dense_seq >= -1);
+";
+
+pub(crate) const SHARED_CHANNEL_DENSE_PUSH_MIGRATION_ID: &str = "v1-shared-channel-dense-push";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1831,6 +1841,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MOMENT_ROLLBACK_PREIMAGE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 20,
+        id: SHARED_CHANNEL_DENSE_PUSH_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SHARED_CHANNEL_DENSE_PUSH_DDL,
         sets_user_version: None,
     },
 ];
@@ -2101,16 +2118,21 @@ fn apply_non_transactional(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::faults::{FaultAction, NoFaults};
+    #[cfg(feature = "fault-injection")]
+    use crate::faults::FaultAction;
+    use crate::faults::NoFaults;
+    #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A one-shot crash injector local to the storage crate's tests (the
     /// testkit's `ScriptedFaults` cannot be used here without a dependency
     /// cycle).
+    #[cfg(feature = "fault-injection")]
     struct OneShotCrash {
         point: FaultPoint,
         armed: AtomicBool,
     }
+    #[cfg(feature = "fault-injection")]
     impl OneShotCrash {
         fn at(point: FaultPoint) -> Self {
             OneShotCrash {
@@ -2119,6 +2141,7 @@ mod tests {
             }
         }
     }
+    #[cfg(feature = "fault-injection")]
     impl FaultInjector for OneShotCrash {
         fn poll(&self, point: FaultPoint) -> FaultAction {
             if point == self.point && self.armed.swap(false, Ordering::AcqRel) {
@@ -2138,7 +2161,9 @@ mod tests {
 
     // A synthetic second migration used to exercise ordering / resume without
     // waiting for a real future schema change.
+    #[cfg(feature = "fault-injection")]
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
+    #[cfg(feature = "fault-injection")]
     fn two_migrations() -> Vec<Migration> {
         // A synthetic probe always appends immediately after the frozen list.
         let mut v = BASELINE_MIGRATIONS.to_vec();
@@ -2188,6 +2213,86 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM engine_ownership", [], |r| r.get(0))
             .expect("own");
         assert_eq!(owns, 1);
+    }
+
+    #[test]
+    fn secret_capture_ownership_migration_backfills_only_completed_present_rows() {
+        let dir = tempdir();
+        let path = dir.join("capture-ownership.db");
+        let ctx = MigrationContext::current(1_300);
+        let mut conn = open_bare(&path);
+        // Everything BEFORE ordinal 14, so these rows model an existing store
+        // at the exact point where the ownership backfill first runs.
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..14], &ctx, &NoFaults)
+            .expect("pre-ownership migrations");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'main', 'main', 1);
+             INSERT INTO binary_blobs (sha256, byte_length, bytes)
+                 VALUES ('ciphertext', 1, x'00');
+
+             INSERT INTO materialization_jobs
+                 (job_id, target_path, content_sha256, preimage_present,
+                  preimage_sha256, target_generation, status, created_at_ms,
+                  completed_at_ms, operation)
+                 VALUES
+                 ('secret-mat_complete-present', 'complete-present', 'ciphertext',
+                  0, NULL, 1, 'complete', 1, 2, 'write'),
+                 ('secret-mat_pending-present', 'pending-present', 'ciphertext',
+                  0, NULL, 1, 'pending', 1, NULL, 'write'),
+                 ('secret-mat_complete-absent', 'complete-absent', 'ciphertext',
+                  0, NULL, 1, 'complete', 1, 2, 'write'),
+                 ('secret-mat_pending-absent', 'pending-absent', 'ciphertext',
+                  0, NULL, 1, 'pending', 1, NULL, 'write');
+
+             INSERT INTO secret_moments
+                 (workspace_id, moment_order, moment_id, version_id, path,
+                  recorded_at_ms, operation, metadata_origin, after_present)
+                 VALUES
+                 ('ws', 1, 'complete-present', 'main', 'complete-present', 1,
+                  'write', 'api', 1),
+                 ('ws', 2, 'pending-present', 'main', 'pending-present', 2,
+                  'write', 'api', 1),
+                 ('ws', 3, 'complete-absent', 'main', 'complete-absent', 3,
+                  'delete', 'api', 0),
+                 ('ws', 4, 'pending-absent', 'main', 'pending-absent', 4,
+                  'delete', 'api', 0);",
+        )
+        .expect("legacy secret moments and materialization jobs");
+
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("ownership and remaining migrations");
+
+        let capture_owned = |moment_id: &str| -> i64 {
+            conn.query_row(
+                "SELECT capture_owned FROM secret_moments WHERE moment_id = ?1",
+                [moment_id],
+                |row| row.get(0),
+            )
+            .expect("capture ownership")
+        };
+        assert_eq!(
+            capture_owned("complete-present"),
+            1,
+            "a present secret with a completed materialization job owns its capture"
+        );
+        assert_eq!(
+            capture_owned("pending-present"),
+            0,
+            "an incomplete job is not proof of plaintext disk ownership"
+        );
+        assert_eq!(
+            capture_owned("complete-absent"),
+            0,
+            "a completed job cannot make an absent after-state own plaintext"
+        );
+        assert_eq!(
+            capture_owned("pending-absent"),
+            0,
+            "an absent after-state with an incomplete job owns no plaintext"
+        );
     }
 
     #[test]
@@ -2363,7 +2468,12 @@ mod tests {
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rollback preimage migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(
+            outcome,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_COUNT - 19
+            }
+        );
 
         type Preimage = (
             Option<String>,
@@ -3542,6 +3652,7 @@ mod tests {
         assert_eq!(before_blob, None, "NULL before_blob_sha256 must stay NULL");
     }
 
+    #[cfg(feature = "fault-injection")]
     #[test]
     fn crash_before_ledger_commit_rolls_back_and_reopen_recovers() {
         let dir = tempdir();
@@ -3579,6 +3690,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "fault-injection")]
     #[test]
     fn crash_between_steps_resumes_second_migration_from_ledger() {
         let dir = tempdir();
@@ -3713,6 +3825,7 @@ mod tests {
         assert_eq!(err.code(), "migration-failed");
     }
 
+    #[cfg(feature = "fault-injection")]
     #[test]
     fn incomplete_migration_with_changed_checksum_fails_closed() {
         let dir = tempdir();
@@ -3756,6 +3869,7 @@ mod tests {
         assert_eq!(err.code(), "migration-failed");
     }
 
+    #[cfg(feature = "fault-injection")]
     #[test]
     fn non_transactional_started_then_resumes() {
         let dir = tempdir();

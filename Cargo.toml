@@ -33,6 +33,7 @@ members = [
     "crates/dohc-engine-crypto",
     "crates/dohc-engine-collab",
     "crates/dohc-engine-sync",
+    "crates/dohc-engine-sync-http",
     "crates/dohc-workspace-engine",
     "crates/yrs-spike",
     "fuzz/dohc-fuzz-targets",

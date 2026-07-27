@@ -34,9 +34,17 @@ interface SessionEntry {
     client: EngineDaemonClient;
     promise: Promise<EngineWorkspaceBinding>;
   } | null;
+  closing: Promise<void> | null;
+  activeRuns: number;
+  idleWaiters: Set<() => void>;
 }
 
 export interface EngineWorkspaceRunOptions {
+  /**
+   * Replays the operation after transport rebinding. Callers must enable this
+   * only for idempotent operations or calls that verify a possibly committed
+   * first attempt before applying another write.
+   */
   retryTransportErrors?: boolean;
 }
 
@@ -49,6 +57,7 @@ const TRANSPORT_REBIND_ATTEMPTS = 6;
 const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
 const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
 const SHADOW_CLONE_TOKEN = /^[0-9a-f]{64}$/;
+export const WORKSPACE_OPEN_DEADLINE_MS = 2_000;
 
 function isAlreadyExists(error: unknown): boolean {
   return (
@@ -69,14 +78,36 @@ export class EngineWorkspaceRebindError extends Error {
   }
 }
 
-export function isEngineSessionReconnectError(error: unknown): boolean {
+export class EngineWorkspaceSessionsClosedError extends Error {
+  constructor() {
+    super("Rust engine workspace sessions are closed.");
+    this.name = "EngineWorkspaceSessionsClosedError";
+  }
+}
+
+function requiresReconnect(error: unknown): boolean {
   return (
-    (error instanceof DaemonRefusalError &&
-      error.disposition === "afterReconnect") ||
-    (typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "transport-error")
+    error instanceof DaemonRefusalError &&
+    error.disposition === "afterReconnect"
+  );
+}
+
+function isTransportError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "transport-error"
+  );
+}
+
+export function isEngineSessionReconnectError(error: unknown): boolean {
+  return requiresReconnect(error) || isTransportError(error);
+}
+
+function daemonMayBeRelaunching(error: unknown): boolean {
+  return (
+    isTransportError(error) || error instanceof EngineDaemonUnavailableError
   );
 }
 
@@ -99,6 +130,7 @@ export class EngineWorkspaceSessions {
   private readonly captureAuthors = new Map<string, AgentAuthor | null>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private acceptingRuns = true;
 
   constructor(
     private readonly source: EngineDaemonClientSource,
@@ -114,63 +146,49 @@ export class EngineWorkspaceSessions {
     operation: (binding: EngineWorkspaceBinding) => Promise<T>,
     options: EngineWorkspaceRunOptions = {},
   ): Promise<T> {
-    const maxAttempts = options.retryTransportErrors
-      ? this.transportRebindAttempts
-      : 1;
-    let rebindStarted = false;
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      let binding: EngineWorkspaceBinding;
-      try {
-        binding = await this.open(workspace);
-      } catch (reopenError) {
-        if (
-          options.retryTransportErrors &&
-          (rebindStarted ||
-            reopenError instanceof EngineDaemonUnavailableError ||
-            isEngineSessionReconnectError(reopenError)) &&
-          attempt < maxAttempts
-        ) {
-          lastError = reopenError;
-          await this.sleep(transportBackoffMs(attempt));
-          continue;
-        }
-        if (!rebindStarted) throw reopenError;
-        throw new EngineWorkspaceRebindError(
-          workspace.workspaceId,
-          reopenError,
+    const entry = await this.acquire(workspace.workspaceId);
+    try {
+      const maxAttempts = options.retryTransportErrors
+        ? this.transportRebindAttempts
+        : 2;
+      let rebindStarted = false;
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const binding = await this.openForRun(
+          workspace,
+          entry,
+          options,
+          rebindStarted,
         );
-      }
-      try {
-        return await operation(binding);
-      } catch (error) {
-        const reconnectRequired = isEngineSessionReconnectError(error);
-        const retryAfterTransport =
-          options.retryTransportErrors === true &&
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          error.code === "transport-error";
-        if (reconnectRequired) {
-          const entry = this.entry(workspace.workspaceId);
-          if (entry.binding === binding) entry.binding = null;
-        }
-        const retryAfterReconnect =
-          options.retryTransportErrors === true && reconnectRequired;
-        if (
-          (!retryAfterReconnect && !retryAfterTransport) ||
-          attempt >= maxAttempts
-        ) {
-          throw error;
-        }
-        rebindStarted = true;
-        lastError = error;
-        if (retryAfterTransport) {
-          await this.sleep(transportBackoffMs(attempt));
+        try {
+          return await operation(binding);
+        } catch (error) {
+          const retryAfterReconnect = requiresReconnect(error);
+          const retryAfterTransport =
+            options.retryTransportErrors === true && isTransportError(error);
+          if (
+            (retryAfterReconnect || isTransportError(error)) &&
+            entry.binding === binding
+          ) {
+            entry.binding = null;
+          }
+          if (
+            (!retryAfterReconnect && !retryAfterTransport) ||
+            attempt >= maxAttempts
+          ) {
+            throw error;
+          }
+          rebindStarted = true;
+          lastError = error;
+          if (retryAfterTransport) {
+            await this.sleep(transportBackoffMs(attempt));
+          }
         }
       }
+      throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
+    } finally {
+      this.release(entry);
     }
-    throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
   }
 
   rememberCaptureAuthor(workspaceId: string, author: AgentAuthor | null): void {
@@ -181,16 +199,25 @@ export class EngineWorkspaceSessions {
     this.captureAuthors.delete(workspaceId);
     const entry = this.entries.get(workspaceId);
     if (!entry) return;
-    this.entries.delete(workspaceId);
-    let binding = entry.binding;
-    if (!binding && entry.opening) {
-      binding = await entry.opening.promise.catch(() => null);
+    if (entry.closing) {
+      await entry.closing;
+      return;
     }
-    if (!binding) return;
-    await this.closeBinding(binding);
+
+    const closing = this.closeEntry(entry);
+    entry.closing = closing;
+    try {
+      await closing;
+    } finally {
+      if (entry.closing === closing) entry.closing = null;
+      if (this.entries.get(workspaceId) === entry) {
+        this.entries.delete(workspaceId);
+      }
+    }
   }
 
   async closeAll(): Promise<void> {
+    this.acceptingRuns = false;
     const workspaceIds = [...this.entries.keys()];
     await Promise.allSettled(
       workspaceIds.map(async (workspaceId) => {
@@ -202,17 +229,92 @@ export class EngineWorkspaceSessions {
   private entry(workspaceId: string): SessionEntry {
     let entry = this.entries.get(workspaceId);
     if (!entry) {
-      entry = { binding: null, opening: null };
+      entry = {
+        binding: null,
+        opening: null,
+        closing: null,
+        activeRuns: 0,
+        idleWaiters: new Set(),
+      };
       this.entries.set(workspaceId, entry);
     }
     return entry;
   }
 
+  private async acquire(workspaceId: string): Promise<SessionEntry> {
+    for (;;) {
+      if (!this.acceptingRuns) {
+        throw new EngineWorkspaceSessionsClosedError();
+      }
+      const entry = this.entry(workspaceId);
+      if (entry.closing) {
+        await entry.closing;
+        continue;
+      }
+      entry.activeRuns += 1;
+      return entry;
+    }
+  }
+
+  private release(entry: SessionEntry): void {
+    entry.activeRuns -= 1;
+    if (entry.activeRuns !== 0) return;
+    const waiters = [...entry.idleWaiters];
+    entry.idleWaiters.clear();
+    for (const resolve of waiters) resolve();
+  }
+
+  private async waitForIdle(entry: SessionEntry): Promise<void> {
+    if (entry.activeRuns === 0) return;
+    await new Promise<void>((resolveIdle) => {
+      entry.idleWaiters.add(resolveIdle);
+    });
+  }
+
+  private async closeEntry(entry: SessionEntry): Promise<void> {
+    await this.waitForIdle(entry);
+    let binding = entry.binding;
+    if (!binding && entry.opening) {
+      binding = await entry.opening.promise.catch(() => null);
+    }
+    entry.binding = null;
+    entry.opening = null;
+    if (binding) await this.closeBinding(binding);
+  }
+
+  private async openForRun(
+    workspace: EngineWorkspace,
+    entry: SessionEntry,
+    options: EngineWorkspaceRunOptions,
+    rebindStarted: boolean,
+  ): Promise<EngineWorkspaceBinding> {
+    const maxAttempts = options.retryTransportErrors
+      ? this.transportRebindAttempts
+      : 2;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.open(workspace, entry);
+      } catch (error) {
+        if (error instanceof EngineWorkspaceRebindError) throw error;
+        lastError = error;
+        if (attempt >= maxAttempts) break;
+        if (daemonMayBeRelaunching(error)) {
+          await this.sleep(transportBackoffMs(attempt));
+        }
+      }
+    }
+    if (rebindStarted) {
+      throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
+    }
+    throw lastError;
+  }
+
   private async open(
     workspace: EngineWorkspace,
+    entry: SessionEntry,
   ): Promise<EngineWorkspaceBinding> {
-    const entry = this.entry(workspace.workspaceId);
-    for (;;) {
+    for (let attempt = 1; ; attempt += 1) {
       const client = this.source.currentClient();
       if (entry.binding?.client === client) return entry.binding;
       if (entry.binding?.client !== client) entry.binding = null;
@@ -228,6 +330,13 @@ export class EngineWorkspaceSessions {
       }
       if (this.source.currentClient() !== client) {
         await this.closeBinding(binding).catch(() => undefined);
+        if (attempt >= this.transportRebindAttempts) {
+          throw new EngineWorkspaceRebindError(
+            workspace.workspaceId,
+            new Error("Rust engine client changed on every open attempt."),
+          );
+        }
+        await this.sleep(transportBackoffMs(attempt));
         continue;
       }
       entry.binding = binding;
@@ -242,15 +351,26 @@ export class EngineWorkspaceSessions {
     await this.prepareWorkspace(workspace.rootPath);
     const requester = new WorkspaceDaemonRequester(client);
     const hasCaptureAuthor = this.captureAuthors.has(workspace.workspaceId);
-    const raw = await requester.request(WORKSPACE_METHOD.open, {
-      rootDir: workspace.rootPath,
-      workspaceId: workspace.workspaceId,
-      ...(hasCaptureAuthor
-        ? { captureAuthor: this.captureAuthors.get(workspace.workspaceId) ?? null }
-        : {}),
-    });
+    const raw = await requester.request(
+      WORKSPACE_METHOD.open,
+      {
+        rootDir: workspace.rootPath,
+        workspaceId: workspace.workspaceId,
+        // The desktop recovery sweep owns user-visible crash reconciliation.
+        // A daemon-side open must therefore preserve running claims on both a
+        // fresh desktop boot and a sidecar-only rebind.
+        recoverRunningDispatches: false,
+        ...(hasCaptureAuthor
+          ? {
+              captureAuthor:
+                this.captureAuthors.get(workspace.workspaceId) ?? null,
+            }
+          : {}),
+      },
+      { deadlineMs: WORKSPACE_OPEN_DEADLINE_MS },
+    );
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
-    return { client, workspace: opened.workspace };
+    return { client, workspace: opened.workspace as WorkspaceHandle };
   }
 
   private async prepareWorkspace(rootPath: string): Promise<void> {
@@ -271,11 +391,11 @@ export class EngineWorkspaceSessions {
         await this.ensureRealDirectory(dohcDirectory, realRoot);
         await this.ensureRealDirectory(markerDirectory, realRoot);
         try {
-          await writeFile(
-            markerPath,
-            randomBytes(32).toString("hex"),
-            { encoding: "utf8", flag: "wx", mode: 0o600 },
-          );
+          await writeFile(markerPath, randomBytes(32).toString("hex"), {
+            encoding: "utf8",
+            flag: "wx",
+            mode: 0o600,
+          });
         } catch (error) {
           if (!isAlreadyExists(error)) throw error;
           const markerInfo = await lstat(markerPath);
@@ -314,7 +434,9 @@ export class EngineWorkspaceSessions {
     }
     const info = await lstat(directory);
     if (!info.isDirectory() || info.isSymbolicLink()) {
-      throw new Error(`Rust engine directory must not be a symlink: ${directory}.`);
+      throw new Error(
+        `Rust engine directory must not be a symlink: ${directory}.`,
+      );
     }
     const resolvedDirectory = await realpath(directory);
     const escape = relative(realRoot, resolvedDirectory);
@@ -323,7 +445,9 @@ export class EngineWorkspaceSessions {
       escape.startsWith(`..${sep}`) ||
       isAbsolute(escape)
     ) {
-      throw new Error(`Rust engine directory escapes the workspace: ${directory}.`);
+      throw new Error(
+        `Rust engine directory escapes the workspace: ${directory}.`,
+      );
     }
   }
 

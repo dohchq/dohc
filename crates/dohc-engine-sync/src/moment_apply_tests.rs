@@ -1,5 +1,5 @@
 use dohc_engine_domain::{
-    ListMomentsQuery, RollbackTextFileMutation, VersionedTextStore, WriteText,
+    CreateNamedVersion, ListMomentsQuery, RollbackTextFileMutation, VersionedTextStore, WriteText,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256, put_binary_blob};
 use dohc_engine_testkit::ScratchDir;
@@ -1133,6 +1133,70 @@ fn moment_append_first_delivery_rejects_plaintext_id_collision_but_redelivery_sk
         })
         .expect("journal count");
     assert_eq!(journal_count, 1);
+}
+
+#[test]
+fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["incoming"]);
+    VersionedTextStore::new(&mut store)
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: "ws".to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 1_500,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("feature version");
+    let incoming = envelope(
+        "materialization-peer",
+        0,
+        "ws",
+        absent_text_payload(
+            "materialization-moment",
+            "materialization-object",
+            "active-at-apply.md",
+            "incoming",
+        ),
+    );
+    let first = apply_replication_envelope(&mut store, &incoming, &NoFaults, &crate::NoLiveLeases)
+        .expect("apply active moment");
+    assert_eq!(
+        first,
+        ApplyOutcome::Applied(crate::RoutedApply {
+            conflict: None,
+            conflicts_opened: 0,
+            materialization_changes: vec![crate::MomentMaterializationChange {
+                path: "active-at-apply.md".to_owned(),
+                operation: "write",
+                content_kind: "text",
+            }],
+        })
+    );
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO active_versions (workspace_id,version_id) VALUES ('ws','feature') \
+                 ON CONFLICT(workspace_id) DO UPDATE SET version_id=excluded.version_id",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("switch active version after apply");
+    assert_eq!(
+        crate::moment_apply::redelivered_materialization_changes(&store, &incoming)
+            .expect("read durable decision"),
+        [crate::MomentMaterializationChange {
+            path: "active-at-apply.md".to_owned(),
+            operation: "write",
+            content_kind: "text",
+        }],
+        "MUTATION: re-deriving from the live active version loses the apply-time disk change"
+    );
 }
 
 #[test]

@@ -328,6 +328,14 @@ export function createSyncRelayHandler({
         await claimPendingShares(actor.userId);
         const share = shareForRecipient(route.shareId, actor.userId);
         const url = new URL(request.url);
+        const channelWireId = url.searchParams.get("channelWireId");
+        if (
+          channelWireId !== null &&
+          (!isChatChannelSelector(share.selector) ||
+            share.selector.channelWireId !== channelWireId)
+        ) {
+          throw notFound();
+        }
         const since = parseCursor(url.searchParams.get("since"));
         const limit = parseLimit(url.searchParams.get("limit"));
         const page = storage.fetchLogPage({
@@ -1087,8 +1095,10 @@ function parseLogOp(value: unknown): SyncRelayLogInput {
   if (!op.payload || typeof op.payload !== "object" || Array.isArray(op.payload)) {
     throw badRequest("payload must be a JSON object");
   }
-  const recordedAtMs = Number(op.recordedAtMs);
-  if (!Number.isFinite(recordedAtMs)) throw badRequest("recordedAtMs must be finite");
+  const recordedAtMs = op.recordedAtMs;
+  if (typeof recordedAtMs !== "number" || !Number.isSafeInteger(recordedAtMs)) {
+    throw badRequest("recordedAtMs must be an integer in the safe wire range");
+  }
   const payloadJson = stableJsonStringify(op.payload);
   if (Buffer.byteLength(payloadJson, "utf8") > MAX_PAYLOAD_JSON_BYTES) {
     throw badRequest("payload is too large");

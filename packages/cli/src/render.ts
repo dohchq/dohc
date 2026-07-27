@@ -83,14 +83,16 @@ export function renderInbox(result: InboxResult): string {
 }
 
 export function renderPost(result: PostResult): string {
-  return `posted ${result.threadId} ${result.messageId} in #${result.channel.slug}`;
+  const posted = `posted ${result.threadId} ${result.messageId} in #${result.channel.slug}`;
+  return result.warning ? `${posted}\nwarning: ${result.warning}` : posted;
 }
 
 export function renderReply(result: ReplyResult): string {
   const details = [`replied ${result.threadId} ${result.messageId}`];
   if (result.parentMessageId) details.push(`to ${result.parentMessageId}`);
   if (result.resolvedMessageId) details.push(`resolved ${result.resolvedMessageId}`);
-  return details.join(" · ");
+  const replied = details.join(" · ");
+  return result.warning ? `${replied}\nwarning: ${result.warning}` : replied;
 }
 
 export function renderReact(result: ReactResult): string {
@@ -156,5 +158,7 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       });
     case "export":
       return renderExport(result as CliResultByVerb["export"]);
+    default:
+      return JSON.stringify(result, null, 2);
   }
 }
