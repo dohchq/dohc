@@ -129,9 +129,31 @@ async fn native_watcher_stop_joins_and_no_notification_arrives_after_return() {
     apply_and_ack(&handle, ready.initial_reconcile).await;
     watcher.stop().expect("joined stop");
 
+    // `stop()` publishes any pending burst before the thread exits, so `dirty`
+    // may legitimately be set the moment it returns. Draining that first is
+    // what makes the assertion below mean what the test name says: the only
+    // thing that could set `dirty` again is a notification arriving AFTER the
+    // join, which is exactly what must not happen. Without the drain this
+    // test is hollow -- it fails wherever a startup burst happens to still be
+    // pending (every Linux run), and passes vacuously wherever one is not.
+    if handle.stats().await.expect("stats").dirty {
+        let run = handle
+            .reconcile_if_dirty(CancellationToken::new())
+            .await
+            .expect("drain the final pre-stop flush");
+        apply_and_ack(&handle, run).await;
+    }
+    assert!(
+        !handle.stats().await.expect("stats").dirty,
+        "the pre-stop flush should be fully drained before the post-stop write"
+    );
+
     ws.write("after-stop.md", b"must not notify");
     tokio::time::sleep(WATCH_SETTLE + Duration::from_millis(200)).await;
-    assert!(!handle.stats().await.expect("stats").dirty);
+    assert!(
+        !handle.stats().await.expect("stats").dirty,
+        "a notification arrived after stop() joined"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
