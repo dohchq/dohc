@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
-import { AGENT_CHANNEL_WIRE_ID } from "@dohc/workspace-engine/linkedChatStore";
+import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PresenceHub } from "./presence";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
