@@ -60,6 +60,7 @@ const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 /// or raw blob-chunk egress.
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
 const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
+const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 
 /// Aggregate hydrated blob bytes allowed to wait for or flow through framed
 /// egress. A single stored blob may be this large, so exact-byte reservations
@@ -1467,6 +1468,7 @@ impl EngineService {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
@@ -1536,6 +1538,7 @@ impl EngineService {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
@@ -1614,6 +1617,7 @@ impl EngineService {
         let sha256 = params.sha256.to_ascii_lowercase();
         let path = params.path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let bytes = match params.bytes_base64 {
@@ -1721,6 +1725,7 @@ impl EngineService {
         let from_path = params.from_path.clone();
         let to_path = params.to_path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
@@ -1789,6 +1794,7 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
@@ -1945,6 +1951,7 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
@@ -2031,10 +2038,11 @@ impl EngineService {
             }),
             MergeTextFileResult::Conflict {
                 comparison,
+                conflict,
                 deduped,
-                ..
             } => json!({
                 "status": "conflict",
+                "conflictId": conflict.conflict_id,
                 "comparison": comparison_json(&comparison),
                 "deduped": deduped,
                 "materializeEnqueued": materialize_enqueued,
@@ -3188,6 +3196,7 @@ impl EngineService {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
         let origin = validated_origin(Some(&params.origin), None)?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         // Prove the version reference and secret-floor routing keylessly before
         // any key-file load/mint. Invalid calls must remain side-effect-free.
@@ -3242,6 +3251,7 @@ impl EngineService {
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let path = params.path.clone();
         let origin = validated_origin(Some(&params.origin), None)?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let moment = open
             .actor
@@ -3475,6 +3485,7 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let origin = validated_origin(Some(&params.origin), None)?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
         for (operation, version_id) in [
@@ -3558,6 +3569,7 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let origin = validated_origin(Some(&params.origin), None)?;
+        validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
         let result = open
@@ -8642,6 +8654,7 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         "beforeText": inband_text(moment.before_text.as_deref()),
         "beforeByteLength": moment.before_byte_length,
         "beforeInbandLimitBytes": before_inband_limit,
+        "beforePath": moment.before_path,
     })
 }
 
@@ -8918,6 +8931,20 @@ fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static s
 fn validate_workspace_param(candidate: Option<&str>, resolved: &str) -> Result<(), WireError> {
     if candidate.is_some_and(|candidate| candidate != resolved) {
         return Err(wire(ErrorCode::InvalidParams, "invalid-workspace"));
+    }
+    Ok(())
+}
+
+fn validate_metadata_fields(
+    summary: Option<&str>,
+    correlation_id: Option<&str>,
+) -> Result<(), WireError> {
+    if [summary, correlation_id]
+        .into_iter()
+        .flatten()
+        .any(|field| field.len() > MAX_METADATA_FIELD_BYTES)
+    {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
     }
     Ok(())
 }

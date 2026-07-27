@@ -627,11 +627,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   async function clearLiveAttribution(live: LiveRun): Promise<void> {
-    try {
-      await options.setRunAttribution(live.workspace.workspaceId, null);
-    } catch (error) {
-      reportError(error);
-    }
+    await options.setRunAttribution(live.workspace.workspaceId, null);
     finishPresence(live);
   }
 
@@ -696,13 +692,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       dispatch.completeRun({ runId: live.claim.run.runId, exitCode: code });
       notifyRunUpdated(live.workspace.workspaceId);
     } catch (error) {
-      liveRuns.delete(live.workspace.workspaceId);
       await clearLiveAttribution(live);
+      liveRuns.delete(live.workspace.workspaceId);
       await releaseLiveWorkspace(live);
       throw error;
     }
-    liveRuns.delete(live.workspace.workspaceId);
     await clearLiveAttribution(live);
+    liveRuns.delete(live.workspace.workspaceId);
     await releaseLiveWorkspace(live);
     await scanAndDrain(live.workspace);
   }
@@ -733,9 +729,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     claim: AgentDispatchClaim,
     cause: unknown,
   ): Promise<void> {
-    try {
-      await options.setRunAttribution(workspace.workspaceId, null);
-    } catch {}
+    await options.setRunAttribution(workspace.workspaceId, null);
     const detail = cause instanceof Error && cause.message ? cause.message : "unknown error";
     await postFailureNote(
       workspace,
@@ -823,10 +817,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         void publishWorking();
       }, PRESENCE_HEARTBEAT_MS);
     } catch (error) {
-      runReservations.delete(workspace.workspaceId);
       reportError(error);
       try {
         await failClaimBeforeRun(workspace, claim, error);
+        runReservations.delete(workspace.workspaceId);
       } finally {
         await releaseWorkspaceLease(releaseWorkspace);
       }
@@ -1437,12 +1431,16 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     selfTestReservations.clear();
     runReservations.clear();
     budgetBypassThreads.clear();
-    liveRuns.clear();
     await Promise.all([...workspaceChains.values()].map((chain) => chain.catch(() => undefined)));
     await Promise.all(quitTerminations);
-    await Promise.all(runWorkspacesToRelease.map(clearLiveAttribution));
     await Promise.all(
-      runWorkspacesToRelease.map((live) => releaseLiveWorkspace(live)),
+      runWorkspacesToRelease.map(async (live) => {
+        await clearLiveAttribution(live);
+        if (liveRuns.get(live.workspace.workspaceId) === live) {
+          liveRuns.delete(live.workspace.workspaceId);
+        }
+        await releaseLiveWorkspace(live);
+      }),
     );
   }
 

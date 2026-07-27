@@ -3609,6 +3609,157 @@ async fn origin_closed_set_rejects_capture_and_ydoc() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutation_metadata_fields_are_bounded_at_every_rpc_entry() {
+    // MUTATION: remove endpoint validation -> these calls fall through to
+    // state/path errors or accept a field the TypeScript contract rejects.
+    let (_scratch, transport, handle) = fixture("metadata-bounds").await;
+    let oversized = "x".repeat(16 * 1024 + 1);
+    let cases = [
+        (
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "a.md", "text": "x", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "correlation.md", "text": "x", "origin": "api", "correlationId": oversized.clone() }),
+        ),
+        (
+            "versionedBinary.write",
+            json!({ "versionId": "main", "path": "a.bin", "bytes": [1], "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedBinary.writeBlob",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "versionId": "main", "path": "blob.bin", "sha256": "a".repeat(64), "bytesBase64": "AQ==", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedText.rename",
+            json!({ "versionId": "main", "fromPath": "a.md", "toPath": "b.md", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedText.delete",
+            json!({ "versionId": "main", "path": "a.md", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedText.merge",
+            json!({ "path": "a.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "secrets.write",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "versionId": "main", "path": ".env", "text": "x", "momentId": "secret-write", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "secrets.delete",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "versionId": "main", "path": ".env", "momentId": "secret-delete", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "secrets.apply",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "path": ".env", "sourceVersionId": "feature", "targetVersionId": "main", "momentId": "secret-apply", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "secrets.restore",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "path": ".env", "beforeMomentId": "before", "momentId": "secret-restore", "origin": "api", "summary": oversized.clone() }),
+        ),
+    ];
+    for (index, (method, params)) in cases.into_iter().enumerate() {
+        let outcome = transport
+            .call(
+                RequestContext::unbounded(),
+                request(20 + index as u64, method, Some(handle.clone()), params),
+            )
+            .await;
+        assert!(
+            outcome.is_err(),
+            "{method}: oversized metadata must be rejected at the RPC boundary"
+        );
+        let error = outcome.unwrap_err();
+        assert_eq!(error.message, "invalid-metadata", "{method}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_metadata_is_distinct_from_absent_in_mutation_fingerprints() {
+    // MUTATION: hash Option<String> through unwrap_or("") -> every retry below
+    // silently replays instead of reporting request-key payload reuse.
+    let (_scratch, transport, handle) = fixture("metadata-presence-fingerprint").await;
+    let mut initial = vec![
+        (
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "write.md", "text": "x", "origin": "api", "requestId": "presence-write" }),
+        ),
+        (
+            "versionedBinary.write",
+            json!({ "versionId": "main", "path": "write.bin", "bytes": [1, 2], "origin": "api", "requestId": "presence-binary" }),
+        ),
+    ];
+    write(
+        &transport,
+        &handle,
+        2,
+        "rename.md",
+        "x",
+        "presence-rename-seed",
+    )
+    .await;
+    write(
+        &transport,
+        &handle,
+        3,
+        "delete.md",
+        "x",
+        "presence-delete-seed",
+    )
+    .await;
+    initial.push((
+        "versionedText.rename",
+        json!({ "versionId": "main", "fromPath": "rename.md", "toPath": "renamed.md", "origin": "api", "requestId": "presence-rename" }),
+    ));
+    initial.push((
+        "versionedText.delete",
+        json!({ "versionId": "main", "path": "delete.md", "origin": "api", "requestId": "presence-delete" }),
+    ));
+
+    for (index, (method, params)) in initial.into_iter().enumerate() {
+        call(
+            &transport,
+            &handle,
+            10 + index as u64,
+            method,
+            params.clone(),
+        )
+        .await;
+        let mut changed = params.clone();
+        changed["summary"] = json!("");
+        let outcome = transport
+            .call(
+                RequestContext::unbounded(),
+                request(30 + index as u64, method, Some(handle.clone()), changed),
+            )
+            .await;
+        assert!(
+            outcome.is_err(),
+            "{method}: absent and empty metadata are distinct payloads"
+        );
+        let error = outcome.unwrap_err();
+        assert_eq!(error.message, "idempotency-key-reuse-mismatch", "{method}");
+
+        let mut changed = params;
+        changed["correlationId"] = json!("");
+        let outcome = transport
+            .call(
+                RequestContext::unbounded(),
+                request(40 + index as u64, method, Some(handle.clone()), changed),
+            )
+            .await;
+        assert!(
+            outcome.is_err(),
+            "{method}: absent and empty correlation metadata are distinct payloads"
+        );
+        let error = outcome.unwrap_err();
+        assert_eq!(error.message, "idempotency-key-reuse-mismatch", "{method}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn raw_text_and_secret_bodies_round_trip_byte_identical() {
     // MUTATION: re-add trimming, CRLF rewriting, or body NFC normalization -> either equality fails.
     let (_scratch, transport, handle) = fixture("raw-bodies").await;
@@ -3668,6 +3819,7 @@ async fn rename_is_one_moment_atomic_and_secret_floor_is_enforced() {
     .await;
     let renamed = call(&transport, &handle, 3, "versionedText.rename", json!({ "versionId": "main", "fromPath": "old.md", "toPath": "new.md", "origin": "api", "requestId": "rename-1" })).await;
     assert_eq!(renamed["moment"]["operation"], "rename");
+    assert_eq!(renamed["moment"]["beforePath"], "old.md");
     assert!(renamed["before"].get("text").is_none());
     assert!(renamed["after"].get("text").is_none());
     assert!(
@@ -4835,6 +4987,82 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
     )
     .await;
     assert_eq!(indexed[0]["path"], "merge.md");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merge_conflict_returns_the_exact_created_conflict_id() {
+    // MUTATION: omit conflictId from the merge response -> the string
+    // assertion fails instead of forcing callers to guess from an open list.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_versions(scratch.path(), "ws-rpcd-merge-conflict-id");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "ws-rpcd-merge-conflict-id"
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "path": "merge.md",
+            "text": "current",
+            "origin": "api",
+            "requestId": "move-main"
+        }),
+    )
+    .await;
+
+    let merged = call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.merge",
+        json!({
+            "path": "merge.md",
+            "sourceVersionId": "feature",
+            "targetVersionId": "main",
+            "origin": "api",
+            "requestId": "merge-conflict"
+        }),
+    )
+    .await;
+    assert_eq!(merged["status"], "conflict");
+    assert!(
+        merged["conflictId"].is_string(),
+        "merge returns its conflict id"
+    );
+    let conflict_id = merged["conflictId"].as_str().unwrap();
+    let conflicts = call(
+        &transport,
+        &handle,
+        4,
+        "conflicts.list",
+        json!({ "status": "open" }),
+    )
+    .await;
+    assert!(
+        conflicts
+            .as_array()
+            .expect("conflicts")
+            .iter()
+            .any(|conflict| conflict["id"] == conflict_id)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

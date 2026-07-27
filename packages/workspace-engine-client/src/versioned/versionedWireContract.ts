@@ -331,6 +331,7 @@ export type MomentRecord = JsonObject & {
   beforeText: string | null;
   beforeByteLength: number | null;
   beforeInbandLimitBytes: number | null;
+  beforePath?: string | null;
 };
 
 export type VersionedTextWriteResult = JsonObject & {
@@ -475,10 +476,17 @@ type MergeMaterializationResult = {
 export type VersionsMergeResult =
   | (JsonObject &
       MergeMaterializationResult & {
-        status: "unchanged" | "conflict";
+        status: "unchanged";
         deduped: boolean;
         comparison: VersionedComparisonRecord;
         reason?: "already-same" | "source-unchanged";
+      })
+  | (JsonObject &
+      MergeMaterializationResult & {
+        status: "conflict";
+        conflictId: string;
+        deduped: boolean;
+        comparison: VersionedComparisonRecord;
       })
   | (JsonObject & {
       status: "merged";
@@ -878,6 +886,7 @@ function momentValue(value: JsonValue, label: string): MomentRecord {
     "beforeText",
     "beforeByteLength",
     "beforeInbandLimitBytes",
+    "beforePath",
   ]);
   const operation = object.operation;
   if (operation !== "write" && operation !== "delete" && operation !== "rename") {
@@ -909,6 +918,9 @@ function momentValue(value: JsonValue, label: string): MomentRecord {
     beforeByteLength: nullableNumberValue(object, "beforeByteLength", label),
     beforeInbandLimitBytes: nullableNumberValue(object, "beforeInbandLimitBytes", label),
   };
+  if (object.beforePath !== undefined) {
+    result.beforePath = nullableStringValue(object, "beforePath", label);
+  }
   if (object.metadataSummary !== undefined) {
     result.metadataSummary = nullableStringValue(object, "metadataSummary", label);
   }
@@ -1272,6 +1284,7 @@ export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult
     "comparison",
     "reason",
     "before",
+    "conflictId",
   ]);
   const status = object.status;
   const materialization: MergeMaterializationResult = {
@@ -1283,23 +1296,30 @@ export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult
     object.comparison ?? null,
     `${label}.comparison`,
   );
-  if (status === "unchanged" || status === "conflict") {
-    const result: Extract<VersionsMergeResult, { status: "unchanged" | "conflict" }> = {
+  if (status === "unchanged") {
+    const reason = object.reason;
+    if (reason !== "already-same" && reason !== "source-unchanged") {
+      throw new VersionedProtocolShapeError(`${label}.reason is invalid.`);
+    }
+    return {
       status,
+      deduped: booleanValue(object, "deduped", label),
+      comparison,
+      reason,
+      ...materialization,
+    };
+  }
+  if (status === "conflict") {
+    if (object.reason !== undefined) {
+      throw new VersionedProtocolShapeError(`${label}.reason is invalid for conflict.`);
+    }
+    return {
+      status,
+      conflictId: stringValue(object, "conflictId", label),
       deduped: booleanValue(object, "deduped", label),
       comparison,
       ...materialization,
     };
-    if (status === "unchanged") {
-      const reason = object.reason;
-      if (reason !== "already-same" && reason !== "source-unchanged") {
-        throw new VersionedProtocolShapeError(`${label}.reason is invalid.`);
-      }
-      result.reason = reason;
-    } else if (object.reason !== undefined) {
-      throw new VersionedProtocolShapeError(`${label}.reason is invalid for conflict.`);
-    }
-    return result;
   }
   if (status !== "merged") {
     throw new VersionedProtocolShapeError(`${label}.status is invalid.`);

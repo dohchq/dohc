@@ -15,6 +15,7 @@ import { nativeTmpdir } from "./testTemp";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+  DAEMON_CAPTURE_HEALTH_POLL_MS,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
   UnsupportedWorkspacePathError,
@@ -36,6 +37,11 @@ import {
 } from "@dohc/workspace-engine-client";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import type {
+  EngineYdocProviderSessionRust,
+  EngineYdocProviderSessionRustOptions,
+} from "../collab/ydocEngineProviderSessionRust";
+import * as Y from "yjs";
 
 // node:sqlite via createRequire, matching the engine store: vitest's vite
 // pipeline cannot statically resolve the node:sqlite builtin yet.
@@ -154,6 +160,9 @@ function capture(root: string, options: {
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
   rustEngineSessions?: EngineWorkspaceSessions;
   daemonOwnsCapture?: boolean;
+  openRustYDocProviderSession?: (
+    options: EngineYdocProviderSessionRustOptions,
+  ) => Promise<EngineYdocProviderSessionRust>;
 } = {}) {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-capture-test",
@@ -173,6 +182,7 @@ function mockLiveSessions(
 ) {
   const client = {
     close: () => undefined,
+    onEvent: () => () => undefined,
     async sendRequest(request: Request): Promise<Response> {
       requests?.push(request);
       const params = request.params as Record<string, JsonValue | undefined>;
@@ -193,6 +203,12 @@ function mockLiveSessions(
       }
       if (request.method === "capture.setAuthor") {
         return { id: request.id, result: { updated: true } };
+      }
+      if (request.method === "watcher.status") {
+        return {
+          id: request.id,
+          result: { running: true, degraded: false, terminal: false },
+        };
       }
       return await loopback.sendRequest(request);
     },
@@ -321,6 +337,126 @@ describe("workspaceEngineCapture batch capture", () => {
       ),
     ).toBe(true);
     expect(draft.activeVersionId).not.toBe("main");
+    await engine.stop();
+  });
+
+  it("mutation proof: installs remote updates buffered during the initial Y.Doc open", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: "note.md",
+      text: "seed",
+    });
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const baseDoc = new Y.Doc();
+    baseDoc.getText("content").insert(0, "base");
+    const staleInitialUpdate = Y.encodeStateAsUpdate(baseDoc);
+    const daemonDoc = new Y.Doc();
+    Y.applyUpdate(daemonDoc, staleInitialUpdate);
+    const remoteDoc = new Y.Doc();
+    Y.applyUpdate(remoteDoc, staleInitialUpdate);
+    remoteDoc.getText("content").insert(4, "+remote");
+    const bufferedUpdate = Y.encodeStateAsUpdate(
+      remoteDoc,
+      Y.encodeStateVector(daemonDoc),
+    );
+    const forwarded: Uint8Array[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        Y.applyUpdate(daemonDoc, bufferedUpdate);
+        options.onRemoteUpdate(bufferedUpdate);
+        return {
+          doc: daemonDoc,
+          initialUpdate: staleInitialUpdate,
+          contentKind: "plaintext",
+          path: "note.md",
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () =>
+            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
+          close: async () => undefined,
+        };
+      },
+    });
+
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: (update) => forwarded.push(update),
+    });
+    const rendererDoc = new Y.Doc();
+    Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+    expect(rendererDoc.getText("content").toString()).toBe("base+remote");
+    expect(forwarded).toEqual([bufferedUpdate]);
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("mutation proof: polls daemon watcher degradation after startup", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = await tempRoot();
+      let degraded = false;
+      const outcomes: boolean[] = [];
+      const daemonStore = Object.assign(createVersionedTextStore(root), {
+        watcherStatus: async () => ({
+          running: true,
+          degraded,
+          terminal: false,
+        }),
+        flushCapture: async () => undefined,
+      });
+      const engine = capture(root, {
+        store: daemonStore,
+        daemonOwnsCapture: true,
+        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      });
+
+      engine.start();
+      await engine.flush();
+      degraded = true;
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await engine.flush();
+
+      expect(outcomes).toEqual([true, false]);
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("mutation proof: counts a secret-only daemon version switch", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedSecretFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: ".env",
+      text: "VALUE=main\n",
+    });
+    await write(root, ".env", "VALUE=main\n");
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      daemonOwnsCapture: true,
+    });
+    const created = await engine.createVersion("Draft");
+    const draftId = created.activeVersionId;
+    loopback.seedSecretFile({
+      workspace: "engine-capture-test",
+      versionId: draftId,
+      path: ".env",
+      text: "VALUE=draft\n",
+    });
+    await write(root, ".env", "VALUE=draft\n");
+
+    await expect(engine.switchVersion("main")).resolves.toEqual({
+      activeVersionId: "main",
+      changedFileCount: 1,
+    });
     await engine.stop();
   });
 
@@ -1934,7 +2070,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     await Promise.all([outcomeReported, errorReported]);
 
     expect(outcomes).toEqual([false]);
-    expect(errors).toEqual(["daemon capture startup"]);
+    expect(errors).toEqual(["daemon capture health"]);
     state.failing = false;
     await engine.stop();
   });

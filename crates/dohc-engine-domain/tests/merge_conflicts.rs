@@ -1539,7 +1539,7 @@ fn exact_merge_retry_reconstructs_recorded_outcome_before_binary_head_comparison
 /// a recorded side that DOES carry identity keeps the strict no-clobber check.
 #[test]
 fn exact_head_gate_falls_back_for_legacy_null_identity_binary_sides() {
-    let live = ConflictFileState::binary_head("a.md", "sha-bytes", "obj-live", "moment-live");
+    let live = ConflictFileState::binary_head("a.md", "sha-bytes", 9, "obj-live", "moment-live");
 
     // Legacy recorded side (NULL identity) with matching path+bytes RESOLVES.
     let legacy = ConflictFileState::binary("a.md", "sha-bytes");
@@ -1558,13 +1558,13 @@ fn exact_head_gate_falls_back_for_legacy_null_identity_binary_sides() {
     // A recorded side that DOES carry identity keeps the strict check: same
     // bytes but a recreated head (different object/moment) must NOT match.
     let strict_same =
-        ConflictFileState::binary_head("a.md", "sha-bytes", "obj-live", "moment-live");
+        ConflictFileState::binary_head("a.md", "sha-bytes", 9, "obj-live", "moment-live");
     assert!(
         live_state_matches_conflict_current(&live, &strict_same),
         "an identity-carrying side matching object+moment must still match"
     );
     let strict_recreated =
-        ConflictFileState::binary_head("a.md", "sha-bytes", "obj-recreated", "moment-recreated");
+        ConflictFileState::binary_head("a.md", "sha-bytes", 9, "obj-recreated", "moment-recreated");
     assert!(
         !live_state_matches_conflict_current(&live, &strict_recreated),
         "an identity-carrying side must reject a same-bytes-but-recreated head (no clobber)"

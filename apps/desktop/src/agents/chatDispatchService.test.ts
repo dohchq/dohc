@@ -94,6 +94,10 @@ interface FixtureOptions {
     chat: LinkedChatStore,
   ) => void | boolean | Promise<void | boolean>;
   temporaryRunActivity?: boolean;
+  setRunAttribution?: (
+    workspaceId: string,
+    run: { agentId: string; onBehalfOf: string; agentRunId: string } | null,
+  ) => void | Promise<void>;
 }
 
 interface Fixture {
@@ -239,8 +243,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     authorizeServiceNote: async () => options.serviceNotesWritable !== false,
     onMessagePosted: (workspaceId) => postedWorkspaces.push(workspaceId),
     onRunUpdated: (workspaceId) => runUpdatedWorkspaces.push(workspaceId),
-    setRunAttribution: (workspaceId, run) => {
+    setRunAttribution: async (workspaceId, run) => {
       attributions.push({ workspaceId, run });
+      await options.setRunAttribution?.(workspaceId, run);
     },
     publishPresence: async (input) => {
       presence.push(input);
@@ -935,6 +940,55 @@ describe("chatDispatchService", () => {
       failureNotePosted: true,
     });
     expect(fixture.dispatch.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([notes[0]!.id]);
+  });
+
+  it("mutation proof: retains a finalized run until attribution teardown succeeds", async () => {
+    let clearAttempts = 0;
+    const teardownError = new Error("capture author clear failed");
+    const fixture = await createFixture({
+      setRunAttribution: (_workspaceId, run) => {
+        if (run === null && clearAttempts++ === 0) throw teardownError;
+      },
+    });
+    await createAgentThread(fixture, {
+      body: "Finish only after capture ownership clears.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.errors).toContain(teardownError);
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
+
+    // The retained finalized run's duplicate exit notification retries only
+    // the teardown path; no second runner is spawned.
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false);
+    expect(fixture.spawnCalls).toHaveLength(1);
+  });
+
+  it("retains a pre-spawn reservation when attribution teardown fails", async () => {
+    const teardownError = new Error("pre-spawn author clear failed");
+    const contextError = new Error("thread context failed");
+    const fixture = await createFixture({
+      setRunAttribution: (_workspaceId, run) => {
+        if (run === null) throw teardownError;
+      },
+    });
+    await createAgentThread(fixture, {
+      body: "Fail while preparing this run.",
+      authorUserId: "user_local",
+    });
+    vi.spyOn(fixture.chat, "listMessages").mockRejectedValueOnce(contextError);
+
+    await expect(activate(fixture)).rejects.toBe(teardownError);
+
+    expect(fixture.errors).toContain(contextError);
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
+    expect(fixture.spawnCalls).toHaveLength(0);
   });
 
   it("finalizes a failed run and dispatches the next claim when its failure note throws", async () => {

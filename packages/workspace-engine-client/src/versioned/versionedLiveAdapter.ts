@@ -63,6 +63,9 @@ export interface VersionedLiveAdapterOptions {
 
 const LIST_TEXT_FILE_HYDRATION_CONCURRENCY = 8;
 const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
+// JSON byte arrays are collections, so the negotiated collection bound is
+// stricter than the content-size bound used by base64/blob transports.
+const INBAND_BINARY_COLLECTION_CAP_BYTES = 16_384;
 
 async function mapWithConcurrency<T, R>(
   values: readonly T[],
@@ -274,7 +277,7 @@ export class VersionedLiveAdapter {
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
     const requestId = randomUUID();
-    if (input.bytes.byteLength > INBAND_CONTENT_CAP_BYTES) {
+    if (input.bytes.byteLength > INBAND_BINARY_COLLECTION_CAP_BYTES) {
       const sha256 = createHash("sha256").update(input.bytes).digest("hex");
       return this.request(
         VERSIONED_METHOD.binaryWriteBlob,

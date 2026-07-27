@@ -807,6 +807,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: origin,
     };
     const moment = this.makeMoment(version, toPath, momentId, "rename", after, before, now);
+    moment.beforePath = fromPath;
     const internal = {
       wire: moment,
       before: copyFile(before),
@@ -1229,6 +1230,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       } else {
         const result: JsonObject = {
           status: "conflict",
+          conflictId,
           comparison,
           deduped: false,
           materializeEnqueued: false,

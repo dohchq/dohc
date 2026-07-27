@@ -194,6 +194,24 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     )
     .await;
 
+    // Capture accepts text through 128 KiB, and the text-read endpoint passes
+    // that same cap to the one-query hydrator. The unrelated 48 KiB
+    // binary/history cap must not truncate this captured body.
+    id += 1;
+    let large_text = call(
+        &transport,
+        &handle,
+        id,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "notes/big.md" }),
+    )
+    .await;
+    assert_eq!(
+        large_text["text"].as_str().map(str::len),
+        Some(64 * 1024),
+        "captured text between 48 KiB and 128 KiB must hydrate"
+    );
+
     // The listing pages by path with a keyset cursor — metadata only, so
     // no page can outgrow the wire frame.
     id += 1;

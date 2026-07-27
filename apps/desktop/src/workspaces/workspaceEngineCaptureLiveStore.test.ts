@@ -157,7 +157,33 @@ describe("createCaptureLiveStores", () => {
     await store.setCaptureAuthor?.(author);
     await store.flushCapture?.();
 
-    expect(captureAuthorsSeen).toEqual([author, author]);
+    expect(captureAuthorsSeen).toEqual([null, author]);
+  });
+
+  it("mutation proof: does not remember capture authorship rejected by the daemon", async () => {
+    const captureAuthorsSeen: Array<AgentAuthor | null> = [];
+    const author = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "rejected-run",
+    };
+    const client = clientFor(async (request) => {
+      if (request.method === WORKSPACE_METHOD.captureSetAuthor) throw SENTINEL;
+      return {
+        id: request.id,
+        result: { settled: true, running: true, degraded: false },
+      };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client, [], captureAuthorsSeen),
+    );
+
+    await expect(store.setCaptureAuthor?.(author)).rejects.toBe(SENTINEL);
+    await store.flushCapture?.();
+
+    expect(captureAuthorsSeen).toEqual([null, null]);
   });
 
   it("mutation proof: rejects an unsettled daemon capture flush", async () => {
@@ -457,6 +483,82 @@ describe("createCaptureLiveStores", () => {
       }),
       status: "incoming-changed",
     });
+  });
+
+  it("mutation proof: returns the conflict id created by this merge", async () => {
+    const older = conflict();
+    const created = { ...conflict(), id: "created-conflict", createdAtMs: 9 };
+    const client = clientFor(async (request) => {
+      if (request.method === VERSIONED_METHOD.textRead) {
+        return { id: request.id, result: snapshot };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge) {
+        return {
+          id: request.id,
+          result: {
+            status: "conflict",
+            conflictId: created.id,
+            deduped: false,
+            comparison: {
+              workspaceId: WORKSPACE_ID,
+              path: "note.md",
+              targetVersionId: "main",
+              sourceVersionId: "draft",
+              base: snapshot,
+              current: snapshot,
+              incoming: { ...snapshot, versionId: "draft", text: "incoming" },
+              status: "diverged",
+            },
+            materializeEnqueued: false,
+            materialized: false,
+            materializeOutcome: "skipped",
+          },
+        };
+      }
+      expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
+      return { id: request.id, result: [older, created] };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const result = await store.mergeTextFileFromVersion({
+      workspaceId: WORKSPACE_ID,
+      targetVersionId: "main",
+      sourceVersionId: "draft",
+      path: "note.md",
+      metadata: { origin: "api" },
+    });
+
+    expect(result).toMatchObject({
+      kind: "conflict",
+      conflict: { id: "created-conflict" },
+    });
+  });
+
+  it("mutation proof: preserves a rename moment's source path", async () => {
+    const client = clientFor(async (request) => ({
+      id: request.id,
+      result: {
+        ...moment,
+        operation: "rename",
+        path: "renamed.md",
+        beforePath: "note.md",
+      },
+    }));
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const detail = await store.getMoment({
+      workspaceId: WORKSPACE_ID,
+      momentId: moment.momentId,
+    });
+
+    expect(detail?.payload.before?.path).toBe("note.md");
+    expect(detail?.payload.after.path).toBe("renamed.md");
   });
 
   it("rejects a truncated text moment instead of fabricating empty content", async () => {

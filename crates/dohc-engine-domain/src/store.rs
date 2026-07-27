@@ -274,6 +274,9 @@ impl<'a> VersionedTextStore<'a> {
         }
 
         let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
+        let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+        let (correlation_kind, correlation_id) =
+            hash_optional_text_fields(input.metadata_correlation_id.as_deref());
         let payload_hash = hash_fields(&[
             input.workspace_id.as_bytes(),
             input.version_id.as_bytes(),
@@ -281,12 +284,10 @@ impl<'a> VersionedTextStore<'a> {
             input.to_path.as_bytes(),
             input.moment_id.as_bytes(),
             input.metadata_origin.as_bytes(),
-            input.metadata_summary.as_deref().unwrap_or("").as_bytes(),
-            input
-                .metadata_correlation_id
-                .as_deref()
-                .unwrap_or("")
-                .as_bytes(),
+            summary_kind,
+            summary,
+            correlation_kind,
+            correlation_id,
             author_kind,
             author_json,
         ]);
@@ -1235,7 +1236,8 @@ impl<'a> VersionedTextStore<'a> {
                  COALESCE(after_content_kind, 'text'), after_binary.sha256, \
                  COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
              COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)) \
+             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)), \
+             m.payload_before_path \
                  FROM moments m \
                  LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
                  LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
@@ -2495,6 +2497,9 @@ fn write_text_in_tx_with_journal(
 
     let blob = text_blob_sha256(&input.text);
     let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
+    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+    let (correlation_kind, correlation_id) =
+        hash_optional_text_fields(input.metadata_correlation_id.as_deref());
     let payload_hash = hash_fields(&[
         input.version_id.as_bytes(),
         input.path.as_bytes(),
@@ -2502,12 +2507,10 @@ fn write_text_in_tx_with_journal(
         input.moment_id.as_bytes(),
         input.object_id.as_bytes(),
         input.metadata_origin.as_bytes(),
-        input.metadata_summary.as_deref().unwrap_or("").as_bytes(),
-        input
-            .metadata_correlation_id
-            .as_deref()
-            .unwrap_or("")
-            .as_bytes(),
+        summary_kind,
+        summary,
+        correlation_kind,
+        correlation_id,
         author_kind,
         author_json,
     ]);
@@ -2730,6 +2733,9 @@ pub fn write_binary_in_tx(
     }
     let sha256 = dohc_engine_storage::hex_sha256(&input.bytes);
     let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
+    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+    let (correlation_kind, correlation_id) =
+        hash_optional_text_fields(input.metadata_correlation_id.as_deref());
     let payload_hash = hash_fields(&[
         b"versioned-binary-write",
         input.workspace_id.as_bytes(),
@@ -2739,12 +2745,10 @@ pub fn write_binary_in_tx(
         input.moment_id.as_bytes(),
         input.object_id.as_bytes(),
         input.metadata_origin.as_bytes(),
-        input.metadata_summary.as_deref().unwrap_or("").as_bytes(),
-        input
-            .metadata_correlation_id
-            .as_deref()
-            .unwrap_or("")
-            .as_bytes(),
+        summary_kind,
+        summary,
+        correlation_kind,
+        correlation_id,
         author_kind,
         author_json,
     ]);
@@ -3190,18 +3194,19 @@ pub fn delete_text_in_tx(
     let input = &normalized_input;
     let ws = &input.workspace_id;
     let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
+    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+    let (correlation_kind, correlation_id) =
+        hash_optional_text_fields(input.metadata_correlation_id.as_deref());
     let payload_hash = hash_fields(&[
         input.workspace_id.as_bytes(),
         input.version_id.as_bytes(),
         input.path.as_bytes(),
         input.moment_id.as_bytes(),
         input.metadata_origin.as_bytes(),
-        input.metadata_summary.as_deref().unwrap_or("").as_bytes(),
-        input
-            .metadata_correlation_id
-            .as_deref()
-            .unwrap_or("")
-            .as_bytes(),
+        summary_kind,
+        summary,
+        correlation_kind,
+        correlation_id,
         author_kind,
         author_json,
     ]);
@@ -3985,7 +3990,8 @@ fn select_moment_by_order(
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
              COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
              COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)) \
+             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)), \
+             m.payload_before_path \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
              LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
@@ -4591,7 +4597,8 @@ pub(crate) fn get_moment(
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
              COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
              COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)) \
+             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)), \
+             m.payload_before_path \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
              LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
@@ -4775,6 +4782,7 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let before_byte_length: Option<i64> = row.get(23)?;
     let after_actual_length: Option<i64> = row.get(24)?;
     let before_actual_length: Option<i64> = row.get(25)?;
+    let before_path: Option<String> = row.get(26)?;
     // Recorded and ACTUAL lengths must agree per side — a corrupted
     // recorded length (lying small or large) fails closed for text and
     // binary alike, matching the in-band reads.
@@ -4868,6 +4876,7 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
             after_byte_length,
             before_text,
             before_byte_length,
+            before_path,
         })
     }))
 }
@@ -4958,6 +4967,13 @@ pub(crate) fn hash_fields(fields: &[&[u8]]) -> String {
 fn hash_author_fields(author_json: Option<&str>) -> (&'static [u8], &[u8]) {
     match author_json {
         Some(author_json) => (b"some", author_json.as_bytes()),
+        None => (b"none", b""),
+    }
+}
+
+fn hash_optional_text_fields(value: Option<&str>) -> (&'static [u8], &[u8]) {
+    match value {
+        Some(value) => (b"some", value.as_bytes()),
         None => (b"none", b""),
     }
 }

@@ -263,6 +263,9 @@ pub struct MomentRecord {
     pub after_byte_length: Option<i64>,
     pub before_text: Option<String>,
     pub before_byte_length: Option<i64>,
+    /// Version-local path of the concrete preimage. Rename moments differ
+    /// from `path`, which is the destination alias.
+    pub before_path: Option<String>,
 }
 
 /// A keyset page of moments (newest first). Mirrors the inventory contract for

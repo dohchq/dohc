@@ -70,6 +70,7 @@ import {
 } from "./workspaceEngineCaptureLiveStore";
 
 export const WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD = 3;
+export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
 // The JSON-RPC protocol version this desktop build speaks. A stale/incompatible
 // kernel binary that answers handshake with a different version (or that does
@@ -961,6 +962,7 @@ export function createWorkspaceEngineCapture(
   let secretStore: SecretFileStore | null = options.secretStore ?? null;
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
+  let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
 
   // THE AUTHORITATIVE live-session registry (WS-G2-C-2 gate fix). One entry per
   // path with a LIVE engine Y.Doc session; the single-canonical reservation
@@ -1141,8 +1143,15 @@ export function createWorkspaceEngineCapture(
     if (initialOpening) {
       initialOpening.installed = true;
       openingRemoteUpdates.delete(current);
+      for (const update of initialOpening.updates) {
+        input.onRemoteUpdate(update);
+      }
     }
-    const initialUpdate = current.initialUpdate;
+    // A daemon update can arrive after the provider has encoded its initial
+    // state but before this generation is installed. The provider has already
+    // applied it to `doc`; encode the installed canonical state so the
+    // renderer cannot initialize from the stale pre-update snapshot.
+    const initialUpdate = Y.encodeStateAsUpdate(canonicalDoc);
     const contentKind = current.contentKind;
     const sessionPath = current.path;
 
@@ -1942,15 +1951,29 @@ export function createWorkspaceEngineCapture(
     }
   }
 
+  function pollDaemonCaptureHealth(): void {
+    if (stopped || daemonCaptureHealthTimer !== null) return;
+    enqueue("daemon capture health", () =>
+      reportCaptureOutcome(async () => {
+        const engine = await engineStore();
+        const status = await engine.watcherStatus?.();
+        return status === undefined
+          ? true
+          : status.running && !status.degraded && !status.terminal;
+      }),
+    );
+    const timer = setTimeout(() => {
+      if (daemonCaptureHealthTimer === timer) daemonCaptureHealthTimer = null;
+      pollDaemonCaptureHealth();
+    }, DAEMON_CAPTURE_HEALTH_POLL_MS);
+    daemonCaptureHealthTimer = timer;
+    daemonCaptureHealthTimer.unref?.();
+  }
+
   return {
     start() {
       if (options.daemonOwnsCapture) {
-        enqueue("daemon capture startup", () =>
-          reportCaptureOutcome(async () => {
-            await engineStore();
-            return true;
-          }),
-        );
+        pollDaemonCaptureHealth();
         return;
       }
       enqueue("startup reconciliation", () =>
@@ -2208,8 +2231,13 @@ export function createWorkspaceEngineCapture(
           "Saved latest edits before switching versions",
         );
         if (options.daemonOwnsCapture) {
-          const before = await listTextFileMetadata(engine, fromVersionId);
-          const after = await listTextFileMetadata(engine, versionId);
+          const [before, after, secretOperations] = await Promise.all([
+            listTextFileMetadata(engine, fromVersionId),
+            listTextFileMetadata(engine, versionId),
+            // The daemon performs the actual materialization after setActive;
+            // this plan is used only to include protected paths in the result.
+            planSecretMaterialization(versionId, fromVersionId),
+          ]);
           const beforeByPath = new Map(
             before.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
           );
@@ -2217,7 +2245,7 @@ export function createWorkspaceEngineCapture(
             after.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
           );
           const changedPaths = new Set([...beforeByPath.keys(), ...afterByPath.keys()]);
-          let changedFileCount = 0;
+          let changedFileCount = secretOperations.length;
           for (const path of changedPaths) {
             if (beforeByPath.get(path) !== afterByPath.get(path)) changedFileCount += 1;
           }
@@ -3295,6 +3323,10 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only NEW work is refused.
       stopped = true;
+      if (daemonCaptureHealthTimer !== null) {
+        clearTimeout(daemonCaptureHealthTimer);
+        daemonCaptureHealthTimer = null;
+      }
       await chain;
       if (options.daemonOwnsCapture && store) {
         await store.flushCapture?.();

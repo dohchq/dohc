@@ -45,6 +45,11 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
   flushCapture?(): Promise<void>;
+  watcherStatus?(): Promise<{
+    running: boolean;
+    degraded: boolean;
+    terminal: boolean;
+  }>;
   setCaptureAuthor?(author: MomentAuthor | null): Promise<void>;
 };
 
@@ -158,7 +163,7 @@ function payloadSnapshot(
         : moment.afterBlobSha256;
   const byteLength = before ? moment.beforeByteLength : moment.afterByteLength;
   return {
-    path: moment.path,
+    path: before ? (moment.beforePath ?? moment.path) : moment.path,
     contentKind,
     ...(sha256 !== null ? { sha256 } : {}),
     ...(byteLength !== null ? { byteLength } : {}),
@@ -751,12 +756,7 @@ export function createCaptureLiveStores(
           workspaceId: input.workspaceId,
           status: "open",
         });
-        const conflict = conflicts.find(
-          (entry) =>
-            entry.path === input.path &&
-            entry.targetVersionId === input.targetVersionId &&
-            entry.sourceVersionId === input.sourceVersionId,
-        );
+        const conflict = conflicts.find((entry) => entry.id === raw.conflictId);
         if (!conflict) throw new Error(`Engine conflict for ${input.path} was not returned.`);
         return { kind: "conflict", comparison, conflict };
       }
@@ -894,12 +894,18 @@ export function createCaptureLiveStores(
       });
     },
 
+    async watcherStatus() {
+      return await runRead(async (adapter) => await adapter.watcherStatus());
+    },
+
     async setCaptureAuthor(author: MomentAuthor | null) {
       const desired = author === null ? null : adapterAuthor(author);
-      sessions.rememberCaptureAuthor(workspace.workspaceId, desired);
       await runMutation(async (adapter) => {
         await adapter.setCaptureAuthor(desired);
       });
+      // Reopen replay is a cache of daemon-accepted state, not caller intent.
+      // Remember only after the mutation succeeds.
+      sessions.rememberCaptureAuthor(workspace.workspaceId, desired);
     },
 
     close: async () => await sessions.closeWorkspace(workspace.workspaceId),

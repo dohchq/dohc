@@ -377,6 +377,29 @@ describe("VersionedLiveAdapter", () => {
     expect(requests[0]?.params).not.toHaveProperty("bytesBase64");
   });
 
+  it("mutation proof: routes a 16,385-byte binary around the wire collection limit", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
+
+    await expect(
+      adapter.writeBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "collection-limit.bin",
+        bytes: new Uint8Array(16_385).fill(3),
+        metadata: { origin: "api" },
+      }),
+    ).rejects.toBe(SENTINEL);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe(VERSIONED_METHOD.binaryWriteBlob);
+    expect(requests[0]?.params).not.toHaveProperty("bytes");
+  });
+
   it("uses the full-range blob endpoint for a new over-cap binary", async () => {
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
