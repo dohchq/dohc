@@ -6,6 +6,7 @@ import {
 } from "@dohc/workspace-core";
 import {
   CHATS_METHOD,
+  VersionedLiveAdapter,
   WORKSPACE_METHOD,
   decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
@@ -1749,6 +1750,11 @@ function agentDispatchStoreHandleFor(workspace: {
 // search-as-you-type must not pay a fresh SQLite open (and its quick_check)
 // per keystroke. Closed beside the chat stores at quit.
 const engineSearchStores = new Map<string, VersionedTextStore>();
+// R16: the LAST remaining consumer of the legacy TypeScript versioned-text
+// store in main.ts. It survives only because searchWorkspaceEngine takes the
+// store itself; that call swaps to the daemon's search.query RPC in its own
+// step, and this helper dies with it. Every other reader below now goes
+// through engineSearchIndexFor.
 function engineSearchStoreFor(workspace: {
   workspaceId: string;
   rootPath: string;
@@ -1760,6 +1766,47 @@ function engineSearchStoreFor(workspace: {
   return store;
 }
 
+// The object-id <-> path index the search surfaces need, read through the
+// DAEMON rather than a second sqlite connection.
+//
+// This used to call createVersionedTextStore(rootPath), which opened another
+// node:sqlite connection to the engine.db the daemon owns -- exactly what
+// workspaceEngineCapture.ts warns about ("a second createVersionedTextStore on
+// the same engine.db would be a second write connection and node:sqlite
+// deadlocks"). It also hydrated every file's CONTENT via listTextFiles just to
+// read two string fields off each row.
+//
+// listTextFileMetadata is the right call: it pages (limit 500 + afterPath) so
+// a workspace past one page is no longer silently truncated, and it never
+// hydrates file bodies.
+async function engineSearchIndexFor(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}): Promise<{ versionId: string; files: { objectId: string; path: string }[] } | null> {
+  const sessions = rustEngineWorkspaceSessions;
+  if (!sessions) return null;
+  return await sessions.run(
+    { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+    async (binding) => {
+      const adapter = new VersionedLiveAdapter(binding.client, binding.workspace, {
+        workspaceId: workspace.workspaceId,
+      });
+      const active = await adapter.getActiveVersion({
+        workspaceId: workspace.workspaceId,
+      });
+      if (!active) return null;
+      const files = await adapter.listTextFileMetadata({
+        workspaceId: workspace.workspaceId,
+        versionId: active.id,
+      });
+      return {
+        versionId: active.id,
+        files: files.map((file) => ({ objectId: file.objectId, path: file.path })),
+      };
+    },
+  );
+}
+
 async function activeEngineFileIndex(workspace: {
   workspaceId: string;
   rootPath: string;
@@ -1767,18 +1814,13 @@ async function activeEngineFileIndex(workspace: {
   pathByObjectId: Map<string, string>;
   objectIdByPath: Map<string, string>;
 }> {
-  const texts = engineSearchStoreFor(workspace);
-  const active = await texts.getActiveVersion({ workspaceId: workspace.workspaceId });
-  if (!active) {
+  const index = await engineSearchIndexFor(workspace);
+  if (!index) {
     return { pathByObjectId: new Map(), objectIdByPath: new Map() };
   }
-  const files = await texts.listTextFiles({
-    workspaceId: workspace.workspaceId,
-    versionId: active.id,
-  });
   return {
-    pathByObjectId: new Map(files.map((file) => [file.objectId, file.path])),
-    objectIdByPath: new Map(files.map((file) => [file.path, file.objectId])),
+    pathByObjectId: new Map(index.files.map((file) => [file.objectId, file.path])),
+    objectIdByPath: new Map(index.files.map((file) => [file.path, file.objectId])),
   };
 }
 
@@ -5742,16 +5784,11 @@ function registerIpcHandlers(
     let pathByObjectId = new Map<string, string>();
     if (fileThreads.length > 0) {
       try {
-        const texts = engineSearchStoreFor(workspace);
-        const active = await texts.getActiveVersion({
-          workspaceId: workspace.workspaceId,
-        });
-        if (active) {
-          const files = await texts.listTextFiles({
-            workspaceId: workspace.workspaceId,
-            versionId: active.id,
-          });
-          pathByObjectId = new Map(files.map((file) => [file.objectId, file.path]));
+        const index = await engineSearchIndexFor(workspace);
+        if (index) {
+          pathByObjectId = new Map(
+            index.files.map((file) => [file.objectId, file.path]),
+          );
         }
       } catch {
         // Path resolution is display-only; the hint fallback keeps the
