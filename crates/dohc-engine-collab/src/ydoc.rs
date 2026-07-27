@@ -1110,7 +1110,7 @@ enum MarkdownNode {
     Fragment(Vec<MarkdownNode>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TextRun {
     text: String,
     marks: Vec<MarkdownMark>,
@@ -1572,17 +1572,85 @@ fn render_code_block(
     children: &[MarkdownNode],
 ) -> ProjectionResult<String> {
     let language = attr_js_string(attrs, "language");
+    let content = markdown_text_content(children)?;
+    let fence = backtick_fence(&content, 3)?;
     let mut output = ProjectionBuffer::new();
-    output.push_str("```")?;
+    output.push_str(&fence)?;
     output.push_str(&language)?;
-    // Match TS: fixed triple-backtick fences can collide with code content.
     if children.is_empty() {
-        output.push_str("\n\n```")?;
+        output.push_str("\n\n")?;
+        output.push_str(&fence)?;
     } else {
         output.push('\n')?;
-        output.push_str(&render_inline(children, true)?)?;
-        output.push_str("\n```")?;
+        output.push_str(&content)?;
+        output.push('\n')?;
+        output.push_str(&fence)?;
     }
+    Ok(output.into_string())
+}
+
+fn markdown_text_content(nodes: &[MarkdownNode]) -> ProjectionResult<String> {
+    fn append(nodes: &[MarkdownNode], output: &mut ProjectionBuffer) -> ProjectionResult<()> {
+        for node in nodes {
+            match node {
+                MarkdownNode::Text(runs) => {
+                    for run in runs {
+                        output.push_str(&run.text)?;
+                    }
+                }
+                MarkdownNode::Element { children, .. } | MarkdownNode::Fragment(children) => {
+                    append(children, output)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut output = ProjectionBuffer::new();
+    append(nodes, &mut output)?;
+    Ok(output.into_string())
+}
+
+fn backtick_fence(value: &str, minimum: usize) -> ProjectionResult<String> {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for character in value.chars() {
+        if character == '`' {
+            current = current.saturating_add(1);
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    let length = minimum.max(longest.saturating_add(1));
+    let mut fence = ProjectionBuffer::with_capacity(length)?;
+    fence.push_repeat('`', length)?;
+    Ok(fence.into_string())
+}
+
+fn render_inline_code(value: &str) -> ProjectionResult<String> {
+    let fence = backtick_fence(value, 1)?;
+    let has_edge_backtick = value.starts_with('`') || value.ends_with('`');
+    let has_edge_space = value.starts_with(' ') || value.ends_with(' ');
+    let only_spaces = value.chars().all(|character| character == ' ');
+    let padding = has_edge_backtick || (has_edge_space && !only_spaces);
+    let padding_bytes = usize::from(padding) * 2;
+    let capacity = fence
+        .len()
+        .checked_mul(2)
+        .and_then(|length| length.checked_add(value.len()))
+        .and_then(|length| length.checked_add(padding_bytes))
+        .ok_or_else(|| projection_too_large(usize::MAX))?;
+    let mut output = ProjectionBuffer::with_capacity(capacity)?;
+    output.push_str(&fence)?;
+    if padding {
+        output.push(' ')?;
+    }
+    output.push_str(value)?;
+    if padding {
+        output.push(' ')?;
+    }
+    output.push_str(&fence)?;
     Ok(output.into_string())
 }
 
@@ -1782,9 +1850,10 @@ enum TableAlign {
 
 struct TableCell {
     text: String,
-    header: bool,
     align: Option<TableAlign>,
 }
+
+const GFM_TABLE_CELL_BLOCK_SEPARATOR: &str = "<br>";
 
 fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
     let mut rows = Vec::new();
@@ -1817,28 +1886,15 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
             let mut raw = ProjectionBuffer::new();
             for (index, child) in children.iter().enumerate() {
                 if index != 0 {
-                    // Match the TS @tiptap/extension-table limitation: its
-                    // multi-block cell separator U+001F survives whitespace
-                    // collapse and reaches yDocToMarkdown output.
-                    raw.push('\u{001f}')?;
+                    raw.push_str(GFM_TABLE_CELL_BLOCK_SEPARATOR)?;
                 }
-                let rendered = render_node(
-                    child,
-                    RenderContext {
-                        parent_tag: tag,
-                        parent_attrs: attrs,
-                        previous: index.checked_sub(1).map(|previous| &children[previous]),
-                        index,
-                    },
-                )?;
+                let rendered = render_table_cell_block(child, tag, attrs, children, index)?;
                 raw.push_str(&rendered)?;
             }
-            let text = collapse_js_whitespace(&raw.into_string())?;
+            let text = prepare_rendered_table_cell(&collapse_js_whitespace(&raw.into_string())?)?;
             cell_text_bytes = checked_projection_len(cell_text_bytes, text.len())?;
             rendered_cells.push(TableCell {
-                // Match TS: literal pipes are emitted unescaped in table cells.
                 text,
-                header: tag == "tableHeader",
                 align: match attrs.get("align").and_then(Value::as_str) {
                     Some("left") => Some(TableAlign::Left),
                     Some("right") => Some(TableAlign::Right),
@@ -1866,7 +1922,6 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
         }
     }
     let header_row = &rows[0];
-    let has_header = header_row.iter().any(|cell| cell.header);
     let mut alignments = vec![None; column_count];
     for row in &rows {
         for (index, cell) in row.iter().enumerate() {
@@ -1881,15 +1936,10 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
         if index != 0 {
             output.push_str(" | ")?;
         }
-        let value = if has_header {
-            header_row
-                .get(index)
-                .map(|cell| cell.text.as_str())
-                .unwrap_or("")
-        } else {
-            // Match TS: headerless tables gain a blank synthetic header.
-            ""
-        };
+        let value = header_row
+            .get(index)
+            .map(|cell| cell.text.as_str())
+            .unwrap_or("");
         pad_utf16_into(&mut output, value, *width)?;
     }
     output.push_str(" |\n| ")?;
@@ -1908,8 +1958,7 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
         }
     }
     output.push_str(" |\n")?;
-    let body = if has_header { &rows[1..] } else { &rows[..] };
-    for row in body {
+    for row in &rows[1..] {
         output.push_str("| ")?;
         for (index, width) in widths.iter().enumerate() {
             if index != 0 {
@@ -1919,6 +1968,60 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
             pad_utf16_into(&mut output, value, *width)?;
         }
         output.push_str(" |\n")?;
+    }
+    Ok(output.into_string())
+}
+
+fn render_table_cell_block(
+    child: &MarkdownNode,
+    parent_tag: &str,
+    parent_attrs: &BTreeMap<String, Value>,
+    siblings: &[MarkdownNode],
+    index: usize,
+) -> ProjectionResult<String> {
+    if let MarkdownNode::Element { tag, children, .. } = child {
+        if tag == "codeBlock" {
+            let content = markdown_text_content(children)?;
+            let mut output = ProjectionBuffer::new();
+            for (line_index, line) in content.split('\n').enumerate() {
+                if line_index != 0 {
+                    output.push_str(GFM_TABLE_CELL_BLOCK_SEPARATOR)?;
+                }
+                if !line.is_empty() {
+                    output.push_str(&render_inline_code(line)?)?;
+                }
+            }
+            return Ok(output.into_string());
+        }
+    }
+
+    render_node(
+        child,
+        RenderContext {
+            parent_tag,
+            parent_attrs,
+            previous: index.checked_sub(1).map(|previous| &siblings[previous]),
+            index,
+        },
+    )
+}
+
+fn prepare_rendered_table_cell(markdown: &str) -> ProjectionResult<String> {
+    let normalized = markdown
+        .replace("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
+        .replace("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR);
+    let mut output = ProjectionBuffer::new();
+    let mut preceding_backslashes = 0usize;
+    for character in normalized.chars() {
+        if character == '|' && preceding_backslashes % 2 == 0 {
+            output.push('\\')?;
+        }
+        output.push(character)?;
+        preceding_backslashes = if character == '\\' {
+            preceding_backslashes.saturating_add(1)
+        } else {
+            0
+        };
     }
     Ok(output.into_string())
 }
@@ -1954,25 +2057,78 @@ fn collapse_js_whitespace(value: &str) -> ProjectionResult<String> {
 }
 
 fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> ProjectionResult<String> {
-    enum InlinePart<'a> {
+    enum SourceInlinePart<'a> {
         Text(&'a TextRun),
         Node(&'a MarkdownNode),
     }
 
-    fn flatten<'a>(nodes: &'a [MarkdownNode], parts: &mut Vec<InlinePart<'a>>) {
+    enum InlinePart<'a> {
+        Text {
+            run: TextRun,
+            literal_markdown: bool,
+        },
+        Node(&'a MarkdownNode),
+    }
+
+    fn flatten<'a>(nodes: &'a [MarkdownNode], parts: &mut Vec<SourceInlinePart<'a>>) {
         for node in nodes {
             match node {
                 MarkdownNode::Text(runs) => {
-                    parts.extend(runs.iter().map(InlinePart::Text));
+                    parts.extend(runs.iter().map(SourceInlinePart::Text));
                 }
                 MarkdownNode::Fragment(children) => flatten(children, parts),
-                MarkdownNode::Element { .. } => parts.push(InlinePart::Node(node)),
+                MarkdownNode::Element { .. } => parts.push(SourceInlinePart::Node(node)),
             }
         }
     }
 
-    let mut parts = Vec::new();
-    flatten(nodes, &mut parts);
+    let mut source_parts = Vec::new();
+    flatten(nodes, &mut source_parts);
+    let mut parts = Vec::with_capacity(source_parts.len());
+    let mut source_index = 0usize;
+    while source_index < source_parts.len() {
+        let SourceInlinePart::Text(run) = source_parts[source_index] else {
+            let SourceInlinePart::Node(node) = source_parts[source_index] else {
+                unreachable!();
+            };
+            parts.push(InlinePart::Node(node));
+            source_index += 1;
+            continue;
+        };
+        let Some(code_mark) = active_mark(&run.marks, MarkKind::Code) else {
+            parts.push(InlinePart::Text {
+                run: run.clone(),
+                literal_markdown: false,
+            });
+            source_index += 1;
+            continue;
+        };
+
+        let mut value = ProjectionBuffer::new();
+        let mut end = source_index;
+        while let Some(SourceInlinePart::Text(candidate)) = source_parts.get(end) {
+            if active_mark(&candidate.marks, MarkKind::Code)
+                .is_none_or(|candidate_code| candidate_code.attrs != code_mark.attrs)
+            {
+                break;
+            }
+            if has_mark(&candidate.marks, MarkKind::Highlight) {
+                value.push_str(&escape_highlight_equals(&candidate.text)?)?;
+            } else {
+                value.push_str(&candidate.text)?;
+            }
+            end += 1;
+        }
+        let mut prepared = run.clone();
+        prepared.text = render_inline_code(&value.into_string())?;
+        prepared.marks.retain(|mark| mark.kind != MarkKind::Code);
+        parts.push(InlinePart::Text {
+            run: prepared,
+            literal_markdown: true,
+        });
+        source_index = end;
+    }
+
     let mut output = ProjectionBuffer::new();
     let mut active: Vec<MarkdownMark> = Vec::new();
     let mut modes: BTreeMap<MarkKind, OpeningMode> = BTreeMap::new();
@@ -1980,7 +2136,7 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> ProjectionResult
 
     for (index, part) in parts.iter().enumerate() {
         let next_marks = parts.get(index + 1).and_then(|next| match next {
-            InlinePart::Text(run) => Some(run.marks.as_slice()),
+            InlinePart::Text { run, .. } => Some(run.marks.as_slice()),
             InlinePart::Node(_) => None,
         });
         match part {
@@ -2009,15 +2165,18 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> ProjectionResult
                 output.push_str(&before)?;
                 output.push_str(&rendered)?;
             }
-            InlinePart::Text(run) => {
+            InlinePart::Text {
+                run,
+                literal_markdown,
+            } => {
                 if run.text.len() > MAX_PROJECTION_BYTES {
                     return Err(projection_too_large(run.text.len()));
                 }
                 let mut text = run.text.clone();
-                if has_mark(&run.marks, MarkKind::Highlight) {
+                if !literal_markdown && has_mark(&run.marks, MarkKind::Highlight) {
                     text = escape_highlight_equals(&text)?;
                 }
-                if !code_context && !has_mark(&run.marks, MarkKind::Code) {
+                if !literal_markdown && !code_context && !has_mark(&run.marks, MarkKind::Code) {
                     text = encode_html_entities(&text)?;
                 }
                 let current = &run.marks;
@@ -2205,8 +2364,7 @@ fn mark_opening(mark: &MarkdownMark, mode: OpeningMode) -> String {
         MarkKind::Link => "[".to_string(),
         MarkKind::Highlight => "==".to_string(),
         MarkKind::Bold => "**".to_string(),
-        // Match TS: inline code always uses a single backtick delimiter.
-        MarkKind::Code => "`".to_string(),
+        MarkKind::Code => unreachable!("inline code marks are rendered before mark serialization"),
         MarkKind::Italic => "*".to_string(),
         MarkKind::Strike => "~~".to_string(),
         MarkKind::Underline => "++".to_string(),
@@ -2243,8 +2401,7 @@ fn mark_closing(mark: &MarkdownMark, mode: OpeningMode) -> String {
         }
         MarkKind::Highlight => "==".to_string(),
         MarkKind::Bold => "**".to_string(),
-        // Match TS: inline code always uses a single backtick delimiter.
-        MarkKind::Code => "`".to_string(),
+        MarkKind::Code => unreachable!("inline code marks are rendered before mark serialization"),
         MarkKind::Italic => "*".to_string(),
         MarkKind::Strike => "~~".to_string(),
         MarkKind::Underline => "++".to_string(),
@@ -2458,6 +2615,20 @@ mod projection_tests {
         remote
     }
 
+    fn text_run(value: &str, marks: Vec<MarkdownMark>) -> MarkdownNode {
+        MarkdownNode::Text(vec![TextRun {
+            text: value.to_string(),
+            marks,
+        }])
+    }
+
+    fn code_mark() -> MarkdownMark {
+        MarkdownMark {
+            kind: MarkKind::Code,
+            attrs: Value::Object(serde_json::Map::new()),
+        }
+    }
+
     #[test]
     fn unknown_xml_elements_preserve_descendant_text() {
         let nodes = vec![MarkdownNode::Element {
@@ -2472,6 +2643,134 @@ mod projection_tests {
         assert_eq!(
             markdown_document(&nodes).expect("small projection"),
             "content survives"
+        );
+    }
+
+    #[test]
+    fn code_block_uses_collision_free_backtick_fence() {
+        let nodes = vec![MarkdownNode::Element {
+            tag: "codeBlock".to_string(),
+            attrs: BTreeMap::from([("language".to_string(), Value::String("js".to_string()))]),
+            children: vec![text_run("before\n```\nafter", Vec::new())],
+        }];
+
+        assert_eq!(
+            markdown_document(&nodes).expect("small projection"),
+            "````js\nbefore\n```\nafter\n````"
+        );
+    }
+
+    #[test]
+    fn inline_code_uses_collision_free_commonmark_delimiters() {
+        let nodes = vec![MarkdownNode::Element {
+            tag: "paragraph".to_string(),
+            attrs: BTreeMap::new(),
+            children: vec![
+                text_run("a`b", vec![code_mark()]),
+                text_run(" / ", Vec::new()),
+                text_run("`edge`", vec![code_mark()]),
+                text_run(" / ", Vec::new()),
+                text_run(" spaced ", vec![code_mark()]),
+                text_run(" / ", Vec::new()),
+                text_run("   ", vec![code_mark()]),
+            ],
+        }];
+
+        assert_eq!(
+            markdown_document(&nodes).expect("small projection"),
+            "``a`b`` / `` `edge` `` / `  spaced  ` / `   `"
+        );
+    }
+
+    #[test]
+    fn adjacent_inline_code_runs_with_same_mark_share_one_fence() {
+        let nodes = vec![MarkdownNode::Element {
+            tag: "paragraph".to_string(),
+            attrs: BTreeMap::new(),
+            children: vec![
+                text_run("a`", vec![code_mark()]),
+                text_run("b", vec![code_mark()]),
+            ],
+        }];
+
+        assert_eq!(
+            markdown_document(&nodes).expect("small projection"),
+            "``a`b``"
+        );
+    }
+
+    #[test]
+    fn table_pipe_escaping_respects_existing_backslashes_and_break_entities() {
+        assert_eq!(
+            prepare_rendered_table_cell(r"plain | odd \| even \\| &lt;br&gt; &amp;lt;br&amp;gt;")
+                .expect("small projection"),
+            r"plain \| odd \| even \\\| <br> <br>"
+        );
+    }
+
+    #[test]
+    fn table_literal_pipes_are_escaped_before_width_measurement() {
+        let doc = remote_doc_with_body([xml_element(
+            "table",
+            &[],
+            [
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [
+                        xml_element("tableHeader", &[], [paragraph("Value")]),
+                        xml_element("tableHeader", &[], [paragraph("Other")]),
+                    ],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [
+                        xml_element("tableCell", &[], [paragraph("left | right")]),
+                        xml_element("tableCell", &[], [paragraph("stable")]),
+                    ],
+                ),
+            ],
+        )]);
+
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .expect("small projection")
+                .markdown,
+            "\n| Value         | Other  |\n| ------------- | ------ |\n| left \\| right | stable |"
+        );
+    }
+
+    #[test]
+    fn headerless_table_promotes_first_row_to_header() {
+        let doc = remote_doc_with_body([xml_element(
+            "table",
+            &[],
+            [
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [
+                        xml_element("tableCell", &[], [paragraph("first")]),
+                        xml_element("tableCell", &[], [paragraph("row")]),
+                    ],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [
+                        xml_element("tableCell", &[], [paragraph("second")]),
+                        xml_element("tableCell", &[], [paragraph("row")]),
+                    ],
+                ),
+            ],
+        )]);
+
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .expect("small projection")
+                .markdown,
+            "\n| first  | row |\n| ------ | --- |\n| second | row |"
         );
     }
 
@@ -2549,7 +2848,7 @@ mod projection_tests {
     }
 
     #[test]
-    fn multi_block_remote_table_cell_matches_typescript_separator_leak() {
+    fn multi_block_remote_table_cell_uses_gfm_inline_break() {
         let doc = remote_doc_with_body([xml_element(
             "table",
             &[],
@@ -2581,7 +2880,44 @@ mod projection_tests {
             .markdown;
         assert_eq!(
             markdown,
-            "\n| H            |\n| ------------ |\n| first\u{001f}second |"
+            "\n| H               |\n| --------------- |\n| first<br>second |"
+        );
+    }
+
+    #[test]
+    fn multiline_code_block_in_table_cell_uses_inline_code_and_breaks() {
+        let doc = remote_doc_with_body([xml_element(
+            "table",
+            &[],
+            [
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element("tableHeader", &[], [paragraph("Code")])],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element(
+                        "tableCell",
+                        &[],
+                        [xml_element(
+                            "codeBlock",
+                            &[("language", "mermaid")],
+                            [xml_text("const fence = ```;\nleft | right <&>")],
+                        )],
+                    )],
+                ),
+            ],
+        )]);
+
+        let markdown = doc
+            .project(ContentKind::Richdoc)
+            .expect("small projection")
+            .markdown;
+        assert!(
+            markdown.contains("````const fence = ```;````<br>`left \\| right <&>`"),
+            "unexpected projection: {markdown}"
         );
     }
 

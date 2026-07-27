@@ -59,6 +59,7 @@
     "@dohc/cli": "workspace:*",
     "@dohc/mcp": "workspace:*",
     "@dohc/sdk": "workspace:*",
+    "@dohc/security-contract": "workspace:*",
     "@dohc/sqlite-worker": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",

@@ -1,0 +1,25 @@
+{
+ "seed": -112,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-headerless-table",
+ "updates": [
+  "ARvFq8aeCQAHAQRib2R5AwV0YWJsZQcAxavGngkAAwh0YWJsZVJvdwcAxavGngkBAwl0YWJsZUNlbGwHAMWrxp4JAgMJcGFyYWdyYXBoBwDFq8aeCQMGBADFq8aeCQQFZmlyc3QoAMWrxp4JAgdjb2xzcGFuAX0BKADFq8aeCQIHcm93c3BhbgF9AYfFq8aeCQIDCXRhYmxlQ2VsbAcAxavGngkMAwlwYXJhZ3JhcGgHAMWrxp4JDQYEAMWrxp4JDgNyb3coAMWrxp4JDAdjb2xzcGFuAX0BKADFq8aeCQwHcm93c3BhbgF9AYfFq8aeCQEDCHRhYmxlUm93BwDFq8aeCRQDCXRhYmxlQ2VsbAcAxavGngkVAwlwYXJhZ3JhcGgHAMWrxp4JFgYEAMWrxp4JFwZzZWNvbmQoAMWrxp4JFQdjb2xzcGFuAX0BKADFq8aeCRUHcm93c3BhbgF9AYfFq8aeCRUDCXRhYmxlQ2VsbAcAxavGngkgAwlwYXJhZ3JhcGgHAMWrxp4JIQYEAMWrxp4JIgNyb3coAMWrxp4JIAdjb2xzcGFuAX0BKADFq8aeCSAHcm93c3BhbgF9AQA=",
+  "AQHFq8aeCSgoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcQaGVhZGVybGVzcy10YWJsZQA="
+ ],
+ "mergedUpdateB64": "ARzFq8aeCQAHAQRib2R5AwV0YWJsZQcAxavGngkAAwh0YWJsZVJvdwcAxavGngkBAwl0YWJsZUNlbGwHAMWrxp4JAgMJcGFyYWdyYXBoBwDFq8aeCQMGBADFq8aeCQQFZmlyc3QoAMWrxp4JAgdjb2xzcGFuAX0BKADFq8aeCQIHcm93c3BhbgF9AYfFq8aeCQIDCXRhYmxlQ2VsbAcAxavGngkMAwlwYXJhZ3JhcGgHAMWrxp4JDQYEAMWrxp4JDgNyb3coAMWrxp4JDAdjb2xzcGFuAX0BKADFq8aeCQwHcm93c3BhbgF9AYfFq8aeCQEDCHRhYmxlUm93BwDFq8aeCRQDCXRhYmxlQ2VsbAcAxavGngkVAwlwYXJhZ3JhcGgHAMWrxp4JFgYEAMWrxp4JFwZzZWNvbmQoAMWrxp4JFQdjb2xzcGFuAX0BKADFq8aeCRUHcm93c3BhbgF9AYfFq8aeCRUDCXRhYmxlQ2VsbAcAxavGngkgAwlwYXJhZ3JhcGgHAMWrxp4JIQYEAMWrxp4JIgNyb3coAMWrxp4JIAdjb2xzcGFuAX0BKADFq8aeCSAHcm93c3BhbgF9ASgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxBoZWFkZXJsZXNzLXRhYmxlAA==",
+ "stateVectorB64": "AcWrxp4JKQ==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "table",
+   "tableCell",
+   "tableRow",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "\n| first  | row |\n| ------ | --- |\n| second | row |"
+ }
+}
