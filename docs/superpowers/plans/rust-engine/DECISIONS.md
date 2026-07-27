@@ -306,3 +306,33 @@ Also unresolved and blocking regardless of the above: no soak evidence JSON has
 ever been banked (the GitHub artifact quota was full on every run), so there is
 no macOS evidence artifact on file — only the Windows one.
 
+
+## RESOLVED (program, 2026-07-27) — a divergent second Y.Doc base is a HARD error, never acked
+
+Two reviewers on #245 asked for opposite things, so this is recorded rather than
+silently settled inside a fix round.
+
+- One asked that `CollabError::BaseStateDiverged` be mapped to `InvalidInput`,
+  grouping it with the payload-invalid variants so the envelope is journaled and
+  acked like any other bad payload.
+- The other pointed out that doing so acks a divergent second base, after which
+  that peer's later updates are permanently stuck in `MissingDependencies`.
+
+The tie-break is the engine's own documented invariant, in `claim_base_in_tx`
+(`crates/dohc-engine-collab/src/durable.rs`): *"Silently resuming (and acking) a
+DIFFERENT base would drop a divergent lineage while the relay cursor advances
+past it, leaving that peer's later updates missing an unrecoverable dependency."*
+
+A divergent base is not a malformed payload. It is evidence that two peers built
+on different lineages, which is local-state disagreement, and acking it advances
+the cursor past the only coordinate that could ever explain the divergence. The
+mapping is therefore `BaseStateDiverged => SyncError::CoordinateDiverged` — a
+hard error with no ack and no journal row, proven by
+`divergent_second_ydoc_base_is_hard_unacked_and_unjournaled`.
+
+**Consequence to be aware of:** a genuinely divergent peer now stalls loudly
+instead of silently dropping its lineage. That is the intended trade — a stall
+is recoverable and visible, an advanced cursor over a dropped lineage is
+neither. If you would rather take the silent-drop behaviour for liveness, say
+so and this flips; the program's judgement is that data-loss-by-ack is the worse
+failure during a cutover.

@@ -1,17 +1,19 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
-    DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
+    CollabError, DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
     apply_remote_update_in_transaction, maybe_compact,
 };
 use dohc_engine_domain::{
-    WriteText, enqueue_write, select_snapshot_by_path_in_tx, write_projected_text_in_tx,
+    ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
+    write_projected_text_in_tx,
 };
-use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, TxnOutcome};
+use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 
 use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
 
+use crate::error::local_corruption;
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
 #[derive(Deserialize)]
@@ -56,6 +58,12 @@ impl LeaseProbe for dohc_engine_collab::LeaseRegistry {
 pub struct YdocApplyResult {
     pub deferred: bool,
     pub reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct YdocDrainResult {
+    pub drained: usize,
+    pub refusals: Vec<crate::ReplicationRefusal>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -116,12 +124,13 @@ pub(crate) fn redelivered_materialization_changes(
 /// replication log keeps the payloads. Only those rows replay — never the
 /// whole history, which after compaction would re-append non-dedupable
 /// updates and cost O(history) per open. Each drained coordinate's marker
-/// row is removed after a successful apply/dedup.
+/// row is removed after a successful apply/dedup. Terminal payload refusals
+/// are returned as well as persisted so the triggering caller can report them.
 pub fn drain_deferred_ydoc_for_key(
     store: &mut EngineStore,
     key: &DocKey,
     faults: &dyn FaultInjector,
-) -> Result<usize, SyncError> {
+) -> Result<YdocDrainResult, SyncError> {
     let pending: Vec<(String, i64, i64, YdocUpdatePayload)> = store.read_with(|conn| {
         let mut stmt = conn
             .prepare(
@@ -153,32 +162,47 @@ pub fn drain_deferred_ydoc_for_key(
         for row in rows {
             let (origin_id, origin_seq, recorded_at_ms, payload_json) =
                 row.map_err(SyncError::corrupt)?;
-            let payload =
-                serde_json::from_str::<YdocUpdatePayload>(&payload_json).map_err(|_| {
-                    SyncError::InvalidInput {
-                        reason: "parked ydoc.update payload is malformed",
-                    }
-                })?;
+            let payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
+                .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
             pending.push((origin_id, origin_seq, recorded_at_ms, payload));
         }
         Ok::<_, SyncError>(pending)
     })?;
     if pending.is_empty() {
-        return Ok(0);
+        return Ok(YdocDrainResult::default());
     }
     let mut applied = 0usize;
+    let mut refusals = Vec::new();
     let mut last_payload: Option<YdocUpdatePayload> = None;
     let mut payload_recorded_at = 0_i64;
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     let mut last_coordinate: Option<(String, i64)> = None;
     for (origin_id, origin_seq, recorded_at_ms, payload) in pending {
+        let established_kind = dohc_engine_collab::read_marker(store, key)
+            .map_err(map_collab_hard_error)?
+            .map(|marker| marker.content_kind);
+        let content_kind_refusal = established_kind
+            .is_some_and(|kind| {
+                kind != dohc_engine_collab::ContentKind::parse(&payload.content_kind)
+            })
+            .then_some("ydoc.update content kind does not match the established lineage");
+        // Once the base arrives it establishes the authoritative path. A
+        // queued payload naming another path is still refused, but its valid
+        // CRDT bytes must enter the lineage first so descendants do not retain
+        // an impossible missing-client-clock dependency.
+        let identity_refusal =
+            match store.read_with(|conn| validate_ydoc_identity(conn, key, &payload.path)) {
+                Ok(_) => None,
+                Err(SyncError::InvalidInput { reason }) => Some(reason),
+                Err(hard) => return Err(hard),
+            };
         let bytes = store
             .get_binary_blob(&payload.update_blob_sha256)?
             .ok_or(SyncError::BlobInvalid)?;
         if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
             return Err(SyncError::BlobInvalid);
         }
-        match apply_remote_update(
+        let outcome = match apply_remote_update(
             store,
             key,
             &RemoteUpdate {
@@ -188,13 +212,36 @@ pub fn drain_deferred_ydoc_for_key(
             },
             faults,
             recorded_at_ms,
-        )
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "parked ydoc.update could not be applied",
-        })? {
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                match map_collab_payload_error(error, "parked ydoc.update could not be applied") {
+                    SyncError::InvalidInput { reason } => {
+                        refusals.push(refuse_deferred_ydoc(
+                            store, key, &origin_id, origin_seq, reason, faults,
+                        )?);
+                        continue;
+                    }
+                    hard => return Err(hard),
+                }
+            }
+        };
+        match outcome {
             TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. }) => applied += 1,
             TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+        }
+        if let Some(reason) = content_kind_refusal.or(identity_refusal) {
+            // The CRDT bytes landed even though the established path identity
+            // forbids projection. Count the coordinate as drained before its
+            // already-ACKed queue row is converted into a refusal: a live
+            // client's doc has not integrated these bytes, so settle must
+            // force a resync instead of materializing unseen remote content.
+            drained_coordinates.push((origin_id.clone(), origin_seq));
+            refusals.push(refuse_deferred_ydoc(
+                store, key, &origin_id, origin_seq, reason, faults,
+            )?);
+            continue;
         }
         // The payload tracks for DEDUPED rows too: a crash between an
         // earlier drain's apply and its marker delete redelivers the row as
@@ -217,9 +264,7 @@ pub fn drain_deferred_ydoc_for_key(
     };
     if let Some(payload) = last_payload
         && let Some(persisted) =
-            dohc_engine_collab::load_persisted(store, key).map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc lineage load failed",
-            })?
+            dohc_engine_collab::load_persisted(store, key).map_err(map_collab_hard_error)?
         && !persisted.doc.has_pending_dependencies()
     {
         let projected = store.write_with(faults, |tx| {
@@ -241,13 +286,11 @@ pub fn drain_deferred_ydoc_for_key(
         match projected {
             Ok(TxnOutcome::Committed(())) => {}
             Ok(TxnOutcome::Crashed { .. }) => return Err(SyncError::FaultCrash),
-            // PERMANENT refusals (the identity pins: path rebound to another
-            // object, object moved, binary head) can never succeed for these
-            // rows — returning early would leave the markers in place and
-            // wedge EVERY subsequent open/resync/close on this doc. The CRDT
-            // content is durably applied above; the path's visible head
-            // legitimately belongs to its current owner, whose own flows
-            // govern it. Clear the markers below and move on.
+            // These rows are already ACKed and therefore cannot be retried
+            // from the relay. If an identity pin now blocks projection,
+            // retaining the marker would wedge every later drain. The CRDT
+            // content is durable above; the visible path legitimately remains
+            // governed by its current owner, so consume the marker.
             Err(SyncError::InvalidInput { .. }) => {}
             // Anything else (storage) is retryable: keep the markers so the
             // next drain retries the projection.
@@ -277,7 +320,46 @@ pub fn drain_deferred_ydoc_for_key(
     // callers (the settle's remote-updates-pending refusal) must still see
     // that remote content landed which the live client has not resynced.
     let _ = applied;
-    Ok(drained_coordinates.len())
+    Ok(YdocDrainResult {
+        drained: drained_coordinates.len(),
+        refusals,
+    })
+}
+
+/// Permanently dispose one already-ACKed deferred coordinate once the eventual
+/// base proves its bytes payload-invalid. The refusal record and queue delete
+/// share a transaction: a crash leaves the marker retryable, while a commit
+/// guarantees this coordinate can never wedge later valid updates.
+fn refuse_deferred_ydoc(
+    store: &mut EngineStore,
+    key: &DocKey,
+    origin_id: &str,
+    origin_seq: i64,
+    reason: &'static str,
+    faults: &dyn FaultInjector,
+) -> Result<crate::ReplicationRefusal, SyncError> {
+    let refusal = crate::ReplicationRefusal {
+        workspace_id: key.workspace_id.clone(),
+        origin_id: origin_id.to_owned(),
+        origin_seq,
+        op_kind: "ydoc.update".to_owned(),
+        reason: crate::RefusalReason::InvalidInput {
+            reason: reason.to_owned(),
+        },
+    };
+    match store.write_with(faults, |tx| {
+        crate::apply::persist_refusal(tx, &refusal)?;
+        tx.execute(
+            "DELETE FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![key.workspace_id, origin_id, origin_seq],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    })? {
+        TxnOutcome::Committed(()) => Ok(refusal),
+        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
 }
 
 /// Oracle parity for applied `ydoc.update` ops (`projectYDocUpdate` →
@@ -297,44 +379,12 @@ pub fn project_and_write_in_tx(
     origin_seq: i64,
     now_ms: i64,
 ) -> Result<(), SyncError> {
+    let current = validate_ydoc_identity(tx, key, path)?;
     let projection = doc
         .project(content_kind)
         .map_err(|_| SyncError::InvalidInput {
             reason: "ydoc projection exceeds materialization cap",
         })?;
-    let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc.update head read failed",
-        })?;
-    // Identity pins (the oracle's fix-2): NEVER write through a path
-    // occupied by a different object, and never project an object into a
-    // path it does not own — a hostile op would otherwise mutate the wrong
-    // plaintext file.
-    if current.binary_sha256.is_some() {
-        return Err(SyncError::InvalidInput {
-            reason: "ydoc.update targets a binary head",
-        });
-    }
-    if let Some(snapshot) = current.snapshot.as_ref()
-        && snapshot.object_id != key.object_id
-    {
-        return Err(SyncError::InvalidInput {
-            reason: "ydoc.update path is occupied by another object",
-        });
-    }
-    let other_alias: Option<String> = tx
-        .query_row(
-            "SELECT path FROM path_aliases              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 AND path != ?4",
-            params![key.workspace_id, key.version_id, key.object_id, path],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    if other_alias.is_some() {
-        return Err(SyncError::InvalidInput {
-            reason: "ydoc.update object already occupies another path",
-        });
-    }
     // Idempotent skip: a redelivered (or content-converged) envelope whose
     // projection already IS the head mints no duplicate moment/job — but the
     // MARKER still advances: the head may have reached these bytes via
@@ -392,12 +442,8 @@ pub fn project_and_write_in_tx(
             request_id: None,
         },
     )
-    .map_err(|_| SyncError::InvalidInput {
-        reason: "ydoc.update projection write failed",
-    })?;
-    enqueue_write(tx, &result, preimage, "ydoc").map_err(|_| SyncError::InvalidInput {
-        reason: "ydoc.update materialization enqueue failed",
-    })?;
+    .map_err(|error| map_domain_payload_error(error, "ydoc.update projection write failed"))?;
+    enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the
     // OLD locally-settled sha behind would make the next session's settle
@@ -426,10 +472,12 @@ pub fn apply_ydoc_envelope(
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
-    let payload: YdocUpdatePayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc.update payload is malformed",
-        })?;
+    let payload: YdocUpdatePayload = match serde_json::from_value(envelope.payload.clone()) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return refuse_ydoc(store, envelope, faults, "ydoc.update payload is malformed");
+        }
+    };
     // Gate on the SAME floor the projection sink applies
     // (`validate_plaintext_storable_path`) rather than R10's narrow
     // share-boundary classifier, which misses reserved 8.3 aliases (`dohc~1`
@@ -440,18 +488,28 @@ pub fn apply_ydoc_envelope(
         || normalized.as_deref() != Some(payload.path.as_str())
         || !matches!(payload.content_kind.as_str(), "plaintext" | "richdoc")
     {
-        return Err(SyncError::InvalidInput {
-            reason: "ydoc.update path or content kind is invalid",
-        });
+        return refuse_ydoc(
+            store,
+            envelope,
+            faults,
+            "ydoc.update path or content kind is invalid",
+        );
     }
-    let key = DocKey::new(
+    let key = match DocKey::new(
         envelope.workspace_id.clone(),
         payload.version_id,
         payload.object_id,
-    )
-    .map_err(|_| SyncError::InvalidInput {
-        reason: "ydoc.update coordinates are invalid",
-    })?;
+    ) {
+        Ok(key) => key,
+        Err(_) => {
+            return refuse_ydoc(
+                store,
+                envelope,
+                faults,
+                "ydoc.update coordinates are invalid",
+            );
+        }
+    };
     // The blob is validated BEFORE any ack path — including the live-lease
     // defer. A defer acks the coordinate with the imported log as the durable
     // queue; if the referenced blob were missing or tampered, the peer cursor
@@ -472,11 +530,12 @@ pub fn apply_ydoc_envelope(
         return Err(SyncError::BlobInvalid);
     }
     if leases.is_live(&key) {
-        // FULL durable validation BEFORE the ack: byte caps, abort-safe
+        // FULL durable validation BEFORE admission: byte caps, abort-safe
         // prevalidation, AND the replay-parity gate — replayed on top of the
         // ALREADY-QUEUED deferred predecessors, because a later update can
         // only become invalid after they apply, and the drain will apply
-        // them first. Anything the drain would refuse must stay unacked.
+        // them first. Anything the drain would reject becomes a refusal, not a
+        // deferred update.
         let queued: Vec<Vec<u8>> = {
             let mut queued = Vec::new();
             let rows: Vec<String> = store.read_with(|conn| {
@@ -497,9 +556,7 @@ pub fn apply_ydoc_envelope(
             })?;
             for payload_json in rows {
                 let queued_payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
-                    .map_err(|_| SyncError::InvalidInput {
-                        reason: "parked ydoc.update payload is malformed",
-                    })?;
+                    .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
                 let queued_bytes = store
                     .get_binary_blob(&queued_payload.update_blob_sha256)?
                     .ok_or(SyncError::BlobInvalid)?;
@@ -507,22 +564,26 @@ pub fn apply_ydoc_envelope(
             }
             queued
         };
-        dohc_engine_collab::validate_remote_update_with_pending(store, &key, &queued, &bytes)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update bytes fail durable validation",
-            })?;
+        if let Err(error) =
+            dohc_engine_collab::validate_remote_update_with_pending(store, &key, &queued, &bytes)
+        {
+            return match map_collab_payload_error(
+                error,
+                "ydoc.update bytes fail durable validation",
+            ) {
+                SyncError::InvalidInput { reason } => refuse_ydoc(store, envelope, faults, reason),
+                hard => Err(hard),
+            };
+        }
         // A deferred coordinate is ACKED — it must be drainable later, which
         // the close/open drains only do for REPLICATED markers. A live lease
-        // over an absent or local-only lineage cannot accept a remote update
-        // now or later: refuse (leaving the coordinate unacked) exactly like
-        // the non-live path's NoMarker/regime refusal would.
-        let marker =
-            dohc_engine_collab::read_marker(store, &key).map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc marker read failed",
-            })?;
+        // over a local-only lineage is a transient local-state race. It stays
+        // hard and unacked so the peer coordinate can be retried after the
+        // session settles or closes.
+        let marker = dohc_engine_collab::read_marker(store, &key).map_err(map_collab_hard_error)?;
         if !marker.is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated) {
-            return Err(SyncError::InvalidInput {
-                reason: "live lease on a non-replicated lineage",
+            return Err(SyncError::RetryableState {
+                reason: "live lease on a non-replicated Y.Doc lineage",
             });
         }
         let deferred_key = key.clone();
@@ -562,9 +623,14 @@ pub fn apply_ydoc_envelope(
         let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind);
         let sv_bytes = {
             let doc = dohc_engine_collab::Ydoc::wire();
-            doc.apply(&bytes).map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update base bytes fail validation",
-            })?;
+            if doc.apply(&bytes).is_err() {
+                return refuse_ydoc(
+                    store,
+                    envelope,
+                    faults,
+                    "ydoc.update base bytes fail validation",
+                );
+            }
             doc.encode_state_vector()
         };
         let claim_key = key.clone();
@@ -574,25 +640,56 @@ pub fn apply_ydoc_envelope(
         // reconstructed lineage PLUS the base, or the visible snapshot would
         // drop local content that is still durably part of the CRDT.
         let base_doc = {
-            let doc = match dohc_engine_collab::load_persisted(store, &key).map_err(|_| {
-                SyncError::InvalidInput {
-                    reason: "ydoc lineage load failed",
-                }
-            })? {
+            let doc = match dohc_engine_collab::load_persisted(store, &key)
+                .map_err(map_collab_hard_error)?
+            {
                 Some(persisted) => persisted.doc,
                 None => dohc_engine_collab::Ydoc::wire(),
             };
-            doc.apply(&claim_bytes)
-                .map_err(|_| SyncError::InvalidInput {
-                    reason: "ydoc.update base bytes fail validation",
-                })?;
+            if doc.apply(&claim_bytes).is_err() {
+                return refuse_ydoc(
+                    store,
+                    envelope,
+                    faults,
+                    "ydoc.update base bytes fail validation",
+                );
+            }
             doc
         };
         let base_path = payload.path.clone();
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
+            // Cross-origin file edits can temporarily occupy this path before
+            // the base arrives. Retrying after the later delete/rename is
+            // convergence-safe; refusing and ACKing would lose the base
+            // forever on this receiver.
+            validate_retryable_ydoc_identity(tx, &claim_key, &base_path)?;
             tx.execute(
                 "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES (?1, ?2, ?3)",
                 rusqlite::params![claim_key.workspace_id, claim_key.object_id, op.recorded_at_ms],
+            )
+            .map_err(SyncError::persist)?;
+            // A non-base update can preallocate the FK parent before the base
+            // establishes the lineage. That bare placeholder is not the
+            // object's provenance: the base coordinate is. Match the daemon's
+            // preallocated-object rule by correcting only an unbound,
+            // markerless object that actually has a pre-base queue entry.
+            tx.execute(
+                "UPDATE file_objects SET created_at_ms=?3 \
+                 WHERE workspace_id=?1 AND object_id=?2 \
+                   AND EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+                     WHERE workspace_id=?1 AND version_id=?4 AND object_id=?2) \
+                   AND NOT EXISTS(SELECT 1 FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND version_id=?4 AND object_id=?2) \
+                   AND NOT EXISTS(SELECT 1 FROM path_aliases \
+                     WHERE workspace_id=?1 AND object_id=?2) \
+                   AND NOT EXISTS(SELECT 1 FROM snapshots \
+                     WHERE workspace_id=?1 AND object_id=?2)",
+                params![
+                    claim_key.workspace_id,
+                    claim_key.object_id,
+                    op.recorded_at_ms,
+                    claim_key.version_id,
+                ],
             )
             .map_err(SyncError::persist)?;
             dohc_engine_collab::claim_base_in_tx(
@@ -603,8 +700,8 @@ pub fn apply_ydoc_envelope(
                 &sv_bytes,
                 op.recorded_at_ms,
             )
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update base could not be claimed",
+            .map_err(|error| {
+                map_collab_payload_error(error, "ydoc.update base could not be claimed")
             })?;
             // A fresh base-only replica gets its FILE, not just CRDT rows.
             project_and_write_in_tx(
@@ -622,37 +719,105 @@ pub fn apply_ydoc_envelope(
                 reason: None,
             })
         })?;
+        if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
+            && dohc_engine_collab::read_marker(store, &key)
+                .map_err(map_collab_hard_error)?
+                .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
+        {
+            let drain = drain_deferred_ydoc_for_key(store, &key, faults)?;
+            return Ok(outcome.with_refusals(drain.refusals));
+        }
         return Ok(outcome);
     }
     // The lease is NOT live: any coordinates parked by an earlier live
     // phase drain FIRST, so the projection below reconstructs the COMPLETE
     // applied lineage (a partial projection would materialize a file missing
     // parked content).
-    if dohc_engine_collab::read_marker(store, &key)
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc marker read failed",
-        })?
+    let drain_refusals = if dohc_engine_collab::read_marker(store, &key)
+        .map_err(map_collab_hard_error)?
         .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
     {
-        drain_deferred_ydoc_for_key(store, &key, faults)?;
-    }
+        drain_deferred_ydoc_for_key(store, &key, faults)?.refusals
+    } else {
+        Vec::new()
+    };
     // Reconstruct the post-apply doc OUTSIDE the admission tx (commutative:
     // the in-tx apply of the same bytes yields the same converged state, and
     // a dedup changes nothing).
     let projected_doc = {
-        let persisted = dohc_engine_collab::load_persisted(store, &key)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc lineage load failed",
-            })?
-            .ok_or(SyncError::InvalidInput {
-                reason: "ydoc.update targets an absent lineage",
-            })?;
-        persisted
-            .doc
-            .apply(&bytes)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update bytes fail durable validation",
-            })?;
+        let Some(persisted) =
+            dohc_engine_collab::load_persisted(store, &key).map_err(map_collab_hard_error)?
+        else {
+            if let Err(error) = dohc_engine_collab::Ydoc::wire().apply(&bytes) {
+                return match map_collab_payload_error(
+                    error,
+                    "ydoc.update bytes fail durable validation",
+                ) {
+                    SyncError::InvalidInput { reason } => {
+                        refuse_ydoc(store, envelope, faults, reason)
+                    }
+                    hard => Err(hard),
+                };
+            }
+            let deferred_key = key.clone();
+            return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
+                let version_exists: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM versions \
+                         WHERE workspace_id=?1 AND version_id=?2)",
+                        params![deferred_key.workspace_id, deferred_key.version_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(SyncError::corrupt)?;
+                if !version_exists {
+                    return Err(SyncError::RetryableState {
+                        reason: "ydoc.update version is missing",
+                    });
+                }
+                // Validate every identity fact already knowable from this
+                // payload before its coordinate is ACKed and parked. For a
+                // genuinely new object the eventual base path is unknown; the
+                // drain repeats this gate after the base establishes it.
+                validate_retryable_ydoc_identity(tx, &deferred_key, &payload.path)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO file_objects \
+                     (workspace_id, object_id, created_at_ms) VALUES (?1, ?2, ?3)",
+                    params![
+                        deferred_key.workspace_id,
+                        deferred_key.object_id,
+                        op.recorded_at_ms
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO ydoc_deferred_updates \
+                     (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        deferred_key.workspace_id,
+                        deferred_key.version_id,
+                        deferred_key.object_id,
+                        op.origin_id,
+                        op.origin_seq,
+                        op.recorded_at_ms,
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                Ok(YdocApplyResult {
+                    deferred: true,
+                    reason: Some("ydoc-lineage-absent"),
+                })
+            });
+        };
+        if persisted.doc.apply(&bytes).is_err() {
+            return refuse_ydoc(
+                store,
+                envelope,
+                faults,
+                "ydoc.update bytes fail durable validation",
+            )
+            .map(|outcome| outcome.with_refusals(drain_refusals));
+        }
         persisted
     };
     let update_path = payload.path.clone();
@@ -662,17 +827,22 @@ pub fn apply_ydoc_envelope(
         origin_seq: envelope.origin_seq,
         bytes,
     };
-    let outcome = crate::apply_envelope_with(store, envelope, faults, |tx, op| {
-        let applied = apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update could not be applied",
-            })?;
-        // An out-of-order cross-origin update parks durably with missing
-        // dependencies; a projection taken NOW would omit the pending remote
-        // content and materialize an incomplete view. Skip — the envelope
-        // that completes the dependency projects the full doc.
-        if !projected_doc.doc.has_pending_dependencies() {
-            project_and_write_in_tx(
+    let outcome =
+        crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
+            let applied = apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms)
+                .map_err(|error| {
+                    map_collab_payload_error(error, "ydoc.update could not be applied")
+                })?;
+            // An out-of-order cross-origin update parks durably with missing
+            // dependencies; a projection taken NOW would omit the pending remote
+            // content and materialize an incomplete view. Skip — the envelope
+            // that completes the dependency projects the full doc.
+            if projected_doc.doc.has_pending_dependencies() {
+                return Ok(crate::apply::MutationOutcome::Applied(applied));
+            }
+            tx.execute_batch("SAVEPOINT dohc_ydoc_projection")
+                .map_err(SyncError::persist)?;
+            match project_and_write_in_tx(
                 tx,
                 &key,
                 &update_path,
@@ -681,10 +851,23 @@ pub fn apply_ydoc_envelope(
                 &op.origin_id,
                 op.origin_seq,
                 op.recorded_at_ms,
-            )?;
-        }
-        Ok(applied)
-    })?;
+            ) {
+                Ok(()) => {
+                    tx.execute_batch("RELEASE dohc_ydoc_projection")
+                        .map_err(SyncError::persist)?;
+                }
+                Err(SyncError::InvalidInput { reason }) => {
+                    tx.execute_batch(
+                        "ROLLBACK TO dohc_ydoc_projection; \
+                     RELEASE dohc_ydoc_projection",
+                    )
+                    .map_err(SyncError::persist)?;
+                    return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation { reason });
+                }
+                Err(hard) => return Err(hard),
+            }
+            Ok(crate::apply::MutationOutcome::Applied(applied))
+        })?;
     if matches!(
         outcome,
         ApplyOutcome::Applied(ReplicationApplyOutcome::Applied { .. })
@@ -700,12 +883,125 @@ pub fn apply_ydoc_envelope(
             reason: "ydoc.update compaction failed",
         })?;
     }
-    Ok(match outcome {
+    Ok(map_applied_ydoc_outcome(outcome).with_refusals(drain_refusals))
+}
+
+fn map_applied_ydoc_outcome(
+    outcome: ApplyOutcome<ReplicationApplyOutcome>,
+) -> ApplyOutcome<YdocApplyResult> {
+    match outcome {
         ApplyOutcome::Applied(_) => ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
         }),
+        ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
         ApplyOutcome::Skipped => ApplyOutcome::Skipped,
         ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
+        ApplyOutcome::WithRefusals { outcome, refusals } => ApplyOutcome::WithRefusals {
+            outcome: Box::new(map_applied_ydoc_outcome(*outcome)),
+            refusals,
+        },
+    }
+}
+
+fn refuse_ydoc(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    reason: &'static str,
+) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
+    crate::apply_envelope_with(store, envelope, faults, move |_tx, _op| {
+        Err(SyncError::InvalidInput { reason })
     })
+}
+
+fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncError {
+    match error {
+        CollabError::MalformedUpdate { .. }
+        | CollabError::ReplayParityViolation { .. }
+        | CollabError::EmptyUpdate
+        | CollabError::UpdateTooLarge { .. }
+        | CollabError::ProjectionTooLarge { .. }
+        | CollabError::ProjectionTooComplex { .. } => SyncError::InvalidInput { reason },
+        CollabError::BaseStateDiverged => SyncError::CoordinateDiverged,
+        hard => map_collab_hard_error(hard),
+    }
+}
+
+fn validate_ydoc_identity(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+    path: &str,
+) -> Result<ConflictFileState, SyncError> {
+    let current = select_snapshot_by_path_in_tx(conn, &key.workspace_id, &key.version_id, path)
+        .map_err(map_domain_hard_error)?;
+    // Identity pins (the oracle's fix-2): NEVER write through a path occupied
+    // by a different object, and never project an object into a path it does
+    // not own — a hostile op would otherwise mutate the wrong plaintext file.
+    if current.binary_sha256.is_some() {
+        return Err(SyncError::InvalidInput {
+            reason: "ydoc.update targets a binary head",
+        });
+    }
+    if let Some(snapshot) = current.snapshot.as_ref()
+        && snapshot.object_id != key.object_id
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "ydoc.update path is occupied by another object",
+        });
+    }
+    let other_alias: Option<String> = conn
+        .query_row(
+            "SELECT path FROM path_aliases \
+             WHERE workspace_id = ?1 AND version_id = ?2 \
+               AND object_id = ?3 AND path != ?4",
+            params![key.workspace_id, key.version_id, key.object_id, path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    if other_alias.is_some() {
+        return Err(SyncError::InvalidInput {
+            reason: "ydoc.update object already occupies another path",
+        });
+    }
+    Ok(current)
+}
+
+fn validate_retryable_ydoc_identity(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+    path: &str,
+) -> Result<ConflictFileState, SyncError> {
+    validate_ydoc_identity(conn, key, path).map_err(|error| match error {
+        SyncError::InvalidInput { reason } => SyncError::RetryableState { reason },
+        hard => hard,
+    })
+}
+
+fn map_collab_hard_error(error: CollabError) -> SyncError {
+    match error {
+        CollabError::Storage(storage) => SyncError::Storage(storage),
+        hard => SyncError::Storage(StorageError::corrupt_public(hard)),
+    }
+}
+
+fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncError {
+    match error {
+        DomainError::InvalidText { .. } | DomainError::InvalidPath { .. } => {
+            SyncError::InvalidInput { reason }
+        }
+        hard @ DomainError::InvalidInput {
+            reason: "object_id is already bound to another object",
+        } => map_domain_hard_error(hard),
+        DomainError::InvalidInput { .. } => SyncError::InvalidInput { reason },
+        hard => map_domain_hard_error(hard),
+    }
+}
+
+fn map_domain_hard_error(error: DomainError) -> SyncError {
+    match error {
+        DomainError::Storage(storage) => SyncError::Storage(storage),
+        hard => SyncError::Storage(StorageError::corrupt_public(hard)),
+    }
 }

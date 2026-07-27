@@ -25,7 +25,10 @@ mod share;
 mod version_apply;
 mod ydoc_apply;
 
-pub use apply::{ApplyOutcome, apply_chat_envelope, apply_envelope_with};
+pub use apply::{
+    ApplyOutcome, RefusalReason, ReplicationRefusal, apply_chat_envelope, apply_envelope_with,
+    read_replayed_refusal, retain_refusal_for_direct_retry,
+};
 pub use conflict_apply::{
     ConflictApplyResult, PendingResolve, PendingResolveReason, apply_conflict_envelope,
 };
@@ -61,8 +64,8 @@ pub use secret_apply::apply_secret_envelope;
 pub use share::{ShareBoundary, ShareSurface, apply_shared_envelope};
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    LeaseProbe, NoLiveLeases, YdocApplyResult, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
-    project_and_write_in_tx,
+    LeaseProbe, NoLiveLeases, YdocApplyResult, YdocDrainResult, apply_ydoc_envelope,
+    drain_deferred_ydoc_for_key, project_and_write_in_tx,
 };
 
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};

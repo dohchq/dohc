@@ -3,13 +3,14 @@
 //! sha passes the stale-head guard, and only the object-id check separates
 //! "my settled head" from "someone else's identical bytes".
 
-use dohc_engine_collab::{ContentKind, Regime};
-use dohc_engine_domain::{RenameTextFile, VersionedTextStore};
+use dohc_engine_collab::{ContentKind, DocKey, Regime};
+use dohc_engine_domain::{RenameTextFile, VersionedTextStore, WriteText};
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, NoFaults, RuntimeError, SelfWriteRecorder,
     WorkspaceSupervisor,
 };
 use dohc_engine_storage::EngineStore;
+use dohc_engine_sync::{LeaseProbe, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::ScratchDir;
 use std::sync::Arc;
 
@@ -18,6 +19,142 @@ struct NoRecorder;
 impl SelfWriteRecorder for NoRecorder {
     fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
     fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+}
+
+struct AlwaysLive;
+
+impl LeaseProbe for AlwaysLive {
+    fn is_live(&self, _key: &DocKey) -> bool {
+        true
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applied() {
+    const WS: &str = "ws-settle-identity-refusal";
+    const PATH: &str = "notes/client.md";
+    const WRONG_PATH: &str = "notes/stale-remote-name.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+
+    let (key, expected_head_sha) = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version(WS, "main", 1, &NoFaults)
+            .expect("main version");
+        versions
+            .write_text(
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "identity-refusal-object".to_owned(),
+                    path: PATH.to_owned(),
+                    text: "client".to_owned(),
+                    moment_id: "identity-refusal-head".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("seed visible head");
+        let head = versions
+            .read_text(WS, "main", PATH)
+            .expect("read head")
+            .expect("visible head");
+        let key = DocKey::new(WS, "main", &head.object_id).expect("doc key");
+
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "client");
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            &doc.encode_full_state(),
+            &NoFaults,
+            3,
+        )
+        .expect("claim replicated base");
+        let remote = doc.plaintext_insert(6, " remote");
+        let remote_sha = store.put_binary_blob(&remote).expect("remote update blob");
+        let envelope = ReplicationEnvelope {
+            workspace_id: WS.to_owned(),
+            origin_id: "identity-refusal-peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".to_owned(),
+            payload: serde_json::json!({
+                "versionId": "main",
+                "objectId": key.object_id,
+                "path": WRONG_PATH,
+                "contentKind": "plaintext",
+                "updateBlobSha256": remote_sha,
+                "isBaseState": false
+            }),
+            recorded_at_ms: 4,
+        };
+        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
+            .expect("park stale-path remote update");
+        (key, head.blob_sha256)
+    };
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
+    std::fs::write(scratch.path().join(PATH), "client").expect("seed disk");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 5).expect("open actor").actor;
+    let refused = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Some(expected_head_sha),
+            "identity-refusal-session".to_owned(),
+            Arc::new(NoRecorder),
+            6,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("unseen applied remote bytes must block settle");
+    assert!(
+        matches!(
+            refused,
+            RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "ydoc-remote-updates-pending"
+            })
+        ),
+        "MUTATION: excluding identity-refused applied rows from drained lets settle succeed: {refused:?}"
+    );
+    supervisor.close(&db).expect("close actor");
+
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("disk remains"),
+        "client"
+    );
+    let store = EngineStore::open(&db, 7).expect("inspect store");
+    let (updates, deferred, refusals): (i64, i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals
+                     WHERE workspace_id=?1 AND origin_id='identity-refusal-peer'",
+                    [WS],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("drain disposition");
+    assert_eq!(
+        (updates, deferred, refusals),
+        (1, 0, 1),
+        "the CRDT bytes apply and the already-ACKed stale identity is consumed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

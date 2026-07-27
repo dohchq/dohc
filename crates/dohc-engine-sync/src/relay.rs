@@ -279,6 +279,7 @@ pub enum SyncPassOutcome {
         fetched: usize,
         has_more: bool,
         applied: usize,
+        refused: usize,
         skipped: usize,
         conflicts_opened: i64,
         pending_cursor: Option<RelayCursor>,
@@ -287,15 +288,21 @@ pub enum SyncPassOutcome {
         /// deliberately did not apply. The cursor advances past them, so they
         /// only exist here — a caller that drops this loses them.
         pending_resolves: Vec<crate::PendingResolve>,
+        /// Per-operation validation failures that were journaled and acked.
+        /// The rejected mutations were rolled back before those coordinates
+        /// were retired.
+        refusals: Vec<crate::ReplicationRefusal>,
     },
     CrashedAfterRemoteCommit,
     CrashedAfterApply {
         applied: usize,
+        refused: usize,
         skipped: usize,
         conflicts_opened: i64,
         pending_cursor: RelayCursor,
         changed_paths: Vec<crate::MomentMaterializationChange>,
         pending_resolves: Vec<crate::PendingResolve>,
+        refusals: Vec<crate::ReplicationRefusal>,
     },
 }
 
@@ -428,11 +435,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             fetched: 0,
             has_more: false,
             applied: 0,
+            refused: 0,
             skipped: 0,
             conflicts_opened: 0,
             pending_cursor: None,
             changed_paths: Vec::new(),
             pending_resolves: Vec::new(),
+            refusals: Vec::new(),
         })
     }
 
@@ -495,54 +504,77 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
         let mut applied = 0_usize;
+        let mut refused = 0_usize;
         let mut skipped = 0_usize;
         let mut conflicts_opened = 0_i64;
         let mut pending_resolves = Vec::new();
+        let mut refusals = Vec::new();
         let mut changed_paths = BTreeMap::new();
-        let mut pulled_foreign_max = BTreeMap::<String, i64>::new();
+        let mut retryable = Vec::new();
         for op in &ordered {
-            match crate::apply_replication_envelope(store, op, faults, leases).map_err(local)? {
-                ApplyOutcome::Applied(routed) => {
-                    if let Some(pending) = routed.pending_resolve() {
-                        pending_resolves.push(pending.clone());
+            match crate::apply_replication_envelope(store, op, faults, leases) {
+                Err(SyncError::RetryableState { .. }) => retryable.push(op),
+                Err(error) => return Err(local(error)),
+                Ok(outcome) => accumulate_pull_outcome(
+                    store,
+                    op,
+                    outcome,
+                    &mut applied,
+                    &mut refused,
+                    &mut skipped,
+                    &mut conflicts_opened,
+                    &mut pending_resolves,
+                    &mut changed_paths,
+                    &mut refusals,
+                )?,
+            }
+        }
+        while !retryable.is_empty() {
+            let mut still_retryable = Vec::new();
+            let mut made_progress = false;
+            for op in retryable {
+                match crate::apply_replication_envelope(store, op, faults, leases) {
+                    Err(SyncError::RetryableState { .. }) => still_retryable.push(op),
+                    Err(error) => return Err(local(error)),
+                    Ok(outcome) => {
+                        made_progress = true;
+                        accumulate_pull_outcome(
+                            store,
+                            op,
+                            outcome,
+                            &mut applied,
+                            &mut refused,
+                            &mut skipped,
+                            &mut conflicts_opened,
+                            &mut pending_resolves,
+                            &mut changed_paths,
+                            &mut refusals,
+                        )?;
                     }
-                    conflicts_opened = conflicts_opened
-                        .checked_add(routed.conflicts_opened)
-                        .ok_or(RelayError::InvalidResponse)?;
-                    for change in routed.materialization_changes {
-                        changed_paths.insert(change.path.clone(), change);
-                    }
-                    for change in crate::router::redelivered_materialization_changes(store, op)
-                        .map_err(local)?
-                    {
-                        changed_paths.insert(change.path.clone(), change);
-                    }
-                    applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
-                }
-                ApplyOutcome::Skipped => {
-                    conflicts_opened = conflicts_opened
-                        .checked_add(
-                            crate::router::redelivered_conflicts_opened(store, op)
-                                .map_err(local)?,
-                        )
-                        .ok_or(RelayError::InvalidResponse)?;
-                    if let Some(pending) =
-                        crate::conflict_apply::read_replayed_pending_resolve(store, op)
-                            .map_err(local)?
-                    {
-                        pending_resolves.push(pending);
-                    }
-                    for change in crate::router::redelivered_materialization_changes(store, op)
-                        .map_err(local)?
-                    {
-                        changed_paths.insert(change.path.clone(), change);
-                    }
-                    skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
-                }
-                ApplyOutcome::Crashed { .. } => {
-                    return Err(RelayError::Local("injected-crash".to_owned()));
                 }
             }
+            if still_retryable.is_empty() {
+                break;
+            }
+            if !made_progress {
+                return Err(RelayError::Local("retryable-state".to_owned()));
+            }
+            retryable = still_retryable;
+        }
+        // A drain refusal can commit before a later envelope fails hard, or
+        // outside a pull during open/resync/close. Claim every relay-owned
+        // pending sidecar under a unique local report token and return it here.
+        // Direct-RPC retry rows retain their sentinel. Cursor commit clears only
+        // the claimed token; a later drain remains unowned, while a newer pull
+        // retags relay rows so a stale cursor cannot destroy an unread refusal.
+        let (pending_refusals, refusal_report_id) =
+            crate::apply::claim_pending_refusals(store, workspace_id, faults).map_err(local)?;
+        for refusal in pending_refusals {
+            push_refusal_once(&mut refusals, refusal);
+        }
+
+        let mut pulled_foreign_max = BTreeMap::<String, i64>::new();
+        for op in &ordered {
             if op.origin_id != identity.origin_id {
                 pulled_foreign_max
                     .entry(op.origin_id.clone())
@@ -567,15 +599,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             cursor,
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
+            refusal_report_id,
         };
         if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
             return Ok(SyncPassOutcome::CrashedAfterApply {
                 applied,
+                refused,
                 skipped,
                 conflicts_opened,
                 pending_cursor,
                 changed_paths: changed_paths.into_values().collect(),
                 pending_resolves,
+                refusals,
             });
         }
         Ok(SyncPassOutcome::Complete {
@@ -583,11 +618,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             fetched,
             has_more,
             applied,
+            refused,
             skipped,
             conflicts_opened,
             pending_cursor: Some(pending_cursor),
             changed_paths: changed_paths.into_values().collect(),
             pending_resolves,
+            refusals,
         })
     }
 
@@ -877,10 +914,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 Err(error) => return Err(error),
             };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
-                Ok(ApplyOutcome::Applied(_)) => applied += 1,
-                Ok(ApplyOutcome::Skipped) => skipped += 1,
-                Ok(ApplyOutcome::Crashed { .. }) => {
-                    return Err(RelayError::Local("injected-crash".to_owned()));
+                Ok(outcome) => {
+                    let (primary, nested_refusals) = outcome.into_primary_and_refusals();
+                    for refusal in nested_refusals {
+                        push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
+                    }
+                    match primary {
+                        ApplyOutcome::Applied(_) => applied += 1,
+                        ApplyOutcome::Refused(refusal) => {
+                            push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
+                        }
+                        ApplyOutcome::Skipped => skipped += 1,
+                        ApplyOutcome::Crashed { .. } => {
+                            return Err(RelayError::Local("injected-crash".to_owned()));
+                        }
+                        ApplyOutcome::WithRefusals { .. } => {
+                            unreachable!("refusals were flattened")
+                        }
+                    }
                 }
                 Err(SyncError::ShareBoundaryViolation) => {
                     refused = refused.checked_add(1).ok_or(RelayError::InvalidResponse)?;
@@ -1084,13 +1135,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 Err(error) => return Err(error),
             };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
-                Ok(ApplyOutcome::Applied(_)) => {}
-                Ok(ApplyOutcome::Skipped) => {
-                    skipped += 1;
-                    continue;
-                }
-                Ok(ApplyOutcome::Crashed { .. }) => {
-                    return Err(RelayError::Local("injected-crash".to_owned()));
+                Ok(outcome) => {
+                    let (primary, nested_refusals) = outcome.into_primary_and_refusals();
+                    debug_assert!(
+                        nested_refusals.is_empty(),
+                        "share-view boundary application does not mutate chat dependencies"
+                    );
+                    match primary {
+                        ApplyOutcome::Applied(_) => {}
+                        ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => {
+                            skipped += 1;
+                            continue;
+                        }
+                        ApplyOutcome::Crashed { .. } => {
+                            return Err(RelayError::Local("injected-crash".to_owned()));
+                        }
+                        ApplyOutcome::WithRefusals { .. } => {
+                            unreachable!("refusals were flattened")
+                        }
+                    }
                 }
                 Err(SyncError::ShareBoundaryViolation | SyncError::InvalidInput { .. }) => {
                     skipped += 1;
@@ -2280,6 +2343,100 @@ fn content_kind_name(value: Option<&serde_json::Value>) -> &'static str {
 
 fn domain(error: DomainError) -> RelayError {
     RelayError::Local(error.code().to_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accumulate_pull_outcome(
+    store: &EngineStore,
+    op: &ReplicationEnvelope,
+    outcome: ApplyOutcome<crate::RoutedApply>,
+    applied: &mut usize,
+    refused: &mut usize,
+    skipped: &mut usize,
+    conflicts_opened: &mut i64,
+    pending_resolves: &mut Vec<crate::PendingResolve>,
+    changed_paths: &mut BTreeMap<String, crate::MomentMaterializationChange>,
+    refusals: &mut Vec<crate::ReplicationRefusal>,
+) -> Result<(), RelayError> {
+    let (primary, drain_refusals) = outcome.into_primary_and_refusals();
+    for refusal in drain_refusals {
+        push_refusal_once(refusals, refusal);
+    }
+    match primary {
+        ApplyOutcome::Applied(routed) => {
+            if let Some(pending) = routed.pending_resolve() {
+                pending_resolves.push(pending.clone());
+            }
+            *conflicts_opened = conflicts_opened
+                .checked_add(routed.conflicts_opened)
+                .ok_or(RelayError::InvalidResponse)?;
+            for change in routed.materialization_changes {
+                changed_paths.insert(change.path.clone(), change);
+            }
+            for change in
+                crate::router::redelivered_materialization_changes(store, op).map_err(local)?
+            {
+                changed_paths.insert(change.path.clone(), change);
+            }
+            *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+        }
+        ApplyOutcome::Refused(refusal) => {
+            *refused = refused.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+            push_refusal_once(refusals, refusal);
+        }
+        ApplyOutcome::Skipped => {
+            *conflicts_opened = conflicts_opened
+                .checked_add(crate::router::redelivered_conflicts_opened(store, op).map_err(local)?)
+                .ok_or(RelayError::InvalidResponse)?;
+            if let Some(refusal) = crate::apply::read_replayed_refusal(store, op).map_err(local)? {
+                push_refusal_once(refusals, refusal);
+            }
+            if let Some(pending) =
+                crate::conflict_apply::read_replayed_pending_resolve(store, op).map_err(local)?
+            {
+                pending_resolves.push(pending);
+            }
+            for change in
+                crate::router::redelivered_materialization_changes(store, op).map_err(local)?
+            {
+                changed_paths.insert(change.path.clone(), change);
+            }
+            *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+        }
+        ApplyOutcome::Crashed { .. } => {
+            return Err(RelayError::Local("injected-crash".to_owned()));
+        }
+        ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+    }
+    Ok(())
+}
+
+fn push_refusal_once(
+    refusals: &mut Vec<crate::ReplicationRefusal>,
+    refusal: crate::ReplicationRefusal,
+) {
+    if !refusals.iter().any(|existing| {
+        existing.workspace_id == refusal.workspace_id
+            && existing.origin_id == refusal.origin_id
+            && existing.origin_seq == refusal.origin_seq
+    }) {
+        refusals.push(refusal);
+    }
+}
+
+fn push_shared_channel_rejection(
+    refused: &mut usize,
+    rejections: &mut Vec<SharedChannelRejection>,
+    refusal: crate::ReplicationRefusal,
+) -> Result<(), RelayError> {
+    *refused = refused.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+    rejections.push(SharedChannelRejection {
+        origin_id: refusal.origin_id,
+        origin_seq: refusal.origin_seq,
+        op_kind: refusal.op_kind,
+        reason: refusal.reason.message().to_owned(),
+    });
+    Ok(())
 }
 
 fn validate_identity_request(workspace: &str, epoch: &str, stream: &str) -> Result<(), RelayError> {
