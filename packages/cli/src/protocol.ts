@@ -82,6 +82,39 @@ export const exportArgsSchema = z
     outDir: z.string().min(1),
   })
   .strict();
+export const momentsArgsSchema = z
+  .object({
+    ...argsBase,
+    sinceMs: z.number().int().nonnegative().optional(),
+    limit: z.number().int().positive().max(500).optional(),
+    includeFiles: z.boolean().optional(),
+  })
+  .strict();
+export const momentArgsSchema = z
+  .object({ ...argsBase, id: z.string().min(1).max(500) })
+  .strict();
+export const fileChatsArgsSchema = z
+  .object({ ...argsBase, path: z.string().min(1).max(4096) })
+  .strict();
+export const chatArgsSchema = z
+  .object({ ...argsBase, threadId: z.string().min(1).max(200) })
+  .strict();
+export const channelsFullArgsSchema = z.object(argsBase).strict();
+export const startChannelChatArgsSchema = z
+  .object({
+    ...argsBase,
+    channel: z.string().min(1).max(200),
+    body: z.string().min(1).max(65_536),
+    title: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+export const replyToChatArgsSchema = z
+  .object({
+    ...argsBase,
+    threadId: z.string().min(1).max(200),
+    body: z.string().min(1).max(65_536),
+  })
+  .strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("channels"), args: channelsArgsSchema }).strict(),
@@ -93,6 +126,25 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("react"), args: reactArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("grep"), args: grepArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("export"), args: exportArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("moments"), args: momentsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("moment"), args: momentArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("fileChats"), args: fileChatsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("chat"), args: chatArgsSchema }).strict(),
+  z.object({
+    ...requestBase,
+    verb: z.literal("channelsFull"),
+    args: channelsFullArgsSchema,
+  }).strict(),
+  z.object({
+    ...requestBase,
+    verb: z.literal("startChannelChat"),
+    args: startChannelChatArgsSchema,
+  }).strict(),
+  z.object({
+    ...requestBase,
+    verb: z.literal("replyToChat"),
+    args: replyToChatArgsSchema,
+  }).strict(),
 ]);
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
@@ -267,6 +319,173 @@ export const exportResultSchema = z
   })
   .strict();
 
+const rawMomentAuthorSchema = z
+  .object({
+    kind: z.literal("agent"),
+    agentId: z.string().min(1),
+    onBehalfOf: z.string().min(1),
+    agentRunId: z.string().min(1).optional(),
+  })
+  .strict();
+const rawMomentOperationSchema = z.enum(["write", "rename", "delete"]);
+const rawMomentFileSchema = z
+  .object({
+    path: z.string().min(1),
+    operation: rawMomentOperationSchema,
+  })
+  .strict();
+const rawMomentSummarySchema = z
+  .object({
+    id: z.string().min(1),
+    recordedAtMs: z.number(),
+    source: z.literal("workspace-engine"),
+    operation: rawMomentOperationSchema,
+    path: z.string().min(1),
+    versionId: z.string().min(1),
+    summary: z.string().optional(),
+    author: rawMomentAuthorSchema.optional(),
+    fileCount: z.literal(1),
+    files: z.array(rawMomentFileSchema).optional(),
+  })
+  .strict();
+const rawMomentPayloadSnapshotSchema = z
+  .object({
+    path: z.string().min(1),
+    contentKind: z.enum(["text", "binary"]).optional(),
+    sha256: z.string().min(1).optional(),
+    byteLength: z.number().int().nonnegative().optional(),
+    text: z.string(),
+  })
+  .strict();
+
+export const momentsResultSchema = z
+  .object({
+    changes: z.array(rawMomentSummarySchema),
+    count: z.number().int().nonnegative(),
+    totalAvailable: z.number().int().nonnegative(),
+    hasMore: z.boolean(),
+    cursorMs: z.number(),
+  })
+  .strict();
+export const momentResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      change: rawMomentSummarySchema.extend({
+        files: z.array(rawMomentFileSchema),
+        before: rawMomentPayloadSnapshotSchema.nullable(),
+        after: rawMomentPayloadSnapshotSchema,
+      }).strict(),
+    })
+    .strict(),
+  z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
+]);
+
+const rawChannelIdSchema = z.string().regex(/^channel_/u);
+const rawThreadIdSchema = z.string().regex(/^thread_/u);
+const rawMessageIdSchema = z.string().regex(/^message_/u);
+const rawChatThreadSchema = z
+  .object({
+    id: rawThreadIdSchema,
+    title: z.string(),
+    createdAtMs: z.number().int().nonnegative(),
+    updatedAtMs: z.number().int().nonnegative(),
+    linkedPathHint: z.string().min(1).optional(),
+  })
+  .strict();
+const rawChatMessageSchema = z
+  .object({
+    id: rawMessageIdSchema,
+    threadId: rawThreadIdSchema,
+    authorKind: cliActorSchema,
+    authorDisplayName: z.string().min(1),
+    body: z.string(),
+    createdAtMs: z.number().int().nonnegative(),
+  })
+  .strict();
+const rawFailureSchema = z
+  .object({ ok: z.literal(false), reason: z.string().min(1) })
+  .strict();
+
+export const fileChatsResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      path: z.string().min(1),
+      fileObjectId: z.string().min(1).nullable(),
+      threads: z.array(rawChatThreadSchema),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+export const chatResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      thread: rawChatThreadSchema,
+      messages: z.array(rawChatMessageSchema),
+      projection: z
+        .object({
+          path: z.string().min(1),
+          readOnly: z.literal(true),
+          text: z.string(),
+        })
+        .strict(),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+export const channelsFullResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      channels: z.array(
+        z
+          .object({
+            id: rawChannelIdSchema,
+            name: z.string().min(1),
+            slug: z.string().min(1),
+            kind: z.enum(["channel", "dm", "agent"]),
+            threadCount: z.number().int().nonnegative(),
+            threads: z.array(
+              z
+                .object({
+                  id: rawThreadIdSchema,
+                  title: z.string(),
+                  messageCount: z.number().int().nonnegative(),
+                  updatedAtMs: z.number().int().nonnegative(),
+                })
+                .strict(),
+            ),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+export const startChannelChatResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      channel: z
+        .object({
+          id: rawChannelIdSchema,
+          name: z.string().min(1),
+          slug: z.string().min(1),
+        })
+        .strict(),
+      thread: rawChatThreadSchema,
+      message: rawChatMessageSchema,
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+export const replyToChatResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), message: rawChatMessageSchema }).strict(),
+  rawFailureSchema,
+]);
+
 export const cliResultSchemas = {
   channels: channelsResultSchema,
   threads: threadsResultSchema,
@@ -277,6 +496,13 @@ export const cliResultSchemas = {
   react: reactResultSchema,
   grep: grepResultSchema,
   export: exportResultSchema,
+  moments: momentsResultSchema,
+  moment: momentResultSchema,
+  fileChats: fileChatsResultSchema,
+  chat: chatResultSchema,
+  channelsFull: channelsFullResultSchema,
+  startChannelChat: startChannelChatResultSchema,
+  replyToChat: replyToChatResultSchema,
 } as const;
 
 export type CliResultByVerb = {

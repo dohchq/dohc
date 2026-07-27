@@ -32,21 +32,17 @@ import {
   isSharedWithMePath,
 } from "@dohc/workspace-core";
 import {
-  LinkedChatStoreError,
-  SharedChannelReadOnlyError,
-  classifyEngineFilePath,
-  classifyEngineFilePathForRead,
-  createLinkedChatStore,
-  createVersionedTextStore,
-  type ChatMessage,
-  type ChatThread,
-  type LinkedChatProjectionFileAccess,
-  type LinkedChatStore,
-  type VersionedTextMoment,
-  type VersionedTextMomentSummary,
-  type VersionedTextStore,
-} from "@dohc/workspace-engine";
-import { PreferredName } from "@dohc/workspace-contracts/chat-identity";
+  DohcCliError,
+  sendCliRequest,
+} from "@dohc/cli";
+import {
+  CLI_PROTOCOL_VERSION,
+  parseCliResult,
+  type CliRequestWithoutToken,
+  type CliResultByVerb,
+  type CliVerb,
+} from "@dohc/cli/protocol";
+import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -82,6 +78,9 @@ export interface ToolContext {
   // registered, so a shared-view MCP server cannot write, create, move,
   // delete, import, publish, share, or post chat. Set by the --read-only flag.
   readOnly?: boolean;
+  // Injectable CLI transport for tests. Production uses sendCliRequest with
+  // the explicit desktop state dir supplied by --home.
+  request?: (request: CliRequestWithoutToken) => Promise<unknown>;
 }
 
 const MCP_AUTHOR: ChangeAuthor = {
@@ -992,19 +991,6 @@ interface RegistryWorkspace {
   kind: string;
   mode?: string;
   remote?: RemoteIdentity;
-  sharedChannels?: RegistryJoinedSharedChannel[];
-}
-
-interface RegistryJoinedSharedChannel {
-  channelWireId: string;
-  access: "read-write" | "read-only";
-  ended?: boolean;
-}
-
-interface ChatAuthorizationWorkspace {
-  workspaceId: string;
-  rootPath: string;
-  sharedChannels: RegistryJoinedSharedChannel[];
 }
 
 interface RegistryFile {
@@ -1046,78 +1032,6 @@ async function findWorkspaceEntry(ctx: ToolContext): Promise<RegistryWorkspace |
     if (workspace.rootPath === ctx.root) return workspace;
     const realWorkspaceRoot = await realpath(workspace.rootPath).catch(() => workspace.rootPath);
     if (realWorkspaceRoot === realRoot) return workspace;
-  }
-  return null;
-}
-
-// Discovery callers intentionally tolerate an absent/broken desktop registry,
-// but an authorization check cannot translate unreadable authority state into
-// "no grants". A genuinely absent registry remains valid for standalone local
-// MCP clients; once the file exists, malformed state fails chat writes closed.
-async function findWorkspaceEntryForChatAuthorization(
-  ctx: ToolContext,
-): Promise<ChatAuthorizationWorkspace | null> {
-  let text: string;
-  try {
-    text = await readFile(join(ctx.home, "dohc-workspaces.json"), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new Error("Cannot read the workspace registry; refusing the chat write.");
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("The workspace registry is invalid; refusing the chat write.");
-  }
-  if (
-    parsed === null ||
-    typeof parsed !== "object" ||
-    !Array.isArray((parsed as { workspaces?: unknown }).workspaces)
-  ) {
-    throw new Error("The workspace registry is invalid; refusing the chat write.");
-  }
-
-  const realRoot = await realpath(ctx.root).catch(() => ctx.root);
-  for (const candidate of (parsed as { workspaces: unknown[] }).workspaces) {
-    if (
-      candidate === null ||
-      typeof candidate !== "object" ||
-      !nonEmptyString((candidate as { workspaceId?: unknown }).workspaceId) ||
-      !nonEmptyString((candidate as { rootPath?: unknown }).rootPath)
-    ) {
-      throw new Error("The workspace registry is invalid; refusing the chat write.");
-    }
-    const raw = candidate as {
-      workspaceId: string;
-      rootPath: string;
-      sharedChannels?: unknown;
-    };
-    const realCandidateRoot = await realpath(raw.rootPath).catch(() => raw.rootPath);
-    if (raw.rootPath !== ctx.root && realCandidateRoot !== realRoot) continue;
-    if (raw.sharedChannels !== undefined && !Array.isArray(raw.sharedChannels)) {
-      throw new Error("The workspace registry is invalid; refusing the chat write.");
-    }
-    const sharedChannels = (raw.sharedChannels ?? []).map((channel) => {
-      if (
-        channel === null ||
-        typeof channel !== "object" ||
-        !nonEmptyString((channel as { channelWireId?: unknown }).channelWireId) ||
-        ((channel as { access?: unknown }).access !== "read-write" &&
-          (channel as { access?: unknown }).access !== "read-only") ||
-        ((channel as { ended?: unknown }).ended !== undefined &&
-          typeof (channel as { ended?: unknown }).ended !== "boolean")
-      ) {
-        throw new Error("The workspace registry is invalid; refusing the chat write.");
-      }
-      return channel as RegistryJoinedSharedChannel;
-    });
-    return {
-      workspaceId: raw.workspaceId,
-      rootPath: raw.rootPath,
-      sharedChannels,
-    };
   }
   return null;
 }
@@ -1282,140 +1196,29 @@ export async function workspaceStatus(ctx: ToolContext) {
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------
 
-// After the flag flip the workspace ENGINE is the sole recorder of history
-// (moments in .dohc/engine/engine.db), so these tools read engine moments —
-// the engine IS the history now. The pre-flip legacy `.dohc/history`
-// change-set relic was retired with @dohc/workspace-history; a moment carries
-// path/operation/versionId (the legacy kind/boundaryCrossings/provenance
-// fields no longer exist and are never faked).
+// The workspace engine is the sole recorder of history, but desktop main is
+// the sole owner of its database. These tools read moments through the CLI
+// transport. The pre-flip legacy `.dohc/history` change-set relic was retired;
+// a moment carries path/operation/versionId (the legacy kind,
+// boundaryCrossings, and provenance fields no longer exist and are never
+// faked).
 
 const LIST_CHANGES_HARD_LIMIT = 500;
-
-// Structural pick so both the timeline summary (listMoments) and the full
-// moment (getMoment) can be summarized with one shape.
-type MomentSummaryFields = Pick<
-  VersionedTextMomentSummary,
-  "id" | "recordedAtMs" | "operation" | "path" | "versionId" | "metadata" | "author"
->;
-
-function momentChangeSummary(moment: MomentSummaryFields, includeFiles: boolean) {
-  return {
-    id: moment.id,
-    recordedAtMs: moment.recordedAtMs,
-    source: "workspace-engine" as const,
-    operation: moment.operation,
-    path: moment.path,
-    versionId: moment.versionId,
-    ...(moment.metadata.summary ? { summary: moment.metadata.summary } : {}),
-    ...(moment.author ? { author: moment.author } : {}),
-    fileCount: 1,
-    ...(includeFiles ? { files: [{ path: moment.path, operation: moment.operation }] } : {}),
-  };
-}
-
-// Per-call open/close, same as the chat tools: the MCP process never holds
-// engine.db handles between tool calls.
-async function withVersionedTextStore<T>(
-  ctx: ToolContext,
-  task: (texts: VersionedTextStore) => Promise<T>,
-): Promise<T> {
-  const texts = createVersionedTextStore(ctx.root);
-  try {
-    return await task(texts);
-  } finally {
-    await texts.close().catch(() => undefined);
-  }
-}
-
-// True only when the engine store already exists on disk: history READS must
-// never create .dohc/engine/engine.db as a side effect (opening the store
-// initializes it).
-async function engineStoreExists(ctx: ToolContext): Promise<boolean> {
-  const stats = await lstat(join(ctx.root, ".dohc", "engine", "engine.db")).catch(() => null);
-  return stats?.isFile() ?? false;
-}
-
-async function engineMomentsForRoot(
-  ctx: ToolContext,
-  limit: number,
-): Promise<VersionedTextMomentSummary[]> {
-  const workspaceId = await workspaceIdForRoot(ctx);
-  if (!workspaceId) return [];
-  if (!(await engineStoreExists(ctx))) return [];
-  try {
-    return await withVersionedTextStore(ctx, async (texts) => {
-      const page = await texts.listMoments({ workspaceId, limit });
-      return page.moments;
-    });
-  } catch {
-    // Unreadable/locked engine store: the read tool degrades to an empty
-    // view instead of crashing.
-    return [];
-  }
-}
-
-async function engineMomentForRoot(
-  ctx: ToolContext,
-  momentId: string,
-): Promise<VersionedTextMoment | null> {
-  const workspaceId = await workspaceIdForRoot(ctx);
-  if (!workspaceId) return null;
-  if (!(await engineStoreExists(ctx))) return null;
-  try {
-    return await withVersionedTextStore(ctx, (texts) =>
-      texts.getMoment({ workspaceId, momentId }),
-    );
-  } catch {
-    return null;
-  }
-}
 
 export async function listChanges(
   ctx: ToolContext,
   args: { sinceMs?: number; limit?: number; includeFiles?: boolean } = {},
 ) {
-  const includeFiles = args.includeFiles ?? false;
-  const sinceMs = args.sinceMs;
-  const limit = Math.min(LIST_CHANGES_HARD_LIMIT, Math.max(1, Math.floor(args.limit ?? 50)));
-  const moments = await engineMomentsForRoot(ctx, LIST_CHANGES_HARD_LIMIT);
-  // Strictly-after cursor rule (same as the engine store's listSince).
-  const selectedMoments =
-    sinceMs === undefined
-      ? moments
-      : moments.filter((moment) => moment.recordedAtMs > sinceMs);
-  // Newest first, ties broken by id for a stable order.
-  const merged = selectedMoments
-    .map((moment) => momentChangeSummary(moment, includeFiles))
-    .sort((a, b) => b.recordedAtMs - a.recordedAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  const selected = merged.slice(0, limit);
-  const cursorMs = selected.reduce(
-    (max, entry) => Math.max(max, entry.recordedAtMs),
-    args.sinceMs ?? 0,
-  );
-  return {
-    changes: selected,
-    count: selected.length,
-    totalAvailable: merged.length,
-    hasMore: merged.length > selected.length,
-    cursorMs,
-  };
+  return requestCli(ctx, "moments", {
+    ...args,
+    ...(args.limit !== undefined
+      ? { limit: Math.min(LIST_CHANGES_HARD_LIMIT, Math.max(1, Math.floor(args.limit))) }
+      : {}),
+  });
 }
 
 export async function readChange(ctx: ToolContext, args: { id: string }) {
-  const moment = await engineMomentForRoot(ctx, args.id);
-  if (moment) {
-    return {
-      ok: true as const,
-      change: {
-        ...momentChangeSummary(moment, true),
-        // The moment's full detail: before is null for a first write; text is
-        // empty ("") for binary payloads (contentKind marks them).
-        before: moment.payload.before,
-        after: moment.payload.after,
-      },
-    };
-  }
-  return { ok: false as const, reason: `change not found: ${args.id}` };
+  return requestCli(ctx, "moment", args);
 }
 
 // --- dohc site tools --------------------------------------------------------
@@ -2457,290 +2260,52 @@ export async function share(ctx: ToolContext, args: { path: string; scope: "publ
 // is returned as proposed content; an ambiguous one returns conflict so a human
 // decides — never a silent overwrite.
 
-// --- linked Chats (workspace engine, PR 0N-1) --------------------------------
+// --- desktop-owned history and Chats ---------------------------------------
 //
-// The two-way file rail: MCP can list a file's Chats, read a thread, and
-// reply AS THE AGENT. These tools open the same .dohc/engine/engine.db the
-// desktop uses over a separate WAL connection (safe cross-process; writes
-// wait out the desktop's write lock via busy_timeout, with a short retry on
-// a busy failure). They require the workspace-engine flag: absent/off means
-// Chats are honestly unavailable, never a silent empty list.
+// MCP is a separate process and never opens the daemon-owned engine database.
+// The desktop is the sole writer and applies workspace authorization plus chat
+// identity before dispatching these CLI verbs.
 
-const CHATS_UNAVAILABLE_REASON =
-  "Chats are not available: the dohc workspace engine is not enabled for this workspace.";
+export const DOHC_TRANSPORT_UNAVAILABLE_REASON =
+  "dohc is not running. Open the dohc app to read workspace history or chats, or post chats.";
 
-async function workspaceIdForRoot(ctx: ToolContext): Promise<string | null> {
-  // The workspace's own manifest is authoritative (it works for external MCP
-  // clients without a desktop registry); the registry is the fallback.
-  const manifest = await readJson<{ workspaceId?: unknown }>(
-    join(ctx.root, ".dohc", "manifest.json"),
-  );
-  if (nonEmptyString(manifest?.workspaceId)) return manifest.workspaceId;
-  const entry = await findWorkspaceEntry(ctx);
-  return nonEmptyString(entry?.workspaceId) ? entry.workspaceId : null;
+function cliFailureReason(error: unknown): string {
+  if (error instanceof DohcCliError && error.message === "desktop app not running") {
+    return DOHC_TRANSPORT_UNAVAILABLE_REASON;
+  }
+  return failureReason(error, DOHC_TRANSPORT_UNAVAILABLE_REASON);
 }
 
-async function requireEngineChats(
+async function requestCli<Verb extends CliVerb>(
   ctx: ToolContext,
-): Promise<{ ok: true; workspaceId: string } | { ok: false; reason: string }> {
-  if (!(await isWorkspaceEngineFlagged(ctx))) {
-    return { ok: false, reason: CHATS_UNAVAILABLE_REASON };
-  }
-  const workspaceId = await workspaceIdForRoot(ctx);
-  if (!workspaceId) {
-    return {
-      ok: false,
-      reason:
-        "Chats are not available: this workspace has no dohc identity (missing .dohc/manifest.json).",
-    };
-  }
-  return { ok: true, workspaceId };
-}
-
-function ownerNameFromUnknown(value: unknown): string | undefined {
-  const parsed = PreferredName.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
-}
-
-// Display identity is profile-owned, not inferred from an auth email. The
-// opaque cloud user id below remains the authorization/provenance key.
-async function agentReplyDisplayName(ctx: ToolContext): Promise<string> {
-  const environmentOwner = ownerNameFromUnknown(process.env.DOHC_MCP_OWNER_NAME);
-  if (environmentOwner) return environmentOwner;
-  const settings = await readJson<{
-    profile?: { preferredName?: unknown };
-  }>(
-    join(ctx.home, "dohc-settings.json"),
-  );
-  const settingsOwner = ownerNameFromUnknown(settings?.profile?.preferredName);
-  if (settingsOwner) return settingsOwner;
-  return "You";
-}
-
-// The VERIFIED opaque relay identity a signed-in agent send stamps on its chat
-// message (WS-MU-C0). Mirrors the desktop's relayAuthorUserId(): the OPAQUE
-// Better Auth user id the relay verifies as `actor.userId` before admitting the
-// replicated op. The desktop plumbs it in via DOHC_MCP_CLOUD_USER_ID (else the
-// dohc-cloud.json credential file's userId). Present ONLY when a cloud session
-// is known; solo/local returns undefined so message.append omits authorUserId
-// and stays byte-identical to today. NEVER the email — identity is opaque.
-async function agentAuthorUserId(ctx: ToolContext): Promise<string | undefined> {
-  if (nonEmptyString(process.env.DOHC_MCP_CLOUD_USER_ID)) {
-    return process.env.DOHC_MCP_CLOUD_USER_ID;
-  }
-  const credentials = await readJson<{ version?: unknown; userId?: unknown }>(
-    join(ctx.home, "dohc-cloud.json"),
-  );
-  if (credentials?.version === 1 && nonEmptyString(credentials.userId)) {
-    return credentials.userId;
-  }
-  return undefined;
-}
-
-async function withEngineStores<T>(
-  ctx: ToolContext,
-  task: (stores: { texts: VersionedTextStore; chats: LinkedChatStore }) => Promise<T>,
-): Promise<T> {
-  // Per-call open/close: the MCP process never holds engine.db handles
-  // between tool calls, so it can't pin WAL locks while the desktop works.
-  const texts = createVersionedTextStore(ctx.root);
-  const chats = createLinkedChatStore(ctx.root);
+  verb: Verb,
+  args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor">,
+): Promise<CliResultByVerb[Verb] | { ok: false; reason: string }> {
+  const request = {
+    protocolVersion: CLI_PROTOCOL_VERSION,
+    verb,
+    args: {
+      cwd: ctx.root,
+      actor: "agent" as const,
+      ...args,
+    },
+  } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
   try {
-    return await task({ texts, chats });
-  } finally {
-    await chats.close().catch(() => undefined);
-    await texts.close().catch(() => undefined);
+    const rawResult = ctx.request
+      ? await ctx.request(request)
+      : await sendCliRequest(request, { stateDir: ctx.home });
+    return parseCliResult(verb, rawResult);
+  } catch (error) {
+    return { ok: false as const, reason: cliFailureReason(error) };
   }
-}
-
-// Agent writes use the same joined-channel boundary as desktop IPC and the
-// local CLI. The engine stores a joined channel in the ordinary chat tables,
-// so the authoritative read-only/ended grant remains in the desktop registry.
-// Resolve the mutation target to the channel's wire identity and refuse before
-// startChannelThread/sendMessage can create any durable local-only rows.
-async function assertMcpSharedChannelWritable(input: {
-  ctx: ToolContext;
-  workspaceId: string;
-  chats: LinkedChatStore;
-  target: { channelId: string } | { threadId: string };
-}): Promise<void> {
-  const workspace = await findWorkspaceEntryForChatAuthorization(input.ctx);
-  if (!workspace) return;
-  if (workspace.workspaceId !== input.workspaceId) {
-    throw new Error("The workspace registry identity does not match; refusing the chat write.");
-  }
-  const blockedWires = new Set(
-    (workspace.sharedChannels ?? [])
-      .filter((channel) => channel.access === "read-only" || channel.ended === true)
-      .map((channel) => channel.channelWireId),
-  );
-  if (blockedWires.size === 0) return;
-
-  const channelId =
-    "channelId" in input.target
-      ? input.target.channelId
-      : await input.chats.findThreadChannelId({
-          workspaceId: input.workspaceId,
-          threadId: input.target.threadId,
-        });
-  if (!channelId) return;
-  const wireId = await input.chats.getChannelWireId({
-    workspaceId: input.workspaceId,
-    channelId,
-  });
-  if (wireId !== null && blockedWires.has(wireId)) {
-    throw new SharedChannelReadOnlyError();
-  }
-}
-
-// Exported for tests: the busy/locked classification the reply retry uses.
-export function isSqliteBusyError(error: unknown): boolean {
-  let cursor: unknown = error;
-  for (let depth = 0; depth < 5 && cursor instanceof Error; depth += 1) {
-    if (/database is locked|database table is locked|SQLITE_BUSY/i.test(cursor.message)) {
-      return true;
-    }
-    cursor = (cursor as Error & { cause?: unknown }).cause;
-  }
-  return false;
-}
-
-// busy_timeout already waits 5s inside SQLite; this retry only covers the
-// rare case where the desktop held its write lock even longer.
-async function withBusyRetry<T>(task: () => Promise<T>, attempts = 3): Promise<T> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      return await task();
-    } catch (error) {
-      if (!isSqliteBusyError(error)) throw error;
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
-    }
-  }
-  throw lastError;
-}
-
-function chatThreadResult(thread: ChatThread) {
-  return {
-    id: thread.id,
-    title: thread.title,
-    createdAtMs: thread.createdAtMs,
-    updatedAtMs: thread.updatedAtMs,
-    ...(thread.linkedFile?.pathHint ? { linkedPathHint: thread.linkedFile.pathHint } : {}),
-  };
-}
-
-function chatMessageResult(message: ChatMessage) {
-  return {
-    id: message.id,
-    threadId: message.threadId,
-    authorKind: message.author.kind,
-    authorDisplayName: message.author.displayName,
-    body: message.body,
-    createdAtMs: message.createdAtMs,
-  };
-}
-
-function chatFailureReason(error: unknown, fallback: string): string {
-  return error instanceof LinkedChatStoreError
-    ? error.message
-    : failureReason(error, fallback);
 }
 
 export async function listFileChats(ctx: ToolContext, args: { path: string }) {
-  const gate = await requireEngineChats(ctx);
-  if (!gate.ok) return { ok: false as const, reason: gate.reason };
-  const resolved = await safeResolve(ctx, args.path);
-  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  try {
-    return await withEngineStores(ctx, async ({ texts, chats }) => {
-      // Chats key on the file's STABLE engine object id (they survive
-      // renames); the active version decides which object a path names.
-      const active = await texts.getActiveVersion({ workspaceId: gate.workspaceId });
-      const snapshot = active
-        ? await texts.readTextFile({
-            workspaceId: gate.workspaceId,
-            versionId: active.id,
-            path: resolved.normalized,
-          })
-        : null;
-      const fileObjectId = snapshot?.objectId ?? null;
-      const threads = fileObjectId
-        ? await chats.listThreadsForFile({
-            workspaceId: gate.workspaceId,
-            objectId: fileObjectId,
-          })
-        : [];
-      return {
-        ok: true as const,
-        path: resolved.normalized,
-        // null = dohc does not track this file (yet); only tracked text
-        // files can have Chats.
-        fileObjectId,
-        threads: threads.map(chatThreadResult),
-      };
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: chatFailureReason(error, `failed to list chats for: ${args.path}`),
-    };
-  }
+  return requestCli(ctx, "fileChats", args);
 }
 
 export async function readChat(ctx: ToolContext, args: { threadId: string }) {
-  const gate = await requireEngineChats(ctx);
-  if (!gate.ok) return { ok: false as const, reason: gate.reason };
-  try {
-    return await withEngineStores(ctx, async ({ texts, chats }) => {
-      const messages = await chats.listMessages({
-        workspaceId: gate.workspaceId,
-        threadId: args.threadId,
-      });
-      const threads = await chats.listThreads({ workspaceId: gate.workspaceId });
-      const thread = threads.find((candidate) => candidate.id === args.threadId);
-      if (!thread) {
-        return { ok: false as const, reason: `chat thread not found: ${args.threadId}` };
-      }
-      // Resolve the linked file's CURRENT path (object id -> active-version
-      // path) so the projection can honestly name it.
-      let linkedFileAccess: LinkedChatProjectionFileAccess = { kind: "unknown" };
-      if (thread.linkedFile) {
-        const active = await texts.getActiveVersion({ workspaceId: gate.workspaceId });
-        const files = active
-          ? await texts.listTextFiles({
-              workspaceId: gate.workspaceId,
-              versionId: active.id,
-            })
-          : [];
-        const linked = files.find(
-          (file) => file.objectId === thread.linkedFile?.objectId,
-        );
-        if (linked) linkedFileAccess = { kind: "allowed", path: linked.path };
-      }
-      const projection = await chats.getThreadProjection({
-        workspaceId: gate.workspaceId,
-        threadId: thread.id,
-        linkedFileAccess,
-      });
-      return {
-        ok: true as const,
-        thread: chatThreadResult(thread),
-        messages: messages.map(chatMessageResult),
-        projection: {
-          path: projection.path,
-          readOnly: projection.readOnly,
-          text: projection.text,
-        },
-      };
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: chatFailureReason(error, `failed to read chat: ${args.threadId}`),
-    };
-  }
+  return requestCli(ctx, "chat", args);
 }
 
 // --- channels (PR 12/15 slice, WS-E) ----------------------------------------
@@ -2751,44 +2316,7 @@ export async function readChat(ctx: ToolContext, args: { threadId: string }) {
 // channel on first use — the same rule the desktop applies. Read-only shared
 // views list only existing channels so discovery never creates durable state.
 export async function listChannels(ctx: ToolContext) {
-  const gate = await requireEngineChats(ctx);
-  if (!gate.ok) return { ok: false as const, reason: gate.reason };
-  try {
-    return await withEngineStores(ctx, async ({ chats }) => {
-      if (!ctx.readOnly) {
-        await withBusyRetry(() =>
-          chats.ensureGeneralChannel({ workspaceId: gate.workspaceId }),
-        );
-      }
-      const channels = await chats.listChannels({ workspaceId: gate.workspaceId });
-      const withThreads = [];
-      for (const channel of channels) {
-        const threads = await chats.listChannelThreads({
-          workspaceId: gate.workspaceId,
-          channelId: channel.id,
-        });
-        withThreads.push({
-          id: channel.id,
-          name: channel.name,
-          slug: channel.slug,
-          kind: channel.kind,
-          threadCount: channel.threadCount,
-          threads: threads.map((entry) => ({
-            id: entry.thread.id,
-            title: entry.thread.title,
-            messageCount: entry.messageCount,
-            updatedAtMs: entry.thread.updatedAtMs,
-          })),
-        });
-      }
-      return { ok: true as const, channels: withThreads };
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: chatFailureReason(error, "failed to list channels"),
-    };
-  }
+  return requestCli(ctx, "channelsFull", {});
 }
 
 // Start a chat in a channel AS THE AGENT. `channel` accepts a channel id or
@@ -2798,99 +2326,14 @@ export async function startChannelChat(
   ctx: ToolContext,
   args: { channel: string; body: string; title?: string },
 ) {
-  const gate = await requireEngineChats(ctx);
-  if (!gate.ok) return { ok: false as const, reason: gate.reason };
-  const displayName = await agentReplyDisplayName(ctx);
-  const authorUserId = await agentAuthorUserId(ctx);
-  try {
-    return await withEngineStores(ctx, async ({ chats }) => {
-      const requested = args.channel.replace(/^#/, "").trim();
-      const bySlug = await chats.findChannelBySlug({
-        workspaceId: gate.workspaceId,
-        slug: requested,
-      });
-      // Fall back to an exact id or display-name match so every form the
-      // tool documents ("general", "#general", "Client ACME", a channel id)
-      // resolves — a channel id slugifies to something no channel owns.
-      const channel =
-        bySlug ??
-        (await chats.listChannels({ workspaceId: gate.workspaceId })).find(
-          (candidate) => candidate.id === requested || candidate.name === requested,
-        );
-      if (!channel) {
-        return { ok: false as const, reason: `channel not found: ${args.channel}` };
-      }
-      await assertMcpSharedChannelWritable({
-        ctx,
-        workspaceId: gate.workspaceId,
-        chats,
-        target: { channelId: channel.id },
-      });
-      const started = await withBusyRetry(() =>
-        chats.startChannelThread({
-          workspaceId: gate.workspaceId,
-          channelId: channel.id,
-          ...(args.title !== undefined ? { title: args.title } : {}),
-          // Agent authorship, always: this tool IS the agent speaking.
-          author: { kind: "agent", displayName },
-          // WS-MU-C0: stamp the signed-in opaque userId so the relay verifies
-          // this agent send and it replicates VERIFIED (omitted when solo/local).
-          ...(authorUserId !== undefined ? { authorUserId } : {}),
-          body: args.body,
-        }),
-      );
-      return {
-        ok: true as const,
-        channel: { id: channel.id, name: channel.name, slug: channel.slug },
-        thread: chatThreadResult(started.thread),
-        message: chatMessageResult(started.message),
-      };
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: chatFailureReason(error, `failed to start a chat in: ${args.channel}`),
-    };
-  }
+  return requestCli(ctx, "startChannelChat", args);
 }
 
 export async function replyToChat(
   ctx: ToolContext,
   args: { threadId: string; body: string },
 ) {
-  const gate = await requireEngineChats(ctx);
-  if (!gate.ok) return { ok: false as const, reason: gate.reason };
-  const displayName = await agentReplyDisplayName(ctx);
-  const authorUserId = await agentAuthorUserId(ctx);
-  try {
-    return await withEngineStores(ctx, async ({ chats }) => {
-      await assertMcpSharedChannelWritable({
-        ctx,
-        workspaceId: gate.workspaceId,
-        chats,
-        target: { threadId: args.threadId },
-      });
-      const message = await withBusyRetry(() =>
-        chats.sendMessage({
-          workspaceId: gate.workspaceId,
-          threadId: args.threadId,
-          // Agent authorship, always: this tool IS the agent speaking. Shared
-          // surfaces render it as "<User Name>'s agent".
-          author: { kind: "agent", displayName },
-          // WS-MU-C0: stamp the signed-in opaque userId so the relay verifies
-          // this agent send and it replicates VERIFIED (omitted when solo/local).
-          ...(authorUserId !== undefined ? { authorUserId } : {}),
-          body: args.body,
-        }),
-      );
-      return { ok: true as const, message: chatMessageResult(message) };
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: chatFailureReason(error, `failed to reply to chat: ${args.threadId}`),
-    };
-  }
+  return requestCli(ctx, "replyToChat", args);
 }
 
 export function resolveConflict(args: { base: string; local: string; remote: string }) {
