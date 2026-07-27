@@ -63,9 +63,8 @@ function normalizedRelayUrl(baseUrl: string): string {
 
 export function relayTransportModeForRoot(
   rootPath: string | null,
-  rustAdapterEnabled: boolean,
 ): RelayTransportMode {
-  if (!rustAdapterEnabled || rootPath === null) return "typescript";
+  if (rootPath === null) return "typescript";
   try {
     const marker = readFileSync(
       join(rootPath, ".dohc", "engine", "SHADOW_CLONE"),

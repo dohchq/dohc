@@ -58,7 +58,6 @@ import {
   readWorkspaceEnginePolicy,
   type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
-import { isRustEngineAdapterEnabled } from "./engineClientFlag";
 import {
   isEngineSessionReconnectError,
   type EngineWorkspaceSessions,
@@ -457,9 +456,8 @@ export interface WorkspaceEngineCaptureOptions {
   // never read the slot — only physically observed watcher batches carry an
   // author.
   activeAgentRun?: () => ActiveAgentRun | null;
-  // R13b dual-engine composition: when DOHC_RUST_ENGINE_ADAPTER=1 this
-  // reconnect-safe session owner supplies the daemon-backed text, secret, and
-  // Y.Doc paths. Injectable stores still take precedence in focused tests.
+  // The reconnect-safe session owner supplies the daemon-backed text, secret,
+  // and Y.Doc paths. Injectable stores still take precedence in focused tests.
   rustEngineSessions?: EngineWorkspaceSessions;
   // The real Rust daemon owns filesystem observation and version
   // materialization. Tests backed by the in-process loopback omit this because
@@ -933,22 +931,10 @@ export function createWorkspaceEngineCapture(
     });
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
 
-  const rustEngineEnabled = isRustEngineAdapterEnabled();
-  if (
-    rustEngineEnabled &&
-    !options.store &&
-    !options.secretStore &&
-    !options.rustEngineSessions
-  ) {
-    throw new Error(
-      "DOHC_RUST_ENGINE_ADAPTER requires Rust engine workspace sessions.",
-    );
-  }
   const useRustEngine =
     !options.store &&
     !options.secretStore &&
-    options.rustEngineSessions !== undefined &&
-    rustEngineEnabled;
+    options.rustEngineSessions !== undefined;
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
     if (!options.rustEngineSessions) {

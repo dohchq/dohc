@@ -349,20 +349,19 @@ describe("EngineRelayClient", () => {
     roots.push(rootPath);
 
     expect(
-      relayTransportModeForRoot(rootPath, true),
+      relayTransportModeForRoot(rootPath),
       "MUTATION: routing a marker-less join to the daemon makes workspace.open fail",
     ).toBe("typescript");
     expect(
-      relayTransportModeForRoot(null, true),
+      relayTransportModeForRoot(null),
       "MUTATION: a daemon preflight has no relay identity to present",
     ).toBe("typescript");
     const markerDirectory = join(rootPath, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
     await writeFile(join(markerDirectory, "SHADOW_CLONE"), "forged");
-    expect(relayTransportModeForRoot(rootPath, true)).toBe("typescript");
+    expect(relayTransportModeForRoot(rootPath)).toBe("typescript");
     await writeFile(join(markerDirectory, "SHADOW_CLONE"), "a".repeat(64));
-    expect(relayTransportModeForRoot(rootPath, true)).toBe("daemon");
-    expect(relayTransportModeForRoot(rootPath, false)).toBe("typescript");
+    expect(relayTransportModeForRoot(rootPath)).toBe("daemon");
   });
 
   it("drains every daemon pull page before reporting synchronization complete", async () => {

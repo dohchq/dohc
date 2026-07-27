@@ -373,7 +373,7 @@ import {
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import {
-  createRustEngineDaemonIfEnabled,
+  createRustEngineDaemon,
   defaultEngineBinaryPath,
   type EngineDaemonLifecycle,
 } from "./workspaces/engineDaemonLifecycle";
@@ -385,7 +385,6 @@ import {
   type EngineRelayWorkspaceClient,
 } from "./workspaces/engineRelayClient";
 import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
-import { isRustEngineAdapterEnabled } from "./workspaces/engineClientFlag";
 import {
   createDesktopLinkedChatStore,
   type DesktopLinkedChatStore,
@@ -407,10 +406,6 @@ import {
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
 import { CHAT_AGENT_PRESENCE_TOPIC } from "./collab/agentPresence";
-import {
-  createDesktopAgentDispatchStore,
-  type DesktopAgentDispatchStoreHandle,
-} from "./agents/desktopAgentDispatchStore";
 import {
   createLiveAgentDispatchStore,
   type LiveAgentDispatchStoreHandle,
@@ -1494,10 +1489,7 @@ function relayClientForWorkspace(input: {
   rootPath: string;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient | null {
-  const mode = relayTransportModeForRoot(
-    input.rootPath,
-    isRustEngineAdapterEnabled(),
-  );
+  const mode = relayTransportModeForRoot(input.rootPath);
   relayTransportRoutes.bind({ ...input, mode });
   if (mode === "typescript") return null;
   if (!rustEngineRelayClient) {
@@ -1513,7 +1505,7 @@ async function probeWorkspaceRelay(input: {
   relayTransportRoutes.bind({
     ...input,
     rootPath: `relay-probe:${input.workspaceId}`,
-    mode: relayTransportModeForRoot(null, isRustEngineAdapterEnabled()),
+    mode: relayTransportModeForRoot(null),
   });
   try {
     return await probeRelayWorkspace(input);
@@ -1712,8 +1704,7 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
   return cachedAgentSessions;
 }
 
-// Linked Chats (PR 0M-5): one lazy store per workspace. The Rust flag swaps
-// the factory boundary; every consumer keeps the same awaitable contract.
+// Linked Chats (PR 0M-5): one lazy Rust-backed store per workspace.
 const linkedChatStores = new Map<string, DesktopLinkedChatStore>();
 function linkedChatStoreFor(workspace: {
   workspaceId: string;
@@ -1721,8 +1712,10 @@ function linkedChatStoreFor(workspace: {
 }): DesktopLinkedChatStore {
   const existing = linkedChatStores.get(workspace.workspaceId);
   if (existing) return existing;
+  if (!rustEngineWorkspaceSessions) {
+    throw new Error("Rust engine workspace sessions are unavailable.");
+  }
   const store = createDesktopLinkedChatStore(workspace, {
-    rustEngineEnabled: isRustEngineAdapterEnabled(),
     sessions: rustEngineWorkspaceSessions,
   });
   linkedChatStores.set(workspace.workspaceId, store);
@@ -1731,21 +1724,22 @@ function linkedChatStoreFor(workspace: {
 
 const agentDispatchStoreHandles = new Map<
   string,
-  DesktopAgentDispatchStoreHandle | LiveAgentDispatchStoreHandle
+  LiveAgentDispatchStoreHandle
 >();
 const dispatchAgentRunSlots = new Map<string, string>();
 function agentDispatchStoreHandleFor(workspace: {
   workspaceId: string;
   rootPath: string;
-}): DesktopAgentDispatchStoreHandle | LiveAgentDispatchStoreHandle {
+}): LiveAgentDispatchStoreHandle {
   const existing = agentDispatchStoreHandles.get(workspace.workspaceId);
   if (existing) return existing;
-  const handle =
-    isRustEngineAdapterEnabled() &&
-    rustEngineDaemon &&
-    rustEngineWorkspaceSessions
-      ? createLiveAgentDispatchStore(workspace, rustEngineWorkspaceSessions)
-      : createDesktopAgentDispatchStore(workspace.rootPath);
+  if (!rustEngineWorkspaceSessions) {
+    throw new Error("Rust engine workspace sessions are unavailable.");
+  }
+  const handle = createLiveAgentDispatchStore(
+    workspace,
+    rustEngineWorkspaceSessions,
+  );
   agentDispatchStoreHandles.set(workspace.workspaceId, handle);
   return handle;
 }
@@ -7285,11 +7279,7 @@ if (process.platform === "win32") app.setAppUserModelId("app.dohc.desktop");
 if (process.platform === "linux") app.setDesktopName("dohc.desktop");
 
 async function startRustEngineDaemon(): Promise<boolean> {
-  // TEMPORARY migration scaffolding: R15 is an atomic authority cutover.
-  // Delete this dual-engine flag and its branch when that cutover lands.
-  const enabled = isRustEngineAdapterEnabled();
-  if (!enabled) return true;
-  rustEngineDaemon = createRustEngineDaemonIfEnabled(true, {
+  rustEngineDaemon = createRustEngineDaemon({
     command: defaultEngineBinaryPath({
       isPackaged: app.isPackaged,
       appPath: app.getAppPath(),
@@ -7300,12 +7290,11 @@ async function startRustEngineDaemon(): Promise<boolean> {
       if (terminal && !quitting) {
         dialog.showErrorBox(
           "Rust engine stopped",
-          `${error.message}\n\nRestart dohc or unset DOHC_RUST_ENGINE_ADAPTER to use the current engine.`,
+          `${error.message}\n\nRestart dohc. If the engine stops again, review the desktop logs and repair or reinstall dohc.`,
         );
       }
     },
   });
-  if (!rustEngineDaemon) return true;
   try {
     await rustEngineDaemon.start();
     const relaySource = new RelayConfiguredDaemonClientSource(
@@ -7325,7 +7314,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
     console.error("[desktop] Rust engine daemon failed to start:", error);
     dialog.showErrorBox(
       "Rust engine failed to start",
-      `${message}\n\nThe opt-in Rust engine will not fall back to the TypeScript engine.`,
+      `${message}\n\nThe desktop cannot start without the Rust engine.`,
     );
     await rustEngineDaemon.stop();
     rustEngineDaemon = null;

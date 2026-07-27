@@ -23,7 +23,6 @@ const binaryPath = fileURLToPath(
     import.meta.url,
   ),
 );
-const originalRustAdapter = process.env.DOHC_RUST_ENGINE_ADAPTER;
 // A skip is right for a developer who has not built the daemon and wrong for
 // CI, where it is the difference between this test guarding the cutover path
 // and reporting green without running. Same pattern as DOHC_REQUIRE_POSTGRES.
@@ -64,11 +63,6 @@ async function waitForPathMoments(
 }
 
 afterEach(async () => {
-  if (originalRustAdapter === undefined) {
-    delete process.env.DOHC_RUST_ENGINE_ADAPTER;
-  } else {
-    process.env.DOHC_RUST_ENGINE_ADAPTER = originalRustAdapter;
-  }
   if (originalKernelSidecar === undefined) {
     delete process.env.DOHC_KERNEL_SIDECAR;
   } else {
@@ -84,7 +78,6 @@ afterEach(async () => {
 it.skipIf(!engineBinaryPresent)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
-    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
     process.env.DOHC_KERNEL_SIDECAR = "0";
     const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-e2e-"));
     roots.push(root);
