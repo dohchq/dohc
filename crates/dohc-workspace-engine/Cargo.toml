@@ -26,6 +26,7 @@ thiserror = "2"
 fs4 = "1.1.0"
 getrandom = "0.3"
 sha2 = "0.10.9"
+filetime = { version = "0.2", optional = true }
 tokio = { version = "1", features = [
   "io-std",
   "io-util",
@@ -45,7 +46,7 @@ libc = "0.2"
 # `write_rehearsal_token_for_harness`); production builds must not enable it.
 # `tokio/process` lives here because only the harness-gated soak runner
 # spawns child processes.
-harness = ["tokio/process"]
+harness = ["tokio/process", "dep:filetime"]
 
 [dev-dependencies]
 # `test-util` gives the driver-loop tests paused virtual time, so they can
@@ -65,4 +66,8 @@ workspace = true
 # harness feature — production builds never compile it.
 [[bin]]
 name = "dohc-soak-runner"
+required-features = ["harness"]
+
+[[bin]]
+name = "dohc-rehearsal-harness"
 required-features = ["harness"]

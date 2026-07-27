@@ -5,6 +5,8 @@
 pub(crate) mod capture_driver;
 pub mod capture_sink;
 pub mod cutover_rehearse;
+#[cfg(feature = "harness")]
+pub mod rehearsal_harness;
 pub mod shadow_fence;
 
 #[cfg(feature = "harness")]
@@ -1292,7 +1294,8 @@ impl EngineService {
             // armed above the startup replay closes the actor on an early drop
             // and is disarmed once the handle is inserted; `CaptureDriver`'s own
             // Drop cancels the files layer.
-            if params.recover_running_dispatches.unwrap_or(true) {
+            // Desktop rebinds opt out because their runner processes outlive the daemon.
+            if actor_open.created_actor && params.recover_running_dispatches.unwrap_or(true) {
                 // Cancellation-aware like every other actor wait in this flow:
                 // a caller abort stops WAITING promptly (the actor still finishes
                 // the reclaim it already accepted — it is idempotent on the next
@@ -9867,9 +9870,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn workspace_open_can_preserve_a_dispatch_owned_by_the_desktop() {
+    async fn workspace_rebind_preserves_a_runner_owned_by_the_desktop() {
         // MUTATION: ignore recoverRunningDispatches=false on the second open ->
-        // the live desktop claim is reclaimed before its runner can complete.
+        // the claim is reclaimed and requeued before the surviving runner can
+        // complete it.
         let scratch = ScratchDir::new().expect("scratch");
         shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
             .expect("shadow marker");
@@ -9918,7 +9922,7 @@ mod tests {
         first_service
             .workspace_close(Some(first_handle))
             .await
-            .expect("simulate daemon teardown");
+            .expect("simulate old daemon teardown");
 
         let rebound_service = EngineService::with_supervisor(supervisor);
         let rebound = rebound_service
@@ -9931,7 +9935,7 @@ mod tests {
                 }),
             )
             .await
-            .expect("daemon-only CLI rebind");
+            .expect("desktop rebind");
         let rebound_handle: WorkspaceHandle =
             serde_json::from_value(rebound["workspace"].clone()).expect("rebound handle");
         let open_runs = rebound_service
@@ -9946,6 +9950,24 @@ mod tests {
             open_runs["claims"][0]["run"]["runId"],
             json!("run-survives")
         );
+
+        rebound_service
+            .chats_dispatch_complete(
+                &RequestContext::unbounded(),
+                Some(rebound_handle.clone()),
+                json!({ "runId": "run-survives", "exitCode": 0, "nowMs": 30 }),
+            )
+            .await
+            .expect("surviving runner completes");
+        let pending = rebound_service
+            .chats_dispatch_list_pending(
+                &RequestContext::unbounded(),
+                Some(rebound_handle.clone()),
+                json!({}),
+            )
+            .await
+            .expect("list pending dispatches");
+        assert_eq!(pending["dispatches"], json!([]));
 
         rebound_service
             .workspace_close(Some(rebound_handle))

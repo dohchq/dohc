@@ -435,6 +435,50 @@ describe("EngineClient", () => {
     transport.close();
   });
 
+  it("times out only the expired request and ignores its late reply", async () => {
+    // MUTATION: call fail() from the deadline timer -> the unrelated request and
+    // every later request reject because the shared client is closed.
+    vi.useFakeTimers();
+    try {
+      const peer = new FakePeerConnection();
+      const transport = client(peer);
+      peer.acknowledge();
+      await transport.ready();
+      const requests: Array<Extract<Envelope, { type: "request" }>> = [];
+      peer.onEnvelope = (envelope) => {
+        if (envelope.type === "request") requests.push(envelope);
+      };
+
+      const expired = transport.sendRequest({
+        ...request(55, "silent.method"),
+        deadlineMs: 25,
+      });
+      const unrelated = transport.sendRequest(request(56, "unrelated.method"));
+      const rejection = expect(expired).rejects.toMatchObject({
+        code: "transport-error",
+        message: "Engine request 1 timed out after 25ms.",
+      });
+
+      await vi.advanceTimersByTimeAsync(25);
+      await rejection;
+      peer.send({ type: "response", id: requests[0]!.id, result: "late" });
+      peer.send({ type: "response", id: requests[1]!.id, result: "unrelated" });
+      await expect(unrelated).resolves.toEqual({
+        id: 56,
+        result: "unrelated",
+      });
+
+      const afterTimeout = transport.sendRequest(
+        request(57, "after.timeout"),
+      );
+      peer.send({ type: "response", id: requests[2]!.id, result: "alive" });
+      await expect(afterTimeout).resolves.toEqual({ id: 57, result: "alive" });
+      transport.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects a matching wire error with the generated WireError payload", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);

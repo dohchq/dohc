@@ -6133,8 +6133,9 @@ impl<'a> LinkedChatStore<'a> {
                      JOIN chat_dispatch_ledger l ON l.workspace_id = r.workspace_id \
                        AND l.trigger_message_id = r.trigger_message_id AND l.run_id = r.run_id \
                      WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
-                       AND r.exit_code = 143 AND r.failure_reason = 'app-quit' \
-                       AND r.failure_note_posted = 0 AND l.state = 'failed' \
+                       AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
+                         OR r.failure_reason = 'app restart during run') \
+                       AND l.state = 'failed' \
                        AND (SELECT COUNT(*) FROM agent_run_records all_runs \
                          WHERE all_runs.run_id = r.run_id) <> 1)",
                     params![workspace_id],
@@ -6153,8 +6154,9 @@ impl<'a> LinkedChatStore<'a> {
                        ON l.workspace_id = r.workspace_id \
                       AND l.trigger_message_id = r.trigger_message_id AND l.run_id = r.run_id \
                      WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
-                       AND r.exit_code = 143 AND r.failure_reason = 'app-quit' \
-                       AND r.failure_note_posted = 0 AND l.state = 'failed' \
+                       AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
+                         OR r.failure_reason = 'app restart during run') \
+                       AND l.state = 'failed' \
                        AND (?2 = 0 OR r.started_at_ms > ?3 \
                          OR (r.started_at_ms = ?3 AND r.run_id > ?4)) \
                      ORDER BY r.started_at_ms, r.run_id LIMIT ?5",

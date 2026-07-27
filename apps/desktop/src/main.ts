@@ -410,6 +410,10 @@ import {
   type DesktopAgentDispatchStoreHandle,
 } from "./agents/desktopAgentDispatchStore";
 import {
+  createLiveAgentDispatchStore,
+  type LiveAgentDispatchStoreHandle,
+} from "./agents/liveAgentDispatchStore";
+import {
   buildOutputSiteRoot,
   staticPreviewTargetForSite,
   getSitePackage,
@@ -498,6 +502,7 @@ import { rgPath } from "@vscode/ripgrep";
 import {
   startCliServer,
   type CliRegistryWorkspace,
+  type CliRunMessageLink,
   type CliServerHandle,
   type CliWorkspaceContext,
 } from "./cli/cliServer";
@@ -1716,16 +1721,21 @@ function linkedChatStoreFor(workspace: { workspaceId: string; rootPath: string }
 
 const agentDispatchStoreHandles = new Map<
   string,
-  DesktopAgentDispatchStoreHandle
+  DesktopAgentDispatchStoreHandle | LiveAgentDispatchStoreHandle
 >();
 const dispatchAgentRunSlots = new Map<string, string>();
 function agentDispatchStoreHandleFor(workspace: {
   workspaceId: string;
   rootPath: string;
-}): DesktopAgentDispatchStoreHandle {
+}): DesktopAgentDispatchStoreHandle | LiveAgentDispatchStoreHandle {
   const existing = agentDispatchStoreHandles.get(workspace.workspaceId);
   if (existing) return existing;
-  const handle = createDesktopAgentDispatchStore(workspace.rootPath);
+  const handle =
+    isRustEngineAdapterEnabled() &&
+    rustEngineDaemon &&
+    rustEngineWorkspaceSessions
+      ? createLiveAgentDispatchStore(workspace, rustEngineWorkspaceSessions)
+      : createDesktopAgentDispatchStore(workspace.rootPath);
   agentDispatchStoreHandles.set(workspace.workspaceId, handle);
   return handle;
 }
@@ -2009,6 +2019,20 @@ async function publishAgentPresence(
   );
 }
 
+const pendingCliRunMessageLinks = new Set<string>();
+
+function cliRunMessageLinkKey(link: CliRunMessageLink): string {
+  return `${link.workspaceId}\u0000${link.runId}\u0000${link.messageId}`;
+}
+
+function hasPendingCliRunMessageLink(
+  workspaceId: string,
+  runId: string,
+): boolean {
+  const prefix = `${workspaceId}\u0000${runId}\u0000`;
+  return [...pendingCliRunMessageLinks].some((key) => key.startsWith(prefix));
+}
+
 const chatDispatchService = createChatDispatchService({
   workspaceFor: workspaceForDispatch,
   listOpenWorkspaces: openDispatchWorkspaces,
@@ -2084,6 +2108,7 @@ const chatDispatchService = createChatDispatchService({
     dispatchAgentRunSlots.delete(workspaceId);
   },
   runSlotOccupied: (workspaceId) => activity.hasAgentRun(workspaceId),
+  hasPendingRunMessageLink: hasPendingCliRunMessageLink,
   publishPresence: publishAgentPresence,
   requeueFailedTrigger: (input) => {
     const workspace = workspaceForDispatch(input.workspaceId);
@@ -2241,6 +2266,18 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
         console.error("[desktop] CLI dispatch scan:", error);
       });
+    },
+    onRunMessageLinkPending: (link) => {
+      pendingCliRunMessageLinks.add(cliRunMessageLinkKey(link));
+    },
+    onRunMessageLinkSettled: (link) => {
+      pendingCliRunMessageLinks.delete(cliRunMessageLinkKey(link));
+      void chatDispatchService.scanWorkspace(link.workspaceId).catch((error) => {
+        console.error("[desktop] CLI provenance recovery scan:", error);
+      });
+    },
+    onRunMessageLinkAbandoned: (link) => {
+      pendingCliRunMessageLinks.delete(cliRunMessageLinkKey(link));
     },
     onError: (error) => {
       console.error("[desktop] CLI server:", error);
@@ -2535,12 +2572,12 @@ app.on("will-quit", (event) => {
     Promise.all(
       [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
     ));
-  const dispatchStoreStop = chatDispatchStop.then(() => {
-    for (const handle of agentDispatchStoreHandles.values()) {
-      try {
-        handle.close();
-      } catch {}
-    }
+  const dispatchStoreStop = chatDispatchStop.then(async () => {
+    await Promise.allSettled(
+      [...agentDispatchStoreHandles.values()].map(
+        async (handle) => await handle.close(),
+      ),
+    );
     agentDispatchStoreHandles.clear();
   });
   // Engine search stores hold the same kind of lazy SQLite handle; close them
@@ -2551,7 +2588,8 @@ app.on("will-quit", (event) => {
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
-  const rustEngineStop = closeAllRelayTransportWorkspaces()
+  const rustEngineStop = dispatchStoreStop
+    .then(async () => await closeAllRelayTransportWorkspaces())
     .catch(() => undefined)
     .then(async () => await rustEngineDaemon?.stop());
   void Promise.race([
@@ -5559,7 +5597,7 @@ function registerIpcHandlers(
     // been migrated before the read-only dispatch adapter validates them.
     linkedChatStoreFor(workspace);
     const dispatchStore = agentDispatchStoreHandleFor(workspace).store;
-    const found = dispatchStore.runRecordsForThread(
+    const found = await dispatchStore.runRecordsForThread(
       workspace.workspaceId,
       input.threadId,
       { limit: 200 },
@@ -6671,7 +6709,7 @@ function registerIpcHandlers(
     const input = ChatDispatchStateForThreadPayload.parse(payload);
     requireWorkspace(input.workspaceId);
     return ChatDispatchStateForThreadResult.parse(
-      chatDispatchService.dispatchStateForThread(
+      await chatDispatchService.dispatchStateForThread(
         input.workspaceId,
         input.threadId,
       ),
