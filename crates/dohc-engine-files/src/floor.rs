@@ -28,13 +28,19 @@
 //! NEEDS-DECISION owned elsewhere. The floor's only job is to decide, given a
 //! real on-disk relative path, whether the scan tracks it.
 
+/// The engine-owned storage segment.
+pub const ENGINE_STORAGE_SEGMENT: &str = ".dohc";
+
 /// Reserved directory/segment names, matched case- and alias-insensitively at
 /// any depth. `.dohc` at any depth is the engine's own storage floor.
-const RESERVED_SEGMENTS: &[&str] = &[".dohc", ".git", "node_modules"];
+///
+/// This is public so filesystem tooling which must mirror the capture floor
+/// can consume the canonical names instead of copying the list.
+pub const RESERVED_SEGMENTS: &[&str] = &[ENGINE_STORAGE_SEGMENT, ".git", "node_modules"];
 
 /// Write-temp file prefixes: an in-progress `.dohc-write-*` staging file is
 /// engine scratch, never user content.
-const IGNORED_FILE_PREFIXES: &[&str] = &[".dohc-write-"];
+pub const IGNORED_FILE_PREFIXES: &[&str] = &[".dohc-write-"];
 
 /// SQLite sidecar suffixes; a sidecar is excluded only when its base ends in a
 /// database extension, so a user's `notes/draft-wal` (no `.db` base) is kept.

@@ -5,6 +5,8 @@
 pub(crate) mod capture_driver;
 pub mod capture_sink;
 pub mod cutover_rehearse;
+#[cfg(feature = "harness")]
+pub mod rehearsal_harness;
 pub mod shadow_fence;
 
 #[cfg(feature = "harness")]
