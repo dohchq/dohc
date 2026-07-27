@@ -789,29 +789,25 @@ async function queryFtsCandidates(
     return null;
   }
   let response: CliGranularChatMessageSearchResponse;
-  let db: EngineSqliteDb | null = null;
   try {
-    if (context.daemonReads) {
-      response = await context.daemonReads.queryChatMessagesGranular({
-        query,
-        limit: MAX_FTS_CANDIDATES,
-      });
-    } else {
-      const { DatabaseSync } = nodeSqlite();
-      db = new DatabaseSync(
-        join(context.rootPath, LINKED_CHAT_STORE_RELATIVE_PATH),
-        { readOnly: true },
+    // The daemon is the only reader. It is unconditionally present -- main.ts
+    // quits the app if startRustEngineDaemon fails, before the CLI server is
+    // even registered -- so the legacy branch here, which opened a SECOND
+    // sqlite connection to the daemon-owned engine.db, was unreachable.
+    //
+    // Thrown rather than silently degraded: a missing daemon reader is an
+    // invariant violation, and the old fallback quietly became a second
+    // writer-adjacent connection to a database the daemon owns.
+    const daemonReads = context.daemonReads;
+    if (!daemonReads) {
+      throw new Error(
+        "CLI workspace context has no daemon reader; the engine daemon is required.",
       );
-      const results = queryChatMessagesGranular(db, {
-        workspaceId: context.workspaceId,
-        query,
-        limit: MAX_FTS_CANDIDATES,
-      });
-      response = {
-        results,
-        saturated: results.length === MAX_FTS_CANDIDATES,
-      };
     }
+    response = await daemonReads.queryChatMessagesGranular({
+      query,
+      limit: MAX_FTS_CANDIDATES,
+    });
     // A saturated prefilter is not exhaustive. Fall back to the full body scan
     // below so the optimization can never change grep's results at scale.
     if (response.saturated) return null;
@@ -824,8 +820,6 @@ async function queryFtsCandidates(
     return { threadIds, messageIds };
   } catch {
     return null;
-  } finally {
-    db?.close();
   }
 }
 

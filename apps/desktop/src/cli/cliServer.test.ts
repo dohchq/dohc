@@ -1835,46 +1835,11 @@ describe("CLI socket server", () => {
     })).resolves.toEqual({ ...added, state: "removed" });
   });
 
-  it("loads only FTS candidate threads for substring grep", async () => {
-    const matching = await post({
-      actor: "human",
-      title: "Candidate search thread",
-      body: "The selective-corpus-needle lives here",
-    });
-    await post({
-      actor: "human",
-      title: "Unrelated search thread",
-      body: "This thread must not be hydrated by substring grep",
-    });
-    if (!store) throw new Error("Store is not available");
-    const loadedThreadIds: string[] = [];
-    const originalListMessages = store.listMessages;
-    store.listMessages = async (input) => {
-      loadedThreadIds.push(input.threadId);
-      return originalListMessages(input);
-    };
-
-    let grep: CliResultByVerb["grep"] | null = null;
-    try {
-      grep = await invoke("grep", {
-        cwd: workspaceRoot,
-        actor: "human",
-        pattern: "selective-corpus-needle",
-        ignoreCase: true,
-        filesWithMatches: false,
-        context: 0,
-        limit: 20,
-        regex: false,
-      });
-    } finally {
-      store.listMessages = originalListMessages;
-    }
-
-    if (!grep || !("matches" in grep)) throw new Error("Expected message grep results");
-    expect(grep.matches.map((match) => match.threadId)).toEqual([matching.threadId]);
-    expect(loadedThreadIds).toHaveLength(1);
-  });
-
+  // The TypeScript-backend twin of this scenario was removed with the legacy
+  // sqlite fallback in queryFtsCandidates. The daemon test below asserts the
+  // same property -- that grep hydrates ONLY the FTS candidate threads
+  // (loadedThreadIds equals the matching thread alone) -- and additionally
+  // covers the saturation fallback, so no coverage was lost.
   it("uses daemon candidates for substring grep and falls back when they saturate", async () => {
     const matching = await post({
       actor: "human",
