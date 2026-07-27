@@ -4,6 +4,7 @@ import {
   type WorkspaceHandle,
 } from "@dohc/workspace-engine-client";
 import { describe, expect, it, vi } from "vitest";
+import { EngineDaemonUnavailableError } from "./engineDaemonLifecycle";
 import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 
 interface Deferred<T> {
@@ -175,5 +176,49 @@ describe("EngineWorkspaceSessions", () => {
     await expect(sessions.run(workspace, operation)).resolves.toBe("opened");
     expect(openAttempts).toBe(2);
     expect(operation).toHaveBeenCalledOnce();
+  });
+
+  it("paces open retries while the daemon lifecycle is relaunching", async () => {
+    const client = {
+      close() {},
+      async sendRequest(request: Request): Promise<Response> {
+        if (request.method !== "workspace.open") {
+          throw new Error(`Unexpected request: ${request.method}`);
+        }
+        return { id: request.id, result: { workspace: "handle-relaunched" } };
+      },
+    };
+    let daemonAvailable = false;
+    let clientLookups = 0;
+    const delays: number[] = [];
+    const sessions = new EngineWorkspaceSessions(
+      {
+        currentClient: () => {
+          clientLookups += 1;
+          if (!daemonAvailable) {
+            throw new EngineDaemonUnavailableError(
+              "Rust engine is relaunching.",
+            );
+          }
+          return client;
+        },
+      },
+      {
+        sleep: async (delayMs) => {
+          delays.push(delayMs);
+          daemonAvailable = true;
+        },
+      },
+    );
+
+    await expect(
+      sessions.run(
+        workspace,
+        async ({ workspace: handle }) => handle,
+        { retryTransportErrors: true },
+      ),
+    ).resolves.toBe("handle-relaunched");
+    expect(delays).toEqual([100]);
+    expect(clientLookups).toBeGreaterThanOrEqual(3);
   });
 });

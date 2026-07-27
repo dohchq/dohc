@@ -142,9 +142,14 @@ export class ChatsLiveAdapter {
     workspaceId: string;
   }): Promise<ChatChannelSummary[]> {
     this.assertWorkspace(input.workspaceId);
-    const result = await this.request(CHATS_METHOD.channelsList, {});
-    this.assertNotTruncated("chats.channels.list", result.truncated);
-    return result.channels;
+    return this.collectCursorPages(
+      async (cursor) =>
+        await this.request(CHATS_METHOD.channelsList, {
+          pageLimit: 500,
+          ...(cursor !== undefined ? { cursor } : {}),
+        }),
+      (page) => page.channels,
+    );
   }
 
   async findChannelBySlug(input: {
@@ -263,9 +268,15 @@ export class ChatsLiveAdapter {
 
   async listThreads(input: { workspaceId: string }): Promise<ChatThread[]> {
     this.assertWorkspace(input.workspaceId);
-    const result = await this.request(CHATS_METHOD.threadsList, {});
-    this.assertNotTruncated("chats.threads.list", result.truncated);
-    return result.threads.map((thread) => this.storeThread(thread));
+    const threads = await this.collectCursorPages(
+      async (cursor) =>
+        await this.request(CHATS_METHOD.threadsList, {
+          pageLimit: 500,
+          ...(cursor !== undefined ? { cursor } : {}),
+        }),
+      (page) => page.threads,
+    );
+    return threads.map((thread) => this.storeThread(thread));
   }
 
   async listThreadsForFile(input: {
@@ -556,12 +567,16 @@ export class ChatsLiveAdapter {
     state?: "following" | "unfollowed";
   }): Promise<ChatFollow[]> {
     this.assertWorkspace(input.workspaceId);
-    const result = await this.request(CHATS_METHOD.followsList, {
-      ownerUserId: input.ownerUserId,
-      ...(input.state !== undefined ? { state: input.state } : {}),
-    });
-    this.assertNotTruncated("chats.follows.list", result.truncated);
-    return result.follows;
+    return this.collectCursorPages(
+      async (cursor) =>
+        await this.request(CHATS_METHOD.followsList, {
+          ownerUserId: input.ownerUserId,
+          ...(input.state !== undefined ? { state: input.state } : {}),
+          pageLimit: 500,
+          ...(cursor !== undefined ? { cursor } : {}),
+        }),
+      (page) => page.follows,
+    );
   }
 
   async ensureDefaultChannelFollows(input: {
@@ -628,12 +643,16 @@ export class ChatsLiveAdapter {
     state?: "active" | "archived";
   }): Promise<ChatBookmark[]> {
     this.assertWorkspace(input.workspaceId);
-    const result = await this.request(CHATS_METHOD.bookmarksList, {
-      ownerUserId: input.ownerUserId,
-      ...(input.state !== undefined ? { state: input.state } : {}),
-    });
-    this.assertNotTruncated("chats.bookmarks.list", result.truncated);
-    return result.bookmarks;
+    return this.collectCursorPages(
+      async (cursor) =>
+        await this.request(CHATS_METHOD.bookmarksList, {
+          ownerUserId: input.ownerUserId,
+          ...(input.state !== undefined ? { state: input.state } : {}),
+          pageLimit: 500,
+          ...(cursor !== undefined ? { cursor } : {}),
+        }),
+      (page) => page.bookmarks,
+    );
   }
 
   async findBookmark(input: {
@@ -1000,14 +1019,6 @@ export class ChatsLiveAdapter {
     if (workspaceId !== this.workspaceId) {
       throw new ChatsAdapterCapabilityError(
         `Workspace ${workspaceId} does not match this adapter's workspace.`,
-      );
-    }
-  }
-
-  private assertNotTruncated(method: string, truncated: boolean): void {
-    if (truncated) {
-      throw new ChatsAdapterCapabilityError(
-        `${method} was truncated by the daemon and has no continuation cursor.`,
       );
     }
   }

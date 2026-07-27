@@ -5,7 +5,10 @@ import {
   decodeWorkspaceResult,
   type WorkspaceHandle,
 } from "@dohc/workspace-engine-client";
-import type { EngineDaemonClient } from "./engineDaemonLifecycle";
+import {
+  EngineDaemonUnavailableError,
+  type EngineDaemonClient,
+} from "./engineDaemonLifecycle";
 
 export interface EngineWorkspace {
   workspaceId: string;
@@ -75,6 +78,12 @@ function isTransportError(error: unknown): boolean {
     error !== null &&
     "code" in error &&
     error.code === "transport-error"
+  );
+}
+
+function daemonMayBeRelaunching(error: unknown): boolean {
+  return (
+    isTransportError(error) || error instanceof EngineDaemonUnavailableError
   );
 }
 
@@ -253,7 +262,7 @@ export class EngineWorkspaceSessions {
       } catch (error) {
         lastError = error;
         if (attempt >= maxAttempts) break;
-        if (isTransportError(error)) {
+        if (daemonMayBeRelaunching(error)) {
           await this.sleep(transportBackoffMs(attempt));
         }
       }

@@ -22,6 +22,10 @@ import type { AwaitableLinkedChatStore } from "./awaitableLinkedChatStore";
 
 const PATH_HINT_ENRICHMENT_CONCURRENCY = 8;
 
+export interface DesktopLinkedChatStore extends AwaitableLinkedChatStore {
+  ensureOpen(): Promise<void>;
+}
+
 export interface DesktopLinkedChatStoreOptions {
   rustEngineEnabled: boolean;
   sessions: EngineWorkspaceSessions | null;
@@ -75,7 +79,7 @@ async function mapWithConcurrency<T, U>(
 export function createLiveLinkedChatStore(
   workspace: EngineWorkspace,
   sessions: EngineWorkspaceSessions,
-): AwaitableLinkedChatStore {
+): DesktopLinkedChatStore {
   const invoke = async <T>(
     operation: (adapter: ChatsLiveAdapter) => Promise<T>,
     options?: EngineWorkspaceRunOptions,
@@ -98,6 +102,13 @@ export function createLiveLinkedChatStore(
     });
 
   return {
+    ensureOpen: async () => {
+      await sessions.run(
+        workspace,
+        async () => undefined,
+        { retryTransportErrors: true },
+      );
+    },
     createThread: async (input) =>
       await invoke(async (adapter) => await adapter.createThread(input)),
     createChannel: async (input) =>
@@ -284,11 +295,14 @@ export function createLiveLinkedChatStore(
 export function createDesktopLinkedChatStore(
   workspace: EngineWorkspace,
   options: DesktopLinkedChatStoreOptions,
-): AwaitableLinkedChatStore {
+): DesktopLinkedChatStore {
   if (options.rustEngineEnabled && options.sessions) {
     return createLiveLinkedChatStore(workspace, options.sessions);
   }
-  return (options.createLegacyStore ?? createLinkedChatStore)(
-    workspace.rootPath,
+  return Object.assign(
+    (options.createLegacyStore ?? createLinkedChatStore)(workspace.rootPath),
+    {
+      ensureOpen: async () => undefined,
+    },
   );
 }

@@ -29,6 +29,14 @@ describe("main-process chat authorization", () => {
     expect(factory).not.toContain("createLinkedChatStore(");
   });
 
+  it("awaits linked-chat initialization before opening the dispatch adapter", () => {
+    const handler = handlerSource("chatRunRecordsForThread");
+    expect(handler).toContain("await linkedChatStore.ensureOpen()");
+    expect(handler.indexOf("await linkedChatStore.ensureOpen()")).toBeLessThan(
+      handler.indexOf("agentDispatchStoreHandleFor(workspace)"),
+    );
+  });
+
   it("guards every renderer chat mutation with the workspace read-only boundary", () => {
     const guardedMutations = [
       "saveChatBookmark",

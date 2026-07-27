@@ -372,9 +372,11 @@ import {
   type EngineDaemonLifecycle,
 } from "./workspaces/engineDaemonLifecycle";
 import { isRustEngineAdapterEnabled } from "./workspaces/engineClientFlag";
-import type { AwaitableLinkedChatStore } from "./workspaces/awaitableLinkedChatStore";
 import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
-import { createDesktopLinkedChatStore } from "./workspaces/liveLinkedChatStore";
+import {
+  createDesktopLinkedChatStore,
+  type DesktopLinkedChatStore,
+} from "./workspaces/liveLinkedChatStore";
 import {
   captureForFlaggedWorkspace,
   configureWorkspaceKernelRuntime,
@@ -1621,11 +1623,11 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
 
 // Linked Chats (PR 0M-5): one lazy store per workspace. The Rust flag swaps
 // the factory boundary; every consumer keeps the same awaitable contract.
-const linkedChatStores = new Map<string, AwaitableLinkedChatStore>();
+const linkedChatStores = new Map<string, DesktopLinkedChatStore>();
 function linkedChatStoreFor(workspace: {
   workspaceId: string;
   rootPath: string;
-}): AwaitableLinkedChatStore {
+}): DesktopLinkedChatStore {
   const existing = linkedChatStores.get(workspace.workspaceId);
   if (existing) return existing;
   const store = createDesktopLinkedChatStore(workspace, {
@@ -5340,9 +5342,8 @@ function registerIpcHandlers(
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
-    // Opening the linked-chat store ensures the phase-1 dispatch tables have
-    // been migrated before the read-only dispatch adapter validates them.
-    linkedChatStoreFor(workspace);
+    const linkedChatStore = linkedChatStoreFor(workspace);
+    await linkedChatStore.ensureOpen();
     const dispatchStore = agentDispatchStoreHandleFor(workspace).store;
     const found = dispatchStore.runRecordsForThread(
       workspace.workspaceId,
