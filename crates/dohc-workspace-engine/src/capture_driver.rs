@@ -2284,6 +2284,17 @@ impl RealEnv {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    fn apply_context(&self) -> ApplyRunContext<'_> {
+        ApplyRunContext {
+            root: &self.root,
+            actor: &self.actor,
+            workspace_id: &self.workspace_id,
+            status: &self.status,
+            self_writes: &self.self_writes,
+            author_json: self.capture_author(),
+        }
+    }
 }
 
 impl DriverEnv for RealEnv {
@@ -2340,17 +2351,7 @@ impl DriverEnv for RealEnv {
         .await
         .map_err(|_| ())?;
 
-        let mut settled = apply_run(
-            &self.root,
-            &self.actor,
-            &self.workspace_id,
-            &fresh,
-            initial,
-            &self.status,
-            &self.self_writes,
-            self.capture_author(),
-        )
-        .await;
+        let mut settled = apply_run(self.apply_context(), &fresh, initial).await;
         // The open barrier must not release on a FAILED baseline: a caller
         // whose first write lands before the retry could have it overwritten
         // by the retry's capture of stale closed-period disk bytes. Retry a
@@ -2370,19 +2371,7 @@ impl DriverEnv for RealEnv {
                 .reconcile_if_dirty(cancel.child_token())
                 .await
             {
-                Ok(run) => {
-                    apply_run(
-                        &self.root,
-                        &self.actor,
-                        &self.workspace_id,
-                        &fresh,
-                        run,
-                        &self.status,
-                        &self.self_writes,
-                        self.capture_author(),
-                    )
-                    .await
-                }
+                Ok(run) => apply_run(self.apply_context(), &fresh, run).await,
                 Err(_) => false,
             };
         }
@@ -2439,17 +2428,7 @@ impl DriverEnv for RealEnv {
                 }
             }
             Ok(run) => {
-                let clean = apply_run(
-                    &self.root,
-                    &self.actor,
-                    &self.workspace_id,
-                    layer,
-                    run,
-                    &self.status,
-                    &self.self_writes,
-                    self.capture_author(),
-                )
-                .await;
+                let clean = apply_run(self.apply_context(), layer, run).await;
                 // A clean-looking tick with a NON-EMPTY quarantine is not
                 // health: the controller parks persistently failing paths on
                 // its own degraded-rescan backoff and stops self-forcing
@@ -2565,18 +2544,15 @@ pub(crate) async fn reconcile_full_for_switch(
                 ReconcileRun::Completed(plan)
                     if !plan.ops.is_empty() || !plan.retained_over_cap.is_empty()
             );
-            if apply_run_with_handle(
+            let context = ApplyRunContext {
                 root,
                 actor,
                 workspace_id,
-                &handle,
-                run,
                 status,
                 self_writes,
-                None,
-            )
-            .await
-            {
+                author_json: None,
+            };
+            if apply_run_with_handle(context, &handle, run).await {
                 Ok(manifest_changed)
             } else {
                 Err(SwitchReconcileError::ApplyFailed)
@@ -2634,6 +2610,15 @@ impl Drop for FilesActorCloseGuard {
     }
 }
 
+struct ApplyRunContext<'a> {
+    root: &'a Path,
+    actor: &'a ActorHandle,
+    workspace_id: &'a str,
+    status: &'a Arc<DriverStatus>,
+    self_writes: &'a SelfWriteSuppression,
+    author_json: Option<String>,
+}
+
 /// Apply one reconcile run through the capture sink and acknowledge it.
 ///
 /// INVARIANT: a prepared plan is ALWAYS acknowledged — the controller's
@@ -2642,39 +2627,23 @@ impl Drop for FilesActorCloseGuard {
 /// abnormal paths (version fetch failure, apply-thread spawn failure or
 /// panic) the plan is acked with an ALL-FAILED receipt: the latch clears,
 /// the paths stay dirty, and the next cycle retries.
-async fn apply_run(
-    root: &Path,
-    actor: &ActorHandle,
-    workspace_id: &str,
-    layer: &FilesLayer,
-    run: ReconcileRun,
-    status: &Arc<DriverStatus>,
-    self_writes: &SelfWriteSuppression,
-    author_json: Option<String>,
-) -> bool {
-    apply_run_with_handle(
-        root,
-        actor,
-        workspace_id,
-        &layer.files.handle(),
-        run,
-        status,
-        self_writes,
-        author_json,
-    )
-    .await
+async fn apply_run(context: ApplyRunContext<'_>, layer: &FilesLayer, run: ReconcileRun) -> bool {
+    apply_run_with_handle(context, &layer.files.handle(), run).await
 }
 
 async fn apply_run_with_handle(
-    root: &Path,
-    actor: &ActorHandle,
-    workspace_id: &str,
+    context: ApplyRunContext<'_>,
     files: &FilesHandle,
     run: ReconcileRun,
-    status: &Arc<DriverStatus>,
-    self_writes: &SelfWriteSuppression,
-    author_json: Option<String>,
 ) -> bool {
+    let ApplyRunContext {
+        root,
+        actor,
+        workspace_id,
+        status,
+        self_writes,
+        author_json,
+    } = context;
     let plan = match run {
         ReconcileRun::Completed(plan) => plan,
         ReconcileRun::Converged | ReconcileRun::Cancelled => return true,

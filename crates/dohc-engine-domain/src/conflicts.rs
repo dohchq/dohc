@@ -1323,11 +1323,8 @@ const CONFLICT_SELECT: &str = "SELECT c.*,
     current_blob.text AS current_text,
     incoming_blob.text AS incoming_text,
     base_binary.byte_length AS base_binary_byte_length,
-    LENGTH(base_binary.bytes) AS base_binary_actual_length,
     current_binary.byte_length AS current_binary_byte_length,
-    LENGTH(current_binary.bytes) AS current_binary_actual_length,
-    incoming_binary.byte_length AS incoming_binary_byte_length,
-    LENGTH(incoming_binary.bytes) AS incoming_binary_actual_length
+    incoming_binary.byte_length AS incoming_binary_byte_length
     FROM conflicts c
     LEFT JOIN blobs base_blob ON base_blob.sha256 = c.base_blob_sha256
     LEFT JOIN blobs current_blob ON current_blob.sha256 = c.current_blob_sha256
@@ -1476,26 +1473,13 @@ fn map_side(
     // Head identity for a binary side is carried in the shared object/latest
     // moment columns; a text side keeps it inside its `TextSnapshot`, so leave
     // these `None` there to avoid duplicating it.
+    // Hydration is not validated while reconstructing a conflict: the byte-use
+    // boundary owns the absent-versus-corrupt classification.
     let (binary_byte_length, binary_object_id, binary_latest_moment_id) = match content_kind {
         ConflictContentKind::Binary if exists == 0 => (None, None, None),
         ConflictContentKind::Binary => (
-            {
-                let recorded: Option<i64> = row
-                    .get(format!("{prefix}_binary_byte_length").as_str())
-                    .map_err(DomainError::sql_corrupt)?;
-                let actual: Option<i64> = row
-                    .get(format!("{prefix}_binary_actual_length").as_str())
-                    .map_err(DomainError::sql_corrupt)?;
-                if recorded.is_none()
-                    || recorded != actual
-                    || recorded.is_some_and(|value| value < 0)
-                {
-                    return Err(DomainError::StateCorrupt {
-                        reason: "binary conflict side has an invalid byte length",
-                    });
-                }
-                recorded
-            },
+            row.get(format!("{prefix}_binary_byte_length").as_str())
+                .map_err(DomainError::sql_corrupt)?,
             row.get(column("object_id").as_str())
                 .map_err(DomainError::sql_corrupt)?,
             row.get(column("latest_moment_id").as_str())
