@@ -10,7 +10,6 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import type {
   AgentDispatchClaim,
-  AgentDispatchStore,
   AgentRunRecord,
   ChatChannelKind,
   ChatMessage,
@@ -21,6 +20,11 @@ import {
   killChildTreeWin32,
   resolveSpawnCommand,
 } from "../process/windowsSpawn";
+import {
+  AGENT_DISPATCH_RPC_DEADLINE_MS,
+  type AgentDispatchRequestOptions,
+  type AwaitableAgentDispatchStore,
+} from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
@@ -29,6 +33,8 @@ export const CHAT_DISPATCH_BUDGET_MAX = 10;
 export const RUNNER_SELF_TEST_TIMEOUT_MS = 120_000;
 export const RUNNER_KILL_GRACE_MS = 10_000;
 export const APP_QUIT_KILL_GRACE_MS = 1_500;
+export const CHAT_DISPATCH_RECOVERY_BACKOFF_MS = 1_000;
+export const CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS = 30_000;
 export const RUN_ID_LOG_TOKEN = "{runId}";
 export const APP_QUIT_EXIT_CODE = 143;
 
@@ -96,7 +102,9 @@ export interface ChatDispatchServiceOptions {
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
   chatStoreFor(workspace: ChatDispatchWorkspace): LinkedChatStore;
-  dispatchStoreFor(workspace: ChatDispatchWorkspace): AgentDispatchStore;
+  dispatchStoreFor(
+    workspace: ChatDispatchWorkspace,
+  ): AwaitableAgentDispatchStore;
   readRunnerSettings(): Promise<RunnerSettings>;
   identityFor(workspaceId: string): Promise<ChatDispatchIdentity>;
   stateDir(): string;
@@ -123,8 +131,11 @@ export interface ChatDispatchServiceOptions {
     workspaceId: string;
     triggerMessageId: string;
     runId: string;
-  }): boolean;
-  listAppQuitRecoveries?(workspaceId: string): ChatDispatchRecovery[];
+  }): boolean | Promise<boolean>;
+  hasPendingRunMessageLink?(workspaceId: string, runId: string): boolean;
+  listAppQuitRecoveries?(
+    workspaceId: string,
+  ): ChatDispatchRecovery[] | Promise<ChatDispatchRecovery[]>;
   spawnRunner?: SpawnRunner;
   killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
   platform?: NodeJS.Platform;
@@ -151,11 +162,32 @@ interface LiveRun {
   killEscalation: ReturnType<typeof setTimeout> | null;
   releaseWorkspace: (() => Promise<void>) | null;
   finalized: boolean;
+  terminalIntent:
+    | { kind: "complete"; exitCode: number }
+    | { kind: "fail"; exitCode?: number; reason: string }
+    | null;
+  terminalDurable: boolean;
 }
 
 interface SpawnedRun {
   child: RunnerProcess;
   logPath: string;
+}
+
+interface PendingPreRunFailure {
+  workspace: ChatDispatchWorkspace;
+  claim: AgentDispatchClaim;
+  reason: string;
+  releaseWorkspace: (() => Promise<void>) | null;
+}
+
+interface PendingInterruptedRequeue {
+  workspace: ChatDispatchWorkspace;
+  input: {
+    workspaceId: string;
+    triggerMessageId: string;
+    runId: string;
+  };
 }
 
 interface SelfTestState {
@@ -306,12 +338,30 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const budgetBypassThreads = new Set<string>();
   const workspaceChains = new Map<string, Promise<void>>();
   const sweptWorkspaces = new Set<string>();
+  const recoveryTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  const recoveryAttempts = new Map<string, number>();
+  const pendingNoReplyChecks = new Map<
+    string,
+    { workspace: ChatDispatchWorkspace; run: AgentRunRecord }
+  >();
+  const pendingPreRunFailures = new Map<string, PendingPreRunFailure>();
+  const pendingInterruptedRequeues = new Map<
+    string,
+    PendingInterruptedRequeue
+  >();
   let pumpTimer: ReturnType<typeof setInterval> | null = null;
   let pumpInFlight: Promise<void> | null = null;
   let started = false;
   let stopped = true;
   let shuttingDown = false;
   let paused = false;
+  const durableDispatchRequest: AgentDispatchRequestOptions = {
+    deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS,
+    retryTransportErrors: true,
+  };
 
   function reportError(error: unknown): void {
     try {
@@ -339,13 +389,48 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return run;
   }
 
+  function runKey(workspaceId: string, runId: string): string {
+    return `${workspaceId}\u0000${runId}`;
+  }
+
+  function scheduleRecoveryScan(workspaceId: string): void {
+    if (stopped || recoveryTimers.has(workspaceId)) return;
+    const attempt = (recoveryAttempts.get(workspaceId) ?? 0) + 1;
+    recoveryAttempts.set(workspaceId, attempt);
+    const delay = Math.min(
+      CHAT_DISPATCH_RECOVERY_BACKOFF_MS * 2 ** (attempt - 1),
+      CHAT_DISPATCH_RECOVERY_MAX_BACKOFF_MS,
+    );
+    const timer = setTimeout(() => {
+      recoveryTimers.delete(workspaceId);
+      if (stopped) return;
+      void scanWorkspace(workspaceId).then(
+        () => {
+          if (!recoveryTimers.has(workspaceId)) {
+            recoveryAttempts.delete(workspaceId);
+          }
+        },
+        (error: unknown) => {
+          reportError(error);
+          scheduleRecoveryScan(workspaceId);
+        },
+      );
+    }, delay);
+    recoveryTimers.set(workspaceId, timer);
+  }
+
   function threadKey(workspaceId: string, threadId: string): string {
     return `${workspaceId}\u0000${threadId}`;
+  }
+
+  function runMessageLinkPending(workspaceId: string, runId: string): boolean {
+    return options.hasPendingRunMessageLink?.(workspaceId, runId) === true;
   }
 
   function workspaceProcessReserved(workspaceId: string): boolean {
     return (
       liveRuns.has(workspaceId) ||
+      pendingPreRunFailures.has(workspaceId) ||
       runReservations.has(workspaceId) ||
       selfTests.has(workspaceId) ||
       selfTestReservations.has(workspaceId) ||
@@ -492,6 +577,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     threadId: string,
     body: string,
     runId?: string,
+    dispatchRequest?: AgentDispatchRequestOptions,
   ): Promise<string | null> {
     if (!(await options.authorizeServiceNote(workspace, threadId))) {
       reportError(
@@ -513,11 +599,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     });
     if (runId) {
       try {
-        options.dispatchStoreFor(workspace).recordRunMessage({
-          workspaceId: workspace.workspaceId,
-          messageId: message.id,
-          runId,
-        });
+        await options.dispatchStoreFor(workspace).recordRunMessage(
+          {
+            workspaceId: workspace.workspaceId,
+            messageId: message.id,
+            runId,
+          },
+          dispatchRequest,
+        );
       } catch {
         // The report itself is authoritative; a provenance chip is optional.
       }
@@ -546,7 +635,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     body: string,
   ): Promise<void> {
     const dispatch = options.dispatchStoreFor(workspace);
-    const current = dispatch.getRunRecord(run.runId);
+    const current = await dispatch.getRunRecord(
+      run.runId,
+      durableDispatchRequest,
+    );
     if (current?.failureNotePosted) return;
     if (!(await agentNoteAlreadyExists(workspace, run.threadId, body))) {
       await sendAgentMessage(
@@ -554,9 +646,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         run.threadId,
         body,
         run.runId,
+        durableDispatchRequest,
       );
     }
-    dispatch.markFailureNotePosted(run.runId);
+    await dispatch.markFailureNotePosted(run.runId, durableDispatchRequest);
   }
 
   async function mostRecentAgentNoteIs(
@@ -656,60 +749,107 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     live: LiveRun,
     exitCode: number | null,
     signal: NodeJS.Signals | null,
-  ): Promise<void> {
-    if (live.finalized) {
-      if (stopped) return;
-      if (liveRuns.get(live.workspace.workspaceId) === live) {
-        if (live.killEscalation) clearTimeout(live.killEscalation);
-        live.killEscalation = null;
-        clearLiveAttribution(live);
-        liveRuns.delete(live.workspace.workspaceId);
-        await releaseLiveWorkspace(live);
-        await scanAndDrain(live.workspace);
-      }
-      return;
+  ): Promise<boolean> {
+    if (stopped || liveRuns.get(live.workspace.workspaceId) !== live) {
+      return false;
     }
-    live.finalized = true;
-    clearTimeout(live.timeout);
-    if (live.killEscalation) clearTimeout(live.killEscalation);
-    live.killEscalation = null;
-    const code = exitCode ?? signalExitCode(signal);
+    if (!live.finalized) {
+      live.finalized = true;
+      clearTimeout(live.timeout);
+      if (live.killEscalation) clearTimeout(live.killEscalation);
+      live.killEscalation = null;
+      live.terminalIntent = {
+        kind: "complete",
+        exitCode: exitCode ?? signalExitCode(signal),
+      };
+    }
+    const intent = live.terminalIntent;
+    if (!intent) return false;
     const dispatch = options.dispatchStoreFor(live.workspace);
-    const linkedMessages = dispatch.listRunMessages(
-      live.workspace.workspaceId,
-      live.claim.run.runId,
-    );
-    try {
-      if (code !== 0) {
-        await postFailureNote(
-          live.workspace,
-          live.claim.run,
-          `⚠ Agent run failed (exit ${code}). Open the run chip for details.`,
-        ).catch(reportError);
-      } else if (linkedMessages.length === 0) {
-        await postFailureNote(
-          live.workspace,
-          live.claim.run,
-          "⚠ Agent run produced no reply. Open the run chip for details.",
-        ).catch(reportError);
+    if (!live.terminalDurable) {
+      let linkedMessages: string[] | null = null;
+      if (intent.kind === "complete") {
+        try {
+          linkedMessages = await dispatch.listRunMessages(
+            live.workspace.workspaceId,
+            live.claim.run.runId,
+            durableDispatchRequest,
+          );
+        } catch (error) {
+          reportError(error);
+          if (intent.exitCode === 0) {
+            pendingNoReplyChecks.set(
+              runKey(live.workspace.workspaceId, live.claim.run.runId),
+              { workspace: live.workspace, run: live.claim.run },
+            );
+            scheduleRecoveryScan(live.workspace.workspaceId);
+          }
+        }
+        if (intent.exitCode !== 0) {
+          await postFailureNote(
+            live.workspace,
+            live.claim.run,
+            `⚠ Agent run failed (exit ${intent.exitCode}). Open the run chip for details.`,
+          ).catch(reportError);
+        } else if (linkedMessages?.length === 0) {
+          if (
+            runMessageLinkPending(
+              live.workspace.workspaceId,
+              live.claim.run.runId,
+            )
+          ) {
+            pendingNoReplyChecks.set(
+              runKey(live.workspace.workspaceId, live.claim.run.runId),
+              { workspace: live.workspace, run: live.claim.run },
+            );
+            scheduleRecoveryScan(live.workspace.workspaceId);
+          } else {
+            await postFailureNote(
+              live.workspace,
+              live.claim.run,
+              "⚠ Agent run produced no reply. Open the run chip for details.",
+            ).catch(reportError);
+          }
+        }
       }
-      dispatch.completeRun({ runId: live.claim.run.runId, exitCode: code });
-      notifyRunUpdated(live.workspace.workspaceId);
-    } catch (error) {
-      liveRuns.delete(live.workspace.workspaceId);
-      clearLiveAttribution(live);
-      await releaseLiveWorkspace(live);
-      throw error;
+      try {
+        if (intent.kind === "complete") {
+          await dispatch.completeRun({
+            runId: live.claim.run.runId,
+            exitCode: intent.exitCode,
+          });
+        } else {
+          await dispatch.failRun({
+            runId: live.claim.run.runId,
+            ...(intent.exitCode !== undefined
+              ? { exitCode: intent.exitCode }
+              : {}),
+            reason: intent.reason,
+          });
+        }
+        live.terminalDurable = true;
+        notifyRunUpdated(live.workspace.workspaceId);
+      } catch (error) {
+        reportError(error);
+        scheduleRecoveryScan(live.workspace.workspaceId);
+        return false;
+      }
     }
+    if (!live.child.hasExited()) return false;
     liveRuns.delete(live.workspace.workspaceId);
     clearLiveAttribution(live);
     await releaseLiveWorkspace(live);
-    await scanAndDrain(live.workspace);
+    return true;
   }
 
   async function timeOutLiveRun(live: LiveRun): Promise<void> {
     if (live.finalized) return;
     live.finalized = true;
+    live.terminalIntent = {
+      kind: "fail",
+      exitCode: 124,
+      reason: `timed out after ${live.timeoutMinutes}m`,
+    };
     live.killEscalation = terminateWithEscalation(
       live.child,
       live.killEscalation,
@@ -720,33 +860,62 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       live.claim.run,
       `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Open the run chip for details.`,
     ).catch(reportError);
-    dispatch.failRun({
-      runId: live.claim.run.runId,
-      exitCode: 124,
-      reason: `timed out after ${live.timeoutMinutes}m`,
-    });
-    notifyRunUpdated(live.workspace.workspaceId);
+    try {
+      await dispatch.failRun({
+        runId: live.claim.run.runId,
+        exitCode: 124,
+        reason: `timed out after ${live.timeoutMinutes}m`,
+      });
+      live.terminalDurable = true;
+      notifyRunUpdated(live.workspace.workspaceId);
+    } catch (error) {
+      reportError(error);
+      scheduleRecoveryScan(live.workspace.workspaceId);
+    }
   }
 
   async function failClaimBeforeRun(
     workspace: ChatDispatchWorkspace,
     claim: AgentDispatchClaim,
-    cause: unknown,
+    reason: string,
   ): Promise<void> {
     try {
       options.setRunAttribution(workspace.workspaceId, null);
     } catch {}
-    const detail = cause instanceof Error && cause.message ? cause.message : "unknown error";
     await postFailureNote(
       workspace,
       claim.run,
       "⚠ Agent run failed to start. Open the run chip for details.",
     ).catch(reportError);
-    options.dispatchStoreFor(workspace).failRun({
+    await options.dispatchStoreFor(workspace).failRun({
       runId: claim.run.runId,
-      reason: `runner failed to start: ${detail}`,
+      reason,
     });
     notifyRunUpdated(workspace.workspaceId);
+  }
+
+  async function recoverPreRunFailure(
+    recovery: PendingPreRunFailure,
+  ): Promise<boolean> {
+    try {
+      await options.dispatchStoreFor(recovery.workspace).failRun({
+        runId: recovery.claim.run.runId,
+        reason: recovery.reason,
+      });
+      if (
+        pendingPreRunFailures.get(recovery.workspace.workspaceId) === recovery
+      ) {
+        pendingPreRunFailures.delete(recovery.workspace.workspaceId);
+      }
+      notifyRunUpdated(recovery.workspace.workspaceId);
+      await releaseWorkspaceLease(recovery.releaseWorkspace);
+      recovery.releaseWorkspace = null;
+      return true;
+    } catch (error) {
+      reportError(error);
+      scheduleRecoveryScan(recovery.workspace.workspaceId);
+      return false;
+    }
   }
 
   async function startClaim(
@@ -795,19 +964,25 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         killEscalation: null,
         releaseWorkspace,
         finalized: false,
+        terminalIntent: null,
+        terminalDurable: false,
       };
       liveRuns.set(workspace.workspaceId, live);
       runReservations.delete(workspace.workspaceId);
       spawned.child.onExit((code, signal) => {
-        void enqueue(workspace.workspaceId, () =>
-          finishLiveRun(live, code, signal),
-        );
+        void enqueue(workspace.workspaceId, async () => {
+          if (await finishLiveRun(live, code, signal)) {
+            await scanAndDrain(live.workspace);
+          }
+        });
       });
       spawned.child.onError((error) => {
         reportError(error);
-        void enqueue(workspace.workspaceId, () =>
-          finishLiveRun(live, 1, null),
-        );
+        void enqueue(workspace.workspaceId, async () => {
+          if (await finishLiveRun(live, 1, null)) {
+            await scanAndDrain(live.workspace);
+          }
+        });
       });
       notifyRunUpdated(workspace.workspaceId);
       const publishWorking = () =>
@@ -825,12 +1000,24 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       runReservations.delete(workspace.workspaceId);
       reportError(error);
+      const detail =
+        error instanceof Error && error.message ? error.message : "unknown error";
+      const reason = `runner failed to start: ${detail}`;
       try {
-        await failClaimBeforeRun(workspace, claim, error);
-      } finally {
+        await failClaimBeforeRun(workspace, claim, reason);
         await releaseWorkspaceLease(releaseWorkspace);
+      } catch (persistenceError) {
+        reportError(persistenceError);
+        pendingPreRunFailures.set(workspace.workspaceId, {
+          workspace,
+          claim,
+          reason,
+          releaseWorkspace,
+        });
+        scheduleRecoveryScan(workspace.workspaceId);
+        return;
       }
-      if (dispatch.openRuns(workspace.workspaceId).length === 0) {
+      if ((await dispatch.openRuns(workspace.workspaceId)).length === 0) {
         await scanAndDrain(workspace);
       }
     }
@@ -849,12 +1036,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const dispatch = options.dispatchStoreFor(workspace);
     if (!runner.enabled || !command) {
       const threadIds = new Set(
-        dispatch
-          .listPending(workspace.workspaceId)
+        (await dispatch.listPending(workspace.workspaceId))
           .map((pending) => pending.threadId),
       );
       for (const threadId of threadIds) {
-        const failedCount = dispatch.failPendingForThread({
+        const failedCount = await dispatch.failPendingForThread({
           workspaceId: workspace.workspaceId,
           threadId,
           reason: "no-runner",
@@ -877,22 +1063,71 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (stopped || paused || workspaceProcessReserved(workspace.workspaceId)) {
       return;
     }
-    const pending = dispatch.listPending(workspace.workspaceId);
+    if (dispatch.resolveUncertainClaim) {
+      runReservations.add(workspace.workspaceId);
+      let uncertainClaim: AgentDispatchClaim | null;
+      try {
+        uncertainClaim = await dispatch.resolveUncertainClaim(
+          workspace.workspaceId,
+          {
+            command,
+            logPath: logPathTemplate(),
+          },
+        );
+      } catch (error) {
+        runReservations.delete(workspace.workspaceId);
+        throw error;
+      }
+      if (uncertainClaim) {
+        const bypassKey = threadKey(
+          workspace.workspaceId,
+          uncertainClaim.run.threadId,
+        );
+        const bypassBudget = budgetBypassThreads.delete(bypassKey);
+        let releaseWorkspace: (() => Promise<void>) | null;
+        try {
+          releaseWorkspace =
+            (await options.prepareRunWorkspace?.(workspace)) ?? null;
+        } catch (error) {
+          runReservations.delete(workspace.workspaceId);
+          if (bypassBudget) budgetBypassThreads.add(bypassKey);
+          throw error;
+        }
+        await startClaim(workspace, uncertainClaim, runner, releaseWorkspace);
+        return;
+      }
+      runReservations.delete(workspace.workspaceId);
+    }
+    const pending = await dispatch.listPending(workspace.workspaceId);
+    const pauseStates = new Map(
+      await Promise.all(
+        [...new Set(pending.map(({ threadId }) => threadId))].map(
+          async (threadId) =>
+            [
+              threadId,
+              await dispatch.getThreadDispatchPauseState(
+                workspace.workspaceId,
+                threadId,
+              ),
+            ] as const,
+        ),
+      ),
+    );
     for (const candidate of pending) {
-      if (dispatch.threadDispatchPaused(workspace.workspaceId, candidate.threadId)) {
+      if (pauseStates.get(candidate.threadId)?.paused === true) {
         continue;
       }
       const bypassKey = threadKey(workspace.workspaceId, candidate.threadId);
       const bypassBudget = budgetBypassThreads.delete(bypassKey);
       if (
         !bypassBudget &&
-        dispatch.recentDispatchCount({
+        (await dispatch.recentDispatchCount({
           workspaceId: workspace.workspaceId,
           threadId: candidate.threadId,
           sinceMs: nowMs() - CHAT_DISPATCH_BUDGET_WINDOW_MS,
-        }) >= CHAT_DISPATCH_BUDGET_MAX
+        })) >= CHAT_DISPATCH_BUDGET_MAX
       ) {
-        dispatch.setThreadDispatchPaused({
+        await dispatch.setThreadDispatchPaused({
           workspaceId: workspace.workspaceId,
           threadId: candidate.threadId,
           paused: true,
@@ -906,7 +1141,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             "⏸ Agent dispatch paused for this thread (budget exceeded). Use Resume in this thread to continue.",
           );
         } catch (error) {
-          dispatch.setThreadDispatchPaused({
+          await dispatch.setThreadDispatchPaused({
             workspaceId: workspace.workspaceId,
             threadId: candidate.threadId,
             paused: false,
@@ -915,23 +1150,40 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         }
         continue;
       }
-      const releaseWorkspace =
-        (await options.prepareRunWorkspace?.(workspace)) ?? null;
       if (stopped || paused || workspaceProcessReserved(workspace.workspaceId)) {
+        return;
+      }
+      runReservations.add(workspace.workspaceId);
+      let releaseWorkspace: (() => Promise<void>) | null;
+      try {
+        releaseWorkspace =
+          (await options.prepareRunWorkspace?.(workspace)) ?? null;
+      } catch (error) {
+        runReservations.delete(workspace.workspaceId);
+        if (bypassBudget) budgetBypassThreads.add(bypassKey);
+        throw error;
+      }
+      if (stopped || paused) {
+        runReservations.delete(workspace.workspaceId);
+        if (bypassBudget) budgetBypassThreads.add(bypassKey);
         await releaseWorkspaceLease(releaseWorkspace);
         return;
       }
       let claim: AgentDispatchClaim | null;
       try {
-        claim = dispatch.claimNextPending(workspace.workspaceId, {
+        claim = await dispatch.claimNextPending(workspace.workspaceId, {
           command,
           logPath: logPathTemplate(),
         });
       } catch (error) {
+        runReservations.delete(workspace.workspaceId);
+        if (bypassBudget) budgetBypassThreads.add(bypassKey);
         await releaseWorkspaceLease(releaseWorkspace);
         throw error;
       }
       if (!claim) {
+        runReservations.delete(workspace.workspaceId);
+        if (bypassBudget) budgetBypassThreads.add(bypassKey);
         await releaseWorkspaceLease(releaseWorkspace);
         return;
       }
@@ -947,23 +1199,76 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         workspaceId: workspace.workspaceId,
       }),
     ]);
-    const recordedCount = options.dispatchStoreFor(workspace).recordEligibleTriggers({
-      workspaceId: workspace.workspaceId,
-      ...(identity.verifiedUserId
-        ? { verifiedUserId: identity.verifiedUserId }
-        : {}),
-    });
+    const recordedCount = await options
+      .dispatchStoreFor(workspace)
+      .recordEligibleTriggers({
+        workspaceId: workspace.workspaceId,
+        ...(identity.verifiedUserId
+          ? { verifiedUserId: identity.verifiedUserId }
+          : {}),
+      });
     if (recordedCount > 0) notifyRunUpdated(workspace.workspaceId);
   }
 
-  async function startupSweep(workspace: ChatDispatchWorkspace): Promise<void> {
-    if (sweptWorkspaces.has(workspace.workspaceId)) return;
+  async function persistInterruptedRequeue(
+    recovery: PendingInterruptedRequeue,
+  ): Promise<boolean> {
+    const requeue = options.requeueFailedTrigger;
+    if (!requeue) return true;
+    const key = runKey(recovery.input.workspaceId, recovery.input.runId);
+    try {
+      const persisted = await requeue(recovery.input);
+      if (!persisted) {
+        throw new Error(
+          `Interrupted agent run ${recovery.input.runId} was not requeued.`,
+        );
+      }
+      if (pendingInterruptedRequeues.get(key) === recovery) {
+        pendingInterruptedRequeues.delete(key);
+      }
+      return true;
+    } catch (error) {
+      reportError(error);
+      scheduleRecoveryScan(recovery.workspace.workspaceId);
+      return false;
+    }
+  }
+
+  async function requeueInterruptedRun(
+    workspace: ChatDispatchWorkspace,
+    input: PendingInterruptedRequeue["input"],
+  ): Promise<boolean> {
+    if (!options.requeueFailedTrigger) return true;
+    const recovery = { workspace, input };
+    pendingInterruptedRequeues.set(
+      runKey(input.workspaceId, input.runId),
+      recovery,
+    );
+    return await persistInterruptedRequeue(recovery);
+  }
+
+  async function recoverInterruptedRequeues(
+    workspace: ChatDispatchWorkspace,
+  ): Promise<boolean> {
+    const pending = [...pendingInterruptedRequeues.values()].filter(
+      (recovery) =>
+        recovery.workspace.workspaceId === workspace.workspaceId,
+    );
+    for (const recovery of pending) {
+      if (!(await persistInterruptedRequeue(recovery))) return false;
+    }
+    return true;
+  }
+
+  async function startupSweep(workspace: ChatDispatchWorkspace): Promise<boolean> {
+    if (sweptWorkspaces.has(workspace.workspaceId)) return true;
     const dispatch = options.dispatchStoreFor(workspace);
-    const open = dispatch.openRuns(workspace.workspaceId);
+    const open = await dispatch.openRuns(workspace.workspaceId);
     for (const claim of open) {
-      const linked = dispatch.listRunMessages(
+      const linked = await dispatch.listRunMessages(
         workspace.workspaceId,
         claim.run.runId,
+        durableDispatchRequest,
       );
       if (linked.length === 0 && !claim.run.failureNotePosted) {
         await postFailureNote(
@@ -972,62 +1277,129 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           "⚠ Agent run failed (app restarted during run). Open the run chip for details.",
         ).catch(reportError);
       }
-      dispatch.failRun({
+      await dispatch.failRun({
         runId: claim.run.runId,
         reason: "app restart during run",
       });
       notifyRunUpdated(workspace.workspaceId);
       if (claim.dispatch.attemptCount < 2) {
-        options.requeueFailedTrigger?.({
-          workspaceId: workspace.workspaceId,
-          triggerMessageId: claim.run.triggerMessageId,
-          runId: claim.run.runId,
-        });
+        if (
+          !(await requeueInterruptedRun(workspace, {
+            workspaceId: workspace.workspaceId,
+            triggerMessageId: claim.run.triggerMessageId,
+            runId: claim.run.runId,
+          }))
+        ) {
+          return false;
+        }
       }
     }
-    for (const recovery of options.listAppQuitRecoveries?.(
-      workspace.workspaceId,
-    ) ?? []) {
-      const linked = dispatch.listRunMessages(
+    const recoveries =
+      (await options.listAppQuitRecoveries?.(workspace.workspaceId)) ?? [];
+    for (const recovery of recoveries) {
+      const linked = await dispatch.listRunMessages(
         workspace.workspaceId,
         recovery.run.runId,
+        durableDispatchRequest,
       );
       if (linked.length > 0) {
         if (!recovery.run.failureNotePosted) {
-          dispatch.markFailureNotePosted(recovery.run.runId);
+          await dispatch.markFailureNotePosted(
+            recovery.run.runId,
+            durableDispatchRequest,
+          );
         }
         continue;
       }
       if (!recovery.run.failureNotePosted) {
+        const restarted =
+          recovery.run.failureReason === "app restart during run";
         await postFailureNote(
           workspace,
           recovery.run,
-          "⚠ Agent run failed (app quit during run). Open the run chip for details.",
+          restarted
+            ? "⚠ Agent run failed (app restarted during run). Open the run chip for details."
+            : "⚠ Agent run failed (app quit during run). Open the run chip for details.",
         ).catch(reportError);
       }
       if (recovery.attemptCount < 2) {
-        options.requeueFailedTrigger?.({
-          workspaceId: workspace.workspaceId,
-          triggerMessageId: recovery.run.triggerMessageId,
-          runId: recovery.run.runId,
-        });
+        if (
+          !(await requeueInterruptedRun(workspace, {
+            workspaceId: workspace.workspaceId,
+            triggerMessageId: recovery.run.triggerMessageId,
+            runId: recovery.run.runId,
+          }))
+        ) {
+          return false;
+        }
       }
     }
     sweptWorkspaces.add(workspace.workspaceId);
+    return true;
+  }
+
+  async function recoverNoReplyChecks(
+    workspace: ChatDispatchWorkspace,
+  ): Promise<void> {
+    const pending = [...pendingNoReplyChecks.entries()].filter(
+      ([, recovery]) =>
+        recovery.workspace.workspaceId === workspace.workspaceId,
+    );
+    for (const [key, recovery] of pending) {
+      if (
+        runMessageLinkPending(
+          recovery.workspace.workspaceId,
+          recovery.run.runId,
+        )
+      ) {
+        scheduleRecoveryScan(workspace.workspaceId);
+        continue;
+      }
+      try {
+        const linked = await options
+          .dispatchStoreFor(workspace)
+          .listRunMessages(
+            workspace.workspaceId,
+            recovery.run.runId,
+            durableDispatchRequest,
+          );
+        if (linked.length === 0) {
+          await postFailureNote(
+            workspace,
+            recovery.run,
+            "⚠ Agent run produced no reply. Open the run chip for details.",
+          );
+        }
+        pendingNoReplyChecks.delete(key);
+      } catch (error) {
+        reportError(error);
+        scheduleRecoveryScan(workspace.workspaceId);
+      }
+    }
   }
 
   async function scanAndDrain(workspace: ChatDispatchWorkspace): Promise<void> {
-    await startupSweep(workspace);
+    const preRunFailure = pendingPreRunFailures.get(workspace.workspaceId);
+    if (preRunFailure && !(await recoverPreRunFailure(preRunFailure))) return;
+    const recovering = liveRuns.get(workspace.workspaceId);
+    if (recovering?.finalized) {
+      if (!(await finishLiveRun(recovering, null, null))) return;
+    }
+    if (!(await recoverInterruptedRequeues(workspace))) return;
+    await recoverNoReplyChecks(workspace);
+    if (!(await startupSweep(workspace))) return;
     await scanTriggers(workspace);
     await drain(workspace);
   }
 
   function scanWorkspace(workspaceId: string): Promise<void> {
-    return enqueue(workspaceId, async () => {
+    const scan = enqueue(workspaceId, async () => {
       const workspace = options.workspaceFor(workspaceId);
       if (!workspace || stopped) return;
       await scanAndDrain(workspace);
     });
+    void scan.catch(() => scheduleRecoveryScan(workspaceId));
+    return scan;
   }
 
   async function pump(): Promise<void> {
@@ -1097,17 +1469,23 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (!live || live.finalized) return;
       stoppedRun = true;
       live.finalized = true;
+      live.terminalIntent = {
+        kind: "fail",
+        exitCode: APP_QUIT_EXIT_CODE,
+        reason: "user-stop",
+      };
       clearTimeout(live.timeout);
       live.killEscalation = terminateWithEscalation(
         live.child,
         live.killEscalation,
       );
       const dispatch = options.dispatchStoreFor(live.workspace);
-      dispatch.failRun({
+      await dispatch.failRun({
         runId: live.claim.run.runId,
         exitCode: APP_QUIT_EXIT_CODE,
         reason: "user-stop",
       });
+      live.terminalDurable = true;
       try {
         await postFailureNote(
           live.workspace,
@@ -1118,7 +1496,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         reportError(error);
         // A stopped run is terminal even when its cosmetic note cannot be
         // stored. Mark it handled so app-quit recovery never retries it.
-        dispatch.markFailureNotePosted(live.claim.run.runId);
+        await dispatch.markFailureNotePosted(
+          live.claim.run.runId,
+          durableDispatchRequest,
+        );
       }
       notifyRunUpdated(workspaceId);
     });
@@ -1132,7 +1513,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     await enqueue(workspaceId, async () => {
       const workspace = options.workspaceFor(workspaceId);
       if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
-      options.dispatchStoreFor(workspace).setThreadDispatchPaused({
+      await options.dispatchStoreFor(workspace).setThreadDispatchPaused({
         workspaceId,
         threadId,
         paused: false,
@@ -1143,23 +1524,22 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     });
   }
 
-  function dispatchStateForThread(
+  async function dispatchStateForThread(
     workspaceId: string,
     threadId: string,
-  ): ChatDispatchThreadState {
+  ): Promise<ChatDispatchThreadState> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
     const dispatch = options.dispatchStoreFor(workspace);
-    const pauseState = dispatch.getThreadDispatchPauseState(
-      workspaceId,
-      threadId,
-    );
+    const [pauseState, pending] = await Promise.all([
+      dispatch.getThreadDispatchPauseState(workspaceId, threadId),
+      dispatch.listPending(workspaceId),
+    ]);
     const live = liveRuns.get(workspaceId);
     return {
       liveRun:
         live?.claim.run.threadId === threadId && live.finalized === false,
-      pendingCount: dispatch
-        .listPending(workspaceId)
+      pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,
       ...(pauseState?.paused && pauseState.reason
@@ -1385,6 +1765,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     stopped = true;
     if (pumpTimer) clearInterval(pumpTimer);
     pumpTimer = null;
+    for (const timer of recoveryTimers.values()) clearTimeout(timer);
+    recoveryTimers.clear();
+    recoveryAttempts.clear();
     const pumpAtStop = pumpInFlight;
     const appQuitRuns: LiveRun[] = [];
     const runWorkspacesToRelease: LiveRun[] = [];
@@ -1407,20 +1790,26 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       runWorkspacesToRelease.push(live);
       quitProcesses.push(live.child);
     }
-    for (const live of appQuitRuns) {
-      options.dispatchStoreFor(live.workspace).failRun({
-        runId: live.claim.run.runId,
-        exitCode: APP_QUIT_EXIT_CODE,
-        reason: "app-quit",
-      });
-    }
     const quitTerminations = quitProcesses.map(terminateForAppQuit);
+    const persistedQuitRuns = await Promise.allSettled(
+      appQuitRuns.map(async (live) => {
+        await options.dispatchStoreFor(live.workspace).failRun({
+          runId: live.claim.run.runId,
+          exitCode: APP_QUIT_EXIT_CODE,
+          reason: "app-quit",
+        });
+      }),
+    );
+    for (const result of persistedQuitRuns) {
+      if (result.status === "rejected") reportError(result.reason);
+    }
     await Promise.all([
       ...[...workspaceChains.values()].map((chain) =>
         chain.catch(() => undefined),
       ),
       pumpAtStop?.catch(() => undefined) ?? Promise.resolve(),
     ]);
+    const preRunFailures = [...pendingPreRunFailures.values()];
     for (const test of selfTests.values()) {
       test.settled = true;
       if (test.poll) clearTimeout(test.poll);
@@ -1438,11 +1827,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     selfTestReservations.clear();
     runReservations.clear();
     budgetBypassThreads.clear();
+    pendingNoReplyChecks.clear();
+    pendingPreRunFailures.clear();
+    pendingInterruptedRequeues.clear();
     liveRuns.clear();
     await Promise.all([...workspaceChains.values()].map((chain) => chain.catch(() => undefined)));
     await Promise.all(quitTerminations);
     await Promise.all(
-      runWorkspacesToRelease.map((live) => releaseLiveWorkspace(live)),
+      [
+        ...runWorkspacesToRelease.map((live) => releaseLiveWorkspace(live)),
+        ...preRunFailures.map(async (recovery) => {
+          await releaseWorkspaceLease(recovery.releaseWorkspace);
+          recovery.releaseWorkspace = null;
+        }),
+      ],
     );
   }
 

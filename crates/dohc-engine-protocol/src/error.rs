@@ -38,6 +38,56 @@ pub enum ErrorCode {
     SessionExpired,
     /// The workspace handle does not refer to an open workspace.
     WorkspaceUnavailable,
+    /// A relay compare-and-swap precondition failed.
+    Conflict,
+    /// The relay has a different operation at a locally-owned coordinate.
+    OriginDiverged,
+    /// The requested share no longer exists or is no longer available.
+    ShareUnavailable,
+    /// The workspace has no enrolled key envelope.
+    KeyEnvelopeMissing,
+    /// A newer replication epoch replaced the caller's epoch.
+    EpochSuperseded,
+    /// The relay does not recognize the caller's replication identity.
+    IdentityNotRecognized,
+    /// The relay refused an authenticated caller's operation.
+    Forbidden,
+    /// The share does not permit writes.
+    ShareReadOnly,
+    /// The operation falls outside the granted share selector.
+    ShareOperationRejected,
+    /// The request exceeded the relay's payload limit.
+    PayloadTooLarge,
+    /// The request exceeded the relay's storage or usage quota.
+    QuotaExceeded,
+    /// Relay pagination claimed more data without advancing.
+    RelayNoProgress,
+    /// A referenced relay blob does not exist.
+    BlobMissing,
+    /// A relay log row references a blob that is unavailable.
+    BlobReferenceMissing,
+    /// Relay blob bytes failed integrity validation.
+    BlobInvalid,
+    /// The operation requires a replication identity.
+    IdentityRequired,
+    /// The caller's stream identity does not match the workspace.
+    StreamIdentityMismatch,
+    /// The relay rejected the claimed operation author.
+    AuthorshipMismatch,
+    /// The relay cannot safely classify the chat operation.
+    UnknownChatOperation,
+    /// Relay presence capacity is exhausted.
+    PresenceCapacity,
+    /// A user attempted to share a workspace with themselves.
+    SelfShare,
+    /// A share selector resolves ambiguously.
+    AmbiguousSelector,
+    /// A shared channel selector is invalid.
+    InvalidChannel,
+    /// The relay endpoint does not permit this HTTP method.
+    RelayMethodNotAllowed,
+    /// The relay returned a response that violated its wire contract.
+    RelayInvalidResponse,
     /// Internal engine failure; details in redacted diagnostics only.
     Internal,
 }
@@ -58,6 +108,31 @@ impl ErrorCode {
             ErrorCode::Overloaded => "OVERLOADED",
             ErrorCode::SessionExpired => "SESSION_EXPIRED",
             ErrorCode::WorkspaceUnavailable => "WORKSPACE_UNAVAILABLE",
+            ErrorCode::Conflict => "CONFLICT",
+            ErrorCode::OriginDiverged => "ORIGIN_DIVERGED",
+            ErrorCode::ShareUnavailable => "SHARE_UNAVAILABLE",
+            ErrorCode::KeyEnvelopeMissing => "KEY_ENVELOPE_MISSING",
+            ErrorCode::EpochSuperseded => "EPOCH_SUPERSEDED",
+            ErrorCode::IdentityNotRecognized => "IDENTITY_NOT_RECOGNIZED",
+            ErrorCode::Forbidden => "FORBIDDEN",
+            ErrorCode::ShareReadOnly => "SHARE_READ_ONLY",
+            ErrorCode::ShareOperationRejected => "SHARE_OPERATION_REJECTED",
+            ErrorCode::PayloadTooLarge => "PAYLOAD_TOO_LARGE",
+            ErrorCode::QuotaExceeded => "QUOTA_EXCEEDED",
+            ErrorCode::RelayNoProgress => "RELAY_NO_PROGRESS",
+            ErrorCode::BlobMissing => "BLOB_MISSING",
+            ErrorCode::BlobReferenceMissing => "BLOB_REFERENCE_MISSING",
+            ErrorCode::BlobInvalid => "BLOB_INVALID",
+            ErrorCode::IdentityRequired => "IDENTITY_REQUIRED",
+            ErrorCode::StreamIdentityMismatch => "STREAM_IDENTITY_MISMATCH",
+            ErrorCode::AuthorshipMismatch => "AUTHORSHIP_MISMATCH",
+            ErrorCode::UnknownChatOperation => "UNKNOWN_CHAT_OPERATION",
+            ErrorCode::PresenceCapacity => "PRESENCE_CAPACITY",
+            ErrorCode::SelfShare => "SELF_SHARE",
+            ErrorCode::AmbiguousSelector => "AMBIGUOUS_SELECTOR",
+            ErrorCode::InvalidChannel => "INVALID_CHANNEL",
+            ErrorCode::RelayMethodNotAllowed => "RELAY_METHOD_NOT_ALLOWED",
+            ErrorCode::RelayInvalidResponse => "RELAY_INVALID_RESPONSE",
             ErrorCode::Internal => "INTERNAL",
         }
     }
@@ -74,6 +149,31 @@ impl ErrorCode {
             | ErrorCode::InvalidEnvelope
             | ErrorCode::MethodNotFound
             | ErrorCode::InvalidParams
+            | ErrorCode::Conflict
+            | ErrorCode::OriginDiverged
+            | ErrorCode::ShareUnavailable
+            | ErrorCode::KeyEnvelopeMissing
+            | ErrorCode::EpochSuperseded
+            | ErrorCode::IdentityNotRecognized
+            | ErrorCode::Forbidden
+            | ErrorCode::ShareReadOnly
+            | ErrorCode::ShareOperationRejected
+            | ErrorCode::PayloadTooLarge
+            | ErrorCode::QuotaExceeded
+            | ErrorCode::RelayNoProgress
+            | ErrorCode::BlobMissing
+            | ErrorCode::BlobReferenceMissing
+            | ErrorCode::BlobInvalid
+            | ErrorCode::IdentityRequired
+            | ErrorCode::StreamIdentityMismatch
+            | ErrorCode::AuthorshipMismatch
+            | ErrorCode::UnknownChatOperation
+            | ErrorCode::PresenceCapacity
+            | ErrorCode::SelfShare
+            | ErrorCode::AmbiguousSelector
+            | ErrorCode::InvalidChannel
+            | ErrorCode::RelayMethodNotAllowed
+            | ErrorCode::RelayInvalidResponse
             | ErrorCode::Cancelled => Retryability::No,
             // Safe to retry only because retryable mutations carry
             // idempotency keys; the engine deduplicates on replay.
