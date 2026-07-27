@@ -36,6 +36,11 @@ interface SessionEntry {
 }
 
 export interface EngineWorkspaceRunOptions {
+  /**
+   * Replays the operation after transport rebinding. Callers must enable this
+   * only for idempotent operations or calls that verify a possibly committed
+   * first attempt before applying another write.
+   */
   retryTransportErrors?: boolean;
 }
 
@@ -47,6 +52,7 @@ export interface EngineWorkspaceSessionsOptions {
 const TRANSPORT_REBIND_ATTEMPTS = 6;
 const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
 const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
+export const WORKSPACE_OPEN_DEADLINE_MS = 2_000;
 
 export class EngineWorkspaceRebindError extends Error {
   readonly workspaceId: string;
@@ -260,6 +266,7 @@ export class EngineWorkspaceSessions {
       try {
         return await this.open(workspace, entry);
       } catch (error) {
+        if (error instanceof EngineWorkspaceRebindError) throw error;
         lastError = error;
         if (attempt >= maxAttempts) break;
         if (daemonMayBeRelaunching(error)) {
@@ -277,7 +284,7 @@ export class EngineWorkspaceSessions {
     workspace: EngineWorkspace,
     entry: SessionEntry,
   ): Promise<EngineWorkspaceBinding> {
-    for (;;) {
+    for (let attempt = 1; ; attempt += 1) {
       const client = this.source.currentClient();
       if (entry.binding?.client === client) return entry.binding;
       if (entry.binding?.client !== client) entry.binding = null;
@@ -293,6 +300,13 @@ export class EngineWorkspaceSessions {
       }
       if (this.source.currentClient() !== client) {
         await this.closeBinding(binding).catch(() => undefined);
+        if (attempt >= this.transportRebindAttempts) {
+          throw new EngineWorkspaceRebindError(
+            workspace.workspaceId,
+            new Error("Rust engine client changed on every open attempt."),
+          );
+        }
+        await this.sleep(transportBackoffMs(attempt));
         continue;
       }
       entry.binding = binding;
@@ -315,6 +329,7 @@ export class EngineWorkspaceSessions {
         // fresh desktop boot and a sidecar-only rebind.
         recoverRunningDispatches: false,
       },
+      { deadlineMs: WORKSPACE_OPEN_DEADLINE_MS },
     );
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
     return { client, workspace: opened.workspace as WorkspaceHandle };

@@ -43,7 +43,7 @@ pub fn journal_local_op_in_tx(
     let payload_json = serde_json::to_string(payload).map_err(|_| SyncError::InvalidInput {
         reason: "payload is not valid JSON",
     })?;
-    if payload_json.len() > crate::model::MAX_PAYLOAD_BYTES {
+    if payload_json.len() > crate::MAX_PAYLOAD_JSON_BYTES {
         return Err(SyncError::InvalidInput {
             reason: "payload exceeds the relay limit",
         });
@@ -110,7 +110,7 @@ pub fn journal_local_replication_op(
     let payload_json = serde_json::to_string(payload).map_err(|_| SyncError::InvalidInput {
         reason: "payload is not valid JSON",
     })?;
-    if payload_json.len() > crate::model::MAX_PAYLOAD_BYTES {
+    if payload_json.len() > crate::MAX_PAYLOAD_JSON_BYTES {
         return Err(SyncError::InvalidInput {
             reason: "payload exceeds the relay limit",
         });

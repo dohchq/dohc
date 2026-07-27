@@ -32,8 +32,9 @@ pub mod supervisor;
 
 pub use actor::{
     ActiveVersionSwitch, ActorHandle, BinaryWriteExecutionResult, LifecycleState,
-    MergeExecutionResult, PostCommitMaterializeOutcome, RollbackExecutionResult, SelfWriteRecorder,
-    StoreSnapshot, UnitsOutcome, WorkspaceActor, YdocOpenState, YdocSettlement,
+    MergeExecutionResult, PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation,
+    RelayOperationOutcome, RollbackExecutionResult, SelfWriteRecorder, StoreSnapshot, UnitsOutcome,
+    WorkspaceActor, YdocOpenState, YdocSettlement,
 };
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;

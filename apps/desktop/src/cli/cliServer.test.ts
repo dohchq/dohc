@@ -29,8 +29,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nativeTmpdir } from "../workspaces/testTemp";
 import {
   CLI_SOCKET_FILE,
+  RUN_MESSAGE_LINK_RECOVERY_FILE,
   cliThreadId,
+  disposeCliServerRuntime,
   handleCliRequestLine,
+  restoreCliServerRuntime,
   startCliServer,
   type CliRegistryWorkspace,
   type CliServerHandle,
@@ -277,6 +280,7 @@ describe("CLI socket server", () => {
   afterEach(async () => {
     await server?.close();
     server = null;
+    disposeCliServerRuntime(serverOptions);
     dispatchDb?.close();
     dispatchDb = null;
     await store?.close();
@@ -313,19 +317,24 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
-  it("returns the fixed version mismatch before opening a workspace", async () => {
-    const response = await rawRequest({
-      token,
-      protocolVersion: CLI_PROTOCOL_VERSION + 1,
-      verb: "channels",
-      args: { cwd: workspaceRoot, actor: "human" },
-    });
+  it("rejects older and newer CLIs before opening a workspace", async () => {
+    for (const protocolVersion of [
+      CLI_PROTOCOL_VERSION - 1,
+      CLI_PROTOCOL_VERSION + 1,
+    ]) {
+      const response = await rawRequest({
+        token,
+        protocolVersion,
+        verb: "channels",
+        args: { cwd: workspaceRoot, actor: "human" },
+      });
 
-    expect(response).toEqual({
-      protocolVersion: CLI_PROTOCOL_VERSION,
-      ok: false,
-      error: "dohc: CLI/app version mismatch — restart the app",
-    });
+      expect(response).toEqual({
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        ok: false,
+        error: "dohc: CLI/app version mismatch — restart the app",
+      });
+    }
     expect(calls.openWorkspace).toBe(0);
   });
 
@@ -626,6 +635,475 @@ describe("CLI socket server", () => {
       engineMessageId(invalid.messageId),
     )).toBeNull();
     expect(errors).toEqual([]);
+  });
+
+  it("retries transient run-message provenance failures until the link persists", async () => {
+    // MUTATION: restore the single best-effort attempt -> no provenance row is
+    // stored after the first transient daemon failure.
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_retry_trigger",
+      threadId: "thread_retry",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for retry linkage.");
+    let attempts = 0;
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage(input) {
+          attempts += 1;
+          if (attempts < 3) throw new Error("transient daemon restart");
+          return originalDispatch.recordRunMessage(input);
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Retry provenance",
+      body: "The message itself persists once.",
+    });
+
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    expect(attempts).toBe(3);
+    expect(result.warning).toBeUndefined();
+    expect(
+      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
+    ).toBe(claim.run.runId);
+    expect(errors).toEqual([]);
+  });
+
+  it("keeps retrying an exhausted provenance link until the posted reply is linked", async () => {
+    // MUTATION: remove the recovery enqueue after the third foreground failure
+    // -> the durable chat reply remains permanently absent from the run ledger.
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_recovery_trigger",
+      threadId: "thread_recovery",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for recovery linkage.");
+    let attempts = 0;
+    const pending: string[] = [];
+    const settled: string[] = [];
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage(input) {
+          attempts += 1;
+          if (attempts <= 3) throw new Error("daemon restart in progress");
+          return originalDispatch.recordRunMessage(input);
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkRecoveryRetryMs = 0;
+    serverOptions.onRunMessageLinkPending = (link) => pending.push(link.messageId);
+    serverOptions.onRunMessageLinkSettled = (link) => settled.push(link.messageId);
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Recover provenance",
+      body: "This posted reply must remain recoverable.",
+    });
+    for (let index = 0; index < 50 && attempts < 4; index += 1) {
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    expect(result.warning).toContain("recovery will continue in the background");
+    expect(attempts).toBe(4);
+    expect(pending).toEqual([engineMessageId]);
+    expect(settled).toEqual([engineMessageId]);
+    expect(
+      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
+    ).toBe(claim.run.runId);
+  });
+
+  it("persists pending provenance across shutdown without reporting it settled", async () => {
+    // MUTATION: clear the queue and call onRunMessageLinkSettled from close()
+    // -> the durable file is absent and shutdown falsely reports recovery.
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_restart_recovery_trigger",
+      threadId: "thread_restart_recovery",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected a dispatch run.");
+    const originalDispatch = dispatchStore;
+    const pending: string[] = [];
+    const settled: string[] = [];
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage() {
+          throw new Error("daemon unavailable until restart");
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkRecoveryRetryMs = 60_000;
+    serverOptions.onRunMessageLinkPending = (link) =>
+      pending.push(link.messageId);
+    serverOptions.onRunMessageLinkSettled = (link) =>
+      settled.push(link.messageId);
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Persist provenance recovery",
+      body: "Recover this link after a desktop restart.",
+    });
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    await server?.close();
+    server = null;
+    disposeCliServerRuntime(serverOptions);
+
+    expect(settled).toEqual([]);
+    expect(
+      JSON.parse(
+        await readFile(
+          join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE),
+          "utf8",
+        ),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        workspaceId: WORKSPACE_ID,
+        runId: claim.run.runId,
+        messageId: engineMessageId,
+      }),
+    ]);
+
+    context = { ...context, dispatchStore: originalDispatch };
+    const restoredOptions: CliServerOptions = {
+      ...serverOptions,
+      runMessageLinkRecoveryRetryMs: 0,
+    };
+    serverOptions = restoredOptions;
+    await restoreCliServerRuntime(restoredOptions);
+    for (
+      let index = 0;
+      index < 50 &&
+      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId) === null;
+      index += 1
+    ) {
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+
+    expect(pending).toEqual([engineMessageId, engineMessageId]);
+    expect(settled).toEqual([engineMessageId]);
+    expect(
+      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
+    ).toBe(claim.run.runId);
+    await expect(
+      stat(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("restores available provenance links past an unavailable workspace", async () => {
+    // MUTATION: return from restore when one workspace is absent -> the valid
+    // link later in the file is never re-armed during this app session.
+    const posted = await post({
+      actor: "human",
+      title: "Existing message",
+      body: "This message will receive restored provenance.",
+    });
+    const engineMessageId = posted.messageId.replace(/^msg_/u, "message_");
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_mixed_restore_trigger",
+      threadId: "thread_mixed_restore",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected a run for mixed restore.");
+    const unavailable = {
+      workspaceId: "workspace-not-registered",
+      runId: "run_deferred",
+      messageId: "message_deferred",
+      attempt: 0,
+      createdAtMs: SERVER_NOW_MS,
+    };
+    const available = {
+      workspaceId: WORKSPACE_ID,
+      runId: claim.run.runId,
+      messageId: engineMessageId,
+      attempt: 0,
+      createdAtMs: SERVER_NOW_MS,
+    };
+
+    disposeCliServerRuntime(serverOptions);
+    await writeFile(
+      join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE),
+      `${JSON.stringify([unavailable, available])}\n`,
+      "utf8",
+    );
+    const restoredOptions: CliServerOptions = {
+      ...serverOptions,
+      runMessageLinkRecoveryRetryMs: 0,
+    };
+    serverOptions = restoredOptions;
+    await restoreCliServerRuntime(restoredOptions);
+    for (
+      let index = 0;
+      index < 50 &&
+      dispatchStore.runIdForMessage(WORKSPACE_ID, engineMessageId) === null;
+      index += 1
+    ) {
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+    for (let index = 0; index < 50; index += 1) {
+      const stored = JSON.parse(
+        await readFile(
+          join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE),
+          "utf8",
+        ),
+      ) as unknown[];
+      if (stored.length === 1) break;
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+
+    expect(
+      dispatchStore.runIdForMessage(WORKSPACE_ID, engineMessageId),
+    ).toBe(claim.run.runId);
+    expect(
+      JSON.parse(
+        await readFile(
+          join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE),
+          "utf8",
+        ),
+      ),
+    ).toEqual([unavailable]);
+    expect(
+      errors.some(
+        (error) =>
+          error instanceof Error &&
+          error.message.includes("workspace-not-registered"),
+      ),
+    ).toBe(true);
+  });
+
+  it("bounds the provenance recovery queue and abandons after its attempt cap", async () => {
+    // MUTATION: remove the size and attempt limits -> both links enter the
+    // queue and the first continues retrying after the asserted cap.
+    const originalDispatch = dispatchStore;
+    const abandoned: string[] = [];
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage() {
+          throw new Error("daemon remains unavailable");
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkRecoveryRetryMs = 60_000;
+    serverOptions.runMessageLinkRecoveryMaxPending = 1;
+    serverOptions.runMessageLinkRecoveryMaxAttempts = 1;
+    serverOptions.onRunMessageLinkAbandoned = (link) =>
+      abandoned.push(link.messageId);
+
+    const runIds: string[] = [];
+    for (const suffix of ["a", "b"]) {
+      dispatchStore.recordTrigger({
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId: `message_bounded_${suffix}`,
+        threadId: `thread_bounded_${suffix}`,
+      });
+      const claim = dispatchStore.claimNextPending(WORKSPACE_ID);
+      if (!claim) throw new Error("Expected a bounded-queue run.");
+      dispatchStore.failRun({
+        runId: claim.run.runId,
+        reason: "seed next run",
+      });
+      runIds.push(claim.run.runId);
+    }
+
+    const first = await post({
+      actor: "agent",
+      runId: runIds[0],
+      title: "First bounded recovery",
+      body: "This occupies the one queue slot.",
+    });
+    const second = await post({
+      actor: "agent",
+      runId: runIds[1],
+      title: "Second bounded recovery",
+      body: "This cannot grow the queue.",
+    });
+    expect(first.warning).toContain("recovery will continue");
+    expect(second.warning).toContain("bounded recovery queue is full");
+
+    disposeCliServerRuntime(serverOptions);
+    const restoredOptions: CliServerOptions = {
+      ...serverOptions,
+      runMessageLinkRecoveryRetryMs: 0,
+    };
+    serverOptions = restoredOptions;
+    await restoreCliServerRuntime(restoredOptions);
+    for (let index = 0; index < 50 && abandoned.length === 0; index += 1) {
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+    expect(abandoned).toEqual([
+      first.messageId.replace(/^msg_/u, "message_"),
+    ]);
+    await expect(
+      stat(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("caps all foreground provenance work with one wall-clock budget", async () => {
+    // MUTATION: give every RPC its own full deadline -> all three attempts use
+    // the same timeout instead of shrinking to the shared foreground budget.
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_foreground_budget_trigger",
+      threadId: "thread_foreground_budget",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected a dispatch run.");
+    const deadlines: number[] = [];
+    context = {
+      ...context,
+      dispatchStore: {
+        ...dispatchStore,
+        async getRunRecord(_runId, requestOptions) {
+          const deadline = requestOptions?.deadlineMs ?? 1_000;
+          deadlines.push(deadline);
+          await new Promise<void>((_resolve, reject) => {
+            setTimeout(() => reject(new Error("request timed out")), deadline);
+          });
+          return null;
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkDeadlineMs = 20;
+    serverOptions.runMessageLinkForegroundBudgetMs = 25;
+    serverOptions.runMessageLinkRecoveryRetryMs = 60_000;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Bound foreground provenance",
+      body: "Return promptly while the daemon is silent.",
+    });
+
+    expect(result.warning).toContain("recovery will continue");
+    expect(deadlines.length).toBeLessThan(3);
+    expect(deadlines[0]).toBeLessThanOrEqual(20);
+    expect(deadlines.reduce((sum, deadline) => sum + deadline, 0)).toBeLessThanOrEqual(25);
+  });
+
+  it("returns a visible warning when run-message provenance retries are exhausted", async () => {
+    // MUTATION: swallow the final failure -> the successful CLI result has no
+    // warning and the desktop error channel remains empty.
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_permanent_trigger",
+      threadId: "thread_permanent",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for failed linkage.");
+    let attempts = 0;
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage() {
+          attempts += 1;
+          throw new Error("daemon remains unavailable");
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Visible provenance warning",
+      body: "Posting succeeds even though linkage is degraded.",
+    });
+
+    expect(attempts).toBe(3);
+    expect(result.warning).toContain(
+      "agent-run provenance could not be recorded after 3 attempts",
+    );
+    expect(errors).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining(`runId=${claim.run.runId}`),
+      }),
+    ]);
+    expect(
+      originalDispatch.listRunMessages(WORKSPACE_ID, claim.run.runId),
+    ).toEqual([]);
+  });
+
+  it("forwards a deadline to every provenance RPC attempt", async () => {
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_deadline_trigger",
+      threadId: "thread_deadline",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for deadline linkage.");
+    const lookupDeadlines: Array<number | undefined> = [];
+    const linkDeadlines: Array<number | undefined> = [];
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async getRunRecord(runId, requestOptions) {
+          lookupDeadlines.push(requestOptions?.deadlineMs);
+          return originalDispatch.getRunRecord(runId);
+        },
+        async recordRunMessage(_input, requestOptions) {
+          linkDeadlines.push(requestOptions?.deadlineMs);
+          await new Promise<void>((_resolve, reject) => {
+            setTimeout(
+              () => reject(new Error("daemon request deadline exceeded")),
+              requestOptions?.deadlineMs ?? 100,
+            );
+          });
+          return true;
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkDeadlineMs = 1;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Deadline provenance",
+      body: "The post remains bounded when linkage does not respond.",
+    });
+
+    expect(lookupDeadlines).toEqual([1, 1, 1]);
+    expect(linkDeadlines).toEqual([1, 1, 1]);
+    expect(result.warning).toContain(
+      "agent-run provenance could not be recorded after 3 attempts",
+    );
   });
 
   it("shows a message branch and lists candidates for an ambiguous id prefix", async () => {
