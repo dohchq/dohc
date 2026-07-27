@@ -35,6 +35,7 @@ permissions:
 
 env:
   CARGO_DENY_VERSION: "0.20.2"
+  CARGO_AUDIT_VERSION: "0.22.2"
 
 jobs:
   javascript:
@@ -151,6 +152,26 @@ jobs:
           RESOLVED_CARGO_DENY_VERSION="$(cargo-deny --version)"
           if [ "$RESOLVED_CARGO_DENY_VERSION" != "cargo-deny $CARGO_DENY_VERSION" ]; then
             echo "::error::expected cargo-deny $CARGO_DENY_VERSION, got $RESOLVED_CARGO_DENY_VERSION"
+            exit 1
+          fi
+
+      # run-rust-checks PROBES for cargo-audit and degrades to SKIP when it is
+      # absent -- honest, but it meant every PR reported "cargo-audit=SKIP"
+      # beside a row of PASSes and no advisory scan ever ran in CI. That is
+      # not hypothetical: the first run after this tool was actually installed
+      # flagged a real DoS advisory that had been sitting on main. Installing
+      # it here turns the row into a result. Pinned for the same reason
+      # cargo-deny is: so a PASS means the same thing across runs.
+      - name: Install pinned cargo-audit
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked --force --version "$CARGO_AUDIT_VERSION"
+          # `cargo audit --version` prints "cargo-audit-audit <version>" --
+          # the cargo subcommand prefix is doubled -- so the version field is
+          # compared rather than the whole line.
+          RESOLVED_CARGO_AUDIT_VERSION="$(cargo audit --version | awk '{print $NF}')"
+          if [ "$RESOLVED_CARGO_AUDIT_VERSION" != "$CARGO_AUDIT_VERSION" ]; then
+            echo "::error::expected cargo-audit $CARGO_AUDIT_VERSION, got $RESOLVED_CARGO_AUDIT_VERSION"
             exit 1
           fi
 
