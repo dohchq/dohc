@@ -353,8 +353,9 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // imported moment metadata provenance (ordinal 18), the imported moment
     // rollback preimage (ordinal 19), the file-object-rooted Y.Doc
     // deferred-update queue (ordinal 21; ordinal 20 is reserved for PR #263),
-    // and pending replication refusals (ordinal 22).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 22);
+    // pending replication refusals (ordinal 22), and the parked
+    // chat-message-before-thread coordinates (ordinal 23).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 23);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(
