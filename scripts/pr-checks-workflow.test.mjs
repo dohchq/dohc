@@ -12,7 +12,7 @@ const triggerBlock = workflow.slice(0, workflow.indexOf("\nconcurrency:"));
 const passVerdict =
   "- 2026-07-27T00:00:00.000Z | run-rust-checks | linux/x64 | PASS | " +
   "fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-  "build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP";
+  "build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=PASS";
 
 test("canonical CI verdict requires every mandatory gate step to report PASS", () => {
   assert.doesNotThrow(() => requireCiPassVerdict(passVerdict));
@@ -30,6 +30,17 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
       ),
     /cargo-deny/,
   );
+  // The advisory scan is the one that had been silently skipping: CI never
+  // installed cargo-audit, so the gate probed, reported SKIP, and the verdict
+  // check did not mind. Both halves are now required -- the tool is installed
+  // and a SKIP fails.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict.replace("cargo-audit=PASS", "cargo-audit=SKIP"),
+      ),
+    /cargo-audit/,
+  );
 });
 
 test("PR workflow validates the canonical verdict and installed cargo-deny version", () => {
@@ -44,6 +55,10 @@ test("PR workflow validates the canonical verdict and installed cargo-deny versi
   assert.match(
     workflow,
     /RESOLVED_CARGO_DENY_VERSION[\s\S]*"cargo-deny \$CARGO_DENY_VERSION"/,
+  );
+  assert.match(
+    workflow,
+    /RESOLVED_CARGO_AUDIT_VERSION[\s\S]*"cargo-audit \$CARGO_AUDIT_VERSION"/,
   );
 });
 
