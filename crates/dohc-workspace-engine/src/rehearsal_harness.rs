@@ -1058,7 +1058,7 @@ fn prepare_clone(clone_path: &Path, now_ms: i64) -> Result<PreparedClone, Harnes
 
 fn issue_token() -> Result<String, HarnessError> {
     let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes).map_err(|_| HarnessError::RandomToken)?;
+    getrandom::fill(&mut bytes).map_err(|_| HarnessError::RandomToken)?;
     Ok(to_hex(&bytes))
 }
 
