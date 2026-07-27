@@ -43,17 +43,17 @@ const WATCH_REATTACH_ATTEMPTS: usize = 3;
 /// thread (never the async runtime).
 const WATCH_REATTACH_BACKOFF: Duration = Duration::from_millis(200);
 /// How often the idle watcher thread verifies the watched root is still the
-/// SAME directory object the OS watch was attached to. On at least one real
-/// backend (observed: the Windows `ReadDirectoryChangesW` path), deleting the
-/// watched root produces NO error callback at all -- the watch simply goes
-/// silently dead, with no event, no error, no further notifications, ever.
-/// Worse, a delete-then-recreate of the root (restore-from-backup,
-/// unzip-over, sync-client folder replace) leaves a directory at the path but
-/// the OS watch still bound to the DELETED object, so existence alone cannot
-/// tell the two apart. The check therefore compares OS file identity, not
-/// mere existence -- cheap (`get_file_id`, once per interval, only while
-/// otherwise idle), and it is what actually catches "watched root replaced"
-/// on the platforms where the callback stays silent.
+/// SAME directory object the OS watch was attached to. Deleting the watched
+/// root produces NO error callback on either real backend we ship on -- not
+/// the Windows `ReadDirectoryChangesW` path, and not Linux inotify (which
+/// reports the removal as ordinary `DELETE_SELF` events and then quietly drops
+/// its own watch). The watch simply goes dead, with no error, ever. Worse, a
+/// delete-then-recreate of the root (restore-from-backup, unzip-over,
+/// sync-client folder replace) leaves a directory at the path but the OS watch
+/// still bound to the DELETED object, so existence alone cannot tell the two
+/// apart. The check therefore compares the bound directory OBJECT -- see
+/// [`WatchedRoot`] -- and is cheap (one `stat`, once per interval, only while
+/// otherwise idle).
 const WATCH_ROOT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// A watcher event. Both kinds mark the generation dirty in CAL-3 (a full
@@ -348,17 +348,20 @@ fn watcher_thread(
             return;
         }
     };
+    // Bind to the exact directory object BEFORE attaching, so the health poll
+    // can detect a delete-then-recreate that existence alone would miss.
+    // Binding first is deliberate: a swap landing between these two lines
+    // leaves the bound object different from what the path now names, and the
+    // poll resolves that with a re-attach. Binding afterwards would record the
+    // NEW object while the watch still sat on the old one -- a dead watch the
+    // poll could never see.
+    let mut watched_root = WatchedRoot::bind(&root);
     if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
         let _ = ready.send(Err(FilesError::WatcherUnavailable {
             reason: "workspace root could not be watched",
         }));
         return;
     }
-    // Capture the identity of the exact directory object the watch is now
-    // bound to, so the health poll can detect a delete-then-recreate that
-    // existence alone would miss. `None` (unreadable) simply forces the first
-    // poll to treat the root as changed and reattach.
-    let mut watched_identity = file_id::get_file_id(&root).ok();
     if ready.send(Ok(())).is_err() {
         return;
     }
@@ -374,10 +377,8 @@ fn watcher_thread(
         if backend_error_pending.swap(false, Ordering::AcqRel)
             && !unavailable.load(Ordering::Acquire)
         {
+            watched_root = WatchedRoot::bind(&root);
             attempt_reattach(&mut watcher, &root, &unavailable);
-            if !unavailable.load(Ordering::Acquire) {
-                watched_identity = file_id::get_file_id(&root).ok();
-            }
         }
         let message = match (first_event, settle_at) {
             (Some(first), Some(settle)) => {
@@ -401,19 +402,17 @@ fn watcher_thread(
             _ => match rx.recv_timeout(WATCH_ROOT_HEALTH_POLL_INTERVAL) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
-                    if !unavailable.load(Ordering::Acquire)
-                        && !root_identity_matches(&root, watched_identity.as_ref())
-                    {
+                    if !unavailable.load(Ordering::Acquire) && !watched_root.still_bound(&root) {
                         loop_disruptions.fetch_add(1, Ordering::AcqRel);
                         handle.notify_overflow();
+                        // Rebind to the NEW directory object (so we don't
+                        // reattach every poll forever), then reattach -- same
+                        // bind-before-attach ordering as startup, and it also
+                        // releases the pin on the object we just lost. On
+                        // exhaustion `unavailable` is set and this branch stops
+                        // running entirely.
+                        watched_root = WatchedRoot::bind(&root);
                         attempt_reattach(&mut watcher, &root, &unavailable);
-                        // On a successful reattach, rebind identity to the
-                        // NEW directory object so we don't reattach every
-                        // poll forever; on exhaustion `unavailable` is set and
-                        // this identity is irrelevant.
-                        if !unavailable.load(Ordering::Acquire) {
-                            watched_identity = file_id::get_file_id(&root).ok();
-                        }
                     }
                     None
                 }
@@ -485,17 +484,76 @@ fn attempt_reattach(
     unavailable.store(true, Ordering::Release);
 }
 
-/// Whether `root` is still the SAME directory object the watch was bound to,
-/// by OS file identity ((st_dev, st_ino) / (volume serial, file index)) --
-/// NOT mere existence, which cannot distinguish the original directory from a
-/// delete-then-recreate that leaves the OS watch pointing at a dead inode.
-/// Any ambiguity (the root is unreadable now, or its identity was unreadable
-/// at attach) is treated as NOT matching, so it feeds a re-attach attempt
-/// rather than a silent skip.
-fn root_identity_matches(root: &Path, watched: Option<&file_id::FileId>) -> bool {
-    match (watched, file_id::get_file_id(root).ok()) {
-        (Some(expected), Some(current)) => *expected == current,
-        _ => false,
+/// The directory object the OS watch is bound to: its file identity, plus --
+/// on Unix -- an open handle that PINS it.
+///
+/// Recorded identity alone is not sound on Linux, because inode numbers are
+/// RECYCLED. On ext4 an `rmdir` immediately followed by `mkdir` at the same
+/// path hands the new directory the very same `(st_dev, st_ino)` the deleted
+/// one had (measured here: every iteration), and `file_id`'s own documentation
+/// warns that "IDs may be re-used". Comparing a number recorded at attach time
+/// against a freshly read one is then a use-after-free of an identifier: it
+/// answers "same directory object" for a root that was replaced. Since inotify
+/// watches INODES rather than paths, the watch stays bound to the dead object
+/// forever -- no event, no error, `disruption_count` still 0 and
+/// `is_unavailable` still false -- which is exactly the silent-dead-watch this
+/// check exists to prevent.
+///
+/// Holding the directory open closes that hole: the kernel cannot free, and so
+/// cannot recycle, an inode that is still referenced, so a recreated root is
+/// GUARANTEED a different number and the comparison becomes sound. Only the
+/// root directory's own inode is pinned (not its contents), and the pin is
+/// released the moment we rebind. The handle is Unix-only: on Windows an open
+/// directory handle would block the very `rmdir` this is meant to observe, and
+/// NTFS file IDs are not recycled this way.
+struct WatchedRoot {
+    /// `None` (unreadable) forces the next poll to treat the root as changed
+    /// and re-attach, rather than silently skipping the check.
+    identity: Option<file_id::FileId>,
+    /// Unix inode pin; see the type docs. Its lifetime is the guarantee, so it
+    /// is deliberately never read after construction.
+    #[cfg(unix)]
+    _pin: Option<std::fs::File>,
+}
+
+impl WatchedRoot {
+    /// Bind to whatever directory object `root` names right now.
+    #[cfg(unix)]
+    fn bind(root: &Path) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        // Read the identity THROUGH the pinned handle rather than with a
+        // second path lookup, so the recorded identity always describes the
+        // object actually held open.
+        let pin = std::fs::File::open(root).ok();
+        let identity = pin
+            .as_ref()
+            .and_then(|dir| dir.metadata().ok())
+            .map(|meta| file_id::FileId::new_inode(meta.dev(), meta.ino()));
+        WatchedRoot {
+            identity,
+            _pin: pin,
+        }
+    }
+
+    /// Bind to whatever directory object `root` names right now.
+    #[cfg(not(unix))]
+    fn bind(root: &Path) -> Self {
+        WatchedRoot {
+            identity: file_id::get_file_id(root).ok(),
+        }
+    }
+
+    /// Whether `root` still resolves to the bound directory object -- NOT mere
+    /// existence, which cannot distinguish the original directory from a
+    /// delete-then-recreate that leaves the OS watch pointing at a dead
+    /// object. Any ambiguity (the root is unreadable now, or was unreadable
+    /// when bound) counts as NOT bound, so it feeds a re-attach attempt rather
+    /// than a silent skip.
+    fn still_bound(&self, root: &Path) -> bool {
+        match (self.identity, file_id::get_file_id(root).ok()) {
+            (Some(bound), Some(current)) => bound == current,
+            _ => false,
+        }
     }
 }
 
@@ -539,6 +597,29 @@ mod tests {
         let config = notify::Config::default().with_follow_symlinks(false);
         notify::RecommendedWatcher::new(|_event: Result<notify::Event, notify::Error>| {}, config)
             .expect("notify backend available in test environment")
+    }
+
+    /// The defect [`WatchedRoot`]'s pin exists for: on ext4, `rmdir` followed
+    /// by `mkdir` at the same path is handed the SAME inode number, so an
+    /// UNPINNED identity comparison answers "still the same directory object"
+    /// for a root that was replaced -- leaving inotify bound to the dead one,
+    /// with no error and no event, forever.
+    #[test]
+    fn a_recreated_root_is_never_reported_as_the_object_the_watch_is_bound_to() {
+        let root = TempRoot::new();
+        let bound = WatchedRoot::bind(&root.0);
+        assert!(
+            bound.still_bound(&root.0),
+            "an untouched root must stay bound, or the poll would reattach forever"
+        );
+
+        std::fs::remove_dir_all(&root.0).expect("delete root");
+        std::fs::create_dir(&root.0).expect("recreate root");
+
+        assert!(
+            !bound.still_bound(&root.0),
+            "a recreated root must not be mistaken for the directory object the watch is bound to"
+        );
     }
 
     #[test]
