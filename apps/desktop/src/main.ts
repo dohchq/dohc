@@ -2150,6 +2150,9 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
         console.error("[desktop] CLI provenance recovery scan:", error);
       });
     },
+    onRunMessageLinkAbandoned: (link) => {
+      pendingCliRunMessageLinks.delete(cliRunMessageLinkKey(link));
+    },
     onError: (error) => {
       console.error("[desktop] CLI server:", error);
     },

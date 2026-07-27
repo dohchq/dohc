@@ -1063,6 +1063,38 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (stopped || paused || workspaceProcessReserved(workspace.workspaceId)) {
       return;
     }
+    if (dispatch.resolveUncertainClaim) {
+      runReservations.add(workspace.workspaceId);
+      let uncertainClaim: AgentDispatchClaim | null;
+      try {
+        uncertainClaim = await dispatch.resolveUncertainClaim(
+          workspace.workspaceId,
+          {
+            command,
+            logPath: logPathTemplate(),
+          },
+        );
+      } catch (error) {
+        runReservations.delete(workspace.workspaceId);
+        throw error;
+      }
+      if (uncertainClaim) {
+        budgetBypassThreads.delete(
+          threadKey(workspace.workspaceId, uncertainClaim.run.threadId),
+        );
+        let releaseWorkspace: (() => Promise<void>) | null;
+        try {
+          releaseWorkspace =
+            (await options.prepareRunWorkspace?.(workspace)) ?? null;
+        } catch (error) {
+          runReservations.delete(workspace.workspaceId);
+          throw error;
+        }
+        await startClaim(workspace, uncertainClaim, runner, releaseWorkspace);
+        return;
+      }
+      runReservations.delete(workspace.workspaceId);
+    }
     const pending = await dispatch.listPending(workspace.workspaceId);
     const pauseStates = new Map(
       await Promise.all(
@@ -1115,9 +1147,22 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         }
         continue;
       }
-      const releaseWorkspace =
-        (await options.prepareRunWorkspace?.(workspace)) ?? null;
       if (stopped || paused || workspaceProcessReserved(workspace.workspaceId)) {
+        return;
+      }
+      runReservations.add(workspace.workspaceId);
+      let releaseWorkspace: (() => Promise<void>) | null;
+      try {
+        releaseWorkspace =
+          (await options.prepareRunWorkspace?.(workspace)) ?? null;
+      } catch (error) {
+        runReservations.delete(workspace.workspaceId);
+        if (bypassBudget) budgetBypassThreads.add(bypassKey);
+        throw error;
+      }
+      if (stopped || paused) {
+        runReservations.delete(workspace.workspaceId);
+        if (bypassBudget) budgetBypassThreads.add(bypassKey);
         await releaseWorkspaceLease(releaseWorkspace);
         return;
       }
@@ -1128,10 +1173,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           logPath: logPathTemplate(),
         });
       } catch (error) {
+        runReservations.delete(workspace.workspaceId);
+        if (bypassBudget) budgetBypassThreads.add(bypassKey);
         await releaseWorkspaceLease(releaseWorkspace);
         throw error;
       }
       if (!claim) {
+        runReservations.delete(workspace.workspaceId);
+        if (bypassBudget) budgetBypassThreads.add(bypassKey);
         await releaseWorkspaceLease(releaseWorkspace);
         return;
       }
@@ -1260,10 +1309,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         continue;
       }
       if (!recovery.run.failureNotePosted) {
+        const restarted =
+          recovery.run.failureReason === "app restart during run";
         await postFailureNote(
           workspace,
           recovery.run,
-          "⚠ Agent run failed (app quit during run). Open the run chip for details.",
+          restarted
+            ? "⚠ Agent run failed (app restarted during run). Open the run chip for details."
+            : "⚠ Agent run failed (app quit during run). Open the run chip for details.",
         ).catch(reportError);
       }
       if (recovery.attemptCount < 2) {

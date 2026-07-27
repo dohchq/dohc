@@ -24,6 +24,12 @@ export type AwaitableAgentDispatchStore = Omit<
   | "markFailureNotePosted"
   | "recordRunMessage"
 > & {
+  resolveUncertainClaim?(
+    workspaceId: Parameters<AgentDispatchStore["claimNextPending"]>[0],
+    options?: Parameters<AgentDispatchStore["claimNextPending"]>[1],
+  ): ReturnType<AgentDispatchStore["claimNextPending"]> | Promise<
+    ReturnType<AgentDispatchStore["claimNextPending"]>
+  >;
   getRunRecord(
     runId: Parameters<AgentDispatchStore["getRunRecord"]>[0],
     options?: AgentDispatchRequestOptions,

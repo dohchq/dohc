@@ -30,6 +30,11 @@ interface SessionEntry {
 }
 
 export interface EngineWorkspaceRunOptions {
+  /**
+   * Replays the operation after transport rebinding. Callers must enable this
+   * only for idempotent operations or calls that verify a possibly committed
+   * first attempt before applying another write.
+   */
   retryTransportErrors?: boolean;
 }
 

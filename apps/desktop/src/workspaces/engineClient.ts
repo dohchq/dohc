@@ -535,6 +535,8 @@ export class EngineClient implements EngineTransport {
   private readonly blobStreams = new Map<number, PendingBlob>();
   private bufferedBlobChunks = 0;
   private readonly pending = new Map<number, PendingRequest>();
+  private readonly abandonedRequestIds = new Set<number>();
+  private readonly abandonedBlobStreamIds = new Set<number>();
   private readonly textDecoder = new TextDecoder("utf-8", { fatal: true });
   private readonly readyPromise: Promise<EngineClient>;
   private readyResolve!: (client: EngineClient) => void;
@@ -648,8 +650,11 @@ export class EngineClient implements EngineTransport {
       const deadlineTimer =
         request.deadlineMs !== undefined && request.deadlineMs !== null
           ? setTimeout(() => {
-              if (!this.pending.has(wireId)) return;
-              this.fail(
+              const pending = this.pending.get(wireId);
+              if (!pending) return;
+              this.pending.delete(wireId);
+              this.abandonedRequestIds.add(wireId);
+              pending.reject(
                 new EngineClientError(
                   "transport-error",
                   `Engine request ${wireId} timed out after ${request.deadlineMs}ms.`,
@@ -964,16 +969,13 @@ export class EngineClient implements EngineTransport {
     // handlers may announce them out of order. Reject only an id that is still
     // active (a live reassembly collision); a completed id is gone from the map
     // and a reuse simply starts a fresh stream bound to its own known request.
-    if (this.blobStreams.has(start.streamId)) {
+    if (
+      this.blobStreams.has(start.streamId) ||
+      this.abandonedBlobStreamIds.has(start.streamId)
+    ) {
       throw new BlobStreamError(
         "duplicate-blob-stream",
         `Blob stream ${start.streamId} is already active.`,
-      );
-    }
-    if (this.blobStreams.size >= MAX_CONCURRENT_BLOB_STREAMS) {
-      throw new BlobStreamError(
-        "too-many-blob-streams",
-        `At most ${MAX_CONCURRENT_BLOB_STREAMS} blob streams may be active.`,
       );
     }
     if (
@@ -995,6 +997,16 @@ export class EngineClient implements EngineTransport {
       throw new BlobStreamError(
         "invalid-blob-start",
         "blobStart.sha256 must be a lowercase SHA-256 hex digest.",
+      );
+    }
+    if (this.abandonedRequestIds.has(start.requestId)) {
+      this.abandonedBlobStreamIds.add(start.streamId);
+      return;
+    }
+    if (this.blobStreams.size >= MAX_CONCURRENT_BLOB_STREAMS) {
+      throw new BlobStreamError(
+        "too-many-blob-streams",
+        `At most ${MAX_CONCURRENT_BLOB_STREAMS} blob streams may be active.`,
       );
     }
     const pendingEntry = this.pending.get(start.requestId);
@@ -1029,6 +1041,10 @@ export class EngineClient implements EngineTransport {
   private receiveBlobChunk(
     frame: Extract<Frame, { kind: "blobChunk" }>,
   ): void {
+    if (this.abandonedBlobStreamIds.has(frame.streamId)) {
+      if (frame.fin) this.abandonedBlobStreamIds.delete(frame.streamId);
+      return;
+    }
     const stream = this.blobStreams.get(frame.streamId);
     if (!stream) {
       throw new BlobStreamError(
@@ -1118,6 +1134,7 @@ export class EngineClient implements EngineTransport {
   private resolveResponse(response: Response): void {
     const pending = this.pending.get(response.id);
     if (!pending) {
+      if (this.abandonedRequestIds.delete(response.id)) return;
       throw new EngineClientError(
         "protocol-error",
         `Received response for unknown request ${response.id}.`,
@@ -1141,6 +1158,7 @@ export class EngineClient implements EngineTransport {
     }
     const pending = this.pending.get(id);
     if (!pending) {
+      if (this.abandonedRequestIds.delete(id)) return;
       throw new EngineClientError(
         "protocol-error",
         `Received error for unknown request ${id}.`,
@@ -1194,6 +1212,8 @@ export class EngineClient implements EngineTransport {
       pending.reject(error);
     }
     this.pending.clear();
+    this.abandonedRequestIds.clear();
+    this.abandonedBlobStreamIds.clear();
     this.blobStreams.clear();
     this.bufferedBlobBytes = 0;
     this.bufferedBlobChunks = 0;

@@ -127,6 +127,87 @@ afterEach(async () => {
 });
 
 describe("live agent dispatch store", () => {
+  it("deadlines every scan-side dispatch read", async () => {
+    // MUTATION: use the ChatsLiveAdapter convenience methods without request
+    // options -> these calls have no deadline and a connected daemon can wedge
+    // the serialized workspace scan.
+    const client = mockClient(dispatchResult);
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    openSessions.push(sessions);
+    const { store } = createLiveAgentDispatchStore(WORKSPACE, sessions);
+
+    await store.listPending(WORKSPACE.workspaceId);
+    await store.openRuns(WORKSPACE.workspaceId);
+    await store.recentDispatchCount({
+      workspaceId: WORKSPACE.workspaceId,
+      threadId: "thread",
+      sinceMs: 0,
+    });
+    await store.threadDispatchPaused(WORKSPACE.workspaceId, "thread");
+    await store.getThreadDispatchPauseState(WORKSPACE.workspaceId, "thread");
+
+    expect(
+      client.requests
+        .filter(({ method }) =>
+          [
+            "chats.dispatch.listPending",
+            "chats.dispatch.openRuns",
+            "chats.dispatch.recentCount",
+            "chats.dispatch.isThreadPaused",
+            "chats.dispatch.getThreadPauseState",
+          ].includes(method),
+        )
+        .map(({ deadlineMs }) => deadlineMs),
+    ).toEqual(Array(5).fill(AGENT_DISPATCH_RPC_DEADLINE_MS));
+  });
+
+  it("deadlines and transport-retries eligible-trigger recording", async () => {
+    // MUTATION: omit either the request deadline or retryTransportErrors ->
+    // the first lost transport response rejects instead of completing on the
+    // rebound workspace session.
+    let attempts = 0;
+    const client = mockClient((request) => {
+      if (request.method === "workspace.open") {
+        return { workspace: `handle-record-${attempts}` };
+      }
+      if (request.method === "workspace.close") return { closed: true };
+      if (request.method !== "chats.dispatch.recordEligibleTriggers") {
+        throw new Error(`Unexpected request: ${request.method}`);
+      }
+      attempts += 1;
+      if (attempts === 1) {
+        throw {
+          code: "transport-error",
+          message: "record response was lost",
+        };
+      }
+      return 2;
+    });
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      { sleep: async () => undefined },
+    );
+    openSessions.push(sessions);
+    const { store } = createLiveAgentDispatchStore(WORKSPACE, sessions);
+
+    await expect(
+      store.recordEligibleTriggers({
+        workspaceId: WORKSPACE.workspaceId,
+        verifiedUserId: "user",
+      }),
+    ).resolves.toBe(2);
+    const requests = client.requests.filter(
+      ({ method }) => method === "chats.dispatch.recordEligibleTriggers",
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests.map(({ deadlineMs }) => deadlineMs)).toEqual([
+      AGENT_DISPATCH_RPC_DEADLINE_MS,
+      AGENT_DISPATCH_RPC_DEADLINE_MS,
+    ]);
+  });
+
   it("live_dispatch_round_trips_every_store_method_and_extra_rpc", async () => {
     const client = mockClient(dispatchResult);
     const sessions = new EngineWorkspaceSessions({

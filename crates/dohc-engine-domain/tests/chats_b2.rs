@@ -751,6 +751,25 @@ fn app_quit_recovery_requires_every_filter_and_hydrates_attempt_count() {
 }
 
 #[test]
+fn restart_failure_remains_durably_recoverable_before_requeue() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "trigger", "thread", "run", 20);
+    LinkedChatStore::new(&mut store)
+        .fail_dispatch(WS, "run", "app restart during run", None, 30, &NO_FAULTS)
+        .expect("fail");
+    let rows = LinkedChatStore::new(&mut store)
+        .list_app_quit_recoveries(WS, None, 10)
+        .expect("recoveries");
+    // MUTATION: keep the recovery query restricted to app-quit -> a crash
+    // between fail_dispatch and requeue_failed_trigger strands this row.
+    assert_eq!(
+        rows.first()
+            .map(|row| (row.run.failure_reason.as_deref(), row.attempt_count,)),
+        Some((Some("app restart during run"), 1)),
+    );
+}
+
+#[test]
 fn failure_note_mark_is_idempotent_and_requires_one_transition() {
     let (_scratch, mut store) = open_store();
     claimed_run(&mut store, "trigger", "thread", "run", 20);

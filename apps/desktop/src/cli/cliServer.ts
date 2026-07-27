@@ -35,6 +35,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import {
   isAbsolute,
   join,
   relative,
@@ -55,6 +62,12 @@ const REGEX_SCAN_TIMEOUT_MS = 5_000;
 const RUN_MESSAGE_LINK_ATTEMPTS = 3;
 const RUN_MESSAGE_LINK_RETRY_MS = 25;
 const RUN_MESSAGE_LINK_DEADLINE_MS = 1_000;
+const RUN_MESSAGE_LINK_FOREGROUND_BUDGET_MS = 1_500;
+const RUN_MESSAGE_LINK_RECOVERY_MAX_PENDING = 1_000;
+const RUN_MESSAGE_LINK_RECOVERY_MAX_ATTEMPTS = 12;
+const RUN_MESSAGE_LINK_RECOVERY_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+export const RUN_MESSAGE_LINK_RECOVERY_FILE =
+  "dohc-run-message-link-recovery.json";
 const TOKEN_RE = /^[a-f0-9]{64}$/u;
 
 const authEnvelopeSchema = z.object({ token: z.string() }).passthrough();
@@ -136,9 +149,14 @@ export interface CliServerOptions {
   regexScanTimeoutMs?: number;
   runMessageLinkRetryMs?: number;
   runMessageLinkDeadlineMs?: number;
+  runMessageLinkForegroundBudgetMs?: number;
   runMessageLinkRecoveryRetryMs?: number;
+  runMessageLinkRecoveryMaxPending?: number;
+  runMessageLinkRecoveryMaxAttempts?: number;
+  runMessageLinkRecoveryMaxAgeMs?: number;
   onRunMessageLinkPending?(link: CliRunMessageLink): void;
   onRunMessageLinkSettled?(link: CliRunMessageLink): void;
+  onRunMessageLinkAbandoned?(link: CliRunMessageLink): void;
 }
 
 export interface CliServerHandle {
@@ -774,13 +792,12 @@ type RunMessageLinkInput = {
 async function tryRunMessageLink(
   context: CliWorkspaceContext,
   input: RunMessageLinkInput,
-  deadlineMs: number,
+  requestDeadlineMs: () => number,
 ): Promise<void> {
   if (input.actor !== "agent" || !input.runId) return;
-  const requestOptions = { deadlineMs };
   const run = await context.dispatchStore.getRunRecord(
     input.runId,
-    requestOptions,
+    { deadlineMs: requestDeadlineMs() },
   );
   if (!run || run.workspaceId !== context.workspaceId) return;
   await context.dispatchStore.recordRunMessage(
@@ -789,7 +806,7 @@ async function tryRunMessageLink(
       messageId: input.messageId,
       runId: input.runId,
     },
-    requestOptions,
+    { deadlineMs: requestDeadlineMs() },
   );
 }
 
@@ -798,33 +815,143 @@ interface PendingRunMessageLink {
   input: RunMessageLinkInput & { runId: string };
   link: CliRunMessageLink;
   attempt: number;
+  createdAtMs: number;
   timer: ReturnType<typeof setTimeout> | null;
+}
+
+interface StoredRunMessageLink extends CliRunMessageLink {
+  attempt: number;
+  createdAtMs: number;
 }
 
 class RunMessageLinkRecoveryQueue {
   private readonly pending = new Map<string, PendingRunMessageLink>();
+  private restored = false;
   private closed = false;
 
   constructor(private readonly options: CliServerOptions) {}
 
+  async restore(): Promise<void> {
+    if (this.restored || this.closed) return;
+    this.restored = true;
+    let stored: StoredRunMessageLink[];
+    try {
+      const parsed = JSON.parse(
+        readFileSync(this.persistencePath(), "utf8"),
+      ) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("expected an array");
+      stored = parsed.filter(isStoredRunMessageLink);
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return;
+      }
+      this.options.onError?.(
+        new Error("Could not restore pending CLI provenance links.", {
+          cause: error,
+        }),
+      );
+      return;
+    }
+    const workspaces = new Map(
+      this.options.listWorkspaces().map((workspace) => [
+        workspace.workspaceId,
+        workspace,
+      ]),
+    );
+    const restored: Array<{
+      context: CliWorkspaceContext;
+      link: StoredRunMessageLink;
+    }> = [];
+    const contexts = new Map<string, CliWorkspaceContext>();
+    for (const link of stored.slice(0, this.maxPending())) {
+      const workspace = workspaces.get(link.workspaceId);
+      if (!workspace) {
+        this.options.onError?.(
+          new Error(
+            `Could not restore CLI provenance link for unavailable workspace ${link.workspaceId}.`,
+          ),
+        );
+        return;
+      }
+      try {
+        let context = contexts.get(link.workspaceId);
+        if (!context) {
+          context = await this.options.openWorkspace(workspace);
+          contexts.set(link.workspaceId, context);
+        }
+        restored.push({ context, link });
+      } catch (error) {
+        this.options.onError?.(
+          new Error(
+            `Could not restore CLI provenance link for workspace ${link.workspaceId}.`,
+            { cause: error },
+          ),
+        );
+        return;
+      }
+    }
+    for (const { context, link } of restored) {
+      this.add(
+        context,
+        {
+          actor: "agent",
+          runId: link.runId,
+          messageId: link.messageId,
+        },
+        link.attempt,
+        link.createdAtMs,
+        false,
+      );
+    }
+    this.persist();
+  }
+
   enqueue(
     context: CliWorkspaceContext,
     input: RunMessageLinkInput & { runId: string },
-  ): void {
-    if (this.closed) return;
+  ): boolean {
+    if (this.closed) return false;
+    if (this.pending.size >= this.maxPending()) return false;
+    return this.add(context, input, 0, Date.now());
+  }
+
+  private add(
+    context: CliWorkspaceContext,
+    input: RunMessageLinkInput & { runId: string },
+    attempt: number,
+    createdAtMs: number,
+    persist = true,
+  ): boolean {
     const link = {
       workspaceId: context.workspaceId,
       runId: input.runId,
       messageId: input.messageId,
     };
     const key = `${link.workspaceId}\u0000${link.runId}\u0000${link.messageId}`;
-    if (this.pending.has(key)) return;
-    const pending = { context, input, link, attempt: 0, timer: null };
+    if (this.pending.has(key)) return true;
+    const pending = {
+      context,
+      input,
+      link,
+      attempt,
+      createdAtMs,
+      timer: null,
+    };
     this.pending.set(key, pending);
+    if (persist && !this.persist()) {
+      this.pending.delete(key);
+      return false;
+    }
     try {
       this.options.onRunMessageLinkPending?.(link);
     } catch {}
     this.schedule(key, pending);
+    return true;
   }
 
   close(): void {
@@ -832,7 +959,6 @@ class RunMessageLinkRecoveryQueue {
     this.closed = true;
     for (const pending of this.pending.values()) {
       if (pending.timer) clearTimeout(pending.timer);
-      this.notifySettled(pending.link);
     }
     this.pending.clear();
   }
@@ -842,7 +968,10 @@ class RunMessageLinkRecoveryQueue {
     const baseDelay =
       this.options.runMessageLinkRecoveryRetryMs ??
       Math.max(250, this.options.runMessageLinkRetryMs ?? RUN_MESSAGE_LINK_RETRY_MS);
-    const delay = Math.min(baseDelay * 2 ** pending.attempt, 5_000);
+    const delay = Math.min(
+      baseDelay * 2 ** Math.min(pending.attempt, 20),
+      5_000,
+    );
     pending.timer = setTimeout(() => {
       pending.timer = null;
       void this.retry(key, pending);
@@ -856,24 +985,90 @@ class RunMessageLinkRecoveryQueue {
   ): Promise<void> {
     if (this.closed || this.pending.get(key) !== pending) return;
     pending.attempt += 1;
+    this.persist();
     try {
       await tryRunMessageLink(
         pending.context,
         pending.input,
-        this.options.runMessageLinkDeadlineMs ?? RUN_MESSAGE_LINK_DEADLINE_MS,
+        () =>
+          this.options.runMessageLinkDeadlineMs ??
+          RUN_MESSAGE_LINK_DEADLINE_MS,
       );
+      if (this.closed || this.pending.get(key) !== pending) return;
       this.pending.delete(key);
+      this.persist();
       this.notifySettled(pending.link);
     } catch (error) {
+      if (this.closed || this.pending.get(key) !== pending) return;
       if (
         error instanceof AgentDispatchStoreError &&
         (error.code === "invalid-input" || error.code === "run-not-found")
       ) {
         this.pending.delete(key);
+        this.persist();
         this.notifySettled(pending.link);
         return;
       }
+      if (
+        pending.attempt >=
+          (this.options.runMessageLinkRecoveryMaxAttempts ??
+            RUN_MESSAGE_LINK_RECOVERY_MAX_ATTEMPTS) ||
+        Date.now() - pending.createdAtMs >=
+          (this.options.runMessageLinkRecoveryMaxAgeMs ??
+            RUN_MESSAGE_LINK_RECOVERY_MAX_AGE_MS)
+      ) {
+        this.pending.delete(key);
+        this.persist();
+        this.notifyAbandoned(pending.link);
+        return;
+      }
       this.schedule(key, pending);
+    }
+  }
+
+  private maxPending(): number {
+    return Math.max(
+      1,
+      this.options.runMessageLinkRecoveryMaxPending ??
+        RUN_MESSAGE_LINK_RECOVERY_MAX_PENDING,
+    );
+  }
+
+  private persistencePath(): string {
+    return join(this.options.stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE);
+  }
+
+  private persist(): boolean {
+    const path = this.persistencePath();
+    try {
+      if (this.pending.size === 0) {
+        rmSync(path, { force: true });
+        return true;
+      }
+      mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 });
+      const stored: StoredRunMessageLink[] = [...this.pending.values()].map(
+        ({ link, attempt, createdAtMs }) => ({
+          ...link,
+          attempt,
+          createdAtMs,
+        }),
+      );
+      const temporaryPath = `${path}.${process.pid}.tmp`;
+      writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      renameSync(temporaryPath, path);
+      return true;
+    } catch (error) {
+      try {
+        this.options.onError?.(
+          new Error("Could not persist pending CLI provenance links.", {
+            cause: error,
+          }),
+        );
+      } catch {}
+      return false;
     }
   }
 
@@ -882,6 +1077,31 @@ class RunMessageLinkRecoveryQueue {
       this.options.onRunMessageLinkSettled?.(link);
     } catch {}
   }
+
+  private notifyAbandoned(link: CliRunMessageLink): void {
+    try {
+      this.options.onRunMessageLinkAbandoned?.(link);
+    } catch {}
+  }
+}
+
+function isStoredRunMessageLink(value: unknown): value is StoredRunMessageLink {
+  if (typeof value !== "object" || value === null) return false;
+  const link = value as Partial<StoredRunMessageLink>;
+  return (
+    typeof link.workspaceId === "string" &&
+    link.workspaceId.length > 0 &&
+    typeof link.runId === "string" &&
+    link.runId.length > 0 &&
+    typeof link.messageId === "string" &&
+    link.messageId.length > 0 &&
+    typeof link.attempt === "number" &&
+    Number.isSafeInteger(link.attempt) &&
+    link.attempt >= 0 &&
+    typeof link.createdAtMs === "number" &&
+    Number.isSafeInteger(link.createdAtMs) &&
+    link.createdAtMs >= 0
+  );
 }
 
 const runMessageLinkRecoveryQueues = new WeakMap<
@@ -904,6 +1124,12 @@ export function disposeCliServerRuntime(options: CliServerOptions): void {
   runMessageLinkRecoveryQueues.delete(options);
 }
 
+export async function restoreCliServerRuntime(
+  options: CliServerOptions,
+): Promise<void> {
+  await runMessageLinkRecoveryQueue(options).restore();
+}
+
 async function linkRunMessage(
   context: CliWorkspaceContext,
   input: RunMessageLinkInput,
@@ -911,44 +1137,61 @@ async function linkRunMessage(
 ): Promise<string | null> {
   if (input.actor !== "agent" || !input.runId) return null;
   const retryMs = options.runMessageLinkRetryMs ?? RUN_MESSAGE_LINK_RETRY_MS;
-  const deadlineMs =
+  const perRequestDeadlineMs =
     options.runMessageLinkDeadlineMs ?? RUN_MESSAGE_LINK_DEADLINE_MS;
+  const foregroundDeadline =
+    Date.now() +
+    (options.runMessageLinkForegroundBudgetMs ??
+      RUN_MESSAGE_LINK_FOREGROUND_BUDGET_MS);
+  const requestDeadlineMs = (): number => {
+    const remaining = foregroundDeadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error("CLI provenance foreground budget exhausted.");
+    }
+    return Math.max(1, Math.min(perRequestDeadlineMs, remaining));
+  };
+  let lastError: unknown;
+  let attempts = 0;
   for (let attempt = 1; attempt <= RUN_MESSAGE_LINK_ATTEMPTS; attempt += 1) {
+    attempts = attempt;
     try {
-      await tryRunMessageLink(context, input, deadlineMs);
+      await tryRunMessageLink(context, input, requestDeadlineMs);
       return null;
     } catch (error) {
+      lastError = error;
       if (
         error instanceof AgentDispatchStoreError &&
         (error.code === "invalid-input" || error.code === "run-not-found")
       ) {
         return null;
       }
-      if (attempt < RUN_MESSAGE_LINK_ATTEMPTS) {
+      const remaining = foregroundDeadline - Date.now();
+      if (attempt < RUN_MESSAGE_LINK_ATTEMPTS && remaining > 0) {
         await new Promise<void>((resolveDelay) => {
-          setTimeout(resolveDelay, retryMs * attempt);
+          setTimeout(resolveDelay, Math.min(retryMs * attempt, remaining));
         });
+        if (Date.now() >= foregroundDeadline) break;
         continue;
       }
-      const warning =
-        `Message posted, but agent-run provenance could not be recorded after ` +
-        `${RUN_MESSAGE_LINK_ATTEMPTS} attempts; recovery will continue in the background.`;
-      runMessageLinkRecoveryQueue(options).enqueue(context, {
-        ...input,
-        runId: input.runId,
-      });
-      try {
-        options.onError?.(
-          new Error(
-            `${warning} runId=${input.runId} messageId=${input.messageId}`,
-            { cause: error },
-          ),
-        );
-      } catch {}
-      return warning;
+      break;
     }
   }
-  return null;
+  const queued = runMessageLinkRecoveryQueue(options).enqueue(context, {
+    ...input,
+    runId: input.runId,
+  });
+  const warning = queued
+    ? `Message posted, but agent-run provenance could not be recorded after ${attempts} attempts; recovery will continue in the background.`
+    : `Message posted, but agent-run provenance could not be recorded and the bounded recovery queue is full.`;
+  try {
+    options.onError?.(
+      new Error(
+        `${warning} runId=${input.runId} messageId=${input.messageId}`,
+        { cause: lastError },
+      ),
+    );
+  } catch {}
+  return warning;
 }
 
 async function dispatch(
@@ -1600,10 +1843,10 @@ export async function startCliServer(
   if (platform === "win32") {
     throw new Error("dohc: CLI socket server is not yet supported on this platform");
   }
-  runMessageLinkRecoveryQueue(options);
 
   await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
   await chmod(options.stateDir, 0o700);
+  await restoreCliServerRuntime(options);
   const socketPath = join(options.stateDir, CLI_SOCKET_FILE);
   const tokenPath = join(options.stateDir, CLI_TOKEN_FILE);
   await Promise.all([
