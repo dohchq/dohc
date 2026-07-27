@@ -737,17 +737,43 @@ fn requeue_clears_run_and_failure_atomically() {
 }
 
 #[test]
-fn app_quit_recovery_requires_every_filter_and_hydrates_attempt_count() {
+fn app_quit_failure_remains_durably_recoverable_after_note() {
     let (_scratch, mut store) = open_store();
     claimed_run(&mut store, "trigger", "thread", "run", 20);
+    LinkedChatStore::new(&mut store)
+        .mark_failure_note_posted(WS, "run", &NO_FAULTS)
+        .expect("mark failure note");
     LinkedChatStore::new(&mut store)
         .fail_dispatch(WS, "run", "app-quit", Some(143), 30, &NO_FAULTS)
         .expect("fail");
     let rows = LinkedChatStore::new(&mut store)
         .list_app_quit_recoveries(WS, None, 10)
         .expect("recoveries");
-    // MUTATION: omit join/filter or attempt hydration -> wrong row/count metadata.
+    // MUTATION: require an unposted failure note -> a crash after the recovery
+    // note but before requeue makes the app-quit row disappear.
     assert_eq!((rows.len(), rows[0].attempt_count), (1, 1));
+}
+
+#[test]
+fn restart_failure_remains_durably_recoverable_before_requeue() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "trigger", "thread", "run", 20);
+    LinkedChatStore::new(&mut store)
+        .mark_failure_note_posted(WS, "run", &NO_FAULTS)
+        .expect("mark failure note");
+    LinkedChatStore::new(&mut store)
+        .fail_dispatch(WS, "run", "app restart during run", None, 30, &NO_FAULTS)
+        .expect("fail");
+    let rows = LinkedChatStore::new(&mut store)
+        .list_app_quit_recoveries(WS, None, 10)
+        .expect("recoveries");
+    // MUTATION: require failure_note_posted = 0 for restart failures -> the
+    // normal note-then-fail ordering strands this row if requeue never commits.
+    assert_eq!(
+        rows.first()
+            .map(|row| (row.run.failure_reason.as_deref(), row.attempt_count,)),
+        Some((Some("app restart during run"), 1)),
+    );
 }
 
 #[test]

@@ -1,8 +1,9 @@
 import { DohcCliError } from "@dohc/cli";
-import type {
-  CliRequestWithoutToken,
-  CliResultByVerb,
-  CliVerb,
+import {
+  CLI_PROTOCOL_VERSION,
+  type CliRequestWithoutToken,
+  type CliResultByVerb,
+  type CliVerb,
 } from "@dohc/cli/protocol";
 import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -203,7 +204,7 @@ describe("desktop CLI proxy", () => {
         ]),
       );
       for (const request of requests) {
-        expect(request.protocolVersion).toBe(1);
+        expect(request.protocolVersion).toBe(CLI_PROTOCOL_VERSION);
         expect(request.args).toMatchObject({ cwd: base.root, actor: "agent" });
       }
     });

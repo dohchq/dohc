@@ -19,7 +19,6 @@ import {
   AgentDispatchStoreError,
   LINKED_CHAT_STORE_RELATIVE_PATH,
   queryChatMessagesGranular,
-  type AgentDispatchStore,
   type ChannelThreadSummary,
   type ChatChannelSummary,
   type ChatMessage,
@@ -28,6 +27,7 @@ import {
   type VersionedTextMoment,
   type VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
+import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
 import { createServer, type Server, type Socket } from "node:net";
@@ -37,6 +37,13 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import {
   isAbsolute,
   join,
@@ -57,6 +64,15 @@ const LIST_MOMENTS_HARD_LIMIT = 500;
 const MAX_SOCKET_CONNECTIONS = 64;
 const REQUEST_DEADLINE_MS = 15_000;
 const REGEX_SCAN_TIMEOUT_MS = 5_000;
+const RUN_MESSAGE_LINK_ATTEMPTS = 3;
+const RUN_MESSAGE_LINK_RETRY_MS = 25;
+const RUN_MESSAGE_LINK_DEADLINE_MS = 1_000;
+const RUN_MESSAGE_LINK_FOREGROUND_BUDGET_MS = 1_500;
+const RUN_MESSAGE_LINK_RECOVERY_MAX_PENDING = 1_000;
+const RUN_MESSAGE_LINK_RECOVERY_MAX_ATTEMPTS = 12;
+const RUN_MESSAGE_LINK_RECOVERY_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+export const RUN_MESSAGE_LINK_RECOVERY_FILE =
+  "dohc-run-message-link-recovery.json";
 const TOKEN_RE = /^[a-f0-9]{64}$/u;
 
 const authEnvelopeSchema = z.object({ token: z.string() }).passthrough();
@@ -108,7 +124,7 @@ export interface CliRegistryWorkspace {
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
-  dispatchStore: AgentDispatchStore;
+  dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
@@ -123,6 +139,12 @@ export interface CliMainIdentity {
   reactionAuthorId: string;
 }
 
+export interface CliRunMessageLink {
+  workspaceId: string;
+  runId: string;
+  messageId: string;
+}
+
 export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
@@ -133,6 +155,16 @@ export interface CliServerOptions {
   nowMs?: () => number;
   platform?: NodeJS.Platform;
   regexScanTimeoutMs?: number;
+  runMessageLinkRetryMs?: number;
+  runMessageLinkDeadlineMs?: number;
+  runMessageLinkForegroundBudgetMs?: number;
+  runMessageLinkRecoveryRetryMs?: number;
+  runMessageLinkRecoveryMaxPending?: number;
+  runMessageLinkRecoveryMaxAttempts?: number;
+  runMessageLinkRecoveryMaxAgeMs?: number;
+  onRunMessageLinkPending?(link: CliRunMessageLink): void;
+  onRunMessageLinkSettled?(link: CliRunMessageLink): void;
+  onRunMessageLinkAbandoned?(link: CliRunMessageLink): void;
 }
 
 export interface CliServerHandle {
@@ -810,31 +842,437 @@ async function notifyWrite(
   }
 }
 
-function linkRunMessage(
+type RunMessageLinkInput = {
+  actor: CliActor;
+  runId?: string;
+  messageId: string;
+};
+
+async function tryRunMessageLink(
   context: CliWorkspaceContext,
-  input: { actor: CliActor; runId?: string; messageId: string },
-  options: CliServerOptions,
-): void {
+  input: RunMessageLinkInput,
+  requestDeadlineMs: () => number,
+): Promise<void> {
   if (input.actor !== "agent" || !input.runId) return;
-  try {
-    const run = context.dispatchStore.getRunRecord(input.runId);
-    if (!run || run.workspaceId !== context.workspaceId) return;
-    context.dispatchStore.recordRunMessage({
+  const run = await context.dispatchStore.getRunRecord(
+    input.runId,
+    { deadlineMs: requestDeadlineMs() },
+  );
+  if (!run || run.workspaceId !== context.workspaceId) return;
+  await context.dispatchStore.recordRunMessage(
+    {
       workspaceId: context.workspaceId,
       messageId: input.messageId,
       runId: input.runId,
-    });
-  } catch (error) {
-    if (
-      error instanceof AgentDispatchStoreError &&
-      (error.code === "invalid-input" || error.code === "run-not-found")
-    ) {
+    },
+    { deadlineMs: requestDeadlineMs() },
+  );
+}
+
+interface PendingRunMessageLink {
+  context: CliWorkspaceContext;
+  input: RunMessageLinkInput & { runId: string };
+  link: CliRunMessageLink;
+  attempt: number;
+  createdAtMs: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+interface StoredRunMessageLink extends CliRunMessageLink {
+  attempt: number;
+  createdAtMs: number;
+}
+
+class RunMessageLinkRecoveryQueue {
+  private readonly pending = new Map<string, PendingRunMessageLink>();
+  private readonly deferred = new Map<string, StoredRunMessageLink>();
+  private restored = false;
+  private closed = false;
+
+  constructor(private readonly options: CliServerOptions) {}
+
+  async restore(): Promise<void> {
+    if (this.restored || this.closed) return;
+    this.restored = true;
+    let stored: StoredRunMessageLink[];
+    try {
+      const parsed = JSON.parse(
+        readFileSync(this.persistencePath(), "utf8"),
+      ) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("expected an array");
+      stored = parsed.filter(isStoredRunMessageLink);
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return;
+      }
+      this.options.onError?.(
+        new Error("Could not restore pending CLI provenance links.", {
+          cause: error,
+        }),
+      );
       return;
     }
+    const workspaces = new Map(
+      this.options.listWorkspaces().map((workspace) => [
+        workspace.workspaceId,
+        workspace,
+      ]),
+    );
+    const restored: Array<{
+      context: CliWorkspaceContext;
+      link: StoredRunMessageLink;
+    }> = [];
+    const contexts = new Map<string, CliWorkspaceContext>();
+    for (const link of stored.slice(0, this.maxPending())) {
+      const workspace = workspaces.get(link.workspaceId);
+      if (!workspace) {
+        this.options.onError?.(
+          new Error(
+            `Could not restore CLI provenance link for unavailable workspace ${link.workspaceId}.`,
+          ),
+        );
+        this.deferred.set(this.key(link), link);
+        continue;
+      }
+      try {
+        let context = contexts.get(link.workspaceId);
+        if (!context) {
+          context = await this.options.openWorkspace(workspace);
+          contexts.set(link.workspaceId, context);
+        }
+        restored.push({ context, link });
+      } catch (error) {
+        this.options.onError?.(
+          new Error(
+            `Could not restore CLI provenance link for workspace ${link.workspaceId}.`,
+            { cause: error },
+          ),
+        );
+        this.deferred.set(this.key(link), link);
+        continue;
+      }
+    }
+    for (const { context, link } of restored) {
+      this.add(
+        context,
+        {
+          actor: "agent",
+          runId: link.runId,
+          messageId: link.messageId,
+        },
+        link.attempt,
+        link.createdAtMs,
+        false,
+      );
+    }
+    this.persist();
+  }
+
+  enqueue(
+    context: CliWorkspaceContext,
+    input: RunMessageLinkInput & { runId: string },
+  ): boolean {
+    if (this.closed) return false;
+    const key = this.key({
+      workspaceId: context.workspaceId,
+      runId: input.runId,
+      messageId: input.messageId,
+    });
+    if (
+      !this.pending.has(key) &&
+      !this.deferred.has(key) &&
+      this.pending.size + this.deferred.size >= this.maxPending()
+    ) {
+      return false;
+    }
+    return this.add(context, input, 0, Date.now());
+  }
+
+  private add(
+    context: CliWorkspaceContext,
+    input: RunMessageLinkInput & { runId: string },
+    attempt: number,
+    createdAtMs: number,
+    persist = true,
+  ): boolean {
+    const link = {
+      workspaceId: context.workspaceId,
+      runId: input.runId,
+      messageId: input.messageId,
+    };
+    const key = this.key(link);
+    if (this.pending.has(key)) return true;
+    this.deferred.delete(key);
+    const pending = {
+      context,
+      input,
+      link,
+      attempt,
+      createdAtMs,
+      timer: null,
+    };
+    this.pending.set(key, pending);
+    if (persist && !this.persist()) {
+      this.pending.delete(key);
+      return false;
+    }
     try {
-      options.onError?.(error);
+      this.options.onRunMessageLinkPending?.(link);
+    } catch {}
+    this.schedule(key, pending);
+    return true;
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pending of this.pending.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
+    }
+    this.pending.clear();
+  }
+
+  private schedule(key: string, pending: PendingRunMessageLink): void {
+    if (this.closed || this.pending.get(key) !== pending) return;
+    const baseDelay =
+      this.options.runMessageLinkRecoveryRetryMs ??
+      Math.max(250, this.options.runMessageLinkRetryMs ?? RUN_MESSAGE_LINK_RETRY_MS);
+    const delay = Math.min(
+      baseDelay * 2 ** Math.min(pending.attempt, 20),
+      5_000,
+    );
+    pending.timer = setTimeout(() => {
+      pending.timer = null;
+      void this.retry(key, pending);
+    }, delay);
+    pending.timer.unref?.();
+  }
+
+  private async retry(
+    key: string,
+    pending: PendingRunMessageLink,
+  ): Promise<void> {
+    if (this.closed || this.pending.get(key) !== pending) return;
+    pending.attempt += 1;
+    this.persist();
+    try {
+      await tryRunMessageLink(
+        pending.context,
+        pending.input,
+        () =>
+          this.options.runMessageLinkDeadlineMs ??
+          RUN_MESSAGE_LINK_DEADLINE_MS,
+      );
+      if (this.closed || this.pending.get(key) !== pending) return;
+      this.pending.delete(key);
+      this.persist();
+      this.notifySettled(pending.link);
+    } catch (error) {
+      if (this.closed || this.pending.get(key) !== pending) return;
+      if (
+        error instanceof AgentDispatchStoreError &&
+        (error.code === "invalid-input" || error.code === "run-not-found")
+      ) {
+        this.pending.delete(key);
+        this.persist();
+        this.notifySettled(pending.link);
+        return;
+      }
+      if (
+        pending.attempt >=
+          (this.options.runMessageLinkRecoveryMaxAttempts ??
+            RUN_MESSAGE_LINK_RECOVERY_MAX_ATTEMPTS) ||
+        Date.now() - pending.createdAtMs >=
+          (this.options.runMessageLinkRecoveryMaxAgeMs ??
+            RUN_MESSAGE_LINK_RECOVERY_MAX_AGE_MS)
+      ) {
+        this.pending.delete(key);
+        this.persist();
+        this.notifyAbandoned(pending.link);
+        return;
+      }
+      this.schedule(key, pending);
+    }
+  }
+
+  private maxPending(): number {
+    return Math.max(
+      1,
+      this.options.runMessageLinkRecoveryMaxPending ??
+        RUN_MESSAGE_LINK_RECOVERY_MAX_PENDING,
+    );
+  }
+
+  private persistencePath(): string {
+    return join(this.options.stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE);
+  }
+
+  private key(link: CliRunMessageLink): string {
+    return `${link.workspaceId}\u0000${link.runId}\u0000${link.messageId}`;
+  }
+
+  private persist(): boolean {
+    const path = this.persistencePath();
+    try {
+      if (this.pending.size === 0 && this.deferred.size === 0) {
+        rmSync(path, { force: true });
+        return true;
+      }
+      mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 });
+      const stored: StoredRunMessageLink[] = [
+        ...this.deferred.values(),
+        ...[...this.pending.values()].map(
+          ({ link, attempt, createdAtMs }) => ({
+            ...link,
+            attempt,
+            createdAtMs,
+          }),
+        ),
+      ];
+      const temporaryPath = `${path}.${process.pid}.tmp`;
+      writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      renameSync(temporaryPath, path);
+      return true;
+    } catch (error) {
+      try {
+        this.options.onError?.(
+          new Error("Could not persist pending CLI provenance links.", {
+            cause: error,
+          }),
+        );
+      } catch {}
+      return false;
+    }
+  }
+
+  private notifySettled(link: CliRunMessageLink): void {
+    try {
+      this.options.onRunMessageLinkSettled?.(link);
     } catch {}
   }
+
+  private notifyAbandoned(link: CliRunMessageLink): void {
+    try {
+      this.options.onRunMessageLinkAbandoned?.(link);
+    } catch {}
+  }
+}
+
+function isStoredRunMessageLink(value: unknown): value is StoredRunMessageLink {
+  if (typeof value !== "object" || value === null) return false;
+  const link = value as Partial<StoredRunMessageLink>;
+  return (
+    typeof link.workspaceId === "string" &&
+    link.workspaceId.length > 0 &&
+    typeof link.runId === "string" &&
+    link.runId.length > 0 &&
+    typeof link.messageId === "string" &&
+    link.messageId.length > 0 &&
+    typeof link.attempt === "number" &&
+    Number.isSafeInteger(link.attempt) &&
+    link.attempt >= 0 &&
+    typeof link.createdAtMs === "number" &&
+    Number.isSafeInteger(link.createdAtMs) &&
+    link.createdAtMs >= 0
+  );
+}
+
+const runMessageLinkRecoveryQueues = new WeakMap<
+  CliServerOptions,
+  RunMessageLinkRecoveryQueue
+>();
+
+function runMessageLinkRecoveryQueue(
+  options: CliServerOptions,
+): RunMessageLinkRecoveryQueue {
+  const existing = runMessageLinkRecoveryQueues.get(options);
+  if (existing) return existing;
+  const created = new RunMessageLinkRecoveryQueue(options);
+  runMessageLinkRecoveryQueues.set(options, created);
+  return created;
+}
+
+export function disposeCliServerRuntime(options: CliServerOptions): void {
+  runMessageLinkRecoveryQueues.get(options)?.close();
+  runMessageLinkRecoveryQueues.delete(options);
+}
+
+export async function restoreCliServerRuntime(
+  options: CliServerOptions,
+): Promise<void> {
+  await runMessageLinkRecoveryQueue(options).restore();
+}
+
+async function linkRunMessage(
+  context: CliWorkspaceContext,
+  input: RunMessageLinkInput,
+  options: CliServerOptions,
+): Promise<string | null> {
+  if (input.actor !== "agent" || !input.runId) return null;
+  const retryMs = options.runMessageLinkRetryMs ?? RUN_MESSAGE_LINK_RETRY_MS;
+  const perRequestDeadlineMs =
+    options.runMessageLinkDeadlineMs ?? RUN_MESSAGE_LINK_DEADLINE_MS;
+  const foregroundDeadline =
+    Date.now() +
+    (options.runMessageLinkForegroundBudgetMs ??
+      RUN_MESSAGE_LINK_FOREGROUND_BUDGET_MS);
+  const requestDeadlineMs = (): number => {
+    const remaining = foregroundDeadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error("CLI provenance foreground budget exhausted.");
+    }
+    return Math.max(1, Math.min(perRequestDeadlineMs, remaining));
+  };
+  let lastError: unknown;
+  let attempts = 0;
+  for (let attempt = 1; attempt <= RUN_MESSAGE_LINK_ATTEMPTS; attempt += 1) {
+    attempts = attempt;
+    try {
+      await tryRunMessageLink(context, input, requestDeadlineMs);
+      return null;
+    } catch (error) {
+      lastError = error;
+      if (
+        error instanceof AgentDispatchStoreError &&
+        (error.code === "invalid-input" || error.code === "run-not-found")
+      ) {
+        return null;
+      }
+      const remaining = foregroundDeadline - Date.now();
+      if (attempt < RUN_MESSAGE_LINK_ATTEMPTS && remaining > 0) {
+        await new Promise<void>((resolveDelay) => {
+          setTimeout(resolveDelay, Math.min(retryMs * attempt, remaining));
+        });
+        if (Date.now() >= foregroundDeadline) break;
+        continue;
+      }
+      break;
+    }
+  }
+  const queued = runMessageLinkRecoveryQueue(options).enqueue(context, {
+    ...input,
+    runId: input.runId,
+  });
+  const warning = queued
+    ? `Message posted, but agent-run provenance could not be recorded after ${attempts} attempts; recovery will continue in the background.`
+    : `Message posted, but agent-run provenance could not be recorded and the bounded recovery queue is full.`;
+  try {
+    options.onError?.(
+      new Error(
+        `${warning} runId=${input.runId} messageId=${input.messageId}`,
+        { cause: lastError },
+      ),
+    );
+  } catch {}
+  return warning;
 }
 
 async function dispatch(
@@ -1283,7 +1721,7 @@ async function dispatch(
         needsDecision: request.args.needsDecision,
         attachments,
       });
-      linkRunMessage(context, {
+      const linkWarning = await linkRunMessage(context, {
         actor: request.args.actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: started.message.id,
@@ -1294,6 +1732,7 @@ async function dispatch(
         threadId: cliThreadId(started.thread.id),
         messageId: cliMessageId(started.message.id),
         title: started.thread.title,
+        ...(linkWarning ? { warning: linkWarning } : {}),
       };
     }
 
@@ -1339,7 +1778,7 @@ async function dispatch(
         needsDecision: request.args.needsDecision,
         attachments,
       });
-      linkRunMessage(context, {
+      const linkWarning = await linkRunMessage(context, {
         actor: request.args.actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: message.id,
@@ -1393,6 +1832,7 @@ async function dispatch(
         ...(decisionMessage && resolvedByReply
           ? { resolvedMessageId: cliMessageId(decisionMessage.id) }
           : {}),
+        ...(linkWarning ? { warning: linkWarning } : {}),
       };
     }
 
@@ -1733,6 +2173,9 @@ export async function startCliServer(
   await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
   // Windows chmod does not set a DACL; directory access still depends on its inherited ACL.
   await chmod(options.stateDir, 0o700);
+  // main added the provenance-restore step; this branch made the endpoint
+  // platform-aware. Both are needed, restore first as main had it.
+  await restoreCliServerRuntime(options);
   const endpointPath = join(options.stateDir, CLI_ENDPOINT_FILE);
   const socketPath = isWindows
     ? `\\\\.\\pipe\\dohc-cli-${randomBytes(16).toString("hex")}`
@@ -1781,6 +2224,7 @@ export async function startCliServer(
       rm(endpointArtifactPath, { force: true }),
       rm(tokenPath, { force: true }),
     ]);
+    disposeCliServerRuntime(options);
     throw error;
   }
   server.unref();
@@ -1806,6 +2250,7 @@ export async function startCliServer(
         rm(endpointArtifactPath, { force: true }),
         rm(tokenPath, { force: true }),
       ]);
+      disposeCliServerRuntime(options);
     },
   };
 }

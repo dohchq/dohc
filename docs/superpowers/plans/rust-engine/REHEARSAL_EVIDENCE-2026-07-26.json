@@ -1,0 +1,337 @@
+{
+  "schema_version": 4,
+  "criterion": "GATE6 end-to-end clone-reset rehearsal on real dogfood workspace byte-clones",
+  "recorded_interpretation": "The live dogfood engine.db is TypeScript-authored and the Rust fence correctly refuses its foreign fingerprint. The authorized cutover is a reset: retain the source SQLite files inside the byte clone, initialize and bind a fresh Rust store in the clone, write the two harness-only markers, then exercise run_rehearsal(NoFaults). Ice accepted the data wipe; this interpretation remains flagged for Ice's post-hoc review.",
+  "floor_clone_design_decision": "The byte clone applies the canonical capture floor to both directory roots and files, except the .dohc subtree required by the rehearsal machinery. Reset never touches capture-excluded content because it is outside the engine's world. Every omitted root or file is recorded, and the complete contents of omitted directory trees are independently hashed into the before/after source proof. Alias and special-file refusal remains fail-closed for every entry actually cloned.",
+  "started_at_unix_ms": 1785086025681,
+  "finished_at_unix_ms": 1785086032490,
+  "source_path": "\\\\?\\C:\\Users\\ice\\dohc\\personal",
+  "clone_path": "\\\\?\\C:\\w\\_targets\\rehearse-dogfood-clones\\clone-1785086025681",
+  "recovery_path": "\\\\?\\C:\\w\\_targets\\rehearse-dogfood-recovery",
+  "outcome": "complete",
+  "state_record": {
+    "generation": 6,
+    "current": {
+      "status": "complete"
+    },
+    "history": [
+      "not-started",
+      "settled",
+      "backed-up",
+      "moved-aside",
+      "initialized",
+      "capturing",
+      "complete"
+    ],
+    "backup": {
+      "recovery_dir": "\\\\?\\C:\\w\\_targets\\rehearse-dogfood-recovery",
+      "db_checksum": "e8330718b9e2a97f0118aa2c82fffa3bd07ca41b3dce845faff1c2c672aaea98",
+      "directory_manifest_sha256": "6f5466a3418584dcc1f7cc91b47b00f24c58fa4a693d947f9d957459dd16fdf8"
+    },
+    "fresh_engine_uuid": "3c5d145ae5fd999278765ac74a2455eb"
+  },
+  "backup_fingerprint": {
+    "recovery_dir": "\\\\?\\C:\\w\\_targets\\rehearse-dogfood-recovery",
+    "db_checksum": "e8330718b9e2a97f0118aa2c82fffa3bd07ca41b3dce845faff1c2c672aaea98",
+    "directory_manifest_sha256": "6f5466a3418584dcc1f7cc91b47b00f24c58fa4a693d947f9d957459dd16fdf8"
+  },
+  "fresh_engine_uuid": "3c5d145ae5fd999278765ac74a2455eb",
+  "source_unchanged": {
+    "verified": true,
+    "before_snapshot_sha256": "43d1b2e0c7a91ec56374c3e5136b14ad15b9439f639323f093ef5b78baa75e72",
+    "after_snapshot_sha256": "43d1b2e0c7a91ec56374c3e5136b14ad15b9439f639323f093ef5b78baa75e72",
+    "before": {
+      "directory_count": 20,
+      "file_count": 121,
+      "total_file_bytes": 3357583,
+      "snapshot_sha256": "43d1b2e0c7a91ec56374c3e5136b14ad15b9439f639323f093ef5b78baa75e72"
+    },
+    "after": {
+      "directory_count": 20,
+      "file_count": 121,
+      "total_file_bytes": 3357583,
+      "snapshot_sha256": "43d1b2e0c7a91ec56374c3e5136b14ad15b9439f639323f093ef5b78baa75e72"
+    }
+  },
+  "source_counts": {
+    "directory_count": 20,
+    "file_count": 121,
+    "total_file_bytes": 3357583,
+    "snapshot_sha256": "43d1b2e0c7a91ec56374c3e5136b14ad15b9439f639323f093ef5b78baa75e72"
+  },
+  "byte_clone_input_counts": {
+    "directory_count": 19,
+    "file_count": 121,
+    "total_file_bytes": 3357583,
+    "snapshot_sha256": "f9513dffbc765f30d8fd6eacf7f9571d1e5238439d1a5bce09586e1bda51b546"
+  },
+  "initial_byte_clone_counts": {
+    "directory_count": 19,
+    "file_count": 121,
+    "total_file_bytes": 3357583,
+    "snapshot_sha256": "f9513dffbc765f30d8fd6eacf7f9571d1e5238439d1a5bce09586e1bda51b546"
+  },
+  "final_clone_counts": {
+    "directory_count": 22,
+    "file_count": 136,
+    "total_file_bytes": 5293231,
+    "snapshot_sha256": "f48a8251365563d04553afa91003e3b30e7d0856753f46ef7ce5e2bec95b710e"
+  },
+  "floor_skips": {
+    "root_count": 1,
+    "directory_root_count": 1,
+    "alias_root_count": 0,
+    "file_root_count": 0,
+    "roots": [
+      {
+        "relative_path": "sites/dohc-workspace-demo/node_modules",
+        "kind": "directory",
+        "source_root_modified_seconds": 1784134437,
+        "source_root_modified_nanoseconds": 404843300,
+        "source_content_sha256": "b577b253c84eb97ffd6327a00e866b371fa1b1f5cf10301123f3569a1829a783",
+        "source_file_count": 294,
+        "source_total_file_bytes": 34454239
+      }
+    ]
+  },
+  "hard_links": {
+    "clone_semantics": "Hard-linked source files are copied byte-for-byte into independent regular files. The clone therefore shares no file identity with any source twin, and clone reset cannot mutate a twin.",
+    "real_cutover_flag": "OUTSIDE-source twins do not endanger the byte clone, but are flagged because a reset performed on the real source tree must account for their shared source identity.",
+    "hard_linked_source_file_count": 3,
+    "total_link_count": 6,
+    "total_twin_path_count": 3,
+    "inside_source_tree_twin_count": 3,
+    "outside_source_tree_twin_count": 0,
+    "outside_source_tree_observed": false,
+    "file_sample_limit": 128,
+    "sampled_file_count": 3,
+    "omitted_file_count": 0,
+    "files": [
+      {
+        "relative_path": "sites/dohc-workspace-demo/vendor/dohc-sdk/dist/index.d.ts",
+        "link_count": 2,
+        "twin_path_count": 1,
+        "inside_source_tree_twin_count": 1,
+        "outside_source_tree_twin_count": 0,
+        "sampled_twin_path_count": 1,
+        "omitted_twin_path_count": 0,
+        "twin_path_sample_limit": 32,
+        "twin_paths": [
+          {
+            "resolved_path": "\\\\?\\C:\\Users\\ice\\dohc\\personal\\sites\\dohc-workspace-demo\\node_modules\\.pnpm\\@dohc+sdk@file+vendor+dohc-sdk\\node_modules\\@dohc\\sdk\\dist\\index.d.ts",
+            "location": "inside_source_tree"
+          }
+        ]
+      },
+      {
+        "relative_path": "sites/dohc-workspace-demo/vendor/dohc-sdk/dist/index.js",
+        "link_count": 2,
+        "twin_path_count": 1,
+        "inside_source_tree_twin_count": 1,
+        "outside_source_tree_twin_count": 0,
+        "sampled_twin_path_count": 1,
+        "omitted_twin_path_count": 0,
+        "twin_path_sample_limit": 32,
+        "twin_paths": [
+          {
+            "resolved_path": "\\\\?\\C:\\Users\\ice\\dohc\\personal\\sites\\dohc-workspace-demo\\node_modules\\.pnpm\\@dohc+sdk@file+vendor+dohc-sdk\\node_modules\\@dohc\\sdk\\dist\\index.js",
+            "location": "inside_source_tree"
+          }
+        ]
+      },
+      {
+        "relative_path": "sites/dohc-workspace-demo/vendor/dohc-sdk/package.json",
+        "link_count": 2,
+        "twin_path_count": 1,
+        "inside_source_tree_twin_count": 1,
+        "outside_source_tree_twin_count": 0,
+        "sampled_twin_path_count": 1,
+        "omitted_twin_path_count": 0,
+        "twin_path_sample_limit": 32,
+        "twin_paths": [
+          {
+            "resolved_path": "\\\\?\\C:\\Users\\ice\\dohc\\personal\\sites\\dohc-workspace-demo\\node_modules\\.pnpm\\@dohc+sdk@file+vendor+dohc-sdk\\node_modules\\@dohc\\sdk\\package.json",
+            "location": "inside_source_tree"
+          }
+        ]
+      }
+    ]
+  },
+  "recapture": {
+    "paths_expected": 27,
+    "paths_recaptured": 27,
+    "records_expected": 27,
+    "records_recaptured": 27,
+    "content_identities_verified": 27,
+    "flush_attempts": 1,
+    "mismatches": [],
+    "projections_settled": true,
+    "verdict": "complete"
+  },
+  "ui_state_tmp_orphans": [
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-10428-c0e17448-5974-4ea4-949d-18195e73eb5d",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-11664-3d724e48-2057-4de2-ba0b-3254b880595a",
+      "size_bytes": 469,
+      "sha256": "4766c2b890578321e6170b5befcf216de04edc2557219f5daa745f19ac62311c"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-15260-468e914e-143e-493b-8d08-b1e20459ca31",
+      "size_bytes": 567,
+      "sha256": "6d4b9558ae1c402839244bef577cc2d09b6a62d04b2722cb7cbd66bd57abb5a4"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-15260-824ce149-4c7d-40b3-b7cd-09eb1eac0f0f",
+      "size_bytes": 567,
+      "sha256": "6d4b9558ae1c402839244bef577cc2d09b6a62d04b2722cb7cbd66bd57abb5a4"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-15260-cc28b345-afff-4765-99f9-cfe40a4596a0",
+      "size_bytes": 550,
+      "sha256": "58fce3df1c3c11e679ad486516bbf6074eb98d7204600bb7fb4613d6f7792d8e"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-21696-0bb75c59-2946-4691-942b-b44996dfa685",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-27596-f3fbf01d-9665-48db-b18f-6591704b2772",
+      "size_bytes": 755,
+      "sha256": "47b68c811f1575081e2a14ac58e7d0886f737a3c7df86f3dd34829cf9396532f"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-31348-5c346f6d-d834-47c7-a1e6-32f0dd7177ae",
+      "size_bytes": 574,
+      "sha256": "408357e99b37426ff1d9585da731c10e0cc662ffe50d2aaebdc72e7e5ed17fbf"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-42876-a6ae9c84-8621-4cef-b788-d86172856f03",
+      "size_bytes": 487,
+      "sha256": "1e93e9d5242b3e59a1c3b63fc4aa59ae953f4bf3390b442e3886dd104cab2a45"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-45736-b31726eb-cbbd-4d2f-8ae4-c458bb9ce672",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-47632-d446d361-25ea-4f68-94c3-0b0d2a9c75ad",
+      "size_bytes": 545,
+      "sha256": "51672dcdf31f9f1671b83aeb3b8140e71675414260cd8fa2d4aaa4cd898690cb"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-49064-a47cf0cc-c1c9-4169-9ea9-f06ee3f6ae40",
+      "size_bytes": 544,
+      "sha256": "31273457d65dc9a6bb0ae86fbb54e2c2b5ef67cfe4ed8127e49f8228451c690f"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-51632-f2c9d25a-65a5-4a5e-aa56-81f11fbf7a0f",
+      "size_bytes": 505,
+      "sha256": "b52660a2e35ff16f9be133bc72103ad20fa4b2574083e5af182b87811b53e7a8"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-52536-3e7c450d-c74c-4d07-a0dd-91f7b4c2f459",
+      "size_bytes": 502,
+      "sha256": "e79319f06e4ef9def6c75e03c0d259027b54986de0f627dc67c2b78c581de799"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-53892-258f4a61-bd64-406d-89d2-7eeb276868df",
+      "size_bytes": 502,
+      "sha256": "e79319f06e4ef9def6c75e03c0d259027b54986de0f627dc67c2b78c581de799"
+    },
+    {
+      "relative_path": ".dohc/ui-state.json.tmp-54960-80920053-2151-4fa4-81ba-38e4ffb2633d",
+      "size_bytes": 549,
+      "sha256": "1c692d40a1486f7f34bb5c2e6d4da52f6e6294e4a78edb3c86883b7b6ca668f6"
+    }
+  ],
+  "preserved_typescript_store": [
+    {
+      "original_relative_path": ".dohc/engine/engine.db",
+      "retained_relative_path": ".dohc/engine/typescript-engine-byte-clone/engine.db",
+      "size_bytes": 2744320,
+      "sha256": "0b22f4800027162673fdf7baf27daf8b617d9d6a96f9dadd488b9df37e984206"
+    }
+  ],
+  "recovery_artifacts": [
+    {
+      "relative_path": "cutover-engine.db",
+      "size_bytes": 749568,
+      "sha256": "e8330718b9e2a97f0118aa2c82fffa3bd07ca41b3dce845faff1c2c672aaea98"
+    },
+    {
+      "relative_path": "cutover-engine.manifest.json",
+      "size_bytes": 272,
+      "sha256": "f6579ffeea725db54ac8be8a82cc50f88aa71e74e2374d8bb93e13b825887386"
+    },
+    {
+      "relative_path": "cutover-files/dohc/agent-runs.json",
+      "size_bytes": 203,
+      "sha256": "5e73eaef46ebb0797dda7b3a51b3fbc804510b7aac0bc779e8acdb2fee9ac154"
+    },
+    {
+      "relative_path": "cutover-files/engine/CUTOVER_REHEARSAL_INVENTORY.json",
+      "size_bytes": 3960,
+      "sha256": "6f0593dcfd8be3c1090441f7e53c18c0587b06ff7215335621a8e026eff82047"
+    },
+    {
+      "relative_path": "cutover-files/engine/CUTOVER_REHEARSAL_STATE/00000000000000000000.json",
+      "size_bytes": 116,
+      "sha256": "196826ae16022478ece2da88eef7d939982d0f1295db1e922088aaec55f05197"
+    },
+    {
+      "relative_path": "cutover-files/engine/CUTOVER_REHEARSAL_STATE/00000000000000000001.json",
+      "size_bytes": 122,
+      "sha256": "eb6116aca74deaebc7f1fa1ba3dac5fde0ec915d0982f7032eca867c482b815f"
+    },
+    {
+      "relative_path": "cutover-files/engine/CUTOVER_REHEARSAL_TOKEN",
+      "size_bytes": 64,
+      "sha256": "875b09c47fd0f38e121de602818ef4c8a0d5934d04820919556f834267f3107f"
+    },
+    {
+      "relative_path": "cutover-files/engine/SHADOW_CLONE",
+      "size_bytes": 64,
+      "sha256": "53057c480697ebae663ee45116f67e23aa65518eb463ed9c6066684cd739f09f"
+    },
+    {
+      "relative_path": "cutover-files/engine/typescript-engine-byte-clone/engine.db",
+      "size_bytes": 2744320,
+      "sha256": "0b22f4800027162673fdf7baf27daf8b617d9d6a96f9dadd488b9df37e984206"
+    },
+    {
+      "relative_path": "cutover-files.manifest.json",
+      "size_bytes": 1180,
+      "sha256": "6f5466a3418584dcc1f7cc91b47b00f24c58fa4a693d947f9d957459dd16fdf8"
+    },
+    {
+      "relative_path": "triplet-proof/engine.db",
+      "size_bytes": 749568,
+      "sha256": "07049f38a9b0a98cd40de4e1b16d144b02cd851cde0f7581e897caab0daee222"
+    },
+    {
+      "relative_path": "triplet-proof/engine.db-shm",
+      "size_bytes": 32768,
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+    },
+    {
+      "relative_path": "triplet-proof/engine.db-wal",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "timings": {
+    "source_snapshot_before_ms": 799,
+    "byte_clone_ms": 3464,
+    "clone_preparation_ms": 147,
+    "rehearsal_ms": 1243,
+    "recapture_ms": 112,
+    "source_verification_ms": 783,
+    "total_ms": 6808
+  }
+}

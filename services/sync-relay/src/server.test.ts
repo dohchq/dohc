@@ -15,10 +15,12 @@ import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
 interface InspectionStatement {
   get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): unknown;
 }
 
 interface InspectionDatabase {
   prepare(sql: string): InspectionStatement;
+  exec(sql: string): void;
   close(): void;
 }
 
@@ -338,6 +340,114 @@ describe("sync relay handler", () => {
         recordedAtMs: 42,
       },
     ]);
+  });
+
+  it("rejects fractional and out-of-range timestamps before admitting log rows", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+
+    for (const recordedAtMs of [
+      42.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      null,
+      "",
+      false,
+    ]) {
+      const response = await h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody({
+            originId: "origin-a",
+            ops: [
+              {
+                originSeq: 0,
+                opKind: "future.opaque",
+                payload: {},
+                recordedAtMs,
+              },
+            ],
+          }),
+        ),
+      );
+      expect(response.status).toBe(400);
+      expect(await json(response)).toMatchObject({
+        ok: false,
+        error: "recordedAtMs must be an integer in the safe wire range",
+      });
+    }
+
+    const fetched = await json(
+      await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
+    );
+    expect(fetched.ops).toEqual([]);
+    // MUTATION: Number.isFinite, Math.trunc, or rounding admits the fractional
+    // row and makes the Rust i64 decoder permanently stall behind it.
+  });
+
+  it("refuses a legacy relay database with a fractional timestamp at cutover", async () => {
+    const root = await tempRoot("fractional-cutover");
+    const dbPath = join(root, "relay.sqlite");
+    const storage = openSyncRelayStorage(dbPath);
+    storage.claimWorkspace({
+      workspaceId: "workspace-a",
+      ownerUserId: "a",
+      createdAtMs: 1,
+    });
+    storage.appendLogBatch({
+      workspaceId: "workspace-a",
+      originId: "legacy-origin",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "future.opaque",
+          payloadJson: "{}",
+          recordedAtMs: 1,
+        },
+      ],
+    });
+    storage.close();
+    const legacy = new InspectionDatabaseSync(dbPath, { readOnly: false });
+    legacy.exec(
+      "UPDATE sync_relay_log SET recorded_at_ms=1.5; " +
+        "DELETE FROM sync_relay_migrations WHERE migration_id='recorded-at-safe-integer-v1';",
+    );
+    legacy.close();
+
+    expect(() => openSyncRelayStorage(dbPath)).toThrow(
+      "sync relay log contains a timestamp outside the integer wire contract",
+    );
+    // MUTATION: casting/truncating during cutover silently changes the signed
+    // wire value; omitting the scan re-exposes the poison row to Rust pulls.
+  });
+
+  it("persists the legacy timestamp validation marker after the first scan", async () => {
+    const root = await tempRoot("timestamp-migration-marker");
+    const dbPath = join(root, "relay.sqlite");
+    const storage = openSyncRelayStorage(dbPath);
+    storage.claimWorkspace({
+      workspaceId: "workspace-a",
+      ownerUserId: "a",
+      createdAtMs: 1,
+    });
+    storage.appendLogBatch({
+      workspaceId: "workspace-a",
+      originId: "legacy-origin",
+      ops: [{ originSeq: 0, opKind: "probe", payloadJson: "{}", recordedAtMs: 1 }],
+    });
+    storage.close();
+    const db = new InspectionDatabaseSync(dbPath, { readOnly: false });
+    const marker = db
+      .prepare(
+        "SELECT completed_at_ms FROM sync_relay_migrations WHERE migration_id=?",
+      )
+      .get("recorded-at-safe-integer-v1");
+    db.exec("UPDATE sync_relay_log SET recorded_at_ms=1.5");
+    db.close();
+    expect(Number(marker?.completed_at_ms)).toBeGreaterThan(0);
+    expect(() => openSyncRelayStorage(dbPath).close()).not.toThrow();
+    // MUTATION: omitting the durable marker makes every reopen rescan the full log.
   });
 
   // Gate finding: a missing blob in an OWNED workspace must be

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use dohc_engine_domain::chats::{CHAT_THREAD_HEADER_MESSAGE_ID, upsert_chat_search_index_row};
@@ -3929,13 +3930,13 @@ struct FakeRelay {
 impl RelayTransport for FakeRelay {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
         *self.pushes.lock().expect("push lock") += 1;
-        let accepted = req
-            .ops
-            .last()
-            .map(|op| op.origin_seq)
-            .ok_or(RelayError::InvalidResponse)?;
+        let accepted = req.ops.len();
+        let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
-            accepted_through_seq: accepted,
+            accepted,
+            inserted: accepted,
+            skipped: 0,
+            current_max_origin_seq,
         })
     }
     fn pull(&self, _req: PullRequest) -> Result<PullResponse, RelayError> {
@@ -3945,14 +3946,25 @@ impl RelayTransport for FakeRelay {
             .clone()
             .ok_or(RelayError::InvalidResponse)
     }
-    fn recover_origin(&self, _req: RecoverRequest) -> Result<RecoverResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
     fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
         Ok(ProbeResponse { has_content: false })
     }
     fn claim_workspace(&self, _req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
         Ok(ClaimResponse)
+    }
+    fn rotate_epoch(&self, _req: EpochRequest) -> Result<EpochResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn blobs_have(&self, _req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        Ok(BlobHaveResponse {
+            missing: Vec::new(),
+        })
+    }
+    fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
+        Ok(())
+    }
+    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::BlobMissing)
     }
     fn upload_key_envelope(
         &self,
@@ -3960,6 +3972,80 @@ impl RelayTransport for FakeRelay {
     ) -> Result<KeyEnvelopeResponse, RelayError> {
         Ok(KeyEnvelopeResponse {
             etag: "etag".to_owned(),
+        })
+    }
+    fn download_key_envelope(
+        &self,
+        _req: KeyEnvelopeDownloadRequest,
+    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
+        Err(RelayError::KeyEnvelopeMissing)
+    }
+    fn shared_channel_pull(
+        &self,
+        _req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn shared_channel_push(
+        &self,
+        _req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn share_view_pull(&self, _req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn share_blob(&self, _req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::ShareUnavailable)
+    }
+}
+
+#[derive(Default)]
+struct KeyConflictRelay {
+    uploads: Mutex<Vec<KeyEnvelopeRequest>>,
+    downloads: Mutex<usize>,
+}
+
+impl RelayTransport for KeyConflictRelay {
+    fn push(&self, _req: PushRequest) -> Result<PushResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn pull(&self, _req: PullRequest) -> Result<PullResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn claim_workspace(&self, _req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn rotate_epoch(&self, _req: EpochRequest) -> Result<EpochResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn blobs_have(&self, _req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn upload_key_envelope(
+        &self,
+        req: KeyEnvelopeRequest,
+    ) -> Result<KeyEnvelopeResponse, RelayError> {
+        self.uploads.lock().expect("key uploads").push(req);
+        Err(RelayError::Conflict)
+    }
+    fn download_key_envelope(
+        &self,
+        _req: KeyEnvelopeDownloadRequest,
+    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
+        *self.downloads.lock().expect("key downloads") += 1;
+        Ok(KeyEnvelopeDownloadResponse {
+            envelope_json: r#"{"winner":true}"#.to_owned(),
+            etag: "winner-etag".to_owned(),
         })
     }
     fn shared_channel_pull(
@@ -3976,6 +4062,299 @@ impl RelayTransport for FakeRelay {
     }
     fn share_view_pull(&self, _req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
         Err(RelayError::InvalidResponse)
+    }
+    fn share_blob(&self, _req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+}
+
+#[test]
+fn key_envelope_conflict_is_surfaced_without_rebasing_over_the_winner() {
+    let client = RelaySyncClient::new(KeyConflictRelay::default());
+    let request = KeyEnvelopeRequest {
+        workspace_id: "ws".to_owned(),
+        replication_epoch: "epoch".to_owned(),
+        stream_identity: "stream".to_owned(),
+        envelope_json: r#"{"stale":true}"#.to_owned(),
+        if_match: Some("stale-etag".to_owned()),
+    };
+    assert_eq!(
+        client.upload_key_envelope(request.clone()),
+        Err(RelayError::Conflict)
+    );
+    assert_eq!(
+        *client.transport().uploads.lock().expect("key uploads"),
+        [request],
+        "MUTATION: conflict rebasing sends the stale bytes a second time"
+    );
+    assert_eq!(
+        *client.transport().downloads.lock().expect("key downloads"),
+        0,
+        "a strict CAS client must not fetch an ETag solely to overwrite its winner"
+    );
+}
+
+#[test]
+fn fresh_coordinate_does_not_canonicalize_payload_for_a_comparison_that_cannot_exist() {
+    let (_scratch, _path, mut engine) = store();
+    let incoming = envelope("canonical-peer", 0, "probe", json!({"z": 1, "a": [2, 3]}));
+    let _ = crate::relay::take_canonical_json_call_count();
+    assert!(matches!(
+        apply_envelope_with(&mut engine, &incoming, &NoFaults, |_, _| Ok(())),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(
+        crate::relay::take_canonical_json_call_count(),
+        0,
+        "MUTATION: eager canonicalization does unused work on every fresh coordinate"
+    );
+    assert!(matches!(
+        apply_envelope_with(&mut engine, &incoming, &NoFaults, |_, _| Ok(())),
+        Ok(ApplyOutcome::Skipped)
+    ));
+    assert_eq!(
+        crate::relay::take_canonical_json_call_count(),
+        2,
+        "redelivery canonicalizes both the incoming and stored payload before comparing"
+    );
+}
+
+struct PagedRelay {
+    pages: BTreeMap<i64, PullResponse>,
+    blobs: BTreeMap<String, Vec<u8>>,
+    pulls: Mutex<Vec<(i64, usize)>>,
+}
+
+impl PagedRelay {
+    fn new(pages: impl IntoIterator<Item = (i64, PullResponse)>) -> Self {
+        Self {
+            pages: pages.into_iter().collect(),
+            blobs: BTreeMap::new(),
+            pulls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl RelayTransport for PagedRelay {
+    fn push(&self, _req: PushRequest) -> Result<PushResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError> {
+        self.pulls
+            .lock()
+            .expect("pull calls")
+            .push((req.cursor, req.limit));
+        self.pages
+            .get(&req.cursor)
+            .cloned()
+            .ok_or(RelayError::InvalidResponse)
+    }
+
+    fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
+        Ok(ProbeResponse { has_content: false })
+    }
+
+    fn claim_workspace(&self, _req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
+        Ok(ClaimResponse)
+    }
+
+    fn rotate_epoch(&self, _req: EpochRequest) -> Result<EpochResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn blobs_have(&self, _req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        Ok(BlobHaveResponse {
+            missing: Vec::new(),
+        })
+    }
+
+    fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    fn download_blob(&self, req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+        self.blobs
+            .get(&req.sha256)
+            .cloned()
+            .map(|bytes| BlobDownloadResponse { bytes })
+            .ok_or(RelayError::BlobMissing)
+    }
+
+    fn upload_key_envelope(
+        &self,
+        _req: KeyEnvelopeRequest,
+    ) -> Result<KeyEnvelopeResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn download_key_envelope(
+        &self,
+        _req: KeyEnvelopeDownloadRequest,
+    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
+        Err(RelayError::KeyEnvelopeMissing)
+    }
+
+    fn shared_channel_pull(
+        &self,
+        _req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn shared_channel_push(
+        &self,
+        _req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn share_view_pull(&self, _req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn share_blob(&self, _req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::ShareUnavailable)
+    }
+}
+
+struct PagedShareRelay {
+    shared_pages: BTreeMap<i64, SharedChannelResponse>,
+    view_pages: BTreeMap<i64, ShareViewResponse>,
+    shared_pulls: Mutex<Vec<i64>>,
+    shared_pushes: Mutex<Vec<SharedChannelRequest>>,
+    view_pulls: Mutex<Vec<(i64, usize)>>,
+    view_blobs: BTreeMap<String, Vec<u8>>,
+    share_blob_calls: Mutex<Vec<String>>,
+}
+
+impl PagedShareRelay {
+    fn new(
+        shared_pages: impl IntoIterator<Item = (i64, SharedChannelResponse)>,
+        view_pages: impl IntoIterator<Item = (i64, ShareViewResponse)>,
+    ) -> Self {
+        Self {
+            shared_pages: shared_pages.into_iter().collect(),
+            view_pages: view_pages.into_iter().collect(),
+            shared_pulls: Mutex::new(Vec::new()),
+            shared_pushes: Mutex::new(Vec::new()),
+            view_pulls: Mutex::new(Vec::new()),
+            view_blobs: BTreeMap::new(),
+            share_blob_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_view_blobs(mut self, blobs: impl IntoIterator<Item = (String, Vec<u8>)>) -> Self {
+        self.view_blobs = blobs.into_iter().collect();
+        self
+    }
+}
+
+impl RelayTransport for PagedShareRelay {
+    fn push(&self, _req: PushRequest) -> Result<PushResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn pull(&self, _req: PullRequest) -> Result<PullResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn claim_workspace(&self, _req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn rotate_epoch(&self, _req: EpochRequest) -> Result<EpochResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn blobs_have(&self, _req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn upload_key_envelope(
+        &self,
+        _req: KeyEnvelopeRequest,
+    ) -> Result<KeyEnvelopeResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn download_key_envelope(
+        &self,
+        _req: KeyEnvelopeDownloadRequest,
+    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn shared_channel_pull(
+        &self,
+        req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        self.shared_pulls
+            .lock()
+            .expect("shared pull calls")
+            .push(req.cursor);
+        self.shared_pages
+            .get(&req.cursor)
+            .cloned()
+            .ok_or(RelayError::InvalidResponse)
+    }
+
+    fn shared_channel_push(
+        &self,
+        req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        let accepted = req.ops.len();
+        let current_max_origin_seq = req.ops.last().map_or(-1, |op| op.origin_seq);
+        self.shared_pushes
+            .lock()
+            .expect("shared push calls")
+            .push(req);
+        Ok(SharedChannelResponse {
+            ops: Vec::new(),
+            next_cursor: 0,
+            has_more: false,
+            push: Some(PushResponse {
+                accepted,
+                inserted: accepted,
+                skipped: 0,
+                current_max_origin_seq,
+            }),
+        })
+    }
+
+    fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
+        self.view_pulls
+            .lock()
+            .expect("view pull calls")
+            .push((req.cursor, req.limit));
+        self.view_pages
+            .get(&req.cursor)
+            .cloned()
+            .ok_or(RelayError::InvalidResponse)
+    }
+
+    fn share_blob(&self, req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        self.share_blob_calls
+            .lock()
+            .expect("share blob calls")
+            .push(req.sha256.clone());
+        self.view_blobs
+            .get(&req.sha256)
+            .cloned()
+            .map(|bytes| BlobDownloadResponse { bytes })
+            .ok_or(RelayError::InvalidResponse)
     }
 }
 
@@ -4024,6 +4403,72 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
 }
 
 #[test]
+fn journal_rejects_payloads_above_the_relay_contract() {
+    // MUTATION: restoring the former 10 MiB journal limit accepts `oversized`.
+    let (_scratch, _path, mut engine) = store();
+    let overhead = br#"{"data":""}"#.len();
+    let exact = json!({"data": "x".repeat(MAX_PAYLOAD_JSON_BYTES - overhead)});
+    assert_eq!(
+        serde_json::to_vec(&exact).expect("exact payload").len(),
+        MAX_PAYLOAD_JSON_BYTES
+    );
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "probe.local",
+            &exact,
+            1_000,
+            &NoFaults,
+        )
+        .expect("exact-limit payload"),
+        TxnOutcome::Committed(0)
+    );
+
+    let oversized = json!({"data": "x".repeat(MAX_PAYLOAD_JSON_BYTES - overhead + 1)});
+    assert!(matches!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "probe.local",
+            &oversized,
+            1_001,
+            &NoFaults,
+        ),
+        Err(SyncError::InvalidInput {
+            reason: "payload exceeds the relay limit"
+        })
+    ));
+}
+
+#[test]
+fn canonical_json_matches_javascript_number_boundaries() {
+    let cases = [
+        (json!(1e21), "1e+21"),
+        (json!(1e-6), "0.000001"),
+        (json!(1e-7), "1e-7"),
+        (json!(-0.0), "0"),
+        (
+            serde_json::from_str("9007199254740993").expect("integer above 2^53"),
+            "9007199254740992",
+        ),
+    ];
+    for (value, expected) in cases {
+        assert_eq!(
+            crate::relay::canonical_json_bytes(&value).expect("canonical number"),
+            expected.as_bytes(),
+            "JavaScript stableJsonStringify parity for {value}"
+        );
+    }
+}
+
+#[test]
 fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     let (_scratch, path, mut engine) = store();
     seed_identity(&mut engine);
@@ -4037,7 +4482,8 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         pushes: Mutex::new(0),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![remote],
-            next_cursor: "cursor-1".to_owned(),
+            next_cursor: 1,
+            has_more: false,
         })),
     };
     let client = RelaySyncClient::new(fake);
@@ -4242,7 +4688,8 @@ fn pull_rejects_op_for_foreign_workspace() {
         pushes: Mutex::new(0),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![foreign],
-            next_cursor: "cursor-1".to_owned(),
+            next_cursor: 1,
+            has_more: false,
         })),
     };
     let client = RelaySyncClient::new(fake);
@@ -4652,6 +5099,79 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
         })
         .expect("updated head");
     assert_eq!(updated_text, "updated base seed");
+}
+
+#[test]
+fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    dohc_engine_domain::VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-relay-path',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "remote projection");
+    let bytes = doc.encode_full_state();
+    let sha256 = dohc_engine_storage::hex_sha256(&bytes);
+    let op = envelope(
+        "ydoc-path-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-relay-path",
+            "path": "notes/relay-path.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha256,
+            "isBaseState": true
+        }),
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![op],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256, bytes);
+    let client = RelaySyncClient::new(relay);
+
+    for (expected_applied, expected_skipped) in [(1, 0), (0, 1)] {
+        let outcome = client
+            .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+            .expect("pull ydoc projection");
+        let SyncPassOutcome::Complete {
+            applied,
+            skipped,
+            changed_paths,
+            ..
+        } = outcome
+        else {
+            panic!("ydoc pull must complete: {outcome:?}");
+        };
+        assert_eq!((applied, skipped), (expected_applied, expected_skipped));
+        assert_eq!(
+            changed_paths,
+            [MomentMaterializationChange {
+                path: "notes/relay-path.md".to_owned(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            "MUTATION: dropping non-moment durable-intent reconstruction loses the owed path"
+        );
+    }
 }
 
 #[test]
@@ -6426,7 +6946,8 @@ fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
         pushes: Mutex::new(0),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![secret, conflict],
-            next_cursor: "router-cursor".into(),
+            next_cursor: 2,
+            has_more: false,
         })),
     });
 
@@ -6465,6 +6986,1157 @@ fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
         read_replication_acked_seq(&engine, "ws", "relay-conflict-peer").expect("conflict ack"),
         0
     );
+}
+
+#[test]
+fn relay_multi_page_pull_preserves_page_one_pending_resolve() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let resolve = envelope(
+        "multi-page-resolve-peer",
+        0,
+        "conflict.resolve",
+        json!({
+            "conflictId": "missing-on-multi-page-receiver",
+            "status": "resolved",
+            "chosenFrom": "incoming",
+            "resolution": "applied-incoming",
+            "updatedAtMs": 10,
+            "path": "notes/multi-page.md"
+        }),
+    );
+    let normal = envelope(
+        "multi-page-normal-peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "✅", 20, "multi-page-author"),
+    );
+    let client = RelaySyncClient::new(PagedRelay::new([
+        (
+            0,
+            PullResponse {
+                ops: vec![resolve],
+                next_cursor: 1,
+                has_more: true,
+            },
+        ),
+        (
+            1,
+            PullResponse {
+                ops: Vec::new(),
+                next_cursor: 2,
+                has_more: true,
+            },
+        ),
+        (
+            2,
+            PullResponse {
+                ops: vec![normal],
+                next_cursor: 3,
+                has_more: false,
+            },
+        ),
+    ]));
+
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("multi-page pull");
+    let SyncPassOutcome::Complete {
+        fetched,
+        applied,
+        pending_cursor: Some(pending_cursor),
+        pending_resolves,
+        ..
+    } = outcome
+    else {
+        panic!("multi-page pull must complete: {outcome:?}");
+    };
+    assert_eq!((fetched, applied, pending_cursor.cursor), (2, 2, 3));
+    assert_eq!(
+        pending_resolves,
+        vec![PendingResolve {
+            remote_conflict_id: "missing-on-multi-page-receiver".to_owned(),
+            local_conflict_id: None,
+            path: Some("notes/multi-page.md".to_owned()),
+            reason: PendingResolveReason::UnmatchedTarget,
+        }],
+        "page-one pending resolves must survive later page fetches"
+    );
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "multi-page-resolve-peer").expect("resolve peer push state"),
+        0
+    );
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "multi-page-normal-peer").expect("normal peer push state"),
+        0
+    );
+}
+
+#[test]
+fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
+    // MUTATION: removing the pass ceiling fetches cursor 500 in the first call
+    // and advances the returned prefix through the second page.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let first_page = (0..crate::model::MAX_PULL_OPS_PER_PASS)
+        .map(|seq| {
+            envelope(
+                "bounded-pull-peer",
+                i64::try_from(seq).expect("sequence"),
+                "chat.reaction.set",
+                reaction_payload(
+                    "added",
+                    "🧱",
+                    i64::try_from(seq).expect("timestamp"),
+                    &format!("bounded-{seq}"),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let second_page = envelope(
+        "bounded-pull-second-peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "▶️", 1_000, "bounded-second"),
+    );
+    let client = RelaySyncClient::new(PagedRelay::new([
+        (
+            0,
+            PullResponse {
+                ops: first_page,
+                next_cursor: i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS).expect("cursor"),
+                has_more: true,
+            },
+        ),
+        (
+            i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS).expect("cursor"),
+            PullResponse {
+                ops: vec![second_page],
+                next_cursor: i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS + 1)
+                    .expect("cursor"),
+                has_more: false,
+            },
+        ),
+    ]));
+
+    let first = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("bounded first pass");
+    let SyncPassOutcome::Complete {
+        fetched,
+        has_more,
+        pending_cursor: Some(pending),
+        ..
+    } = first
+    else {
+        panic!("first pass must return its completed-page cursor: {first:?}");
+    };
+    assert_eq!(fetched, crate::model::MAX_PULL_OPS_PER_PASS);
+    assert!(
+        has_more,
+        "the operation ceiling must explicitly report that the relay is not drained"
+    );
+    assert_eq!(
+        pending.cursor,
+        i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS).expect("cursor")
+    );
+    assert_eq!(
+        *client.transport().pulls.lock().expect("pull calls"),
+        [(0, crate::model::MAX_PULL_OPS_PER_PASS)]
+    );
+    client
+        .commit_pull_cursor(&mut engine, "ws", &pending, &NoFaults)
+        .expect("commit bounded prefix");
+
+    let second = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("resume after bounded prefix");
+    assert!(matches!(
+        second,
+        SyncPassOutcome::Complete {
+            fetched: 1,
+            applied: 1,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
+    // MUTATION: removing the page ceiling walks the unbounded advancing stream.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let mut pages = Vec::new();
+    for cursor in 0..crate::model::MAX_PULL_PAGES_PER_PASS {
+        let cursor = i64::try_from(cursor).expect("cursor");
+        pages.push((
+            cursor,
+            PullResponse {
+                ops: Vec::new(),
+                next_cursor: cursor + 1,
+                has_more: true,
+            },
+        ));
+    }
+    let resume_cursor =
+        i64::try_from(crate::model::MAX_PULL_PAGES_PER_PASS).expect("resume cursor");
+    pages.push((
+        resume_cursor,
+        PullResponse {
+            ops: Vec::new(),
+            next_cursor: resume_cursor + 1,
+            has_more: false,
+        },
+    ));
+    let client = RelaySyncClient::new(PagedRelay::new(pages));
+
+    let first = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("page-bounded pull");
+    let SyncPassOutcome::Complete {
+        fetched: 0,
+        has_more,
+        pending_cursor: Some(pending),
+        ..
+    } = first
+    else {
+        panic!("empty page prefix must complete: {first:?}");
+    };
+    assert_eq!(pending.cursor, resume_cursor);
+    assert!(
+        has_more,
+        "the page ceiling must explicitly report that the relay is not drained"
+    );
+    assert_eq!(
+        client.transport().pulls.lock().expect("pull calls").len(),
+        crate::model::MAX_PULL_PAGES_PER_PASS
+    );
+}
+
+#[test]
+fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let pages = (0..=crate::model::MAX_PULL_PAGES_PER_PASS)
+        .map(|cursor| {
+            let cursor = i64::try_from(cursor).expect("cursor");
+            (
+                cursor,
+                PullResponse {
+                    ops: Vec::new(),
+                    next_cursor: cursor + 1,
+                    has_more: cursor
+                        < i64::try_from(crate::model::MAX_PULL_PAGES_PER_PASS)
+                            .expect("page ceiling"),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let client = RelaySyncClient::new(PagedRelay::new(pages));
+
+    let recovered = client
+        .recover_origin(&mut engine, "ws", "recovered-origin", &NoFaults)
+        .expect("recovery must resume through every advancing page");
+    assert_eq!(recovered.shared_prefix_length, 0);
+    assert_eq!(
+        client.transport().pulls.lock().expect("pull calls").len(),
+        crate::model::MAX_PULL_PAGES_PER_PASS + 1,
+        "MUTATION: restoring the recover page ceiling rejects before the terminal page"
+    );
+}
+
+#[test]
+fn recover_origin_clears_shared_push_positions_before_rebased_ops_are_scanned() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    assert!(matches!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.channel.create",
+            &json!({"wireId": "channel-wire"}),
+            1_001,
+            &NoFaults,
+        ),
+        Ok(TxnOutcome::Committed(1))
+    ));
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO shared_channel_push_state \
+                 (workspace_id,share_id,pushed_seq,dense_seq) VALUES ('ws','share',99,99)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed stale shared push state");
+    let recovery = RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: Vec::new(),
+            next_cursor: 0,
+            has_more: false,
+        },
+    )]));
+    recovery
+        .recover_origin(&mut engine, "ws", "recovered", &NoFaults)
+        .expect("recover origin");
+    let retained: bool = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM shared_channel_push_state \
+                 WHERE workspace_id='ws')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("read shared state");
+    assert!(
+        !retained,
+        "MUTATION: retaining the old physical cursor skips every renumbered operation"
+    );
+
+    let pushing = RelaySyncClient::new(PagedShareRelay::new([], []));
+    assert_eq!(
+        pushing
+            .push_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+            .expect("push rebased share lane")
+            .pushed,
+        1
+    );
+}
+
+#[test]
+fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor() {
+    let (_scratch, _path, mut engine) = store();
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [
+            (
+                0,
+                SharedChannelResponse {
+                    ops: Vec::new(),
+                    next_cursor: 1,
+                    has_more: true,
+                    push: None,
+                },
+            ),
+            (
+                1,
+                SharedChannelResponse {
+                    ops: Vec::new(),
+                    next_cursor: 2,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+        ],
+        [],
+    ));
+
+    let first = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("bounded shared-channel page");
+    assert_eq!((first.fetched, first.next_cursor), (0, 1));
+    assert!(
+        first.has_more,
+        "MUTATION: dropping has_more prevents the desktop adapter from draining page two"
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .shared_pulls
+            .lock()
+            .expect("shared pull calls"),
+        [0],
+        "MUTATION: restoring the hasMore loop consumes the second page in one actor turn"
+    );
+    assert_eq!(
+        read_share_cursor(&engine, "ws", "share", CursorKind::SharedChannel)
+            .expect("committed shared cursor"),
+        1
+    );
+
+    let second = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("resumed shared-channel page");
+    assert_eq!(second.next_cursor, 2);
+}
+
+#[test]
+fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds() {
+    let (_scratch, _path, mut engine) = store();
+    let rejected = ShareReplicationEnvelope {
+        origin_id: "shared-peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "chat.channel.create".to_owned(),
+        payload: json!({
+            "channelId": "outside-channel",
+            "wireId": "outside-wire",
+            "name": "Outside",
+            "slug": "outside",
+            "kind": "channel",
+            "createdAtMs": 10
+        }),
+        recorded_at_ms: 10,
+    };
+    let admitted = ShareReplicationEnvelope {
+        origin_id: "shared-peer".to_owned(),
+        origin_seq: 1,
+        op_kind: "chat.channel.create".to_owned(),
+        payload: json!({
+            "channelId": "inside-channel",
+            "wireId": "channel-wire",
+            "name": "Inside",
+            "slug": "inside",
+            "kind": "channel",
+            "createdAtMs": 20
+        }),
+        recorded_at_ms: 20,
+    };
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [
+            (
+                0,
+                SharedChannelResponse {
+                    ops: vec![rejected],
+                    next_cursor: 1,
+                    has_more: true,
+                    push: None,
+                },
+            ),
+            (
+                1,
+                SharedChannelResponse {
+                    ops: vec![admitted],
+                    next_cursor: 2,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+        ],
+        [],
+    ));
+
+    let first = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("boundary rejection is a reported, acknowledged outcome");
+    assert_eq!(
+        first,
+        SharedChannelPullOutcome {
+            fetched: 1,
+            has_more: true,
+            applied: 0,
+            refused: 1,
+            rejections: vec![SharedChannelRejection {
+                origin_id: "shared-peer".to_owned(),
+                origin_seq: 0,
+                op_kind: "chat.channel.create".to_owned(),
+                reason: "share-boundary-violation".to_owned(),
+            }],
+            skipped: 0,
+            next_cursor: 1,
+        }
+    );
+    assert_eq!(
+        read_share_cursor(&engine, "ws", "share", CursorKind::SharedChannel)
+            .expect("rejected page cursor"),
+        1,
+        "MUTATION: returning ShareOperationRejected before commit leaves this at zero"
+    );
+
+    let second = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("the page after the rejected-only page must remain reachable");
+    assert_eq!(
+        (
+            second.fetched,
+            second.applied,
+            second.refused,
+            second.next_cursor
+        ),
+        (1, 1, 0, 2)
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .shared_pulls
+            .lock()
+            .expect("shared pull calls"),
+        [0, 1],
+        "MUTATION: failing to commit the rejected boundary refetches cursor zero"
+    );
+}
+
+#[test]
+fn shared_channel_push_resumes_from_durable_physical_and_dense_positions() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                 VALUES ('ws','channel','Channel','channel','channel',1,1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_channel_wire_ids (workspace_id,wire_id,channel_id) \
+                 VALUES ('ws','channel-wire','channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                 VALUES ('ws','thread','Thread',1,1,'channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("shared channel fixture");
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.message.append",
+            &json!({"threadId": "thread"}),
+            1_001,
+            &NoFaults,
+        )
+        .expect("journal first eligible op"),
+        TxnOutcome::Committed(1)
+    );
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    assert_eq!(
+        client
+            .push_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+            .expect("first shared push")
+            .pushed,
+        1
+    );
+
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM chat_threads WHERE workspace_id='ws' AND thread_id='thread'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("remove historical eligibility fixture");
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.channel.create",
+            &json!({"wireId": "channel-wire"}),
+            1_002,
+            &NoFaults,
+        )
+        .expect("journal next eligible op"),
+        TxnOutcome::Committed(2)
+    );
+    assert_eq!(
+        client
+            .push_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+            .expect("incremental shared push")
+            .pushed,
+        1
+    );
+
+    let pushes = client
+        .transport()
+        .shared_pushes
+        .lock()
+        .expect("shared push calls");
+    assert_eq!(pushes.len(), 2);
+    assert_eq!(pushes[0].ops[0].origin_seq, 0);
+    assert_eq!(
+        pushes[1].ops[0].origin_seq, 1,
+        "MUTATION: rescanning from -1 recomputes the removed op as ineligible and reuses dense zero"
+    );
+    drop(pushes);
+    let state: (i64, Option<i64>) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT pushed_seq,dense_seq FROM shared_channel_push_state \
+                 WHERE workspace_id='ws' AND share_id='share'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("durable shared push state");
+    assert_eq!(state, (2, Some(1)));
+}
+
+#[test]
+fn shared_channel_push_bootstraps_legacy_state_without_a_dense_position() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.channel.create",
+            &json!({"wireId": "channel-wire"}),
+            1_001,
+            &NoFaults,
+        )
+        .expect("journal legacy eligible op"),
+        TxnOutcome::Committed(1)
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO shared_channel_push_state \
+                 (workspace_id,share_id,pushed_seq,dense_seq) \
+                 VALUES ('ws','share',1,NULL)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("legacy shared push state");
+    assert_eq!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.channel.create",
+            &json!({"wireId": "channel-wire"}),
+            1_002,
+            &NoFaults,
+        )
+        .expect("journal post-migration op"),
+        TxnOutcome::Committed(2)
+    );
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+
+    assert_eq!(
+        client
+            .push_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+            .expect("bootstrap shared push")
+            .pushed,
+        1
+    );
+    let pushes = client
+        .transport()
+        .shared_pushes
+        .lock()
+        .expect("shared push calls");
+    assert_eq!(pushes.len(), 1);
+    assert_eq!(
+        pushes[0].ops[0].origin_seq, 1,
+        "the migrated physical cursor must bootstrap its matching dense coordinate"
+    );
+}
+
+#[test]
+fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
+    let (_scratch, _path, mut engine) = store();
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [],
+        [
+            (
+                0,
+                ShareViewResponse {
+                    ops: Vec::new(),
+                    next_cursor: 1,
+                    has_more: true,
+                },
+            ),
+            (
+                1,
+                ShareViewResponse {
+                    ops: Vec::new(),
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            ),
+        ],
+    ));
+
+    let first = client
+        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .expect("bounded share-view page");
+    assert_eq!((first.fetched, first.pending_cursor.cursor), (0, 1));
+    assert!(
+        first.has_more,
+        "MUTATION: dropping has_more prevents the desktop adapter from draining page two"
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .view_pulls
+            .lock()
+            .expect("view pull calls"),
+        [(0, crate::model::MAX_PULL_OPS_PER_PASS)],
+        "MUTATION: restoring the hasMore loop accumulates the second page"
+    );
+    assert_eq!(
+        read_share_cursor(&engine, "ws", "share", CursorKind::ShareView)
+            .expect("uncommitted view cursor"),
+        0
+    );
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+        .expect("commit first view page");
+    let second = client
+        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .expect("resume view page");
+    assert_eq!(second.pending_cursor.cursor, 2);
+    assert!(!second.has_more);
+}
+
+#[test]
+fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
+    let (_scratch, _path, mut engine) = store();
+    let op = |seq, path: &str| ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: seq,
+        op_kind: "moment.append".to_owned(),
+        payload: json!({
+            "path": path,
+            "payloadAfterPath": path,
+            "operation": "selector-only"
+        }),
+        recorded_at_ms: 10 + seq,
+    };
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                ops: vec![op(0, "docs/a.md"), op(1, "projects/b.md")],
+                next_cursor: 2,
+                has_more: false,
+            },
+        )],
+    ));
+    let outcome = client
+        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .expect("pull multi-path share");
+    assert_eq!(
+        (outcome.fetched, outcome.skipped),
+        (2, 0),
+        "MUTATION: restoring a single prefix permanently drops the other selected path"
+    );
+}
+
+#[test]
+fn workspace_push_excludes_origins_imported_from_share_views() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log \
+                 (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                 VALUES ('ws','shared:share:peer',0,'moment.append','{}',2,1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed imported share origin");
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults)
+        .expect("push owner lane");
+    assert_eq!(
+        *client.transport().pushes.lock().expect("push calls"),
+        1,
+        "MUTATION: an unfiltered origin scan sends the imported share row through the owner lane"
+    );
+}
+
+#[test]
+fn share_view_actor_replay_does_not_redownload_completed_blob_prefixes() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let blobs = [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()];
+    let snapshots = blobs
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            json!({
+                "path": format!("docs/{index}.md"),
+                "blobSha256": dohc_engine_storage::hex_sha256(bytes),
+                "contentKind": "text"
+            })
+        })
+        .collect::<Vec<_>>();
+    let op = ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({"forkSnapshots": snapshots}),
+        recorded_at_ms: 10,
+    };
+    let relay = PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                ops: vec![op],
+                next_cursor: 1,
+                has_more: false,
+            },
+        )],
+    )
+    .with_view_blobs(
+        blobs
+            .iter()
+            .map(|bytes| (dohc_engine_storage::hex_sha256(bytes), bytes.clone())),
+    );
+    let client = RelaySyncClient::new(relay);
+
+    client
+        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .expect("initial multi-blob pull");
+    client
+        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .expect("actor-style replay without cursor commit");
+    assert_eq!(
+        client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls")
+            .len(),
+        blobs.len(),
+        "MUTATION: fetching before the idempotency lookup redownloads the completed prefix"
+    );
+}
+
+#[test]
+fn relay_redelivered_page_reconstructs_pending_resolve_without_committed_cursor() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let resolve = envelope(
+        "redelivered-resolve-peer",
+        0,
+        "conflict.resolve",
+        json!({
+            "conflictId": "missing-on-redelivery",
+            "status": "resolved",
+            "chosenFrom": "current",
+            "resolution": "keep-current",
+            "updatedAtMs": 10,
+            "path": "notes/redelivery.md"
+        }),
+    );
+    let client = RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![resolve],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]));
+
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
+    let first = client
+        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases)
+        .expect("first pull");
+    let SyncPassOutcome::CrashedAfterApply {
+        applied,
+        pending_resolves: first_pending,
+        ..
+    } = first
+    else {
+        panic!("first pull must stop before cursor commit: {first:?}");
+    };
+    assert_eq!(applied, 1);
+    assert_eq!(first_pending.len(), 1);
+    assert!(
+        read_relay_cursor(&engine, "ws")
+            .expect("read cursor")
+            .is_none()
+    );
+
+    let retry = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("redelivered pull");
+    let SyncPassOutcome::Complete {
+        applied,
+        skipped,
+        pending_resolves,
+        ..
+    } = retry
+    else {
+        panic!("redelivered pull must complete: {retry:?}");
+    };
+    assert_eq!((applied, skipped), (0, 1));
+    assert_eq!(
+        pending_resolves, first_pending,
+        "the Skipped arm must reconstruct the persisted pending resolve"
+    );
+}
+
+#[test]
+fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let normal = envelope(
+        "hydrate-order-normal-peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "💧", 20, "hydrate-order-author"),
+    );
+    let missing_sha = dohc_engine_storage::hex_sha256(b"missing relay hydration");
+    let missing = version_create_with_shipped_snapshots(
+        "hydrate-order-missing-peer",
+        "hydrate-order-version",
+        vec![shipped_text_snapshot(
+            "hydrate-order-object",
+            "hydrate-order.md",
+            &missing_sha,
+        )],
+    );
+    let client = RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![normal, missing],
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]));
+
+    assert_eq!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        Err(RelayError::BlobMissing)
+    );
+    assert!(
+        read_relay_cursor(&engine, "ws")
+            .expect("read cursor")
+            .is_none()
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "hydrate-order-normal-peer").expect("normal ack"),
+        -1,
+        "hydration must complete before the first envelope applies"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "hydrate-order-missing-peer")
+            .expect("missing ack"),
+        -1
+    );
+}
+
+#[test]
+fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
+    // MUTATION: collapsing the digest to one BlobKind leaves one count at zero.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    // A canonical empty Yjs update is also valid UTF-8, so the same digest is
+    // legal in both the text and binary stores.
+    let bytes = vec![0_u8, 0_u8];
+    let sha256 = dohc_engine_storage::hex_sha256(&bytes);
+    let text = version_create_with_shipped_snapshots(
+        "a-dual-kind-text-peer",
+        "dual-kind-version",
+        vec![json!({
+            "objectId": "dual-kind-object",
+            "objectCreatedAtMs": 1_100,
+            "path": "dual-kind.md",
+            "blobSha256": sha256,
+            "byteLength": bytes.len(),
+            "updatedAtMs": 1_200,
+            "latestMomentId": "dual-kind-moment",
+            "metadata": {"origin": "sync"}
+        })],
+    );
+    let binary = envelope(
+        "z-dual-kind-binary-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "dual-kind-version",
+            "objectId": "dual-kind-object",
+            "path": "dual-kind.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha256,
+            "isBaseState": true
+        }),
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![text, binary],
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256.clone(), bytes);
+    let client = RelaySyncClient::new(relay);
+
+    let outcome = client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases);
+    assert!(
+        matches!(outcome, Ok(SyncPassOutcome::Complete { .. })),
+        "dual-kind hydration pass must complete: {outcome:?}"
+    );
+    let rows = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM blobs WHERE sha256=?1",
+                    [&sha256],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM binary_blobs WHERE sha256=?1",
+                    [&sha256],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            ))
+        })
+        .expect("dual-kind blob rows");
+    assert_eq!(
+        rows,
+        (1, 1),
+        "one digest referenced by both kinds must hydrate both physical stores"
+    );
+}
+
+#[test]
+fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let text = "already local";
+    let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+    engine
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![sha256, text.len() as i64, text],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("seed local blob");
+    let op = version_create_with_shipped_snapshots(
+        "present-blob-peer",
+        "present-blob-version",
+        vec![shipped_text_snapshot(
+            "present-blob-object",
+            "present.md",
+            &sha256,
+        )],
+    );
+    let client = RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![op],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]));
+    let _ = crate::relay::take_local_blob_bytes_call_count();
+    assert!(matches!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        Ok(SyncPassOutcome::Complete { .. })
+    ));
+    assert_eq!(
+        crate::relay::take_local_blob_bytes_call_count(),
+        0,
+        "MUTATION: using the blob reader as an existence probe reads and hashes present content"
+    );
+}
+
+#[test]
+fn relay_multi_page_pull_reports_conflicts_opened() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let normal = envelope(
+        "multi-page-before-conflict-peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "⚔️", 20, "conflict-author"),
+    );
+    let side = |path: &str| {
+        json!({
+            "exists": false,
+            "path": path,
+            "contentKind": "text"
+        })
+    };
+    let conflict = envelope(
+        "multi-page-conflict-peer",
+        0,
+        "conflict.open",
+        json!({
+            "id": "multi-page-open-conflict",
+            "workspaceId": "ws",
+            "path": "doc.md",
+            "targetVersionId": "main",
+            "sourceVersionId": "peer",
+            "createdAtMs": 2_000,
+            "updatedAtMs": 2_000,
+            "base": side("doc.md"),
+            "current": side("doc.md"),
+            "incoming": side("doc.md"),
+            "status": "open",
+            "chosenFrom": "current",
+            "metadata": {"origin": "sync"}
+        }),
+    );
+    let client = RelaySyncClient::new(PagedRelay::new([
+        (
+            0,
+            PullResponse {
+                ops: vec![normal],
+                next_cursor: 1,
+                has_more: true,
+            },
+        ),
+        (
+            1,
+            PullResponse {
+                ops: vec![conflict],
+                next_cursor: 2,
+                has_more: false,
+            },
+        ),
+    ]));
+
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("multi-page conflict pull");
+    let SyncPassOutcome::Complete {
+        fetched,
+        applied,
+        conflicts_opened,
+        ..
+    } = outcome
+    else {
+        panic!("multi-page conflict pull must complete: {outcome:?}");
+    };
+    assert_eq!((fetched, applied, conflicts_opened), (2, 2, 1));
 }
 
 #[test]
@@ -6541,7 +8213,8 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
         pushes: Mutex::new(0),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![local, divergent],
-            next_cursor: "moment-conflict-cursor".into(),
+            next_cursor: 2,
+            has_more: false,
         })),
     });
 
@@ -6564,7 +8237,51 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
 }
 
 #[test]
-fn relay_retry_surfaces_pending_resolve_acked_before_later_error() {
+fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
+    let (_scratch, _path, mut engine) = store();
+    let relay = |cursor| RelayCursor {
+        cursor,
+        replication_epoch: "epoch".to_owned(),
+        stream_identity: "stream".to_owned(),
+    };
+    assert!(matches!(
+        commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults),
+        Ok(TxnOutcome::Committed(()))
+    ));
+    assert!(matches!(
+        commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults),
+        Ok(TxnOutcome::Committed(()))
+    ));
+    assert_eq!(
+        read_relay_cursor(&engine, "ws")
+            .expect("read relay cursor")
+            .expect("relay cursor")
+            .cursor,
+        10
+    );
+    let share = |cursor| ShareCursor {
+        kind: CursorKind::ShareView,
+        share_id: "share".to_owned(),
+        cursor,
+    };
+    assert!(matches!(
+        commit_share_cursor(&mut engine, "ws", &share(10), &NoFaults),
+        Ok(TxnOutcome::Committed(()))
+    ));
+    assert!(matches!(
+        commit_share_cursor(&mut engine, "ws", &share(4), &NoFaults),
+        Ok(TxnOutcome::Committed(()))
+    ));
+    assert_eq!(
+        read_share_cursor(&engine, "ws", "share", CursorKind::ShareView)
+            .expect("read share cursor"),
+        10,
+        "MUTATION: unconditional conflict updates let an older acknowledgement regress the cursor"
+    );
+}
+
+#[test]
+fn relay_hydration_failure_before_apply_retries_and_surfaces_pending_resolve() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
@@ -6595,18 +8312,19 @@ fn relay_retry_surfaces_pending_resolve_acked_before_later_error() {
         pushes: Mutex::new(0),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![resolve, later],
-            next_cursor: "retry-cursor".into(),
+            next_cursor: 2,
+            has_more: false,
         })),
     });
 
-    assert!(matches!(
+    assert_eq!(
         client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
-        Err(RelayError::Local(_))
-    ));
+        Err(RelayError::BlobMissing)
+    );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "retry-pending-peer").expect("resolve ack"),
-        0,
-        "the deferred resolve commits before the later envelope fails"
+        -1,
+        "whole-page hydration must finish before the deferred resolve applies"
     );
     assert!(
         read_relay_cursor(&engine, "ws")
@@ -6638,7 +8356,7 @@ fn relay_retry_surfaces_pending_resolve_acked_before_later_error() {
     else {
         panic!("retry must complete: {retry:?}");
     };
-    assert_eq!((applied, skipped), (1, 1));
+    assert_eq!((applied, skipped), (2, 0));
     assert_eq!(
         pending_resolves,
         vec![PendingResolve {
@@ -6730,7 +8448,8 @@ fn committed_pull_cursor_clears_persisted_pending_resolves() {
         pushes: Mutex::new(0),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![resolve],
-            next_cursor: "cursor-clear".into(),
+            next_cursor: 1,
+            has_more: false,
         })),
     });
 
@@ -6767,6 +8486,52 @@ fn committed_pull_cursor_clears_persisted_pending_resolves() {
         0,
         "a committed cursor makes retry reconstruction unreachable, so the rows must go"
     );
+}
+
+#[test]
+fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
+    let (_scratch, _path, mut engine) = store();
+    let cursor = RelayCursor {
+        cursor: 42,
+        replication_epoch: "epoch-1".to_owned(),
+        stream_identity: "stream-1".to_owned(),
+    };
+    assert!(matches!(
+        commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults),
+        Ok(TxnOutcome::Committed(()))
+    ));
+    let stored = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT typeof(cursor), cursor FROM sync_relay_cursors WHERE workspace_id='ws'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("stored cursor");
+    assert_eq!(stored, ("text".to_owned(), "42".to_owned()));
+    assert_eq!(
+        read_relay_cursor(&engine, "ws").expect("parsed cursor"),
+        Some(cursor)
+    );
+
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE sync_relay_cursors SET cursor='not-a-number' WHERE workspace_id='ws'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("poison cursor");
+    assert!(matches!(
+        read_relay_cursor(&engine, "ws"),
+        Err(SyncError::InvalidInput {
+            reason: "persisted relay cursor is invalid"
+        })
+    ));
 }
 
 /// The router must hand back the applier's STRUCTURED result. A deferred
