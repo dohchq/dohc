@@ -27,6 +27,21 @@ async function postgresReachable(): Promise<boolean> {
 }
 
 const pgAvailable = await postgresReachable();
+
+// Self-skipping is right for local dev, and WRONG anywhere this suite is the
+// thing standing between a change and the collab surface's authorization
+// behaviour. In CI a Postgres that failed to start would otherwise skip every
+// test here and report green -- a hollow pass. DOHC_REQUIRE_POSTGRES turns an
+// unreachable database into a failure instead.
+if (!pgAvailable && process.env.DOHC_REQUIRE_POSTGRES === "1") {
+  throw new Error(
+    `DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}. ` +
+      "These tests apply the real 0002_better_auth.sql migration and exercise " +
+      "session/authorization behaviour through it; skipping them here would " +
+      "report green without checking anything.",
+  );
+}
+
 const describeWithPostgres = describe.skipIf(!pgAvailable);
 
 const PASSWORD = "a-real-password-123";

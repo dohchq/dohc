@@ -41,6 +41,29 @@ jobs:
     name: typecheck + tests
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
+    # packages/workspace-auth exercises Better Auth against a REAL Postgres: it
+    # applies the actual 0002_better_auth.sql migration and drives session and
+    # authorization behaviour through it. Its suite self-skips when no database
+    # is reachable, which is right for local dev and WRONG for CI -- a Postgres
+    # that failed to start would silently skip the collab surface's
+    # authorization tests and report green. So CI provides the database, and
+    # DOHC_REQUIRE_POSTGRES makes an unreachable one a FAILURE rather than a skip.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: dohc
+          POSTGRES_PASSWORD: dohc
+          POSTGRES_DB: dohc_v2
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U dohc -d dohc_v2"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DOHC_REQUIRE_POSTGRES: "1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
