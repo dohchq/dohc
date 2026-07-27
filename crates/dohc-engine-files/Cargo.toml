@@ -36,8 +36,11 @@ notify = "8"
 # OS file identity ((st_dev, st_ino) / (volume serial, file index)) for the
 # watcher root-liveness check: existence alone can't distinguish the ORIGINAL
 # watched directory object from a delete-then-recreate that leaves the OS watch
-# pointing at a dead inode. Already in the tree via `notify`; same safe API the
-# runtime's EngineDbIdentity uses, so this crate keeps forbid(unsafe_code).
+# pointing at a dead inode. On Unix the watcher additionally keeps the root
+# directory open, because inode NUMBERS are recycled and identity is only
+# meaningful while the object is pinned (see `watch::WatchedRoot`).
+# Already in the tree via `notify`; same safe API the runtime's EngineDbIdentity
+# uses, so this crate keeps forbid(unsafe_code).
 file-id = "0.2"
 # Shared `.dohc/files.toml` / `visibility.toml` parsing and search-policy
 # resolution. Both the runtime's local index path and sync's replicated index
