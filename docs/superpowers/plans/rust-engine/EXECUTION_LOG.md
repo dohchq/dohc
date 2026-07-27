@@ -2350,3 +2350,110 @@ next round caught. The compounding lesson became structure:
   bounds do not produce a bankable platform-specific resource-leak verdict
   without per-platform calibration; the WSL result is scenario/portability
   evidence under that caveat.
+
+## 2026-07-26 / 2026-07-27 — the R15-6 stretch, and an honest state of the program
+
+Twelve merges landed since the last entry and none were recorded here. That gap
+mattered: an audit on 2026-07-27 found no document on `main` was a reliable
+index of program state, while `SHARDS.tsv` still pointed two rows at closed PRs
+and marked three merged shards "in review". This entry closes the gap.
+
+### Merged since the last entry
+
+| PR | what it actually fixed |
+|---|---|
+| #242 | RPC-E part 1: central replication router + three missing appliers |
+| #243 | RPC-E part 2: `moment.append` replication apply |
+| #244 | Nine chat gaps where the replicated path skipped the local rule |
+| #249 | R13b-rest stage 1: launch and supervise the engine daemon |
+| #250 | Desktop suite green on Windows (21 machine-dependent failures) |
+| #252 | R13b-S0: live chats + versioned daemon adapters (90 methods, 27 decoders) |
+| #253 | R13b-SW: fence version switches and forks from live writes (#239 deferrals) |
+| #255 | Recorded the R13b-rest OPEN decisions (MCP transport, key custody) |
+| #256 | macOS SUN_LEN bind failure in the special-target materialize test |
+| #260 | Actor condvar two-mutex violation, caught by the macOS evidence run |
+| #261 | `engine.db` files too small to be a database opened as FRESH (macOS/Linux data loss) |
+| #262 | `PROPTEST_CASES` silently ignored on the last two fuzz targets |
+| #264 | `SQLITE_OPEN_NOFOLLOW` refusing symlinked ANCESTORS — would fail the cutover backup |
+| #266 | The yjs<->yrs replay-parity gate |
+
+Four of these (#256, #260, #261, #264) exist only because the macOS gate was
+dispatched early rather than saved for the end. #261 is the sharpest: a
+1-byte-truncated `engine.db` was reported as size 0 by SQLite's unix VFS, opened
+as a fresh database, and had a new schema built over it — destroying exactly the
+restore evidence the cutover depends on.
+
+### State of R15-6, stated plainly
+
+R15-6 scoped RPC-E and R13b-rest INTO the pre-flip work. Neither is close.
+
+- **RPC-E:** parts 1 and 2 merged (#242, #243). Parts 3 and 4 are unmerged,
+  carried by #263 after #246/#248 were closed. `crates/dohc-engine-sync-http`
+  does not exist on `main`, and the daemon dispatch table on `main` has no
+  `sync.*` / `keys.*` / `share.*` arms. **The desktop cannot drive replication
+  through the daemon at all today.**
+- **`main` is in a bad intermediate state.** #242/#244 landed the validation
+  guards; #245 landed the refuse-and-ack disposition that pairs with them and is
+  still unmerged. Until it lands, a rejected replicated op is a permanent wedge.
+- **R13b-rest:** ZERO call-site migration shards have merged. Substrate only
+  (#249, #252, #253). Open: #254 (S1), #265 (S2/S3/S4), #258 (S5), #257 (S6),
+  #268 (S8 partial, stacked on #263's branch rather than `main`).
+- **Five surfaces have no branch and no PR:** `sharedChannels.ts`,
+  `shareMounts.ts`, `workspaceFiles.ts`, `workspaceSearch.ts`,
+  `workspaceGraph.ts` (~2,485 lines), all still importing `@dohc/workspace-engine`
+  directly.
+
+### The cutover blocker nobody had written down
+
+`packages/mcp/src/tools.ts` opens `.dohc/engine/engine.db` directly
+(`:1334`, `:2463`, `:2544`) and performs agent WRITES from a separate process.
+After the flip the daemon owns that database. Flipping without resolving the MCP
+transport decision puts a second writer on the daemon-owned `engine.db` —
+landing on top of a freshly wiped dogfood dataset. This is the single most
+direct route to corrupting real data post-flip and it is decision-gated on Ice.
+
+### Review state, measured rather than assumed
+
+An independent read-only triage re-checked every unresolved review thread on the
+seven `main`-based PRs against their branch heads, discarding threads already
+fixed. Result: **27 P1s genuinely open** (#263: 10, #257: 7, #245: 5, #258: 2,
+#254/#259/#265: 1 each). The PRs were gate-green, not review-clean; those are
+different things and had been conflated.
+
+### macOS soak: diagnosed, not closed
+
+Ten completed runs of `rust-engine-macos-evidence.yml`, ten failures, always on
+the RSS bound. A 90-minute run showed quarter slopes halving
+(72.8 -> 35.4 -> 16.9 -> 6.7 KB/s), RSS ending below its peak, threads ending
+lower than they started — an allocator plateau, not a constant-rate leak.
+#267 therefore evaluates the post-warm-up tail against the unchanged 20 KiB/s
+bound.
+
+`GATE6_PACKET.md` §1b was briefly marked RESOLVED on that basis. **That was an
+overclaim and has been retracted.** No macOS soak has ever concluded `success`,
+and moving the verdict window is a change to the criterion Ice authorized, not a
+fix to a defect in it. It is now an OPEN decision in `DECISIONS.md`. Separately,
+no macOS evidence JSON has ever been banked — every artifact upload hit the
+GitHub storage quota, so the only banked soak evidence is the Windows run.
+
+### Two guards that were not guarding
+
+- `native_watcher_stop_joins_and_no_notification_arrives_after_return` was
+  recorded as a `/mnt/c` inotify artifact to be ignored. It fails on native
+  ext4 too. Experiment settled it: the watcher genuinely joins and no post-stop
+  notification arrives; the TEST never drains the legitimate final pre-stop
+  flush, so it trips wherever a startup burst is still pending — and passes
+  vacuously wherever one is not. A recorded excuse was masking a hollow guard.
+- `apps/site` has been failing `tsc --noEmit` on `main`: the demo passes the
+  desktop `ActivityBar` a `chats` prop that `9eb99ef9` removed. A broken site
+  typecheck reads as noise from whichever PR is being run, which made a clean
+  typecheck useless as a merge gate for all nine open PRs (fixed in #269).
+
+### Residual worth carrying forward
+
+There is no CI guard regenerating the richdoc fixtures against the TypeScript
+oracle. `gen-fixtures.mjs` imports the live TS source, but nothing re-runs it,
+so if `packages/ydoc-projection` changes again the Rust projection will drift
+silently while the byte-for-byte parity test keeps passing against frozen
+expectations.
+
