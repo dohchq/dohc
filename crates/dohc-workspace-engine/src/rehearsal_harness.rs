@@ -583,6 +583,9 @@ fn expected_recapture_inventory(
         }
         let (classification, normalized) =
             classify_engine_file_path_normalized(&entry.relative_path);
+        if classification == PathClassification::Ignored {
+            continue;
+        }
         let secret = classification == PathClassification::Secret;
         if classification == PathClassification::Tracked
             && policy.files_policy.as_ref().is_some_and(|rules| {
@@ -599,7 +602,8 @@ fn expected_recapture_inventory(
             {
                 "content"
             }
-            PathClassification::Tracked | PathClassification::Ignored => "capture_refused",
+            PathClassification::Tracked => "capture_refused",
+            PathClassification::Ignored => unreachable!("ignored paths were excluded above"),
         };
         expected.insert(
             entry.relative_path.clone(),
@@ -1255,12 +1259,17 @@ fn traversal_identity(path: &Path, metadata: &Metadata) -> Result<TraversalIdent
 
 #[cfg(target_os = "linux")]
 fn linux_mount_id(path: &Path) -> Result<u64, HarnessError> {
-    use std::os::unix::ffi::OsStringExt as _;
-
     let mountinfo = std::fs::read("/proc/self/mountinfo").map_err(|source| HarnessError::Io {
         operation: "inspect source mount identity",
         source,
     })?;
+    linux_mount_id_from_mountinfo(path, &mountinfo)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mount_id_from_mountinfo(path: &Path, mountinfo: &[u8]) -> Result<u64, HarnessError> {
+    use std::os::unix::ffi::OsStringExt as _;
+
     let mut containing_mount = None::<(usize, u64)>;
     for line in mountinfo.split(|byte| *byte == b'\n') {
         let fields = line
@@ -2197,6 +2206,29 @@ mod tests {
         assert!(!traversal_identity_crosses_root(source, source));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_mountinfo_decodes_escaped_paths_and_selects_deepest_mount() {
+        let current_dir = std::env::current_dir().expect("current directory");
+        assert!(
+            linux_mount_id(&current_dir).expect("live mount ID") > 0,
+            "the production reader must resolve the current directory from /proc/self/mountinfo"
+        );
+
+        let mountinfo = b"10 1 0:1 / / rw - ext4 /dev/root rw\n\
+            20 10 0:2 / /tmp/rehearsal\\040mount rw - ext4 /dev/root rw\n\
+            30 20 0:3 / /tmp/rehearsal\\040mount/nested rw - ext4 /dev/root rw\n";
+
+        assert_eq!(
+            linux_mount_id_from_mountinfo(
+                Path::new("/tmp/rehearsal mount/nested/workspace/note.md"),
+                mountinfo,
+            )
+            .expect("mount ID"),
+            30,
+        );
+    }
+
     #[test]
     fn scratch_and_recovery_inside_source_are_refused_before_creation() {
         let source = fixture_source();
@@ -2435,6 +2467,33 @@ mod tests {
             !banked.contains(&sha256_bytes(b"TOKEN=fixture-secret\n")),
             "secret sha256 must not be serialized"
         );
+    }
+
+    #[test]
+    fn capture_policy_refusals_are_not_reported_as_recapture_data_loss() {
+        let source = fixture_source();
+        let refused = source.join("shared-with-me");
+        std::fs::create_dir(&refused).expect("policy-refused directory");
+        std::fs::write(refused.join("remote.md"), b"not locally captured\n")
+            .expect("policy-refused file");
+        let scratch_parent = ScratchDir::new().expect("scratch parent");
+        let recovery_parent = ScratchDir::new().expect("recovery parent");
+        let scratch = scratch_parent.join("clones");
+        let recovery = recovery_parent.join("artifacts");
+
+        let evidence = run(HarnessConfig {
+            source: source.path(),
+            scratch: &scratch,
+            recovery: &recovery,
+        })
+        .expect("policy refusal must not be classified as recapture data loss");
+
+        assert_eq!(evidence.recapture.paths_expected, 1);
+        assert_eq!(evidence.recapture.paths_recaptured, 1);
+        assert_eq!(evidence.recapture.records_expected, 1);
+        assert_eq!(evidence.recapture.records_recaptured, 1);
+        assert_eq!(evidence.recapture.verdict, RecaptureVerdict::Complete);
+        assert!(evidence.recapture.mismatches.is_empty());
     }
 
     #[test]
