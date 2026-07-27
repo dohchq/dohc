@@ -1,0 +1,105 @@
+# The pull-request gate this repository did not have.
+#
+# Before this, PRs had NO automated checks at all: "Desktop Release" is
+# state=disabled_manually (turned off 2026-07-01 after three failures),
+# "Engine tests (native matrix)" is registered but its workflow file no longer
+# exists on main, and the macOS evidence run is workflow_dispatch only. Every
+# open PR showed CodeRabbit as its only check -- with ten PRs queued behind the
+# Rust-engine cutover.
+#
+# What that cost, concretely: PR #272 added a workspace package to
+# apps/desktop dependencies without adding it to mainBundledWorkspaceDeps.
+# electron-vite then externalizes it, and workspace packages ship raw
+# TypeScript with extensionless relative imports, so the main process dies at
+# startup with ERR_MODULE_NOT_FOUND. Typecheck and the unit suite were both
+# green, because vitest and tsc resolve TypeScript sources directly.
+#
+# Scope is deliberately correctness, not release. Packaging, signing and update
+# manifests stay in Desktop Release; reviving that pipeline is a separate job
+# and its July 1 logs have expired, so its failure cause is unknown. This
+# workflow only claims to answer: does the tree typecheck, do the tests pass,
+# and does the Rust engine gate hold.
+name: PR checks
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: pr-checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  javascript:
+    name: typecheck + tests
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # package.json engines: ^20.19.0 || ^22.13.0 || >=24.0.0
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Runs every package, not just the one a PR touched. apps/site was broken
+      # on main for weeks precisely because a red typecheck there read as noise
+      # from whichever PR happened to be running.
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+  rust:
+    name: engine gate
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
+
+      # The gate's fixture-drift step regenerates the richdoc parity fixtures
+      # through the LIVE TypeScript oracle, so it needs the JS workspace
+      # installed. Without it that step reports SKIP rather than PASS -- which
+      # is honest, but it would mean the drift check never actually runs in CI,
+      # and drift going unnoticed is exactly what it exists to prevent.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          rustc -vV
+          cargo --version
+
+      # Pinned to the same version the macOS evidence workflow uses, so
+      # "cargo-deny=PASS" means the same thing in both places.
+      - name: Install pinned cargo-deny
+        run: cargo install cargo-deny --locked --force --version "$CARGO_DENY_VERSION"
+        env:
+          CARGO_DENY_VERSION: "0.20.2"
+
+      # The same script the program runs locally, so a green CI run and a green
+      # local gate mean the same thing. Linux also compiles and runs the
+      # cfg(unix) code the canonical Windows gate cannot see at all.
+      - name: Canonical engine gate
+        run: node tools/rust-engine-program/run-rust-checks.mjs
