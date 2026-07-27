@@ -1220,6 +1220,14 @@ impl EngineService {
                 return Ok(json!({ "workspace": handle }));
             }
             lock(&self.handles).remove(&handle);
+            // The normal close path drops pending cursors with the handle;
+            // eviction dropped the handle and the sessions but left them.
+            // Handles are minted from a monotonic counter, so the orphans were
+            // never CONSUMABLE — every reopen gets a new handle and
+            // consume_pending_cursor matches on it — they simply accumulated
+            // in the map for the life of the process, one per issued cursor
+            // per evicted binding, with nothing able to remove them.
+            lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
             lock(&self.sessions).retain(|_, session| session.workspace != handle);
             // The evicted binding's files layer must not outlive it. Clear
             // suppression only AFTER the shutdown drain — an in-flight
@@ -11307,5 +11315,73 @@ mod tests {
             .await
             .expect("final workspace close");
         assert_eq!(service.supervisor.actor_count(), baseline);
+    }
+
+    /// A workspace whose actor died is EVICTED and rebound by the next open,
+    /// never closed. That path dropped the handle and the sessions but left
+    /// the handle's pending cursors in the map, where nothing could ever
+    /// remove them: `consume_pending_cursor` matches on the handle, and every
+    /// rebind mints a new one from a monotonic counter. Each evicted binding
+    /// therefore stranded one entry per issued cursor for the life of the
+    /// process. The normal close path has always dropped them.
+    #[tokio::test]
+    async fn evicting_a_dead_binding_drops_its_pending_cursors() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let open_params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "evicted-cursor-cleanup"
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), open_params.clone())
+            .await
+            .expect("initial workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+
+        lock(&service.pending_cursors).insert(
+            "evicted-token".to_owned(),
+            PendingCursor {
+                handle: handle.clone(),
+                workspace_id: "evicted-cursor-cleanup".to_owned(),
+                cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
+                    cursor: 7,
+                    replication_epoch: "epoch".to_owned(),
+                    stream_identity: "stream".to_owned(),
+                    refusal_report_id: None,
+                }),
+            },
+        );
+
+        // Kill the actor underneath the live handle. The next open finds a
+        // bound-but-Closed actor and takes the eviction path rather than the
+        // short-circuit or the close path.
+        let db_path = scratch.path().join(".dohc").join("engine").join("engine.db");
+        let closing_path = db_path.clone();
+        let _closed = tokio::task::spawn_blocking(move || supervisor.close(&closing_path))
+            .await
+            .expect("actor close task");
+
+        let reopened = service
+            .workspace_open(&RequestContext::unbounded(), open_params)
+            .await
+            .expect("workspace reopen after the actor died");
+        let rebound: WorkspaceHandle =
+            serde_json::from_value(reopened["workspace"].clone()).expect("rebound handle");
+        assert_ne!(rebound, handle, "eviction must mint a fresh handle");
+
+        assert!(
+            lock(&service.pending_cursors).is_empty(),
+            "eviction must drop the dead binding's pending cursors"
+        );
+
+        service
+            .workspace_close(Some(rebound))
+            .await
+            .expect("final workspace close");
     }
 }
