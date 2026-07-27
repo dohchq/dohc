@@ -3390,6 +3390,145 @@ async fn rpc_b2_reshapes_six_existing_arms_without_truncated() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn named_chat_lists_page_without_losing_rows() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-named-pages").await;
+    let mut id = 10;
+
+    for (channel_id, now_ms) in [("channel-1", 10), ("channel-2", 11)] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.channels.create",
+            json!({
+                "channelId": channel_id,
+                "name": channel_id,
+                "kind": "channel",
+                "nowMs": now_ms,
+            }),
+        )
+        .await;
+    }
+    for (channel_id, thread_id, message_id, now_ms) in [
+        ("channel-1", "thread-1", "message-1", 12),
+        ("channel-2", "thread-2", "message-2", 13),
+    ] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.threads.start",
+            json!({
+                "channelId": channel_id,
+                "threadId": thread_id,
+                "messageId": message_id,
+                "authorKind": "human",
+                "authorDisplayName": "Ice",
+                "body": thread_id,
+                "nowMs": now_ms,
+            }),
+        )
+        .await;
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.follows.set",
+            json!({
+                "ownerUserId": "owner",
+                "targetKind": "thread",
+                "targetId": thread_id,
+                "state": "following",
+                "nowMs": now_ms,
+            }),
+        )
+        .await;
+    }
+    let mut bookmark_ids = Vec::new();
+    for (thread_id, now_ms) in [("thread-1", 14), ("thread-2", 15)] {
+        let bookmark = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.bookmarks.save",
+            json!({
+                "ownerUserId": "owner",
+                "targetKind": "thread",
+                "targetId": thread_id,
+                "mode": "live",
+                "destinationPath": format!("bookmarks/{thread_id}.md"),
+                "nowMs": now_ms,
+            }),
+        )
+        .await;
+        bookmark_ids.push(
+            bookmark["bookmarkId"]
+                .as_str()
+                .expect("bookmark id")
+                .to_owned(),
+        );
+    }
+
+    for (method, params, row_key, id_key, expected) in [
+        (
+            "chats.channels.list",
+            json!({}),
+            "channels",
+            "channelId",
+            vec!["channel-1".to_owned(), "channel-2".to_owned()],
+        ),
+        (
+            "chats.threads.list",
+            json!({}),
+            "threads",
+            "threadId",
+            vec!["thread-1".to_owned(), "thread-2".to_owned()],
+        ),
+        (
+            "chats.follows.list",
+            json!({ "ownerUserId": "owner" }),
+            "follows",
+            "targetId",
+            vec!["thread-1".to_owned(), "thread-2".to_owned()],
+        ),
+        (
+            "chats.bookmarks.list",
+            json!({ "ownerUserId": "owner" }),
+            "bookmarks",
+            "bookmarkId",
+            bookmark_ids.into_iter().rev().collect(),
+        ),
+    ] {
+        let mut first_params = params.clone();
+        first_params["pageLimit"] = json!(1);
+        let first = call(&transport, &handle, &mut id, method, first_params).await;
+        assert!(first.get("truncated").is_none());
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("first page continuation");
+        let mut second_params = params;
+        second_params["pageLimit"] = json!(1);
+        second_params["cursor"] = json!(cursor);
+        let second = call(&transport, &handle, &mut id, method, second_params).await;
+        assert_eq!(second["nextCursor"], Value::Null);
+        let actual = [first, second]
+            .into_iter()
+            .flat_map(|page| {
+                page[row_key]
+                    .as_array()
+                    .expect("page rows")
+                    .iter()
+                    .map(|row| row[id_key].as_str().expect("row id").to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{method} must return every row once");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rpc_b2_page_adapter_drains_without_overlap_or_omission() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

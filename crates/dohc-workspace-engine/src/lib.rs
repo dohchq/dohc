@@ -239,7 +239,7 @@ fn bounded_chat_page_len(rows: &[Value]) -> Result<usize, WireError> {
     Ok(included)
 }
 
-fn dispatch_page_cursor<T>(
+fn chat_page_cursor<T>(
     rows: &[T],
     included: usize,
     consumed: i64,
@@ -4094,25 +4094,49 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let _: EmptyParams = parse(params)?;
+        let params: ChatPageParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)? as usize;
+        let binding = chat_cursor_binding("chats.channels.list", &workspace_id, &[]);
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let cancellation = OperationCancellation::new(ctx);
         let channels = Self::read_under_ctx(
             &cancellation,
             "chats.channels.list",
-            open.actor.chat_channels_list(open.workspace_id),
+            open.actor.chat_channels_list(workspace_id),
         )
         .await?;
-        // Bounded domain-side (10k rows) but a row can still be string-
-        // heavy: the byte budget keeps every page under the wire frame.
-        // No cursor on this family yet (composite sort keys) — truncated
-        // says so honestly; cursor pagination is RPC_GAP follow-up work.
+        let channels: Vec<_> = channels
+            .into_iter()
+            .filter(|channel| match cursor.as_ref() {
+                Some(cursor) => {
+                    (
+                        channel.channel.created_at_ms,
+                        channel.channel.channel_id.as_str(),
+                    ) > (cursor.first, cursor.second.as_str())
+                }
+                None => true,
+            })
+            .take(page_limit + 1)
+            .collect();
         let row_values: Vec<Value> = channels.iter().map(channel_summary_json).collect();
-        let included = bounded_chat_page_len(&row_values)?;
-        let truncated = included < row_values.len();
+        let included = bounded_chat_page_len(&row_values)?.min(page_limit);
+        let next_cursor = chat_page_cursor(
+            &channels,
+            included,
+            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
+            binding,
+            |channel| {
+                (
+                    channel.channel.created_at_ms,
+                    channel.channel.channel_id.clone(),
+                )
+            },
+        )?;
         Ok(json!({
             "channels": row_values[..included].to_vec(),
-            "truncated": truncated,
+            "nextCursor": next_cursor,
         }))
     }
 
@@ -4237,25 +4261,42 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let _: EmptyParams = parse(params)?;
+        let params: ChatPageParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)? as usize;
+        let binding = chat_cursor_binding("chats.threads.list", &workspace_id, &[]);
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let cancellation = OperationCancellation::new(ctx);
         let threads = Self::read_under_ctx(
             &cancellation,
             "chats.threads.list",
-            open.actor.chat_threads_list(open.workspace_id),
+            open.actor.chat_threads_list(workspace_id),
         )
         .await?;
-        // Bounded domain-side (10k rows) but a row can still be string-
-        // heavy: the byte budget keeps every page under the wire frame.
-        // No cursor on this family yet (composite sort keys) — truncated
-        // says so honestly; cursor pagination is RPC_GAP follow-up work.
+        let threads: Vec<_> = threads
+            .into_iter()
+            .filter(|thread| match cursor.as_ref() {
+                Some(cursor) => {
+                    (thread.created_at_ms, thread.thread_id.as_str())
+                        > (cursor.first, cursor.second.as_str())
+                }
+                None => true,
+            })
+            .take(page_limit + 1)
+            .collect();
         let row_values: Vec<Value> = threads.iter().map(thread_json).collect();
-        let included = bounded_chat_page_len(&row_values)?;
-        let truncated = included < row_values.len();
+        let included = bounded_chat_page_len(&row_values)?.min(page_limit);
+        let next_cursor = chat_page_cursor(
+            &threads,
+            included,
+            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
+            binding,
+            |thread| (thread.created_at_ms, thread.thread_id.clone()),
+        )?;
         Ok(json!({
             "threads": row_values[..included].to_vec(),
-            "truncated": truncated,
+            "nextCursor": next_cursor,
         }))
     }
 
@@ -5088,6 +5129,14 @@ impl EngineService {
         let params: ChatFollowListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)? as usize;
+        let state_filter = params.state.as_deref().unwrap_or("");
+        let binding = chat_cursor_binding(
+            "chats.follows.list",
+            &workspace_id,
+            &[params.owner_user_id.as_str(), state_filter],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let cancellation = OperationCancellation::new(ctx);
         let follows = Self::read_under_ctx(
             &cancellation,
@@ -5096,19 +5145,44 @@ impl EngineService {
                 .chat_follows_list(open.workspace_id, params.owner_user_id, params.state),
         )
         .await?;
-        // Bounded domain-side (10k rows) but a row can still be string-
-        // heavy: the byte budget keeps every page under the wire frame.
-        // No cursor on this family yet (composite sort keys) — truncated
-        // says so honestly; cursor pagination is RPC_GAP follow-up work.
+        let follows: Vec<_> = follows
+            .into_iter()
+            .filter(|follow| match cursor.as_ref() {
+                Some(cursor) => {
+                    format!(
+                        "{}\0{}",
+                        follow_target_kind_str(follow.target_kind),
+                        follow.target_id
+                    ) > cursor.second
+                }
+                None => true,
+            })
+            .take(page_limit + 1)
+            .collect();
         let row_values: Vec<Value> = follows
             .iter()
             .map(|follow| follow_json(&workspace_id, follow))
             .collect();
-        let included = bounded_chat_page_len(&row_values)?;
-        let truncated = included < row_values.len();
+        let included = bounded_chat_page_len(&row_values)?.min(page_limit);
+        let next_cursor = chat_page_cursor(
+            &follows,
+            included,
+            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
+            binding,
+            |follow| {
+                (
+                    0,
+                    format!(
+                        "{}\0{}",
+                        follow_target_kind_str(follow.target_kind),
+                        follow.target_id
+                    ),
+                )
+            },
+        )?;
         Ok(json!({
             "follows": row_values[..included].to_vec(),
-            "truncated": truncated,
+            "nextCursor": next_cursor,
         }))
     }
 
@@ -5369,6 +5443,14 @@ impl EngineService {
         let params: ChatBookmarkListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)? as usize;
+        let state_filter = params.state.as_deref().unwrap_or("");
+        let binding = chat_cursor_binding(
+            "chats.bookmarks.list",
+            &workspace_id,
+            &[params.owner_user_id.as_str(), state_filter],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let cancellation = OperationCancellation::new(ctx);
         let bookmarks = Self::read_under_ctx(
             &cancellation,
@@ -5380,19 +5462,33 @@ impl EngineService {
             ),
         )
         .await?;
-        // Bounded domain-side (10k rows) but a row can still be string-
-        // heavy: the byte budget keeps every page under the wire frame.
-        // No cursor on this family yet (composite sort keys) — truncated
-        // says so honestly; cursor pagination is RPC_GAP follow-up work.
+        let bookmarks: Vec<_> = bookmarks
+            .into_iter()
+            .filter(|bookmark| match cursor.as_ref() {
+                Some(cursor) => {
+                    bookmark.updated_at_ms < cursor.first
+                        || (bookmark.updated_at_ms == cursor.first
+                            && bookmark.bookmark_id > cursor.second)
+                }
+                None => true,
+            })
+            .take(page_limit + 1)
+            .collect();
         let row_values: Vec<Value> = bookmarks
             .iter()
             .map(|bookmark| bookmark_json(&workspace_id, bookmark))
             .collect();
-        let included = bounded_chat_page_len(&row_values)?;
-        let truncated = included < row_values.len();
+        let included = bounded_chat_page_len(&row_values)?.min(page_limit);
+        let next_cursor = chat_page_cursor(
+            &bookmarks,
+            included,
+            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
+            binding,
+            |bookmark| (bookmark.updated_at_ms, bookmark.bookmark_id.clone()),
+        )?;
         Ok(json!({
             "bookmarks": row_values[..included].to_vec(),
-            "truncated": truncated,
+            "nextCursor": next_cursor,
         }))
     }
 
@@ -5646,7 +5742,7 @@ impl EngineService {
             .map(dispatch_json)
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = dispatch_page_cursor(
+        let next_cursor = chat_page_cursor(
             &rows,
             included,
             cursor.as_ref().map_or(0, |cursor| cursor.consumed),
@@ -5688,7 +5784,7 @@ impl EngineService {
             .map(dispatch_claim_json)
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = dispatch_page_cursor(
+        let next_cursor = chat_page_cursor(
             &rows,
             included,
             cursor.as_ref().map_or(0, |cursor| cursor.consumed),
@@ -6090,7 +6186,7 @@ impl EngineService {
             })
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = dispatch_page_cursor(
+        let next_cursor = chat_page_cursor(
             &rows,
             included,
             cursor.as_ref().map_or(0, |cursor| cursor.consumed),
@@ -7878,10 +7974,6 @@ struct SearchEnsureIndexParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EmptyParams {}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatChannelCreateParams {
     channel_id: String,
     name: String,
@@ -8177,6 +8269,9 @@ struct ChatFollowSetParams {
 struct ChatBookmarkListParams {
     owner_user_id: String,
     state: Option<String>,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -8184,6 +8279,9 @@ struct ChatBookmarkListParams {
 struct ChatFollowListParams {
     owner_user_id: String,
     state: Option<String>,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -8894,16 +8992,20 @@ fn feed_read_state_json(state: &ChatFeedReadState) -> Value {
     })
 }
 
+fn follow_target_kind_str(kind: FollowTargetKind) -> &'static str {
+    match kind {
+        FollowTargetKind::Person => "person",
+        FollowTargetKind::Agent => "agent",
+        FollowTargetKind::Channel => "channel",
+        FollowTargetKind::Thread => "thread",
+    }
+}
+
 fn follow_json(workspace_id: &str, follow: &ChatFollow) -> Value {
     json!({
         "workspaceId": workspace_id,
         "ownerUserId": follow.owner_user_id,
-        "targetKind": match follow.target_kind {
-            FollowTargetKind::Person => "person",
-            FollowTargetKind::Agent => "agent",
-            FollowTargetKind::Channel => "channel",
-            FollowTargetKind::Thread => "thread",
-        },
+        "targetKind": follow_target_kind_str(follow.target_kind),
         "targetId": follow.target_id,
         "state": match follow.state {
             FollowState::Following => "following",

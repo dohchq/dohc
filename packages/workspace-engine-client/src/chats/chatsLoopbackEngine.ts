@@ -694,7 +694,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.channelFindBySlug: return ["slug"];
     case CHATS_METHOD.channelsList:
     case CHATS_METHOD.threadsList:
-      return [];
+      return ["pageLimit", "cursor"];
     case CHATS_METHOD.readStateListUnreadFileThreads:
       return ["pageLimit", "afterThreadId"];
     case CHATS_METHOD.channelGetWireId: return ["channelId"];
@@ -746,7 +746,7 @@ function allowedKeys(method: string): readonly string[] {
         "ownerUserId", "replicationOwnerUserId", "targetKind", "targetId", "state", "nowMs",
       ];
     case CHATS_METHOD.followsList:
-      return ["ownerUserId", "state"];
+      return ["ownerUserId", "state", "pageLimit", "cursor"];
     case CHATS_METHOD.followsEnsureDefaults: return ["ownerUserId"];
     case CHATS_METHOD.feedMarkSeen:
       return ["ownerUserId", "replicationOwnerUserId", "headCursor", "nowMs"];
@@ -754,7 +754,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.bookmarkSave:
       return ["ownerUserId", "targetKind", "targetId", "mode", "destinationPath", "nowMs"];
     case CHATS_METHOD.bookmarksList:
-      return ["ownerUserId", "state"];
+      return ["ownerUserId", "state", "pageLimit", "cursor"];
     case CHATS_METHOD.bookmarkFind:
     case CHATS_METHOD.bookmarkArchive:
     case CHATS_METHOD.bookmarkMarkPending:
@@ -924,7 +924,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       case CHATS_METHOD.channelEnsureAgent:
         return this.channelEnsure(state, workspace, params, "My agent", "agent");
       case CHATS_METHOD.channelsList:
-        return this.channelsList(state, workspace);
+        return this.channelsList(state, workspace, params);
       case CHATS_METHOD.channelFindBySlug:
         return this.channelFindBySlug(state, params);
       case CHATS_METHOD.channelGetWireId:
@@ -936,7 +936,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.replay(request, workspace, params, true, () =>
           this.threadCreate(state, workspace, params));
       case CHATS_METHOD.threadsList:
-        return this.threadsList(state, workspace);
+        return this.threadsList(state, workspace, params);
       case CHATS_METHOD.threadsListForFile:
         return this.threadsListForFile(state, workspace, params);
       case CHATS_METHOD.threadsListForChannel:
@@ -1312,7 +1312,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     });
   }
 
-  private channelsList(state: WorkspaceState, workspace: string): JsonValue {
+  private channelsList(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
     const channels = [...state.channels.values()]
       .filter((channel) => channel.workspaceId === workspace)
       .sort(
@@ -1333,7 +1337,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
           }, 0),
         };
       });
-    return jsonResult({ channels, truncated: false });
+    const result = page(channels, params, `${workspace}\0channels`);
+    return jsonResult({
+      channels: result.values,
+      nextCursor: result.nextCursor,
+    });
   }
 
   private channelFindBySlug(
@@ -1405,7 +1413,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(thread);
   }
 
-  private threadsList(state: WorkspaceState, workspace: string): JsonValue {
+  private threadsList(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
     const threads = [...state.threads.values()]
       .filter((thread) => thread.workspaceId === workspace)
       .sort(
@@ -1422,7 +1434,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
         channelId: thread.channelId ?? null,
         linkedObjectId: thread.linkedFile?.objectId ?? null,
       }));
-    return jsonResult({ threads, truncated: false });
+    const result = page(threads, params, `${workspace}\0threads`);
+    return jsonResult({
+      threads: result.values,
+      nextCursor: result.nextCursor,
+    });
   }
 
   private messageSend(
@@ -2100,7 +2116,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
           left.updatedAtMs - right.updatedAtMs ||
           compareText(left.targetId, right.targetId),
       );
-    return jsonResult({ follows, truncated: false });
+    const result = page(
+      follows,
+      params,
+      `${workspace}\0follows\0${ownerUserId}\0${wantedState ?? ""}`,
+    );
+    return jsonResult({
+      follows: result.values,
+      nextCursor: result.nextCursor,
+    });
   }
 
   private ensureDefaultFollows(
@@ -2366,7 +2390,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
           left.createdAtMs - right.createdAtMs ||
           compareText(left.bookmarkId, right.bookmarkId),
       );
-    return jsonResult({ bookmarks, truncated: false });
+    const result = page(
+      bookmarks,
+      params,
+      `bookmarks\0${ownerUserId}\0${wantedState ?? ""}`,
+    );
+    return jsonResult({
+      bookmarks: result.values,
+      nextCursor: result.nextCursor,
+    });
   }
 
   private bookmarkFind(state: WorkspaceState, params: ChatsJsonObject): JsonValue {

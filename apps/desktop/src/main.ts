@@ -334,7 +334,6 @@ import {
   removeMountFolder,
 } from "./workspaces/shareMounts";
 import {
-  createLinkedChatStore,
   createVersionedTextStore,
   claimRelayWorkspace,
   downloadKeyEnvelope,
@@ -362,7 +361,6 @@ import {
   type ChatBookmark,
   type ChatReaction,
   type ChatThread,
-  type LinkedChatStore,
   type SyncRelayConnection,
   type VersionedTextMomentSummary,
   type VersionedTextStore,
@@ -388,6 +386,10 @@ import {
 } from "./workspaces/engineRelayClient";
 import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
 import { isRustEngineAdapterEnabled } from "./workspaces/engineClientFlag";
+import {
+  createDesktopLinkedChatStore,
+  type DesktopLinkedChatStore,
+} from "./workspaces/liveLinkedChatStore";
 import {
   captureForFlaggedWorkspace,
   configureWorkspaceKernelRuntime,
@@ -1706,15 +1708,19 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
   return cachedAgentSessions;
 }
 
-// Linked Chats (PR 0M-5): per-workspace store over the SAME engine.db the
-// versioned text store uses (separate WAL-safe connection). Built lazily on
-// first chat IPC and only ever for flagged workspaces (the handlers gate on
-// the engine capture being attached).
-const linkedChatStores = new Map<string, LinkedChatStore>();
-function linkedChatStoreFor(workspace: { workspaceId: string; rootPath: string }): LinkedChatStore {
+// Linked Chats (PR 0M-5): one lazy store per workspace. The Rust flag swaps
+// the factory boundary; every consumer keeps the same awaitable contract.
+const linkedChatStores = new Map<string, DesktopLinkedChatStore>();
+function linkedChatStoreFor(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}): DesktopLinkedChatStore {
   const existing = linkedChatStores.get(workspace.workspaceId);
   if (existing) return existing;
-  const store = createLinkedChatStore(workspace.rootPath);
+  const store = createDesktopLinkedChatStore(workspace, {
+    rustEngineEnabled: isRustEngineAdapterEnabled(),
+    sessions: rustEngineWorkspaceSessions,
+  });
   linkedChatStores.set(workspace.workspaceId, store);
   return store;
 }
@@ -2588,7 +2594,7 @@ app.on("will-quit", (event) => {
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
-  const rustEngineStop = dispatchStoreStop
+  const rustEngineStop = Promise.all([chatStoreStop, dispatchStoreStop])
     .then(async () => await closeAllRelayTransportWorkspaces())
     .catch(() => undefined)
     .then(async () => await rustEngineDaemon?.stop());
@@ -5593,9 +5599,8 @@ function registerIpcHandlers(
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
-    // Opening the linked-chat store ensures the phase-1 dispatch tables have
-    // been migrated before the read-only dispatch adapter validates them.
-    linkedChatStoreFor(workspace);
+    const linkedChatStore = linkedChatStoreFor(workspace);
+    await linkedChatStore.ensureOpen();
     const dispatchStore = agentDispatchStoreHandleFor(workspace).store;
     const found = await dispatchStore.runRecordsForThread(
       workspace.workspaceId,

@@ -274,9 +274,9 @@ const NEW_DECODER_CASES: Array<{
   { method: CHATS_METHOD.channelFindBySlug, valid: null },
   {
     method: CHATS_METHOD.channelsList,
-    valid: { channels: [{ ...channel, threadCount: 1, unreadCount: 0 }], truncated: false },
+    valid: { channels: [{ ...channel, threadCount: 1, unreadCount: 0 }], nextCursor: null },
   },
-  { method: CHATS_METHOD.threadsList, valid: { threads: [threadWire], truncated: false } },
+  { method: CHATS_METHOD.threadsList, valid: { threads: [threadWire], nextCursor: null } },
   {
     method: CHATS_METHOD.messagesList,
     valid: { messages: [message], nextAfterMessageOrder: null },
@@ -284,10 +284,10 @@ const NEW_DECODER_CASES: Array<{
   { method: CHATS_METHOD.readStateGet, valid: readState },
   { method: CHATS_METHOD.readStateMarkThreadRead, valid: readState },
   { method: CHATS_METHOD.followsSet, valid: follow },
-  { method: CHATS_METHOD.followsList, valid: { follows: [follow], truncated: false } },
+  { method: CHATS_METHOD.followsList, valid: { follows: [follow], nextCursor: null } },
   { method: CHATS_METHOD.feedMarkSeen, valid: feedReadState },
   { method: CHATS_METHOD.bookmarkSave, valid: bookmark },
-  { method: CHATS_METHOD.bookmarksList, valid: { bookmarks: [bookmark], truncated: false } },
+  { method: CHATS_METHOD.bookmarksList, valid: { bookmarks: [bookmark], nextCursor: null } },
   {
     method: CHATS_METHOD.bookmarkMarkReady,
     valid: { bookmark, applied: true },
@@ -513,7 +513,7 @@ describe("ChatsLiveAdapter", () => {
             linkedObjectId: null,
           },
         ],
-        truncated: false,
+        nextCursor: null,
       })),
       WORKSPACE,
       { workspaceId: "workspace" },
@@ -547,7 +547,7 @@ describe("ChatsLiveAdapter", () => {
         id: 1,
         method: CHATS_METHOD.threadsList,
         workspace: WORKSPACE,
-        params: {},
+        params: { pageLimit: 500 },
       },
     ]);
     expect(threads[0]?.linkedFile).not.toHaveProperty("pathHint");
@@ -650,20 +650,126 @@ describe("ChatsLiveAdapter", () => {
     expect(requests).toHaveLength(2);
   });
 
-  it("fails closed when a cursorless named list is truncated", async () => {
+  it("paginates every named aggregate list until its cursor is exhausted", async () => {
     const requests: Request[] = [];
     const adapter = new ChatsLiveAdapter(
-      mockDaemon(requests, () => ({ threads: [], truncated: true })),
+      mockDaemon(requests, (request) => {
+        const cursor = (request.params as { cursor?: string }).cursor;
+        const nextCursor = cursor === undefined ? "page-2" : null;
+        switch (request.method) {
+          case CHATS_METHOD.channelsList:
+            return {
+              channels: [
+                {
+                  ...channel,
+                  channelId: cursor === undefined ? "channel-1" : "channel-2",
+                  threadCount: 0,
+                  unreadCount: 0,
+                },
+              ],
+              nextCursor,
+            };
+          case CHATS_METHOD.threadsList:
+            return {
+              threads: [
+                {
+                  ...threadWire,
+                  threadId: cursor === undefined ? "thread-1" : "thread-2",
+                },
+              ],
+              nextCursor,
+            };
+          case CHATS_METHOD.followsList:
+            return {
+              follows: [
+                {
+                  ...follow,
+                  targetId: cursor === undefined ? "target-1" : "target-2",
+                },
+              ],
+              nextCursor,
+            };
+          case CHATS_METHOD.bookmarksList:
+            return {
+              bookmarks: [
+                {
+                  ...bookmark,
+                  bookmarkId:
+                    cursor === undefined ? "bookmark-1" : "bookmark-2",
+                },
+              ],
+              nextCursor,
+            };
+          default:
+            throw new Error(`Unexpected method: ${request.method}`);
+        }
+      }),
       WORKSPACE,
       { workspaceId: "workspace" },
     );
 
     await expect(
+      adapter.listChannels({ workspaceId: "workspace" }),
+    ).resolves.toHaveLength(2);
+    await expect(
       adapter.listThreads({ workspaceId: "workspace" }),
-    ).rejects.toThrow(
-      "chats.threads.list was truncated by the daemon and has no continuation cursor.",
-    );
-    expect(requests).toHaveLength(1);
+    ).resolves.toHaveLength(2);
+    await expect(
+      adapter.listFollows({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+      }),
+    ).resolves.toHaveLength(2);
+    await expect(
+      adapter.listBookmarks({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+      }),
+    ).resolves.toHaveLength(2);
+    expect(
+      requests.map(({ method, params }) => ({ method, params })),
+    ).toEqual([
+      {
+        method: CHATS_METHOD.channelsList,
+        params: { pageLimit: 500 },
+      },
+      {
+        method: CHATS_METHOD.channelsList,
+        params: { pageLimit: 500, cursor: "page-2" },
+      },
+      {
+        method: CHATS_METHOD.threadsList,
+        params: { pageLimit: 500 },
+      },
+      {
+        method: CHATS_METHOD.threadsList,
+        params: { pageLimit: 500, cursor: "page-2" },
+      },
+      {
+        method: CHATS_METHOD.followsList,
+        params: { ownerUserId: "owner", pageLimit: 500 },
+      },
+      {
+        method: CHATS_METHOD.followsList,
+        params: {
+          ownerUserId: "owner",
+          pageLimit: 500,
+          cursor: "page-2",
+        },
+      },
+      {
+        method: CHATS_METHOD.bookmarksList,
+        params: { ownerUserId: "owner", pageLimit: 500 },
+      },
+      {
+        method: CHATS_METHOD.bookmarksList,
+        params: {
+          ownerUserId: "owner",
+          pageLimit: 500,
+          cursor: "page-2",
+        },
+      },
+    ]);
   });
 
   it("reconstructs completeRun and failRun with an acknowledgement followed by getRunRecord", async () => {

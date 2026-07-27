@@ -409,7 +409,7 @@ export type ChatFollowSetParams = ChatsJsonObject & {
   state: "following" | "unfollowed";
   nowMs?: number;
 };
-export type ChatFollowListParams = ChatOwnerParams & {
+export type ChatFollowListParams = ChatOwnerParams & ChatPageParams & {
   state?: "following" | "unfollowed";
 };
 export type ChatFeedMarkSeenParams = ChatOwnerParams & {
@@ -433,7 +433,7 @@ export type ChatBookmarkSaveParams = ChatOwnerParams & {
   destinationPath: string;
   nowMs?: number;
 };
-export type ChatBookmarksListParams = ChatOwnerParams & {
+export type ChatBookmarksListParams = ChatOwnerParams & ChatPageParams & {
   state?: "active" | "archived";
 };
 export type ChatBookmarkListPendingParams = ChatPageParams & {
@@ -511,11 +511,11 @@ export type ChatThreadStartResult = ChatsJsonObject & {
 export type ChatWireIdResult = ChatsJsonObject & { wireId: string | null };
 export type ChatChannelsListResult = ChatsJsonObject & {
   channels: ChatChannelSummary[];
-  truncated: boolean;
+  nextCursor: string | null;
 };
 export type ChatThreadsListResult = ChatsJsonObject & {
   threads: ChatThreadWireRecord[];
-  truncated: boolean;
+  nextCursor: string | null;
 };
 export type ChatMessagesListResult = ChatsJsonObject & {
   messages: ChatMessage[];
@@ -523,11 +523,11 @@ export type ChatMessagesListResult = ChatsJsonObject & {
 };
 export type ChatFollowsListResult = ChatsJsonObject & {
   follows: ChatFollow[];
-  truncated: boolean;
+  nextCursor: string | null;
 };
 export type ChatBookmarksListResult = ChatsJsonObject & {
   bookmarks: ChatBookmark[];
-  truncated: boolean;
+  nextCursor: string | null;
 };
 export type ChatEnqueueResult = ChatsJsonObject & { enqueued: boolean };
 export type ChatCompleteResult = ChatsJsonObject & { completed: true };
@@ -596,11 +596,11 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.channelEnsureAgent]: ChatChannelEnsureParams;
   [CHATS_METHOD.channelEnsureGeneral]: ChatChannelEnsureParams;
   [CHATS_METHOD.channelFindBySlug]: ChatChannelFindBySlugParams;
-  [CHATS_METHOD.channelsList]: ChatEmptyParams;
+  [CHATS_METHOD.channelsList]: ChatPageParams;
   [CHATS_METHOD.channelGetWireId]: ChatChannelGetWireIdParams;
   [CHATS_METHOD.threadStart]: ChatThreadStartParams;
   [CHATS_METHOD.threadCreate]: ChatThreadCreateParams;
-  [CHATS_METHOD.threadsList]: ChatEmptyParams;
+  [CHATS_METHOD.threadsList]: ChatPageParams;
   [CHATS_METHOD.threadsListForFile]: ChatThreadsListForFileParams;
   [CHATS_METHOD.threadsListForChannel]: ChatThreadsListForChannelParams;
   [CHATS_METHOD.threadFindChannelId]: ChatThreadParams;
@@ -1382,12 +1382,12 @@ export function decodeChatsResult<M extends ChatsMethod>(
       result = value === null ? null : decodeChannel(value, label);
       break;
     case CHATS_METHOD.channelsList: {
-      const object = objectValue(value, label, ["channels", "truncated"]);
+      const object = objectValue(value, label, ["channels", "nextCursor"]);
       result = {
         channels: arrayValue(object, "channels", label).map((entry, index) =>
           decodeChannelSummary(entry, `${label}.channels[${index}]`),
         ),
-        truncated: booleanValue(object, "truncated", label),
+        nextCursor: nullableString(object, "nextCursor", label),
       };
       break;
     }
@@ -1408,12 +1408,12 @@ export function decodeChatsResult<M extends ChatsMethod>(
       result = decodeChatThread(value, label);
       break;
     case CHATS_METHOD.threadsList: {
-      const object = objectValue(value, label, ["threads", "truncated"]);
+      const object = objectValue(value, label, ["threads", "nextCursor"]);
       result = {
         threads: arrayValue(object, "threads", label).map((entry, index) =>
           decodeThreadWireRecord(entry, `${label}.threads[${index}]`),
         ),
-        truncated: booleanValue(object, "truncated", label),
+        nextCursor: nullableString(object, "nextCursor", label),
       };
       break;
     }
@@ -1513,12 +1513,12 @@ export function decodeChatsResult<M extends ChatsMethod>(
       result = decodeFollow(value, label);
       break;
     case CHATS_METHOD.followsList: {
-      const object = objectValue(value, label, ["follows", "truncated"]);
+      const object = objectValue(value, label, ["follows", "nextCursor"]);
       result = {
         follows: arrayValue(object, "follows", label).map((entry, index) =>
           decodeFollow(entry, `${label}.follows[${index}]`),
         ),
-        truncated: booleanValue(object, "truncated", label),
+        nextCursor: nullableString(object, "nextCursor", label),
       };
       break;
     }
@@ -1536,12 +1536,12 @@ export function decodeChatsResult<M extends ChatsMethod>(
       result = decodeChatBookmark(value, label);
       break;
     case CHATS_METHOD.bookmarksList: {
-      const object = objectValue(value, label, ["bookmarks", "truncated"]);
+      const object = objectValue(value, label, ["bookmarks", "nextCursor"]);
       result = {
         bookmarks: arrayValue(object, "bookmarks", label).map((entry, index) =>
           decodeChatBookmark(entry, `${label}.bookmarks[${index}]`),
         ),
-        truncated: booleanValue(object, "truncated", label),
+        nextCursor: nullableString(object, "nextCursor", label),
       };
       break;
     }
