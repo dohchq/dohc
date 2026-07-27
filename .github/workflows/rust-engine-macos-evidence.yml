@@ -66,12 +66,17 @@ env:
 jobs:
   macos-evidence:
     name: macOS gate + ${{ inputs.mode == 'full' && 'cutoverBlocking soak' || 'quick smoke' }}
-    # Blacksmith's macOS runner (R15 decision #2). Apple Silicon M4 / ARM64 —
-    # the architecture apps/desktop actually ships on for Mac, so this is
-    # closer to the shipping target than an Intel runner would be. Pinned to
-    # macos-15 rather than -latest so a rolling OS bump cannot silently change
-    # what the cited evidence ran on.
-    runs-on: blacksmith-6vcpu-macos-15
+    # GitHub-hosted Apple Silicon (ARM64) — the architecture apps/desktop
+    # actually ships on for Mac. Pinned to macos-15 rather than -latest so a
+    # rolling OS bump cannot silently change what the cited evidence ran on.
+    #
+    # This was blacksmith-6vcpu-macos-15 (R15 decision #2) until Blacksmith was
+    # dropped over its billing. NOTE BEFORE RE-ENABLING THIS WORKFLOW: this
+    # repository is PRIVATE, and GitHub bills macOS minutes at a 10x
+    # multiplier. A single full-mode run is a 60-90 minute soak, so it can
+    # consume ~600-900 billable minutes. It is workflow_dispatch-only, but the
+    # cost is real and deliberate, not incidental.
+    runs-on: macos-15
     # The runner can use up to 2x the requested duration while satisfying both
     # its cycle and time targets. At the 90-minute maximum, 240 minutes leaves
     # 60 minutes for setup, the full gate, release builds, and idle drain.
