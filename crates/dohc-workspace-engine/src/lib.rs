@@ -1226,20 +1226,23 @@ impl EngineService {
         // armed above the startup replay closes the actor on an early drop
         // and is disarmed once the handle is inserted; `CaptureDriver`'s own
         // Drop cancels the files layer.
-        // Cancellation-aware like every other actor wait in this flow: a
-        // caller abort stops WAITING promptly (the actor still finishes the
-        // reclaim it already accepted — it is idempotent on the next open)
-        // and the open_guard above closes the actor on early drop.
-        Self::read_under_ctx(
-            &cancellation,
-            "workspace.open (dispatch reclaim)",
-            actor.chat_dispatch_reclaim_running(
-                params.workspace_id.clone(),
-                CHAT_DISPATCH_MAX_ATTEMPTS,
-                now_ms,
-            ),
-        )
-        .await?;
+        // Desktop rebinds opt out because their runner processes outlive the daemon.
+        if actor_open.created_actor && params.recover_running_dispatches.unwrap_or(true) {
+            // Cancellation-aware like every other actor wait in this flow:
+            // a caller abort stops WAITING promptly (the actor still finishes
+            // the reclaim it already accepted — it is idempotent on the next
+            // open) and the open_guard above closes the actor on early drop.
+            Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (dispatch reclaim)",
+                actor.chat_dispatch_reclaim_running(
+                    params.workspace_id.clone(),
+                    CHAT_DISPATCH_MAX_ATTEMPTS,
+                    now_ms,
+                ),
+            )
+            .await?;
+        }
         capture.wait_for_baseline().await;
         open_guard.disarm();
         lock(&self.handles).insert(
@@ -7114,6 +7117,8 @@ struct WorkspaceOpenParams {
     root_dir: String,
     workspace_id: String,
     #[serde(default)]
+    recover_running_dispatches: Option<bool>,
+    #[serde(default)]
     relay: Option<RelayOpenParams>,
 }
 
@@ -9691,6 +9696,112 @@ mod tests {
         // through the catch-all to Internal.
         let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_rebind_preserves_a_runner_owned_by_the_desktop() {
+        // MUTATION: ignore recoverRunningDispatches=false on the second open ->
+        // the claim is reclaimed and requeued before the surviving runner can
+        // complete it.
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let first_service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "desktop-runner-survives-daemon";
+        let opened = first_service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            )
+            .await
+            .expect("initial workspace open");
+        let first_handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        first_service
+            .chats_dispatch_enqueue(
+                &RequestContext::unbounded(),
+                Some(first_handle.clone()),
+                json!({
+                    "triggerMessageId": "trigger-survives",
+                    "threadId": "thread-survives",
+                    "nowMs": 10,
+                }),
+            )
+            .await
+            .expect("enqueue dispatch");
+        let claim = first_service
+            .chats_dispatch_claim_next_pending(
+                &RequestContext::unbounded(),
+                Some(first_handle.clone()),
+                json!({
+                    "runId": "run-survives",
+                    "command": "agent",
+                    "nowMs": 20,
+                }),
+            )
+            .await
+            .expect("claim dispatch");
+        assert_eq!(claim["run"]["runId"], json!("run-survives"));
+
+        first_service
+            .workspace_close(Some(first_handle))
+            .await
+            .expect("simulate old daemon teardown");
+
+        let rebound_service = EngineService::with_supervisor(supervisor);
+        let rebound = rebound_service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                    "recoverRunningDispatches": false,
+                }),
+            )
+            .await
+            .expect("desktop rebind");
+        let rebound_handle: WorkspaceHandle =
+            serde_json::from_value(rebound["workspace"].clone()).expect("rebound handle");
+        let open_runs = rebound_service
+            .chats_dispatch_open_runs(
+                &RequestContext::unbounded(),
+                Some(rebound_handle.clone()),
+                json!({}),
+            )
+            .await
+            .expect("list open runs");
+        assert_eq!(
+            open_runs["claims"][0]["run"]["runId"],
+            json!("run-survives")
+        );
+
+        rebound_service
+            .chats_dispatch_complete(
+                &RequestContext::unbounded(),
+                Some(rebound_handle.clone()),
+                json!({ "runId": "run-survives", "exitCode": 0, "nowMs": 30 }),
+            )
+            .await
+            .expect("surviving runner completes");
+        let pending = rebound_service
+            .chats_dispatch_list_pending(
+                &RequestContext::unbounded(),
+                Some(rebound_handle.clone()),
+                json!({}),
+            )
+            .await
+            .expect("list pending dispatches");
+        assert_eq!(pending["dispatches"], json!([]));
+
+        rebound_service
+            .workspace_close(Some(rebound_handle))
+            .await
+            .expect("workspace close");
     }
 
     #[tokio::test]

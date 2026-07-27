@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const CLI_PROTOCOL_VERSION = 1;
+export const CLI_PROTOCOL_VERSION = 2;
 export const CLI_JSON_SCHEMA_VERSION = 1;
 
 export const cliActorSchema = z.enum(["human", "agent"]);
@@ -230,6 +230,7 @@ export const postResultSchema = z
     threadId: z.string().min(1),
     messageId: z.string().min(1),
     title: z.string(),
+    warning: z.string().min(1).optional(),
   })
   .strict();
 export const replyResultSchema = z
@@ -238,6 +239,7 @@ export const replyResultSchema = z
     messageId: z.string().min(1),
     parentMessageId: z.string().min(1).optional(),
     resolvedMessageId: z.string().min(1).optional(),
+    warning: z.string().min(1).optional(),
   })
   .strict();
 export const reactResultSchema = z
