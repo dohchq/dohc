@@ -137,6 +137,49 @@ also hit the artifact-storage quota; those provenance and calibration caveats
 remain, but they are not an open decision about whether the tail satisfies
 R15-2.
 
+## 1c. macOS soak on FINAL main — R15-2 NOT SATISFIED (recorded 2026-07-27)
+
+The first macOS evidence run against final `main` (all 30 merges) **fails**, and it
+fails under the tail methodology Ice accepted, not merely under the old whole-run fit.
+
+```
+FAIL | cycles=11478 crashes=83 durationSecs=5525
+rssSlopeWholeB/s=29401.9  rssSlopeTailB/s=21171.3
+warmupDominatedWholeRunFit=false  drain=RETAINED
+```
+
+The tail is **21,171 B/s against the unchanged 20,480 B/s bound** — over by ~3%.
+
+| run | whole-run | tail | verdict |
+|---|---|---|---|
+| #267 branch, 90 min | 26,208 B/s | 14,255 B/s | PASS |
+| **final main, 92 min** | **29,402 B/s** | **21,171 B/s** | **FAIL** |
+
+### What this does and does not establish
+
+- **It does establish that R15-2 is not satisfied on final code.** Whatever the cause,
+  there is no passing macOS soak against what would actually be flipped.
+- **It does NOT establish a regression.** One sample on each side cannot distinguish a
+  real increase caused by the day's merges from ordinary variance on a shared macOS
+  runner. A repeat run against the same commit is required before attributing it, and
+  attributing it from n=1 would be exactly the kind of confident-but-unfounded claim
+  this program has already been burned by.
+- `warmupDominatedWholeRunFit=false` is worth noting: unlike the earlier run, the
+  whole-run fit is NOT inflated by warm-up here, so the curve is flatter — a more
+  leak-like shape than the clean asymptotic decay recorded in section 1b.
+
+### What IS newly true
+
+**Evidence is finally banked.** #267 writes the evidence JSON to the step summary and
+run log before attempting the artifact upload, so this run left recoverable evidence
+rather than losing it to the account-wide artifact quota. Every previous macOS run
+produced evidence and banked none.
+
+### Consequence
+
+R15-2 remains **NOT MET**. This is independent of the rehearsal blocker recorded in
+`DECISIONS.md`; either one alone is sufficient reason not to flip.
+
 ## 2. Differential (TS-vs-Rust capture parity) — PASS
 - 10/10 scenarios green on BOTH engines; goldens committed
   (capture-fixtures.json / capture-goldens.json); tamper-check proves the compare
