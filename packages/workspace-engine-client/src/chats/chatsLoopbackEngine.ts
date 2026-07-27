@@ -695,6 +695,8 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.channelsList:
     case CHATS_METHOD.threadsList:
       return ["pageLimit", "cursor"];
+    case CHATS_METHOD.readStateListUnreadFileThreads:
+      return ["pageLimit", "afterThreadId"];
     case CHATS_METHOD.channelGetWireId: return ["channelId"];
     case CHATS_METHOD.threadStart:
       return [
@@ -952,6 +954,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.readStateGet(state, workspace, params);
       case CHATS_METHOD.readStateMarkThreadRead:
         return this.readStateMark(state, workspace, params);
+      case CHATS_METHOD.readStateListUnreadFileThreads:
+        return this.listUnreadFileThreads(state, params);
       case CHATS_METHOD.decisionResolve:
         return this.replay(request, workspace, params, true, () =>
           this.decisionResolve(state, params));
@@ -1518,6 +1522,34 @@ export class ChatsLoopbackEngine implements EngineTransport {
     state.humanReads.set(threadId, upTo);
     state.humanReadStates.set(threadId, result);
     return jsonResult(result);
+  }
+
+  private listUnreadFileThreads(
+    state: WorkspaceState,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const limit = pageLimit(params);
+    const afterThreadId = optionalString(params, "afterThreadId");
+    return jsonResult(
+      [...state.threads.values()]
+        .filter((thread) => thread.channelId === undefined && thread.linkedFile !== undefined)
+        .filter((thread) => afterThreadId === undefined || thread.id > afterThreadId)
+        .flatMap((thread) => {
+          const messageCount = threadMessages(state, thread.id).length;
+          const lastReadSequence =
+            state.humanReadStates.get(thread.id)?.lastReadSequence ?? 0;
+          return messageCount > Math.min(lastReadSequence, messageCount)
+            ? [{ threadId: thread.id, messageCount, lastReadSequence }]
+            : [];
+        })
+        .sort((left, right) =>
+          left.threadId < right.threadId
+            ? -1
+            : left.threadId > right.threadId
+              ? 1
+              : 0)
+        .slice(0, limit),
+    );
   }
 
   private insertMessage(

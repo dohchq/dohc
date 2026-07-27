@@ -185,6 +185,25 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
     })
 }
 
+/// Open an existing, fully migrated v2 store without creating files, changing
+/// persistent pragmas, or applying migrations. This is the reader primitive
+/// for daemon requests that run while another engine owns workspace writes.
+pub(crate) fn open_engine_db_read_only(path: &Path) -> Result<OpenedEngineDb, StorageError> {
+    reject_undersized_database(path)?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(StorageError::corrupt)?;
+    apply_session_pragmas(&conn)?;
+    if classify_fingerprint(&conn)? != Disposition::ExistingV2 {
+        return Err(StorageError::StateCorrupt { source: None });
+    }
+    validate_v2(&conn)?;
+    integrity_check(&conn)?;
+    Ok(OpenedEngineDb {
+        conn,
+        freshly_created: false,
+    })
+}
+
 /// Reject an existing, non-empty file that is too small to hold a SQLite
 /// header, before the connection is opened (so the rejected file is left
 /// byte-unchanged).

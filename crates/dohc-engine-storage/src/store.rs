@@ -8,7 +8,7 @@ use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
 use crate::limits::{MAX_DOCUMENT_BODY_BYTES, MAX_IDENTIFIER_BYTES};
 use crate::materialize::MaterializationJob;
-use crate::schema::open_engine_db;
+use crate::schema::{open_engine_db, open_engine_db_read_only};
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -179,6 +179,18 @@ impl EngineStore {
         Ok(EngineStore {
             conn: opened.conn,
             freshly_created: opened.freshly_created,
+            database_path: path.to_path_buf(),
+        })
+    }
+
+    /// Open an existing, current store for queries only. Unlike [`Self::open`],
+    /// this never creates the database, changes persistent pragmas, or runs the
+    /// migration ledger.
+    pub fn open_read_only(path: &Path) -> Result<Self, StorageError> {
+        let opened = open_engine_db_read_only(path)?;
+        Ok(EngineStore {
+            conn: opened.conn,
+            freshly_created: false,
             database_path: path.to_path_buf(),
         })
     }

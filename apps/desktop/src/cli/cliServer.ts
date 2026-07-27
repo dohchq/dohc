@@ -27,6 +27,12 @@ import {
   type VersionedTextMoment,
   type VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
+import {
+  MAX_GRANULAR_CHAT_QUERY_CHARS,
+  type ChatUnreadFileThread,
+  type GranularChatMessageSearchResponse,
+  type GranularChatMessageSearchResult,
+} from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
@@ -116,6 +122,21 @@ interface SqliteModule {
   ) => EngineSqliteDb;
 }
 
+type CliGranularChatMessageSearchResult = Pick<
+  GranularChatMessageSearchResult,
+  "threadId" | "messageId" | "text"
+>;
+type CliGranularChatMessageSearchResponse = Pick<
+  GranularChatMessageSearchResponse,
+  "saturated"
+> & {
+  results: CliGranularChatMessageSearchResult[];
+};
+type CliUnreadFileThread = Pick<
+  ChatUnreadFileThread,
+  "threadId" | "messageCount" | "lastReadSequence"
+>;
+
 export interface CliRegistryWorkspace {
   workspaceId: string;
   rootPath: string;
@@ -131,6 +152,16 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   listMoments(input: { limit: number }): Promise<VersionedTextMomentSummary[]>;
   readMoment(momentId: string): Promise<VersionedTextMoment | null>;
   assertWritable(target: { channelId: string } | { threadId: string }): Promise<void>;
+  daemonReads?: {
+    queryChatMessagesGranular(input: {
+      query: string;
+      limit: number;
+    }): Promise<CliGranularChatMessageSearchResponse>;
+    listUnreadFileThreads(input: {
+      pageLimit: number;
+      afterThreadId?: string;
+    }): Promise<CliUnreadFileThread[]>;
+  };
 }
 
 export interface CliMainIdentity {
@@ -746,29 +777,47 @@ async function regexMatchesForTexts(
   });
 }
 
-function queryFtsCandidates(
+async function queryFtsCandidates(
   context: CliWorkspaceContext,
   query: string,
-): { threadIds: Set<string>; messageIds: Set<string> } | null {
+): Promise<{ threadIds: Set<string>; messageIds: Set<string> } | null> {
   if ([...query.trim()].length < 3) return null;
-  const { DatabaseSync } = nodeSqlite();
+  if (
+    context.daemonReads &&
+    [...query.trim()].length > MAX_GRANULAR_CHAT_QUERY_CHARS
+  ) {
+    return null;
+  }
+  let response: CliGranularChatMessageSearchResponse;
   let db: EngineSqliteDb | null = null;
   try {
-    db = new DatabaseSync(
-      join(context.rootPath, LINKED_CHAT_STORE_RELATIVE_PATH),
-      { readOnly: true },
-    );
-    const rows = queryChatMessagesGranular(db, {
-      workspaceId: context.workspaceId,
-      query,
-      limit: MAX_FTS_CANDIDATES,
-    });
+    if (context.daemonReads) {
+      response = await context.daemonReads.queryChatMessagesGranular({
+        query,
+        limit: MAX_FTS_CANDIDATES,
+      });
+    } else {
+      const { DatabaseSync } = nodeSqlite();
+      db = new DatabaseSync(
+        join(context.rootPath, LINKED_CHAT_STORE_RELATIVE_PATH),
+        { readOnly: true },
+      );
+      const results = queryChatMessagesGranular(db, {
+        workspaceId: context.workspaceId,
+        query,
+        limit: MAX_FTS_CANDIDATES,
+      });
+      response = {
+        results,
+        saturated: results.length === MAX_FTS_CANDIDATES,
+      };
+    }
     // A saturated prefilter is not exhaustive. Fall back to the full body scan
     // below so the optimization can never change grep's results at scale.
-    if (rows.length === MAX_FTS_CANDIDATES) return null;
+    if (response.saturated) return null;
     const threadIds = new Set<string>();
     const messageIds = new Set<string>();
-    for (const row of rows) {
+    for (const row of response.results) {
       threadIds.add(row.threadId);
       if (row.messageId) messageIds.add(row.messageId);
     }
@@ -780,7 +829,26 @@ function queryFtsCandidates(
   }
 }
 
-function humanUnreadFileThreadIds(context: CliWorkspaceContext): Set<string> {
+async function humanUnreadFileThreadIds(
+  context: CliWorkspaceContext,
+): Promise<Set<string>> {
+  if (context.daemonReads) {
+    const threadIds = new Set<string>();
+    let afterThreadId: string | undefined;
+    for (;;) {
+      const rows = await context.daemonReads.listUnreadFileThreads({
+        pageLimit: 500,
+        ...(afterThreadId ? { afterThreadId } : {}),
+      });
+      for (const row of rows) threadIds.add(row.threadId);
+      if (rows.length < 500) return threadIds;
+      const next = rows.at(-1)?.threadId;
+      if (!next || next === afterThreadId) {
+        throw new Error("Daemon unread-file pagination did not advance.");
+      }
+      afterThreadId = next;
+    }
+  }
   const { DatabaseSync } = nodeSqlite();
   let db: EngineSqliteDb | null = null;
   try {
@@ -1579,7 +1647,7 @@ async function dispatch(
               channel: channel.cli,
             })),
         );
-        const unreadFileIds = humanUnreadFileThreadIds(context);
+        const unreadFileIds = await humanUnreadFileThreadIds(context);
         const fileThreads = (await loadThreads(context, channels)).filter((thread) =>
           thread.thread.linkedFile && unreadFileIds.has(thread.thread.id));
         const messagesByThread = await loadMessagesByThread(context, fileThreads);
@@ -1898,7 +1966,7 @@ async function dispatch(
       // deadline-bounded full scan.
       const fts = request.args.regex
         ? null
-        : queryFtsCandidates(context, request.args.pattern);
+        : await queryFtsCandidates(context, request.args.pattern);
       const scanThreads = !request.args.regex && fts
         ? selected.filter((thread) => fts.threadIds.has(thread.thread.id))
         : selected;

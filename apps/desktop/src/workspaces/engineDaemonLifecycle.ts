@@ -27,6 +27,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface EngineDaemonClient {
   sendRequest(request: Request): Promise<Response>;
+  cancelRequest?(requestId: number): Promise<void>;
   onBlob?(handler: (blob: CompletedDaemonBlob) => void): () => void;
   onEvent?(handler: (event: Event) => void): () => void;
   close(): void;
@@ -142,6 +143,7 @@ export class EngineDaemonLifecycle {
   private readonly exitedGenerations = new Set<number>();
   private readonly inFlightLaunches = new Set<InFlightLaunch>();
   private readonly launchingClients = new Set<EngineDaemonClient>();
+  private readonly workspaceRequestTails = new Map<string, Promise<void>>();
 
   constructor(options: EngineDaemonLifecycleOptions) {
     this.options = options;
@@ -179,6 +181,95 @@ export class EngineDaemonLifecycle {
   ): Promise<JsonValue> {
     const client = this.requireClient();
     return await this.smokeWorkspaceWithClient(client, rootDir, workspaceId);
+  }
+
+  async requestWorkspace(
+    rootDir: string,
+    workspaceId: string,
+    method: string,
+    params: Request["params"],
+  ): Promise<JsonValue> {
+    const previous = this.workspaceRequestTails.get(rootDir) ?? Promise.resolve();
+    const request = previous
+      .catch(() => undefined)
+      .then(
+        async () =>
+          await this.requestWorkspaceOnce(
+            rootDir,
+            workspaceId,
+            method,
+            params,
+          ),
+      );
+    const tail = request.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.workspaceRequestTails.set(rootDir, tail);
+    try {
+      return await request;
+    } finally {
+      if (this.workspaceRequestTails.get(rootDir) === tail) {
+        this.workspaceRequestTails.delete(rootDir);
+      }
+    }
+  }
+
+  private async requestWorkspaceOnce(
+    rootDir: string,
+    workspaceId: string,
+    method: string,
+    params: Request["params"],
+  ): Promise<JsonValue> {
+    const client = this.requireClient();
+    const opened = resultObject(
+      await this.sendSmokeRequest(
+        client,
+        {
+          id: this.requestId(),
+          method: "workspace.open",
+          params: {
+            rootDir,
+            workspaceId,
+            recoverRunningDispatches: false,
+            skipStartupMaintenance: true,
+          },
+        },
+        "workspace.open",
+      ),
+      "workspace.open",
+    );
+    if (typeof opened.workspace !== "string" || opened.workspace.length === 0) {
+      throw new EngineDaemonUnavailableError(
+        "Rust engine workspace.open returned no workspace handle.",
+      );
+    }
+    const workspace = opened.workspace as WorkspaceHandle;
+    try {
+      return (
+        await this.sendSmokeRequest(
+          client,
+          {
+            id: this.requestId(),
+            method,
+            workspace,
+            params,
+          },
+          method,
+        )
+      ).result;
+    } finally {
+      await this.sendSmokeRequest(
+        client,
+        {
+          id: this.requestId(),
+          method: "workspace.close",
+          workspace,
+          params: {},
+        },
+        "workspace.close",
+      );
+    }
   }
 
   currentClient(): EngineDaemonClient {
@@ -281,9 +372,15 @@ export class EngineDaemonLifecycle {
   ): Promise<Response> {
     const timeoutMs =
       this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const boundedRequest = {
+      ...request,
+      deadlineMs: request.deadlineMs ?? timeoutMs,
+    };
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
+        void client.cancelRequest?.(request.id).catch(() => undefined);
+        if (method === "workspace.open") client.close();
         reject(
           new EngineDaemonUnavailableError(
             `Rust engine ${method} timed out after ${timeoutMs}ms.`,
@@ -293,7 +390,7 @@ export class EngineDaemonLifecycle {
       timeout.unref();
     });
     try {
-      return await Promise.race([client.sendRequest(request), deadline]);
+      return await Promise.race([client.sendRequest(boundedRequest), deadline]);
     } finally {
       if (timeout) clearTimeout(timeout);
     }

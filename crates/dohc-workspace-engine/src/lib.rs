@@ -161,6 +161,7 @@ const SINGLE_ROW_HARD_CAP_BYTES: usize = 700 * 1024;
 /// Approximate serialized-bytes budget for one chat list/messages page —
 /// the same measured discipline as every other list family.
 const CHAT_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+const GRANULAR_CHAT_RESPONSE_BYTE_BUDGET: usize = 256 * 1024;
 
 const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
 const CHAT_PAGE_LIMIT_MAX: i64 = 500;
@@ -271,6 +272,7 @@ struct OpenWorkspace {
     db_path: PathBuf,
     workspace_id: String,
     actor: ActorHandle,
+    mode: WorkspaceOpenMode,
     relay: Option<RelayConfiguration>,
     /// The autonomous capture driver (files actor + watcher + reconcile
     /// loop), spawned only after the shadow binding succeeded. Shared so the
@@ -285,6 +287,12 @@ struct OpenWorkspace {
     /// Version fences retain this gate through their destructive continuation,
     /// without stalling editor traffic in unrelated open workspaces.
     session_ops: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceOpenMode {
+    Full,
+    ReadOnly,
 }
 
 #[derive(Clone)]
@@ -555,6 +563,7 @@ impl EngineService {
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
+        self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         if request.method == "versionedBinary.readBlob" {
             let (result, blob_egress) = self
                 .versioned_binary_read_blob(&ctx, request.workspace, request.params, id)
@@ -696,6 +705,10 @@ impl EngineService {
             }
             "search.query" => {
                 self.search_query(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "search.queryChatMessagesGranular" => {
+                self.search_query_chat_messages_granular(&ctx, request.workspace, request.params)
                     .await?
             }
             "search.ensureIndex" => {
@@ -901,6 +914,14 @@ impl EngineService {
                 self.chats_read_state_get(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.readState.listUnreadFileThreads" => {
+                self.chats_read_state_list_unread_file_threads(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
+            }
             "chats.agentReadState.listUnreadThreads" => {
                 self.chats_agent_read_state_list_unread_threads(
                     &ctx,
@@ -1075,6 +1096,33 @@ impl EngineService {
         Ok(ServiceResponse::response(Response { id, result }))
     }
 
+    fn ensure_handle_allows_method(
+        &self,
+        handle: Option<&WorkspaceHandle>,
+        method: &str,
+    ) -> Result<(), WireError> {
+        let Some(handle) = handle else {
+            return Ok(());
+        };
+        let read_only = lock(&self.handles)
+            .get(handle)
+            .is_some_and(|open| open.mode == WorkspaceOpenMode::ReadOnly);
+        if read_only
+            && !matches!(
+                method,
+                "workspace.close"
+                    | "search.queryChatMessagesGranular"
+                    | "chats.readState.listUnreadFileThreads"
+            )
+        {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "method is unavailable on a read-only workspace handle",
+            ));
+        }
+        Ok(())
+    }
+
     /// Tear down every open workspace's capture driver (watcher joined,
     /// files actor closed). Called at daemon shutdown AFTER the transport's
     /// workspace close hook: store actors are already gone by then, so any
@@ -1114,6 +1162,11 @@ impl EngineService {
             shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
                 .map_err(map_shadow_fence)?;
         let root = validated.root;
+        let requested_mode = if params.skip_startup_maintenance {
+            WorkspaceOpenMode::ReadOnly
+        } else {
+            WorkspaceOpenMode::Full
+        };
         let existing = {
             let guard = lock(&self.handles);
             guard
@@ -1128,6 +1181,12 @@ impl EngineService {
                 return Err(wire(
                     ErrorCode::InvalidParams,
                     "workspace root is already bound to another workspace",
+                ));
+            }
+            if open.mode != requested_mode {
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "workspace root is already open in a different mode",
                 ));
             }
             if open.relay != params.relay.as_ref().map(RelayOpenParams::configuration) {
@@ -1180,10 +1239,13 @@ impl EngineService {
         let supervisor = self.supervisor;
         let actor_path = db_path.clone();
         let now_ms = now_ms()?;
-        let actor_open = tokio::task::spawn_blocking(move || supervisor.open(&actor_path, now_ms))
-            .await
-            .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
-            .map_err(map_runtime)?;
+        let actor_open = tokio::task::spawn_blocking(move || match requested_mode {
+            WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
+            WorkspaceOpenMode::ReadOnly => supervisor.open_read_only(&actor_path),
+        })
+        .await
+        .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
+        .map_err(map_runtime)?;
         // The supervisor deduplicates by physical engine.db identity, including
         // root aliases and hard links. EngineService state (capture driver,
         // session registry, and version barriers) deliberately has one owner:
@@ -1223,65 +1285,73 @@ impl EngineService {
             supervisor: self.supervisor,
             db_path: Some(db_path.clone()),
         };
-        // Mandatory readiness barrier: derived mention rows must exist before
-        // this workspace can expose a mention read or advance the dispatch
-        // scan cursor past an older `@agent` message.
-        Self::read_under_ctx(
-            &cancellation,
-            "workspace.open (mention backfill)",
-            actor.chat_mentions_backfill(params.workspace_id.clone(), cancellation.token.clone()),
-        )
-        .await?;
-        // Startup replay BEFORE the files layer exists: jobs left pending by
-        // a crash, a transient settle failure, or a pulled replication apply
-        // land on disk while nothing is watching (no suppression window),
-        // and the baseline reconcile below then scans the POST-replay disk.
-        actor
-            .materialize_replay_pending(root.clone(), now_ms)
-            .await
-            .map_err(map_runtime)?;
-        // The files layer spawns ONLY here — after the shadow binding
-        // succeeded — so an unmarked or mismatched root can never grow a
-        // watcher or files actor (the shadow-scope dormancy invariant).
         let capture_apply_gate = Arc::new(tokio::sync::Mutex::new(()));
-        let capture = capture_driver::CaptureDriver::spawn(
-            root.clone(),
-            actor.clone(),
-            params.workspace_id.clone(),
-            self.self_writes.scoped(&root),
-            Arc::clone(&capture_apply_gate),
-            capture_author_json.flatten(),
-            #[cfg(feature = "harness")]
-            self.capture_apply_probe.clone(),
-        );
-        // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
-        // disk state) must apply before the handle is handed out, or a
-        // caller's first write could later be overwritten by a capture of
-        // stale disk bytes.
-        //
-        // CANCELLATION: nothing owns the store actor yet (the handle is
-        // inserted below), so an abort here would leak it. The `open_guard`
-        // armed above the startup replay closes the actor on an early drop
-        // and is disarmed once the handle is inserted; `CaptureDriver`'s own
-        // Drop cancels the files layer.
-        // Desktop rebinds opt out because their runner processes outlive the daemon.
-        if actor_open.created_actor && params.recover_running_dispatches.unwrap_or(true) {
-            // Cancellation-aware like every other actor wait in this flow:
-            // a caller abort stops WAITING promptly (the actor still finishes
-            // the reclaim it already accepted — it is idempotent on the next
-            // open) and the open_guard above closes the actor on early drop.
+        let capture = if requested_mode == WorkspaceOpenMode::ReadOnly {
+            None
+        } else {
+            // Mandatory readiness barrier: derived mention rows must exist before
+            // this workspace can expose a mention read or advance the dispatch
+            // scan cursor past an older `@agent` message.
             Self::read_under_ctx(
                 &cancellation,
-                "workspace.open (dispatch reclaim)",
-                actor.chat_dispatch_reclaim_running(
+                "workspace.open (mention backfill)",
+                actor.chat_mentions_backfill(
                     params.workspace_id.clone(),
-                    CHAT_DISPATCH_MAX_ATTEMPTS,
-                    now_ms,
+                    cancellation.token.clone(),
                 ),
             )
             .await?;
-        }
-        capture.wait_for_baseline().await;
+            // Startup replay BEFORE the files layer exists: jobs left pending by
+            // a crash, a transient settle failure, or a pulled replication apply
+            // land on disk while nothing is watching (no suppression window),
+            // and the baseline reconcile below then scans the POST-replay disk.
+            actor
+                .materialize_replay_pending(root.clone(), now_ms)
+                .await
+                .map_err(map_runtime)?;
+            // The files layer spawns ONLY here — after the shadow binding
+            // succeeded — so an unmarked or mismatched root can never grow a
+            // watcher or files actor (the shadow-scope dormancy invariant).
+            let capture = capture_driver::CaptureDriver::spawn(
+                root.clone(),
+                actor.clone(),
+                params.workspace_id.clone(),
+                self.self_writes.scoped(&root),
+                Arc::clone(&capture_apply_gate),
+                capture_author_json.flatten(),
+                #[cfg(feature = "harness")]
+                self.capture_apply_probe.clone(),
+            );
+            // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
+            // disk state) must apply before the handle is handed out, or a
+            // caller's first write could later be overwritten by a capture of
+            // stale disk bytes.
+            //
+            // CANCELLATION: nothing owns the store actor yet (the handle is
+            // inserted below), so an abort here would leak it. The `open_guard`
+            // armed above the startup replay closes the actor on an early drop
+            // and is disarmed once the handle is inserted; `CaptureDriver`'s own
+            // Drop cancels the files layer.
+            // Desktop rebinds opt out because their runner processes outlive the daemon.
+            if actor_open.created_actor && params.recover_running_dispatches.unwrap_or(true) {
+                // Cancellation-aware like every other actor wait in this flow:
+                // a caller abort stops WAITING promptly (the actor still finishes
+                // the reclaim it already accepted — it is idempotent on the next
+                // open) and the open_guard above closes the actor on early drop.
+                Self::read_under_ctx(
+                    &cancellation,
+                    "workspace.open (dispatch reclaim)",
+                    actor.chat_dispatch_reclaim_running(
+                        params.workspace_id.clone(),
+                        CHAT_DISPATCH_MAX_ATTEMPTS,
+                        now_ms,
+                    ),
+                )
+                .await?;
+            }
+            capture.wait_for_baseline().await;
+            Some(capture)
+        };
         open_guard.disarm();
         lock(&self.handles).insert(
             handle.clone(),
@@ -1290,10 +1360,11 @@ impl EngineService {
                 db_path,
                 workspace_id: params.workspace_id,
                 actor,
+                mode: requested_mode,
                 relay: params
                     .relay
                     .map(|configuration| configuration.configuration()),
-                capture: Arc::new(Mutex::new(Some(capture))),
+                capture: Arc::new(Mutex::new(capture)),
                 capture_apply_gate,
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
@@ -5129,6 +5200,39 @@ impl EngineService {
         Ok(read_state_json(&state))
     }
 
+    async fn chats_read_state_list_unread_file_threads(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: UnreadFileThreadPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.readState.listUnreadFileThreads",
+            open.actor.chat_read_state_list_unread_file_threads(
+                open.workspace_id,
+                params.after_thread_id,
+                page_limit,
+            ),
+        )
+        .await?;
+        Ok(Value::Array(
+            rows.into_iter()
+                .map(|row| {
+                    json!({
+                        "threadId": row.thread_id,
+                        "messageCount": row.message_count,
+                        "lastReadSequence": row.last_read_sequence,
+                    })
+                })
+                .collect(),
+        ))
+    }
+
     async fn chats_agent_read_state_list_unread_threads(
         &self,
         ctx: &RequestContext,
@@ -7106,6 +7210,56 @@ impl EngineService {
         ))
     }
 
+    async fn search_query_chat_messages_granular(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SearchChatMessagesGranularParams = parse(params)?;
+        let effective_limit = usize::try_from(params.limit)
+            .unwrap_or(dohc_engine_runtime::search::MAX_GRANULAR_CHAT_RESULT_LIMIT)
+            .min(dohc_engine_runtime::search::MAX_GRANULAR_CHAT_RESULT_LIMIT);
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let batch = Self::read_under_ctx(
+            &cancellation,
+            "search.queryChatMessagesGranular",
+            open.actor.search_query_chat_messages_granular(
+                open.workspace_id,
+                params.query,
+                params.limit,
+                GRANULAR_CHAT_RESPONSE_BYTE_BUDGET,
+            ),
+        )
+        .await?;
+        let saturated_by_limit = params.limit > 0 && batch.results.len() == effective_limit;
+        let row_values: Vec<Value> = batch
+            .results
+            .into_iter()
+            .map(|row| {
+                json!({
+                    "threadId": row.thread_id,
+                    "messageId": row.message_id,
+                    "text": row.text,
+                })
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, GRANULAR_CHAT_RESPONSE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "granular-chat-row-exceeds-wire-limit",
+            ));
+        }
+        Ok(json!({
+            "results": &row_values[..included],
+            "saturated": batch.saturated_by_bytes
+                || saturated_by_limit
+                || included < row_values.len(),
+        }))
+    }
+
     async fn search_ensure_index(
         &self,
         ctx: &RequestContext,
@@ -7457,6 +7611,8 @@ struct WorkspaceOpenParams {
     capture_author: Option<Value>,
     #[serde(default)]
     recover_running_dispatches: Option<bool>,
+    #[serde(default)]
+    skip_startup_maintenance: bool,
     #[serde(default)]
     relay: Option<RelayOpenParams>,
 }
@@ -8114,6 +8270,13 @@ struct SearchParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SearchChatMessagesGranularParams {
+    query: String,
+    limit: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SearchEnsureIndexParams {
     workspace_id: String,
     version_id: String,
@@ -8365,6 +8528,14 @@ struct ChatPageParams {
     page_limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UnreadFileThreadPageParams {
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    after_thread_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -10295,6 +10466,166 @@ mod tests {
             .workspace_close(Some(rebound_handle))
             .await
             .expect("workspace close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn maintenance_free_open_does_not_apply_pending_migrations() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        std::fs::create_dir_all(db_path.parent().expect("engine parent"))
+            .expect("engine directory");
+        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
+        assert!(
+            store
+                .bind_shadow_clone_token(SHADOW_TOKEN)
+                .expect("bind shadow token")
+        );
+        drop(store);
+
+        let conn = rusqlite::Connection::open(&db_path).expect("fixture connection");
+        let removed_migration: String = conn
+            .query_row(
+                "SELECT id FROM engine_migrations ORDER BY ordinal DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("latest migration");
+        conn.execute(
+            "DELETE FROM engine_migrations WHERE id = ?1",
+            [&removed_migration],
+        )
+        .expect("remove latest migration ledger row");
+        for column in [
+            "before_object_id",
+            "before_version_id",
+            "before_path",
+            "before_updated_at_ms",
+            "before_metadata_origin",
+            "before_metadata_summary",
+            "before_metadata_correlation_id",
+        ] {
+            conn.execute(&format!("ALTER TABLE moments DROP COLUMN {column}"), [])
+                .expect("restore the pre-migration moments shape");
+        }
+        drop(conn);
+
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "read-only-pending-migration",
+                    "recoverRunningDispatches": false,
+                    "skipStartupMaintenance": true,
+                }),
+            )
+            .await
+            .expect("maintenance-free open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("read migration ledger");
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM engine_migrations WHERE id = ?1",
+                [&removed_migration],
+                |row| row.get(0),
+            )
+            .expect("migration count");
+        // MUTATION: routing this mode through supervisor.open applies the
+        // missing ledger entry before workspace.open returns.
+        assert_eq!(
+            present, 0,
+            "a maintenance-free read must not apply a pending migration"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn maintenance_free_handle_is_not_reused_for_full_open() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        std::fs::create_dir_all(db_path.parent().expect("engine parent"))
+            .expect("engine directory");
+        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
+        assert!(
+            store
+                .bind_shadow_clone_token(SHADOW_TOKEN)
+                .expect("bind shadow token")
+        );
+        drop(store);
+
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "open-mode-compatibility",
+        });
+        let read_only = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "open-mode-compatibility",
+                    "skipStartupMaintenance": true,
+                }),
+            )
+            .await
+            .expect("maintenance-free open");
+        let read_only_handle: WorkspaceHandle =
+            serde_json::from_value(read_only["workspace"].clone()).expect("workspace handle");
+
+        let incompatible = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await;
+        // MUTATION: omitting the mode comparison returns the maintenance-free
+        // handle as a successful full open and silently leaves capture absent.
+        assert!(
+            matches!(
+                incompatible,
+                Err(WireError {
+                    code: ErrorCode::InvalidParams,
+                    ..
+                })
+            ),
+            "a full open must not reuse a maintenance-free handle"
+        );
+
+        service
+            .workspace_close(Some(read_only_handle))
+            .await
+            .expect("close maintenance-free handle");
+        let full = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .expect("full open after maintenance-free close");
+        let full_handle: WorkspaceHandle =
+            serde_json::from_value(full["workspace"].clone()).expect("full workspace handle");
+        assert!(
+            lock(&service.handles)
+                .get(&full_handle)
+                .is_some_and(|open| lock(&open.capture).is_some()),
+            "the subsequent full open must run startup and own capture"
+        );
+        service
+            .workspace_close(Some(full_handle))
+            .await
+            .expect("close full handle");
     }
 
     #[tokio::test]

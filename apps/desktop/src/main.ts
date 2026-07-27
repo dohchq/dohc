@@ -5,6 +5,12 @@ import {
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
 import {
+  CHATS_METHOD,
+  WORKSPACE_METHOD,
+  decodeGranularChatMessageSearchResponse,
+  decodeUnreadFileThreads,
+} from "@dohc/workspace-engine-client";
+import {
   app,
   BrowserWindow,
   clipboard,
@@ -2189,6 +2195,7 @@ async function openCliWorkspace(
   const capture = activity.engineCaptureFor(workspace.workspaceId);
   if (!capture) throw new Error("Chats are not enabled for this workspace.");
   const store = linkedChatStoreFor(workspace);
+  const daemon = rustEngineDaemon;
   return {
     workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
@@ -2196,6 +2203,38 @@ async function openCliWorkspace(
     dispatchStore: agentDispatchStoreHandleFor(workspace).store,
     readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
     fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
+    ...(daemon
+      ? {
+          daemonReads: {
+            async queryChatMessagesGranular(input: {
+              query: string;
+              limit: number;
+            }) {
+              return decodeGranularChatMessageSearchResponse(
+                await daemon.requestWorkspace(
+                  workspace.rootPath,
+                  workspace.workspaceId,
+                  WORKSPACE_METHOD.searchQueryChatMessagesGranular,
+                  input,
+                ),
+              );
+            },
+            async listUnreadFileThreads(input: {
+              pageLimit: number;
+              afterThreadId?: string;
+            }) {
+              return decodeUnreadFileThreads(
+                await daemon.requestWorkspace(
+                  workspace.rootPath,
+                  workspace.workspaceId,
+                  CHATS_METHOD.readStateListUnreadFileThreads,
+                  input,
+                ),
+              );
+            },
+          },
+        }
+      : {}),
     filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
     listMoments: async ({ limit }) => {
       const page = await capture.listMoments({ limit });

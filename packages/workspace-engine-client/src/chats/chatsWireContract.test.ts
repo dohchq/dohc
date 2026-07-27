@@ -153,6 +153,9 @@ describe("B2 chats wire contract and loopback", () => {
         upToSequence: 1,
       })).lastReadSequence,
     ).toBe(1);
+    expect(
+      await roundTrip(CHATS_METHOD.readStateListUnreadFileThreads, {}),
+    ).toEqual([]);
 
     expect(
       (await roundTrip(CHATS_METHOD.threadsListForFile, {
@@ -506,6 +509,66 @@ describe("B2 chats wire contract and loopback", () => {
     ).toBeGreaterThan(0);
 
     expect([...seen].sort()).toEqual(Object.values(CHATS_METHOD).sort());
+  });
+
+  it("orders and keyset-paginates unread file threads like the daemon", async () => {
+    const engine = new ChatsLoopbackEngine();
+    let id = 0;
+    for (const threadId of ["thread-c", "thread-a", "thread-b"]) {
+      await call(
+        engine,
+        ++id,
+        CHATS_METHOD.threadCreate,
+        {
+          threadId,
+          title: threadId,
+          linkedFile: { objectId: `object-${threadId}` },
+        },
+        `create-${threadId}`,
+      );
+      await call(
+        engine,
+        ++id,
+        CHATS_METHOD.messageSend,
+        {
+          threadId,
+          messageId: `message-${threadId}`,
+          authorKind: "agent",
+          authorDisplayName: "Agent",
+          body: "Unread",
+        },
+        `send-${threadId}`,
+      );
+    }
+
+    const unreadPage = async (
+      params: { pageLimit: number; afterThreadId?: string },
+    ): Promise<string[]> => {
+      try {
+        const response = await engine.sendRequest({
+          id: ++id,
+          method: CHATS_METHOD.readStateListUnreadFileThreads,
+          workspace: WORKSPACE,
+          params,
+        });
+        return decodeChatsResult(
+          CHATS_METHOD.readStateListUnreadFileThreads,
+          response.result,
+        ).map((row) => row.threadId);
+      } catch {
+        return ["request-rejected"];
+      }
+    };
+
+    // MUTATION: restoring the empty parameter contract and unbounded insertion
+    // order makes these assertions receive "request-rejected" or all rows.
+    expect(await unreadPage({ pageLimit: 2 })).toEqual([
+      "thread-a",
+      "thread-b",
+    ]);
+    expect(
+      await unreadPage({ pageLimit: 2, afterThreadId: "thread-b" }),
+    ).toEqual(["thread-c"]);
   });
 
   it("preserves prototype-named message ids in a null-prototype run map", () => {
