@@ -23,6 +23,8 @@ fn binary_input(request_id: &str) -> WriteBinary {
         bytes: vec![1, 2, 3, 4],
         moment_id: "binary-original-moment".to_owned(),
         metadata_origin: "api".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms: 10,
         request_id: Some(request_id.to_owned()),

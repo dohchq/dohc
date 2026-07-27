@@ -1,6 +1,7 @@
 //! RPC-D sequencing steps 1-3: mutation guards exercised through the real
 //! in-process transport and actor-owned store.
 
+use base64::Engine as _;
 use dohc_engine_protocol::{
     ErrorCode,
     frame::{Frame, FrameDecoder, blob_chunks, encode_blob_chunk_frame},
@@ -157,6 +158,41 @@ async fn write_response_shape_contains_object_snapshot_moment_and_deduped() {
     assert!(result["snapshot"]["sha256"].is_string());
     assert!(result["moment"]["momentId"].is_string());
     assert_eq!(result["deduped"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_mutations_persist_summary_and_correlation_metadata() {
+    let (_scratch, transport, handle) = fixture("mutation-provenance").await;
+    let result = call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "path": "provenance.md",
+            "text": "captured",
+            "origin": "local-file",
+            "summary": "Updated provenance.md",
+            "correlationId": "capture-pass-1",
+            "requestId": "provenance-write-1",
+        }),
+    )
+    .await;
+    assert_eq!(
+        result["snapshot"]["metadataSummary"],
+        "Updated provenance.md"
+    );
+    assert_eq!(
+        result["snapshot"]["metadataCorrelationId"],
+        "capture-pass-1"
+    );
+    assert_eq!(result["moment"]["metadataSummary"], "Updated provenance.md");
+    assert_eq!(result["moment"]["metadataCorrelationId"], "capture-pass-1");
+
+    let listed = moments(&transport, &handle, 3).await;
+    assert_eq!(listed[0]["metadataSummary"], "Updated provenance.md");
+    assert_eq!(listed[0]["metadataCorrelationId"], "capture-pass-1");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -370,22 +406,32 @@ async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn over_cap_write_refuses_before_commit() {
+async fn capture_sized_text_write_succeeds_and_over_cap_refuses_before_commit() {
     // MUTATION: commit text/binary and only then refuse -> the moment count changes.
     let (_scratch, transport, handle) = fixture("cap").await;
     write(&transport, &handle, 2, "seed.md", "seed", "cap-seed").await;
     let before = moments(&transport, &handle, 3).await.len();
+    write(
+        &transport,
+        &handle,
+        4,
+        "capture-sized.md",
+        &"x".repeat(128 * 1024),
+        "capture-sized",
+    )
+    .await;
+    assert_eq!(moments(&transport, &handle, 5).await.len(), before + 1);
     let refused = transport
         .call(
             RequestContext::unbounded(),
             request(
-                4,
+                6,
                 "versionedText.write",
                 Some(handle.clone()),
                 json!({
                     "versionId": "main",
                     "path": "too-big.md",
-                    "text": "x".repeat(49 * 1024),
+                    "text": "x".repeat(128 * 1024 + 1),
                     "origin": "api",
                     "requestId": "too-big",
                 }),
@@ -394,12 +440,12 @@ async fn over_cap_write_refuses_before_commit() {
         .await
         .expect_err("over cap");
     assert_eq!(refused.message, "content-exceeds-inband-cap");
-    assert_eq!(moments(&transport, &handle, 5).await.len(), before);
+    assert_eq!(moments(&transport, &handle, 7).await.len(), before + 1);
     let refused = transport
         .call(
             RequestContext::unbounded(),
             request(
-                6,
+                8,
                 "versionedBinary.write",
                 Some(handle.clone()),
                 json!({
@@ -413,7 +459,55 @@ async fn over_cap_write_refuses_before_commit() {
         .await
         .expect_err("over-cap binary");
     assert_eq!(refused.message, "content-exceeds-inband-cap");
-    assert_eq!(moments(&transport, &handle, 7).await.len(), before);
+    assert_eq!(moments(&transport, &handle, 9).await.len(), before + 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blob_write_accepts_full_range_bytes_and_reuses_a_referenced_digest() {
+    let (scratch, transport, handle) = fixture("binary-blob-write").await;
+    let bytes = vec![23_u8; 64 * 1024];
+    let sha256 = "f4b2c062d90362445dbc56af4628e6511315ab018340fb8818ed5d8adac4e0d1";
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    let uploaded = call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.writeBlob",
+        json!({
+            "versionId": "main",
+            "path": "uploaded.bin",
+            "sha256": sha256,
+            "bytesBase64": encoded,
+            "origin": "api",
+        }),
+    )
+    .await;
+    assert_eq!(uploaded["snapshot"]["sha256"], sha256);
+    assert_eq!(uploaded["snapshot"]["byteLength"], 64 * 1024);
+    assert_eq!(
+        std::fs::read(scratch.path().join("uploaded.bin")).expect("uploaded binary"),
+        bytes
+    );
+
+    let restored = call(
+        &transport,
+        &handle,
+        3,
+        "versionedBinary.writeBlob",
+        json!({
+            "versionId": "main",
+            "path": "restored.bin",
+            "sha256": sha256,
+            "origin": "restore",
+        }),
+    )
+    .await;
+    assert_eq!(restored["snapshot"]["sha256"], sha256);
+    assert_eq!(
+        std::fs::read(scratch.path().join("restored.bin")).expect("restored binary"),
+        bytes
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -520,7 +614,7 @@ async fn secrets_write_rejects_over_cap_text_before_commit() {
                     "workspaceId": "ws-rpcd-secret-cap",
                     "versionId": "main",
                     "path": ".env",
-                    "text": "x".repeat(dohc_engine_domain::INBAND_CONTENT_CAP_BYTES + 1),
+                    "text": "x".repeat(dohc_engine_domain::MAX_SECRET_FILE_BYTES + 1),
                     "origin": "api",
                     "momentId": "secret-too-big",
                 }),
@@ -1218,6 +1312,9 @@ async fn secret_restore_to_absent_removes_materialized_plaintext_on_reopen() {
             "path": ".env",
             "beforeMomentId": "restore-away-first-write",
             "momentId": "restore-away-to-absent",
+            "origin": "restore",
+            "summary": "Restore protected file",
+            "correlationId": "restore-away",
         }),
     )
     .await;
@@ -3509,6 +3606,191 @@ async fn origin_closed_set_rejects_capture_and_ydoc() {
             .expect_err("reserved origin");
         assert_eq!(error.message, "invalid-metadata");
     }
+    let conflict_origin = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                22,
+                "conflicts.resolve",
+                Some(handle),
+                json!({ "local": {
+                    "conflictId": "missing",
+                    "resolution": "keep-current",
+                    "objectId": "resolve-object",
+                    "writeMomentId": "resolve-write",
+                    "deleteMomentId": "resolve-delete",
+                    "metadataOrigin": "capture",
+                }}),
+            ),
+        )
+        .await
+        .expect_err("conflicts.resolve reserved origin");
+    // MUTATION: forward LocalResolveDto.metadata_origin without
+    // validated_origin. The actor sees the missing conflict instead.
+    assert_eq!(conflict_origin.message, "invalid-metadata");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutation_metadata_fields_are_bounded_at_every_rpc_entry() {
+    // MUTATION: remove endpoint validation -> these calls fall through to
+    // state/path errors or accept a field the TypeScript contract rejects.
+    let (_scratch, transport, handle) = fixture("metadata-bounds").await;
+    let oversized = "x".repeat(16 * 1024 + 1);
+    let cases = [
+        (
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "a.md", "text": "x", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "correlation.md", "text": "x", "origin": "api", "correlationId": oversized.clone() }),
+        ),
+        (
+            "versionedBinary.write",
+            json!({ "versionId": "main", "path": "a.bin", "bytes": [1], "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedBinary.writeBlob",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "versionId": "main", "path": "blob.bin", "sha256": "a".repeat(64), "bytesBase64": "AQ==", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedText.rename",
+            json!({ "versionId": "main", "fromPath": "a.md", "toPath": "b.md", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedText.delete",
+            json!({ "versionId": "main", "path": "a.md", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "versionedText.merge",
+            json!({ "path": "a.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "secrets.write",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "versionId": "main", "path": ".env", "text": "x", "momentId": "secret-write", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "secrets.delete",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "versionId": "main", "path": ".env", "momentId": "secret-delete", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "secrets.apply",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "path": ".env", "sourceVersionId": "feature", "targetVersionId": "main", "momentId": "secret-apply", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "secrets.restore",
+            json!({ "workspaceId": "ws-rpcd-metadata-bounds", "path": ".env", "beforeMomentId": "before", "momentId": "secret-restore", "origin": "api", "summary": oversized.clone() }),
+        ),
+        (
+            "conflicts.resolve",
+            json!({ "local": {
+                "conflictId": "missing",
+                "resolution": "keep-current",
+                "objectId": "resolve-object",
+                "writeMomentId": "resolve-write",
+                "deleteMomentId": "resolve-delete",
+                "metadataOrigin": "api",
+                "metadataSummary": oversized.clone(),
+            }}),
+        ),
+    ];
+    for (index, (method, params)) in cases.into_iter().enumerate() {
+        let outcome = transport
+            .call(
+                RequestContext::unbounded(),
+                request(20 + index as u64, method, Some(handle.clone()), params),
+            )
+            .await;
+        assert!(
+            outcome.is_err(),
+            "{method}: oversized metadata must be rejected at the RPC boundary"
+        );
+        let error = outcome.unwrap_err();
+        assert_eq!(error.message, "invalid-metadata", "{method}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_metadata_is_distinct_from_absent_in_mutation_fingerprints() {
+    // MUTATION: hash Option<String> through unwrap_or("") -> every retry below
+    // silently replays instead of reporting request-key payload reuse.
+    let (_scratch, transport, handle) = fixture("metadata-presence-fingerprint").await;
+    let mut initial = vec![
+        (
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "write.md", "text": "x", "origin": "api", "requestId": "presence-write" }),
+        ),
+        (
+            "versionedBinary.write",
+            json!({ "versionId": "main", "path": "write.bin", "bytes": [1, 2], "origin": "api", "requestId": "presence-binary" }),
+        ),
+    ];
+    write(
+        &transport,
+        &handle,
+        2,
+        "rename.md",
+        "x",
+        "presence-rename-seed",
+    )
+    .await;
+    write(
+        &transport,
+        &handle,
+        3,
+        "delete.md",
+        "x",
+        "presence-delete-seed",
+    )
+    .await;
+    initial.push((
+        "versionedText.rename",
+        json!({ "versionId": "main", "fromPath": "rename.md", "toPath": "renamed.md", "origin": "api", "requestId": "presence-rename" }),
+    ));
+    initial.push((
+        "versionedText.delete",
+        json!({ "versionId": "main", "path": "delete.md", "origin": "api", "requestId": "presence-delete" }),
+    ));
+
+    for (index, (method, params)) in initial.into_iter().enumerate() {
+        call(
+            &transport,
+            &handle,
+            10 + index as u64,
+            method,
+            params.clone(),
+        )
+        .await;
+        let mut changed = params.clone();
+        changed["summary"] = json!("");
+        let outcome = transport
+            .call(
+                RequestContext::unbounded(),
+                request(30 + index as u64, method, Some(handle.clone()), changed),
+            )
+            .await;
+        assert!(
+            outcome.is_err(),
+            "{method}: absent and empty metadata are distinct payloads"
+        );
+        let error = outcome.unwrap_err();
+        assert_eq!(error.message, "idempotency-key-reuse-mismatch", "{method}");
+
+        let mut changed = params;
+        changed["correlationId"] = json!("");
+        let outcome = transport
+            .call(
+                RequestContext::unbounded(),
+                request(40 + index as u64, method, Some(handle.clone()), changed),
+            )
+            .await;
+        assert!(
+            outcome.is_err(),
+            "{method}: absent and empty correlation metadata are distinct payloads"
+        );
+        let error = outcome.unwrap_err();
+        assert_eq!(error.message, "idempotency-key-reuse-mismatch", "{method}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3571,6 +3853,7 @@ async fn rename_is_one_moment_atomic_and_secret_floor_is_enforced() {
     .await;
     let renamed = call(&transport, &handle, 3, "versionedText.rename", json!({ "versionId": "main", "fromPath": "old.md", "toPath": "new.md", "origin": "api", "requestId": "rename-1" })).await;
     assert_eq!(renamed["moment"]["operation"], "rename");
+    assert_eq!(renamed["moment"]["beforePath"], "old.md");
     assert!(renamed["before"].get("text").is_none());
     assert!(renamed["after"].get("text").is_none());
     assert!(
@@ -3884,6 +4167,8 @@ async fn rollback_rejects_sync_record_only_moment() {
                     text: "sync".to_owned(),
                     moment_id: "sync-marker".to_owned(),
                     metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
                     author_json: None,
                     now_ms: 2,
                     request_id: None,
@@ -4638,6 +4923,8 @@ fn seed_versions(root: &Path, workspace_id: &str) {
                 text: "base".to_owned(),
                 moment_id: "base-moment".to_owned(),
                 metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 author_json: None,
                 now_ms: 2,
                 request_id: None,
@@ -4668,6 +4955,8 @@ fn seed_versions(root: &Path, workspace_id: &str) {
                 text: "incoming".to_owned(),
                 moment_id: "incoming-moment".to_owned(),
                 metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 author_json: None,
                 now_ms: 4,
                 request_id: None,
@@ -4685,6 +4974,8 @@ fn seed_versions(root: &Path, workspace_id: &str) {
                 bytes: vec![1, 2, 3],
                 moment_id: "binary-moment".to_owned(),
                 metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 author_json: None,
                 now_ms: 5,
                 request_id: None,
@@ -4711,7 +5002,12 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
         json!({ "path": "merge.md", "sourceVersionId": "feature", "targetVersionId": "main" }),
     )
     .await;
-    assert_eq!(compared["status"], "merged");
+    assert_eq!(compared["status"], "incoming-changed");
+    assert_eq!(compared["workspaceId"], "ws-rpcd-merge");
+    assert_eq!(compared["targetVersionId"], "main");
+    assert_eq!(compared["sourceVersionId"], "feature");
+    assert_eq!(compared["current"]["text"], "base");
+    assert_eq!(compared["incoming"]["text"], "incoming");
     let merged = call(&transport, &handle, 3, "versionedText.merge", json!({ "path": "merge.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api", "requestId": "merge-1" })).await;
     assert_eq!(merged["status"], "merged");
     assert!(merged["snapshot"].get("text").is_none());
@@ -4725,6 +5021,82 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
     )
     .await;
     assert_eq!(indexed[0]["path"], "merge.md");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merge_conflict_returns_the_exact_created_conflict_id() {
+    // MUTATION: omit conflictId from the merge response -> the string
+    // assertion fails instead of forcing callers to guess from an open list.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_versions(scratch.path(), "ws-rpcd-merge-conflict-id");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "ws-rpcd-merge-conflict-id"
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "path": "merge.md",
+            "text": "current",
+            "origin": "api",
+            "requestId": "move-main"
+        }),
+    )
+    .await;
+
+    let merged = call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.merge",
+        json!({
+            "path": "merge.md",
+            "sourceVersionId": "feature",
+            "targetVersionId": "main",
+            "origin": "api",
+            "requestId": "merge-conflict"
+        }),
+    )
+    .await;
+    assert_eq!(merged["status"], "conflict");
+    assert!(
+        merged["conflictId"].is_string(),
+        "merge returns its conflict id"
+    );
+    let conflict_id = merged["conflictId"].as_str().unwrap();
+    let conflicts = call(
+        &transport,
+        &handle,
+        4,
+        "conflicts.list",
+        json!({ "status": "open" }),
+    )
+    .await;
+    assert!(
+        conflicts
+            .as_array()
+            .expect("conflicts")
+            .iter()
+            .any(|conflict| conflict["id"] == conflict_id)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5018,6 +5390,8 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
                         text: "target".to_owned(),
                         moment_id: format!("target-{index:03}"),
                         metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         now_ms: 10 + index,
                         request_id: None,
@@ -5051,6 +5425,8 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
                         text: "source".to_owned(),
                         moment_id: format!("source-{index:03}"),
                         metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         now_ms: 600 + index,
                         request_id: None,
@@ -5083,6 +5459,8 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
                         text: path.to_owned(),
                         moment_id: moment_id.to_owned(),
                         metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         author_json: None,
                         now_ms: 900,
                         request_id: None,

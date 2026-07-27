@@ -29,6 +29,13 @@ import {
   type EngineYDocProviderSession,
 } from "../collab/ydocEngineProviderSession";
 import {
+  openEngineYdocProviderSessionRust,
+  type EngineYdocProviderSessionRust,
+  type EngineYdocProviderSessionRustOptions,
+} from "../collab/ydocEngineProviderSessionRust";
+import type { EngineTransport } from "@dohc/workspace-engine-client";
+import * as Y from "yjs";
+import {
   isTextMediaType,
   mediaTypeForPath,
   scanWorkspaceFilesTolerant,
@@ -51,8 +58,19 @@ import {
   readWorkspaceEnginePolicy,
   type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
+import { isRustEngineAdapterEnabled } from "./engineClientFlag";
+import {
+  isEngineSessionReconnectError,
+  type EngineWorkspaceSessions,
+} from "./engineWorkspaceSessions";
+import {
+  createCaptureLiveStores,
+  type CaptureTextFileMetadata,
+  type CaptureVersionedTextStore,
+} from "./workspaceEngineCaptureLiveStore";
 
 export const WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD = 3;
+export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
 // The JSON-RPC protocol version this desktop build speaks. A stale/incompatible
 // kernel binary that answers handshake with a different version (or that does
@@ -265,6 +283,10 @@ export interface WorkspaceEngineCapture {
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
   captureBatch(events: readonly WatcherEvent[]): void;
+  // Updates the daemon capture owner's live authorship state. Starting a run
+  // is ordered before the caller launches agent work; clearing first flushes
+  // the daemon so every write observed during the run retains its author.
+  setActiveAgentRun(run: ActiveAgentRun | null): Promise<void>;
   // Registers engine-originated disk writes the watcher is about to observe;
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
@@ -435,11 +457,18 @@ export interface WorkspaceEngineCaptureOptions {
   // never read the slot — only physically observed watcher batches carry an
   // author.
   activeAgentRun?: () => ActiveAgentRun | null;
-  // Dormant R13b composition slot. Accepted for future construction-time
-  // wiring but intentionally never read by any capture or Y.Doc path here.
-  rustEngineAdapter?: {
-    transport: import("@dohc/workspace-engine-client").EngineTransport;
-  };
+  // R13b dual-engine composition: when DOHC_RUST_ENGINE_ADAPTER=1 this
+  // reconnect-safe session owner supplies the daemon-backed text, secret, and
+  // Y.Doc paths. Injectable stores still take precedence in focused tests.
+  rustEngineSessions?: EngineWorkspaceSessions;
+  // The real Rust daemon owns filesystem observation and version
+  // materialization. Tests backed by the in-process loopback omit this because
+  // that transport has no autonomous watcher or disk writer.
+  daemonOwnsCapture?: boolean;
+  // Injectable only to simulate daemon generations in focused restart tests.
+  openRustYDocProviderSession?: (
+    options: EngineYdocProviderSessionRustOptions,
+  ) => Promise<EngineYdocProviderSessionRust>;
 }
 
 export interface EngineDiskWriter {
@@ -904,10 +933,39 @@ export function createWorkspaceEngineCapture(
     });
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
 
-  let store: VersionedTextStore | null = options.store ?? null;
+  const rustEngineEnabled = isRustEngineAdapterEnabled();
+  if (
+    rustEngineEnabled &&
+    !options.store &&
+    !options.secretStore &&
+    !options.rustEngineSessions
+  ) {
+    throw new Error(
+      "DOHC_RUST_ENGINE_ADAPTER requires Rust engine workspace sessions.",
+    );
+  }
+  const useRustEngine =
+    !options.store &&
+    !options.secretStore &&
+    options.rustEngineSessions !== undefined &&
+    rustEngineEnabled;
+  let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
+  function daemonStores() {
+    if (!options.rustEngineSessions) {
+      throw new Error("Rust engine workspace sessions are unavailable.");
+    }
+    liveStores ??= createCaptureLiveStores(
+      { workspaceId, rootPath },
+      options.rustEngineSessions,
+    );
+    return liveStores;
+  }
+
+  let store: CaptureVersionedTextStore | null = options.store ?? null;
   let secretStore: SecretFileStore | null = options.secretStore ?? null;
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
+  let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
 
   // THE AUTHORITATIVE live-session registry (WS-G2-C-2 gate fix). One entry per
   // path with a LIVE engine Y.Doc session; the single-canonical reservation
@@ -942,6 +1000,209 @@ export function createWorkspaceEngineCapture(
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
 
+  async function openRestartSafeRustYDocSession(input: {
+    versionId: string;
+    path: string;
+    contentKind?: YDocContentKind;
+    onRemoteUpdate: (update: Uint8Array) => void;
+    onSettled: (result: {
+      sha256: string;
+      markdown: string;
+    }) => void | Promise<void>;
+  }): Promise<EngineYDocProviderSession> {
+    const sessions = options.rustEngineSessions!;
+    const openProvider =
+      options.openRustYDocProviderSession ??
+      openEngineYdocProviderSessionRust;
+    const workspace = { workspaceId, rootPath };
+    let canonicalDoc: Y.Doc | null = null;
+    let current: EngineYdocProviderSessionRust | null = null;
+    let closed = false;
+    let operationChain: Promise<void> = Promise.resolve();
+    const openingRemoteUpdates = new WeakMap<
+      EngineYdocProviderSessionRust,
+      { updates: Uint8Array[]; installed: boolean }
+    >();
+
+    const append = <T>(operation: () => Promise<T>): Promise<T> => {
+      const pending = operationChain.then(operation);
+      operationChain = pending.then(
+        () => undefined,
+        () => undefined,
+      );
+      return pending;
+    };
+
+    const openGeneration = async (): Promise<EngineYdocProviderSessionRust> =>
+      await sessions.run(
+        workspace,
+        async (binding) => {
+          if (typeof binding.client.onEvent !== "function") {
+            throw new Error(
+              "Rust engine client does not expose Y.Doc event delivery.",
+            );
+          }
+          let opened: EngineYdocProviderSessionRust | null = null;
+          const opening = { updates: [] as Uint8Array[], installed: false };
+          const requestReconnect = (error: unknown): void => {
+            if (
+              opened === null ||
+              closed ||
+              !isEngineSessionReconnectError(error)
+            ) {
+              return;
+            }
+            const failed = opened;
+            void append(async () => {
+              if (current === failed) await rebind(failed);
+            }).catch((rebindError: unknown) => {
+              onError(`Y.Doc rebind of ${input.path}`, rebindError);
+            });
+          };
+          opened = await openProvider({
+            transport: binding.client as EngineTransport,
+            workspace: binding.workspace,
+            versionId: input.versionId,
+            path: input.path,
+            ...(input.contentKind
+              ? { contentKind: input.contentKind }
+              : {}),
+            onRemoteUpdate: (update) => {
+              if (current !== opened || canonicalDoc === null) {
+                if (!opening.installed) opening.updates.push(update);
+                return;
+              }
+              Y.applyUpdate(canonicalDoc, update);
+              input.onRemoteUpdate(update);
+            },
+            onLocalEditError: requestReconnect,
+            onSessionError: requestReconnect,
+            onSettled: input.onSettled,
+          });
+          openingRemoteUpdates.set(opened, opening);
+          return opened;
+        },
+        { retryTransportErrors: true },
+      );
+
+    const rebind = async (
+      failed: EngineYdocProviderSessionRust,
+    ): Promise<void> => {
+      if (current !== failed || canonicalDoc === null || closed) return;
+      const replacement = await openGeneration();
+      const opening = openingRemoteUpdates.get(replacement);
+      const updatesIncludedInRemoteDelta = opening?.updates.length ?? 0;
+
+      // Reconcile daemon-side edits into the stable renderer document first,
+      // then replay every renderer edit missing from the replacement. The
+      // exposed Y.Doc never changes identity across daemon generations.
+      const remoteDelta = Y.encodeStateAsUpdate(
+        replacement.doc,
+        Y.encodeStateVector(canonicalDoc),
+      );
+      if (remoteDelta.byteLength > 2) {
+        Y.applyUpdate(canonicalDoc, remoteDelta);
+        input.onRemoteUpdate(remoteDelta);
+      }
+      const replay = Y.encodeStateAsUpdate(
+        canonicalDoc,
+        Y.encodeStateVector(replacement.doc),
+      );
+      if (replay.byteLength > 2) {
+        await replacement.applyLocalUpdate(replay);
+      }
+      current = replacement;
+      if (opening) {
+        opening.installed = true;
+        openingRemoteUpdates.delete(replacement);
+        for (const update of opening.updates.slice(updatesIncludedInRemoteDelta)) {
+          Y.applyUpdate(canonicalDoc, update);
+          input.onRemoteUpdate(update);
+        }
+      }
+      await failed.close({ settle: false }).catch(() => undefined);
+    };
+
+    const executeWithReconnect = async <T>(
+      operation: (session: EngineYdocProviderSessionRust) => Promise<T>,
+    ): Promise<T> => {
+      if (closed || current === null) {
+        throw new Error(`Y.Doc session for ${input.path} is closed.`);
+      }
+      const generation = current;
+      try {
+        return await operation(generation);
+      } catch (error) {
+        if (!isEngineSessionReconnectError(error)) throw error;
+        await rebind(generation);
+        if (current === null) throw error;
+        return await operation(current);
+      }
+    };
+
+    current = await openGeneration();
+    canonicalDoc = current.doc;
+    const initialOpening = openingRemoteUpdates.get(current);
+    if (initialOpening) {
+      initialOpening.installed = true;
+      openingRemoteUpdates.delete(current);
+      for (const update of initialOpening.updates) {
+        input.onRemoteUpdate(update);
+      }
+    }
+    // A daemon update can arrive after the provider has encoded its initial
+    // state but before this generation is installed. The provider has already
+    // applied it to `doc`; encode the installed canonical state so the
+    // renderer cannot initialize from the stale pre-update snapshot.
+    const initialUpdate = Y.encodeStateAsUpdate(canonicalDoc);
+    const contentKind = current.contentKind;
+    const sessionPath = current.path;
+
+    return {
+      doc: canonicalDoc,
+      initialUpdate,
+      contentKind,
+      path: sessionPath,
+      applyLocalUpdate(update) {
+        void append(async () => {
+          if (canonicalDoc === null) {
+            throw new Error(`Y.Doc session for ${input.path} is closed.`);
+          }
+          Y.applyUpdate(canonicalDoc, update);
+          await executeWithReconnect(async (session) => {
+            await session.applyLocalUpdate(update);
+          });
+        }).catch((error: unknown) => {
+          onError(`Y.Doc local update of ${input.path}`, error);
+        });
+      },
+      settleNow(settleOptions) {
+        return append(async () =>
+          await executeWithReconnect(async (session) =>
+            await session.settleNow(settleOptions),
+          ),
+        );
+      },
+      applyExternalMarkdownEdit(markdown) {
+        return append(async () => {
+          const result = await executeWithReconnect(async (session) =>
+            await session.applyExternalMarkdownEdit(markdown),
+          );
+          return { supported: result.kind === "merged" };
+        });
+      },
+      close(closeOptions) {
+        return append(async () => {
+          if (closed || current === null) return;
+          await executeWithReconnect(async (session) => {
+            await session.close(closeOptions);
+          });
+          closed = true;
+        });
+      },
+    };
+  }
+
   // Flush (settle) + release every live Y.Doc session whose path matches, so a
   // destructive/rewriting op can never collide with a later stale settle.
   // Propagates the first teardown failure: the op fails and the entry is
@@ -966,7 +1227,9 @@ export function createWorkspaceEngineCapture(
   // The encrypted secret store (PR 08) shares engine.db; opened lazily so
   // workspaces without secret files never touch the key path.
   function secretStoreFor(): SecretFileStore {
-    secretStore ??= createSecretFileStore(rootPath);
+    secretStore ??= useRustEngine
+      ? daemonStores().secretStore
+      : createSecretFileStore(rootPath);
     return secretStore;
   }
 
@@ -1064,10 +1327,12 @@ export function createWorkspaceEngineCapture(
   }
 
   let initialized: Promise<VersionedTextStore> | null = null;
-  function engineStore(): Promise<VersionedTextStore> {
+  function engineStore(): Promise<CaptureVersionedTextStore> {
     if (!initialized) {
       const attempt = (async () => {
-        store ??= createVersionedTextStore(rootPath);
+        store ??= useRustEngine
+          ? daemonStores().store
+          : createVersionedTextStore(rootPath);
         await store.ensureMainVersion({ workspaceId });
         return store;
       })();
@@ -1088,6 +1353,30 @@ export function createWorkspaceEngineCapture(
   async function activeVersionIdOf(engine: VersionedTextStore): Promise<string> {
     const active = await engine.getActiveVersion({ workspaceId });
     return active?.id ?? ENGINE_MAIN_VERSION_ID;
+  }
+
+  async function listTextFileMetadata(
+    engine: VersionedTextStore,
+    versionId: string,
+  ): Promise<CaptureTextFileMetadata[]> {
+    const captureEngine = engine as CaptureVersionedTextStore;
+    if (captureEngine.listTextFileMetadata) {
+      return await captureEngine.listTextFileMetadata({ workspaceId, versionId });
+    }
+    const snapshots = await engine.listTextFiles({ workspaceId, versionId });
+    return snapshots.map((snapshot) => ({
+      path: snapshot.path,
+      objectId: snapshot.objectId,
+      contentKind: snapshot.contentKind ?? "text",
+      byteLength: snapshot.byteLength ?? Buffer.byteLength(snapshot.text, "utf8"),
+      sha256:
+        snapshot.sha256 ??
+        (snapshot.contentKind === "binary"
+          ? null
+          : sha256Utf8(snapshot.text)),
+      updatedAtMs: snapshot.updatedAtMs,
+      latestMomentId: snapshot.latestMomentId,
+    }));
   }
 
   function consumeExpectedEvent(
@@ -1378,14 +1667,14 @@ export function createWorkspaceEngineCapture(
     // path the tolerant scan FAILED to read (unreadable directory, racy
     // delete) is left alone: absent-from-a-degraded-listing is not evidence
     // of deletion, and retiring it here would record a false delete moment.
-    const tracked = await engine.listTextFiles({ workspaceId, versionId });
-    for (const snapshot of tracked) {
-      if (diskPaths.has(snapshot.path)) continue;
-      if (isUnderScanFailedPath(snapshot.path, failedPaths)) continue;
+    const tracked = await listTextFileMetadata(engine, versionId);
+    for (const file of tracked) {
+      if (diskPaths.has(file.path)) continue;
+      if (isUnderScanFailedPath(file.path, failedPaths)) continue;
       // TS-confirm the absence before retiring: the scan (kernel or TS) is
       // trusted for adds/updates but never to authorize a delete on its own.
-      if (!(await pathConfirmedAbsentOnDisk(rootPath, snapshot.path))) continue;
-      await deleteIfTracked(engine, versionId, snapshot.path, metadata);
+      if (!(await pathConfirmedAbsentOnDisk(rootPath, file.path))) continue;
+      await deleteIfTracked(engine, versionId, file.path, metadata);
     }
     // Same rule for the encrypted store: protected files deleted while dohc
     // was closed retire from the secret state (metadata-only moment).
@@ -1501,11 +1790,33 @@ export function createWorkspaceEngineCapture(
     previousVersionId: string,
     policy: WorkspaceEnginePolicySnapshot,
   ): Promise<MaterializeOperation[]> {
-    const targetFiles = await engine.listTextFiles({
-      workspaceId,
-      versionId: targetVersionId,
-    });
+    const targetFiles = await listTextFileMetadata(engine, targetVersionId);
     const targetPaths = new Set(targetFiles.map((file) => file.path));
+    const targetTextSnapshots = new Map(
+      (
+        await Promise.all(
+          targetFiles
+            .filter(
+              (file) =>
+                file.contentKind === "text" &&
+                policyTracksPath(file.path, policy),
+            )
+            .map(async (file) => {
+              const snapshot = await engine.readTextFile({
+                workspaceId,
+                versionId: targetVersionId,
+                path: file.path,
+              });
+              if (!snapshot || snapshot.contentKind === "binary") {
+                throw new Error(
+                  `Text content for ${file.path} is no longer available.`,
+                );
+              }
+              return [file.path, snapshot] as const;
+            }),
+        )
+      ),
+    );
     const operations: MaterializeOperation[] = [];
     for (const file of targetFiles) {
       if (!policyTracksPath(file.path, policy)) continue;
@@ -1524,16 +1835,27 @@ export function createWorkspaceEngineCapture(
         operations.push({ kind: "write-binary", path: file.path, bytes });
         continue;
       }
-      if (disk.kind === "text" && disk.text === file.text) continue;
-      operations.push({ kind: "write", path: file.path, text: file.text });
+      const snapshot = targetTextSnapshots.get(file.path);
+      if (!snapshot) {
+        throw new Error(`Text content for ${file.path} is no longer available.`);
+      }
+      if (
+        disk.kind === "text" &&
+        (file.sha256 !== null
+          ? disk.sha256 === file.sha256
+          : disk.sha256 === sha256Utf8(snapshot.text))
+      ) {
+        continue;
+      }
+      operations.push({ kind: "write", path: file.path, text: snapshot.text });
     }
     // Only paths the PREVIOUS version tracked are deletable: the pre-switch
     // reconcile captured every engine-ownable text file into it, so this set
     // is exactly "text files the engine owns on disk right now".
-    const previousFiles = await engine.listTextFiles({
-      workspaceId,
-      versionId: previousVersionId,
-    });
+    const previousFiles = await listTextFileMetadata(
+      engine,
+      previousVersionId,
+    );
     for (const file of previousFiles) {
       if (targetPaths.has(file.path)) continue;
       if (!policyTracksPath(file.path, policy)) continue;
@@ -1632,8 +1954,31 @@ export function createWorkspaceEngineCapture(
     }
   }
 
+  function pollDaemonCaptureHealth(): void {
+    if (stopped || daemonCaptureHealthTimer !== null) return;
+    enqueue("daemon capture health", () =>
+      reportCaptureOutcome(async () => {
+        const engine = await engineStore();
+        const status = await engine.watcherStatus?.();
+        return status === undefined
+          ? true
+          : status.running && !status.degraded && !status.terminal;
+      }),
+    );
+    const timer = setTimeout(() => {
+      if (daemonCaptureHealthTimer === timer) daemonCaptureHealthTimer = null;
+      pollDaemonCaptureHealth();
+    }, DAEMON_CAPTURE_HEALTH_POLL_MS);
+    daemonCaptureHealthTimer = timer;
+    daemonCaptureHealthTimer.unref?.();
+  }
+
   return {
     start() {
+      if (options.daemonOwnsCapture) {
+        pollDaemonCaptureHealth();
+        return;
+      }
       enqueue("startup reconciliation", () =>
         // reconcile() reports false when the tolerant scan skipped paths:
         // everything readable seeded, but the pass is degraded, so the
@@ -1644,6 +1989,7 @@ export function createWorkspaceEngineCapture(
 
     captureBatch(events) {
       if (events.length === 0) return;
+      if (options.daemonOwnsCapture) return;
       const batch = events.map((event) => ({ ...event }));
       // Attribution is decided HERE, at settle (captureBatch runs on the
       // watcher's settle path), not when the chain task executes — the legacy
@@ -1680,6 +2026,24 @@ export function createWorkspaceEngineCapture(
       );
     },
 
+    setActiveAgentRun(run) {
+      return enqueueResult("daemon capture authorship", async () => {
+        if (!options.daemonOwnsCapture) return;
+        const engine = await engineStore();
+        if (run === null) await engine.flushCapture?.();
+        await engine.setCaptureAuthor?.(
+          run === null
+            ? null
+            : {
+                kind: "agent",
+                agentId: run.agentId,
+                onBehalfOf: run.onBehalfOf,
+                agentRunId: run.agentRunId,
+              },
+        );
+      });
+    },
+
     registerExpectedEngineEvents,
 
     async openYDocSession(input) {
@@ -1690,30 +2054,47 @@ export function createWorkspaceEngineCapture(
       // write connection and node:sqlite deadlocks.
       const engine = await engineStore();
       const versionId = await activeVersionIdOf(engine);
-      const session = await openEngineYDocProviderSession({
-        store: engine,
-        rootDir: rootPath,
-        workspaceId,
-        versionId,
-        path: input.path,
-        ...(input.contentKind ? { contentKind: input.contentKind } : {}),
-        onRemoteUpdate: input.onRemoteUpdate,
-        onSettled: async (result) => {
-          // Register the settle's self-write (sha of the projected markdown) so
-          // even a watcher event that lands after the live-path guard lifts on
-          // close is recognized as our own; then write the on-disk .md the
-          // user/agent sees, through the contained disk writer.
-          const cancel = registerExpectedEngineEvents([
-            { path: input.path, operation: "write", sha256: result.sha256 },
-          ]);
-          try {
-            await diskWriter.writeTextFile(join(rootPath, input.path), result.markdown);
-          } catch (error) {
-            cancel();
-            onError(`ydoc settle disk write of ${input.path}`, error);
-          }
-        },
-      });
+      const onSettled = async (result: {
+        sha256: string;
+        markdown: string;
+      }) => {
+        // Register the settle's self-write (sha of the projected markdown) so
+        // even a watcher event that lands after the live-path guard lifts on
+        // close is recognized as our own; then write the on-disk .md the
+        // user/agent sees, through the contained disk writer.
+        const cancel = registerExpectedEngineEvents([
+          { path: input.path, operation: "write", sha256: result.sha256 },
+        ]);
+        try {
+          await diskWriter.writeTextFile(
+            join(rootPath, input.path),
+            result.markdown,
+          );
+        } catch (error) {
+          cancel();
+          onError(`ydoc settle disk write of ${input.path}`, error);
+        }
+      };
+      const session = useRustEngine
+        ? await openRestartSafeRustYDocSession({
+            versionId,
+            path: input.path,
+            ...(input.contentKind
+              ? { contentKind: input.contentKind }
+              : {}),
+            onRemoteUpdate: input.onRemoteUpdate,
+            onSettled,
+          })
+        : await openEngineYDocProviderSession({
+            store: engine,
+            rootDir: rootPath,
+            workspaceId,
+            versionId,
+            path: input.path,
+            ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+            onRemoteUpdate: input.onRemoteUpdate,
+            onSettled,
+          });
       // Register the live session only after the open succeeds (a secret/
       // not-found/already-live rejection propagates to the caller and never
       // guards a path that has no session). The close below drops the entry
@@ -1798,16 +2179,20 @@ export function createWorkspaceEngineCapture(
         );
         // Fork from exactly what's on disk right now — capture the latest
         // edits first so the new version starts as a faithful copy.
-        await reconcileDiskIntoVersion(
-          engine,
-          fromVersionId,
-          policy,
-          {
-            origin: "local-file",
-            summary: "Saved latest edits",
-            correlationId: `version-create-${createId()}`,
-          },
-        );
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        } else {
+          await reconcileDiskIntoVersion(
+            engine,
+            fromVersionId,
+            policy,
+            {
+              origin: "local-file",
+              summary: "Saved latest edits",
+              correlationId: `version-create-${createId()}`,
+            },
+          );
+        }
         const version = await engine.createNamedVersion({
           workspaceId,
           name,
@@ -1837,7 +2222,7 @@ export function createWorkspaceEngineCapture(
           return { activeVersionId: fromVersionId, changedFileCount: 0 };
         }
         // Fail closed before any mutation: an unknown target throws here.
-        await engine.listTextFiles({ workspaceId, versionId });
+        await listTextFileMetadata(engine, versionId);
         // WS-G2-C-2 (gate fix 2): a live Y.Doc session pins its OLD versionId+
         // path. Materializing another version into the same folder while it
         // stays live would let a later settle write a STALE projection into the
@@ -1848,6 +2233,32 @@ export function createWorkspaceEngineCapture(
           () => true,
           "Saved latest edits before switching versions",
         );
+        if (options.daemonOwnsCapture) {
+          // The daemon watcher owns the source version. Force it to settle
+          // before comparing heads, otherwise both the changed-file count and
+          // the version being left can be based on pre-save state.
+          await engine.flushCapture?.();
+          const [before, after, secretOperations] = await Promise.all([
+            listTextFileMetadata(engine, fromVersionId),
+            listTextFileMetadata(engine, versionId),
+            // The daemon performs the actual materialization after setActive;
+            // this plan is used only to include protected paths in the result.
+            planSecretMaterialization(versionId, fromVersionId),
+          ]);
+          const beforeByPath = new Map(
+            before.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
+          );
+          const afterByPath = new Map(
+            after.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
+          );
+          const changedPaths = new Set([...beforeByPath.keys(), ...afterByPath.keys()]);
+          let changedFileCount = secretOperations.length;
+          for (const path of changedPaths) {
+            if (beforeByPath.get(path) !== afterByPath.get(path)) changedFileCount += 1;
+          }
+          await engine.setActiveVersion({ workspaceId, versionId });
+          return { activeVersionId: versionId, changedFileCount };
+        }
         // Nothing is ever lost: the current disk state (including edits still
         // inside the watcher settle window) is captured into the version the
         // user is leaving.
@@ -1902,16 +2313,20 @@ export function createWorkspaceEngineCapture(
         // Capture the latest disk edits first so the comparison reflects what
         // the user actually sees in the folder.
         const activeVersionId = await activeVersionIdOf(engine);
-        await reconcileDiskIntoVersion(
-          engine,
-          activeVersionId,
-          policy,
-          {
-            origin: "local-file",
-            summary: "Saved latest edits",
-            correlationId: `version-compare-${createId()}`,
-          },
-        );
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        } else {
+          await reconcileDiskIntoVersion(
+            engine,
+            activeVersionId,
+            policy,
+            {
+              origin: "local-file",
+              summary: "Saved latest edits",
+              correlationId: `version-compare-${createId()}`,
+            },
+          );
+        }
         const textChanges = await compareVersionFiles(engine, {
           workspaceId,
           sourceVersionId,
@@ -1952,16 +2367,20 @@ export function createWorkspaceEngineCapture(
         );
         // Capture the latest disk edits so the merge sees them (whichever
         // side is active).
-        await reconcileDiskIntoVersion(
-          engine,
-          activeVersionId,
-          policy,
-          {
-            origin: "local-file",
-            summary: "Saved latest edits",
-            correlationId,
-          },
-        );
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        } else {
+          await reconcileDiskIntoVersion(
+            engine,
+            activeVersionId,
+            policy,
+            {
+              origin: "local-file",
+              summary: "Saved latest edits",
+              correlationId,
+            },
+          );
+        }
         const versions = await engine.listVersions({ workspaceId });
         const source = versions.find((version) => version.id === sourceVersionId);
         if (!source || source.kind !== "named") {
@@ -2022,10 +2441,14 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           mergedFileCount += 1;
-          if (result.operation === "write") {
-            materializations.push(await materializeWriteForSnapshot(engine, result.write.snapshot));
-          } else {
-            materializations.push({ kind: "delete", path: change.path });
+          if (!options.daemonOwnsCapture) {
+            if (result.operation === "write") {
+              materializations.push(
+                await materializeWriteForSnapshot(engine, result.write.snapshot),
+              );
+            } else {
+              materializations.push({ kind: "delete", path: change.path });
+            }
           }
         }
         // Secret files merge through the encrypted path (PR 08): whole-file,
@@ -2093,6 +2516,9 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("resolve conflict", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        }
         const result = await engine.resolveTextConflict({
           workspaceId,
           conflictId,
@@ -2131,6 +2557,9 @@ export function createWorkspaceEngineCapture(
     async listMoments(input = {}) {
       await chain;
       const engine = await engineStore();
+      if (options.daemonOwnsCapture) {
+        await engine.flushCapture?.();
+      }
       const activeVersionId = await activeVersionIdOf(engine);
       const page = await engine.listMoments({
         workspaceId,
@@ -2199,6 +2628,9 @@ export function createWorkspaceEngineCapture(
     async readMoment(momentId) {
       await chain;
       const engine = await engineStore();
+      if (options.daemonOwnsCapture) {
+        await engine.flushCapture?.();
+      }
       const moment = await engine.getMoment({ workspaceId, momentId });
       if (moment) return { protected: false, moment };
       // Protected moments live in the secret store; the detail is
@@ -2216,6 +2648,9 @@ export function createWorkspaceEngineCapture(
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        }
         const moment = await engine.getMoment({ workspaceId, momentId });
         if (!moment) {
           // Protected restore (PR 08): the whole round trip stays encrypted —
@@ -2423,6 +2858,9 @@ export function createWorkspaceEngineCapture(
       // Drain the chain so a just-captured file is immediately chat-able.
       await chain;
       const engine = await engineStore();
+      if (options.daemonOwnsCapture) {
+        await engine.flushCapture?.();
+      }
       const activeVersionId = await activeVersionIdOf(engine);
       const snapshot = await engine.readTextFile({
         workspaceId,
@@ -2895,23 +3333,37 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    flush() {
-      return chain;
+    async flush() {
+      await chain;
+      if (options.daemonOwnsCapture) {
+        await (await engineStore()).flushCapture?.();
+      }
     },
 
     async stop() {
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only NEW work is refused.
       stopped = true;
-      await chain;
-      // Release the SQLite handles for the stores THIS capture created, so
-      // repeated workspace switches never accumulate handles/WAL locks. An
-      // injected store belongs to its creator and is left open.
-      if (!options.store && store) {
-        await store.close().catch(() => undefined);
+      if (daemonCaptureHealthTimer !== null) {
+        clearTimeout(daemonCaptureHealthTimer);
+        daemonCaptureHealthTimer = null;
       }
-      if (!options.secretStore && secretStore) {
-        await secretStore.close().catch(() => undefined);
+      await chain;
+      try {
+        if (options.daemonOwnsCapture && store) {
+          await store.flushCapture?.();
+        }
+      } finally {
+        // Release the SQLite handles for the stores THIS capture created, so
+        // repeated workspace switches never accumulate handles/WAL locks. An
+        // injected store belongs to its creator and is left open. A degraded
+        // daemon flush must not strand either close.
+        if (!options.store && store) {
+          await store.close().catch(() => undefined);
+        }
+        if (!options.secretStore && secretStore) {
+          await secretStore.close().catch(() => undefined);
+        }
       }
     },
   };

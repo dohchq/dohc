@@ -1605,7 +1605,11 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   captureFor: async (workspace, hooks) =>
     findWorkspace(workspace.workspaceId)?.shareView
       ? null
-      : captureForFlaggedWorkspace(workspace, hooks),
+      : captureForFlaggedWorkspace(
+          workspace,
+          hooks,
+          rustEngineWorkspaceSessions,
+        ),
 });
 const panelAgentRunSlots = new Map<string, string>();
 // Local agent integration: owns the per-workspace MCP child + active-run slot
@@ -1616,18 +1620,18 @@ const panelAgentRunSlots = new Map<string, string>();
 // launches its own copy via the Settings config snippet.
 const agentIntegration = createAgentIntegration({
   rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
-  setAgentRun: (workspaceId, run) => {
+  setAgentRun: async (workspaceId, run) => {
     if (run) {
       const previous = panelAgentRunSlots.get(workspaceId);
-      if (previous) activity.clearAgentRun(workspaceId, previous);
-      if (!activity.claimAgentRun(workspaceId, run)) {
+      if (previous) await activity.clearAgentRun(workspaceId, previous);
+      if (!(await activity.claimAgentRun(workspaceId, run))) {
         throw new Error("Another agent run is already active in this workspace.");
       }
       panelAgentRunSlots.set(workspaceId, run.agentRunId);
       return;
     }
     const ownedRunId = panelAgentRunSlots.get(workspaceId);
-    if (ownedRunId) activity.clearAgentRun(workspaceId, ownedRunId);
+    if (ownedRunId) await activity.clearAgentRun(workspaceId, ownedRunId);
     panelAgentRunSlots.delete(workspaceId);
   },
   home: stateDir(),
@@ -1876,10 +1880,14 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
   const workspace = findWorkspace(workspaceId);
   if (!workspace || sharedViewOf(workspaceId)) return false;
   const scoped = (async () => {
-    const capture = await captureForFlaggedWorkspace(workspace, {
-      activeAgentRun: () => null,
-      onCaptureOutcome: () => undefined,
-    });
+    const capture = await captureForFlaggedWorkspace(
+      workspace,
+      {
+        activeAgentRun: () => null,
+        onCaptureOutcome: () => undefined,
+      },
+      rustEngineWorkspaceSessions,
+    );
     if (!capture) return false;
     try {
       // A normal open may have started while the scoped capture was built.
@@ -2101,16 +2109,16 @@ const chatDispatchService = createChatDispatchService({
     });
   },
   onRunUpdated: () => notifyRenderer(),
-  setRunAttribution: (workspaceId, run) => {
+  setRunAttribution: async (workspaceId, run) => {
     if (run) {
-      if (!activity.claimAgentRun(workspaceId, run)) {
+      if (!(await activity.claimAgentRun(workspaceId, run))) {
         throw new Error("Another agent run is already active in this workspace.");
       }
       dispatchAgentRunSlots.set(workspaceId, run.agentRunId);
       return;
     }
     const ownedRunId = dispatchAgentRunSlots.get(workspaceId);
-    if (ownedRunId) activity.clearAgentRun(workspaceId, ownedRunId);
+    if (ownedRunId) await activity.clearAgentRun(workspaceId, ownedRunId);
     dispatchAgentRunSlots.delete(workspaceId);
   },
   runSlotOccupied: (workspaceId) => activity.hasAgentRun(workspaceId),
@@ -2597,7 +2605,7 @@ app.on("will-quit", (event) => {
     .then((server) => server?.close())
     .catch(() => undefined),
   );
-  agentIntegration.stopAll();
+  const agentIntegrationStop = agentIntegration.stopAll().catch(() => undefined);
   // Linked chat stores are lazy singletons with SQLite handles on the shared
   // engine.db; close them at quit so WAL locks never outlive the app.
   const chatStoreStop = chatDispatchStop.then(() =>
@@ -2620,7 +2628,15 @@ app.on("will-quit", (event) => {
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
-  const rustEngineStop = Promise.all([chatStoreStop, dispatchStoreStop])
+  const captureStop = engineYDocStop
+      .then(() => chatDispatchStop)
+      .then(() => agentIntegrationStop)
+      .then(() => activity.stopAll());
+  const rustEngineStop = Promise.all([
+    captureStop.catch(() => undefined),
+    chatStoreStop,
+    dispatchStoreStop,
+  ])
     .then(async () => await closeAllRelayTransportWorkspaces())
     .catch(() => undefined)
     .then(async () => await rustEngineDaemon?.stop());
@@ -2629,7 +2645,8 @@ app.on("will-quit", (event) => {
       agentSessionStop,
       cliServerStop,
       chatDispatchStop,
-      engineYDocStop.then(() => chatDispatchStop).then(() => activity.stopAll()),
+      agentIntegrationStop,
+      captureStop,
       chatStoreStop,
       dispatchStoreStop,
       searchStoreStop,

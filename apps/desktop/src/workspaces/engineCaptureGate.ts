@@ -5,6 +5,7 @@ import {
 } from "./workspaceEngineCapture";
 import { readWorkspaceSettingsFile } from "./workspaceSettingsFile";
 import type { WorkspaceCaptureHooks } from "./workspaceActivity";
+import type { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 
 export { configureWorkspaceKernelRuntime };
 
@@ -20,6 +21,7 @@ export { configureWorkspaceKernelRuntime };
 export async function captureForFlaggedWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   hooks: WorkspaceCaptureHooks,
+  rustEngineSessions?: EngineWorkspaceSessions | null,
 ): Promise<WorkspaceEngineCapture | null> {
   const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
   if (!settings.experimental.workspaceEngineAlpha) return null;
@@ -33,5 +35,8 @@ export async function captureForFlaggedWorkspace(
     // PR 0N-1: batches settled while a dohc-tracked agent run is active are
     // stamped with agent authorship (History shows "<User Name>'s agent").
     activeAgentRun: hooks.activeAgentRun,
+    ...(rustEngineSessions
+      ? { rustEngineSessions, daemonOwnsCapture: true }
+      : {}),
   });
 }

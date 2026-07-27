@@ -3,8 +3,12 @@ import {
   WORKSPACE_METHOD,
   WorkspaceDaemonRequester,
   decodeWorkspaceResult,
+  type AgentAuthor,
   type WorkspaceHandle,
 } from "@dohc/workspace-engine-client";
+import { randomBytes } from "node:crypto";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   EngineDaemonUnavailableError,
   type EngineDaemonClient,
@@ -52,7 +56,17 @@ export interface EngineWorkspaceSessionsOptions {
 const TRANSPORT_REBIND_ATTEMPTS = 6;
 const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
 const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
+const SHADOW_CLONE_TOKEN = /^[0-9a-f]{64}$/;
 export const WORKSPACE_OPEN_DEADLINE_MS = 2_000;
+
+function isAlreadyExists(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "EEXIST"
+  );
+}
 
 export class EngineWorkspaceRebindError extends Error {
   readonly workspaceId: string;
@@ -87,6 +101,10 @@ function isTransportError(error: unknown): boolean {
   );
 }
 
+export function isEngineSessionReconnectError(error: unknown): boolean {
+  return requiresReconnect(error) || isTransportError(error);
+}
+
 function daemonMayBeRelaunching(error: unknown): boolean {
   return (
     isTransportError(error) || error instanceof EngineDaemonUnavailableError
@@ -108,6 +126,8 @@ async function defaultSleep(ms: number): Promise<void> {
 
 export class EngineWorkspaceSessions {
   private readonly entries = new Map<string, SessionEntry>();
+  private readonly preparations = new Map<string, Promise<void>>();
+  private readonly captureAuthors = new Map<string, AgentAuthor | null>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private acceptingRuns = true;
@@ -147,12 +167,17 @@ export class EngineWorkspaceSessions {
           const retryAfterTransport =
             options.retryTransportErrors === true && isTransportError(error);
           if (
+            (retryAfterReconnect || isTransportError(error)) &&
+            entry.binding === binding
+          ) {
+            entry.binding = null;
+          }
+          if (
             (!retryAfterReconnect && !retryAfterTransport) ||
             attempt >= maxAttempts
           ) {
             throw error;
           }
-          if (entry.binding === binding) entry.binding = null;
           rebindStarted = true;
           lastError = error;
           if (retryAfterTransport) {
@@ -166,7 +191,12 @@ export class EngineWorkspaceSessions {
     }
   }
 
+  rememberCaptureAuthor(workspaceId: string, author: AgentAuthor | null): void {
+    this.captureAuthors.set(workspaceId, author);
+  }
+
   async closeWorkspace(workspaceId: string): Promise<void> {
+    this.captureAuthors.delete(workspaceId);
     const entry = this.entries.get(workspaceId);
     if (!entry) return;
     if (entry.closing) {
@@ -236,8 +266,8 @@ export class EngineWorkspaceSessions {
 
   private async waitForIdle(entry: SessionEntry): Promise<void> {
     if (entry.activeRuns === 0) return;
-    await new Promise<void>((resolve) => {
-      entry.idleWaiters.add(resolve);
+    await new Promise<void>((resolveIdle) => {
+      entry.idleWaiters.add(resolveIdle);
     });
   }
 
@@ -318,7 +348,9 @@ export class EngineWorkspaceSessions {
     client: EngineDaemonClient,
     workspace: EngineWorkspace,
   ): Promise<EngineWorkspaceBinding> {
+    await this.prepareWorkspace(workspace.rootPath);
     const requester = new WorkspaceDaemonRequester(client);
+    const hasCaptureAuthor = this.captureAuthors.has(workspace.workspaceId);
     const raw = await requester.request(
       WORKSPACE_METHOD.open,
       {
@@ -328,11 +360,95 @@ export class EngineWorkspaceSessions {
         // A daemon-side open must therefore preserve running claims on both a
         // fresh desktop boot and a sidecar-only rebind.
         recoverRunningDispatches: false,
+        ...(hasCaptureAuthor
+          ? {
+              captureAuthor:
+                this.captureAuthors.get(workspace.workspaceId) ?? null,
+            }
+          : {}),
       },
       { deadlineMs: WORKSPACE_OPEN_DEADLINE_MS },
     );
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
     return { client, workspace: opened.workspace as WorkspaceHandle };
+  }
+
+  private async prepareWorkspace(rootPath: string): Promise<void> {
+    let preparation = this.preparations.get(rootPath);
+    if (!preparation) {
+      preparation = (async () => {
+        const workspaceRoot = resolve(rootPath);
+        const rootInfo = await lstat(workspaceRoot);
+        if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
+          throw new Error(
+            `Rust engine workspace root must be a real directory: ${rootPath}.`,
+          );
+        }
+        const realRoot = await realpath(workspaceRoot);
+        const dohcDirectory = join(workspaceRoot, ".dohc");
+        const markerDirectory = join(dohcDirectory, "engine");
+        const markerPath = join(markerDirectory, "SHADOW_CLONE");
+        await this.ensureRealDirectory(dohcDirectory, realRoot);
+        await this.ensureRealDirectory(markerDirectory, realRoot);
+        try {
+          await writeFile(markerPath, randomBytes(32).toString("hex"), {
+            encoding: "utf8",
+            flag: "wx",
+            mode: 0o600,
+          });
+        } catch (error) {
+          if (!isAlreadyExists(error)) throw error;
+          const markerInfo = await lstat(markerPath);
+          if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) {
+            throw new Error(
+              `Rust engine shadow marker must be a real file: ${markerPath}.`,
+            );
+          }
+          const token = await readFile(markerPath, "utf8");
+          if (!SHADOW_CLONE_TOKEN.test(token)) {
+            throw new Error(
+              `Rust engine shadow marker is invalid for ${rootPath}.`,
+            );
+          }
+        }
+      })();
+      this.preparations.set(rootPath, preparation);
+      const release = () => {
+        if (this.preparations.get(rootPath) === preparation) {
+          this.preparations.delete(rootPath);
+        }
+      };
+      void preparation.then(release, release);
+    }
+    await preparation;
+  }
+
+  private async ensureRealDirectory(
+    directory: string,
+    realRoot: string,
+  ): Promise<void> {
+    try {
+      await mkdir(directory);
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+    }
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error(
+        `Rust engine directory must not be a symlink: ${directory}.`,
+      );
+    }
+    const resolvedDirectory = await realpath(directory);
+    const escape = relative(realRoot, resolvedDirectory);
+    if (
+      escape === ".." ||
+      escape.startsWith(`..${sep}`) ||
+      isAbsolute(escape)
+    ) {
+      throw new Error(
+        `Rust engine directory escapes the workspace: ${directory}.`,
+      );
+    }
   }
 
   private async closeBinding(binding: EngineWorkspaceBinding): Promise<void> {

@@ -34,9 +34,11 @@ pub struct WireLimits {
 impl WireLimits {
     /// Spike defaults. Real values are frozen with the protocol at Gate 0.
     pub const SPIKE_DEFAULTS: WireLimits = WireLimits {
-        max_frame_bytes: 1024 * 1024,
+        // One accepted 1 MiB UTF-8 secret may expand to six JSON bytes per
+        // byte when every character needs escaping, plus its RPC envelope.
+        max_frame_bytes: 8 * 1024 * 1024,
         max_blob_chunk_bytes: 256 * 1024,
-        max_string_bytes: 64 * 1024,
+        max_string_bytes: 8 * 1024 * 1024,
         max_collection_len: 16_384,
         max_batch_len: 64,
         max_json_depth: 32,

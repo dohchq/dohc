@@ -108,9 +108,10 @@ pub enum SnapshotContent {
 pub struct SnapshotMetadata {
     pub object_id: String,
     pub path: String,
-    /// Byte length of a TEXT head; None for binary heads (their length
-    /// comes with `versionedBinary.read`'s metadata).
-    pub text_byte_length: Option<i64>,
+    /// Digest of the current content, regardless of text/binary kind.
+    pub sha256: String,
+    /// Byte length of the current content, regardless of text/binary kind.
+    pub byte_length: i64,
     pub updated_at_ms: i64,
     pub latest_moment_id: String,
     pub metadata_origin: String,
@@ -262,6 +263,9 @@ pub struct MomentRecord {
     pub after_byte_length: Option<i64>,
     pub before_text: Option<String>,
     pub before_byte_length: Option<i64>,
+    /// Version-local path of the concrete preimage. Rename moments differ
+    /// from `path`, which is the destination alias.
+    pub before_path: Option<String>,
 }
 
 /// A keyset page of moments (newest first). Mirrors the inventory contract for
@@ -303,6 +307,8 @@ pub struct WriteText {
     /// The (unique-per-workspace) id to pin on the new moment.
     pub moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
     /// Optional idempotency key: a same-payload retry replays exactly-once.
@@ -320,6 +326,8 @@ pub struct WriteBinary {
     pub bytes: Vec<u8>,
     pub moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
     /// Optional idempotency key: a same-payload retry replays exactly-once.
@@ -408,6 +416,8 @@ pub struct DeleteTextFile {
     pub moment_id: String,
     pub request_id: Option<String>,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
 }
@@ -422,6 +432,8 @@ pub struct RenameTextFile {
     pub moment_id: String,
     pub request_id: Option<String>,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
 }

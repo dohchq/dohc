@@ -342,23 +342,41 @@ export function createWorkspaceActivity(
   // capture reads this slot when a batch settles, so writes made during the
   // run are attributed to the agent. Throws if the workspace isn't open — a
   // run can only attach to a live watcher.
-  function setAgentRun(workspaceId: string, run: ActiveAgentRun | null): void {
+  async function setAgentRun(
+    workspaceId: string,
+    run: ActiveAgentRun | null,
+  ): Promise<void> {
     const entry = watched.get(workspaceId);
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
+    await entry.capture?.setActiveAgentRun(run);
     entry.agentRun = run;
   }
 
-  function claimAgentRun(workspaceId: string, run: ActiveAgentRun): boolean {
+  async function claimAgentRun(
+    workspaceId: string,
+    run: ActiveAgentRun,
+  ): Promise<boolean> {
     const entry = watched.get(workspaceId);
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
     if (entry.agentRun !== null) return false;
     entry.agentRun = run;
-    return true;
+    try {
+      await entry.capture?.setActiveAgentRun(run);
+      return true;
+    } catch (error) {
+      if (entry.agentRun?.agentRunId === run.agentRunId) entry.agentRun = null;
+      throw error;
+    }
   }
 
-  function clearAgentRun(workspaceId: string, agentRunId: string): void {
+  async function clearAgentRun(
+    workspaceId: string,
+    agentRunId: string,
+  ): Promise<void> {
     const entry = watched.get(workspaceId);
     if (!entry) return;
+    if (entry.agentRun?.agentRunId !== agentRunId) return;
+    await entry.capture?.setActiveAgentRun(null);
     if (entry.agentRun?.agentRunId === agentRunId) entry.agentRun = null;
   }
 

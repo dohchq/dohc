@@ -334,7 +334,12 @@ describe("versioned typed loopback", () => {
     };
     expect(
       await call(engine, 5, VERSIONED_METHOD.versionsCompare, compareParams),
-    ).toEqual({ status: "merged" });
+    ).toMatchObject({
+      path: "seed.md",
+      status: "incoming-changed",
+      targetVersionId: "main",
+      sourceVersionId: named.id,
+    });
     const pageParams: VersionsCompareFilesParams = {
       sourceVersionId: named.id,
       targetVersionId: "main",
@@ -612,6 +617,7 @@ describe("versioned typed loopback", () => {
       path: ".env",
       beforeMomentId: "secret-apply",
       momentId: "secret-restore",
+      origin: "restore",
     };
     expect(
       decodeSecretRestoreResult(
@@ -760,7 +766,10 @@ describe("loopback contract enforcement", () => {
         targetVersionId: "main",
         path: "compare.md",
       }),
-    ).toEqual({ status: "unchanged" });
+    ).toMatchObject({
+      path: "compare.md",
+      status: "current-changed",
+    });
   });
 
   it("refuses rollback when the mutation moment belongs to another path", async () => {
@@ -1463,6 +1472,7 @@ describe("loopback contract enforcement", () => {
       path: ".env",
       beforeMomentId: "restore-retry-b",
       momentId: "restore-retry",
+      origin: "restore",
     };
     decodeSecretRestoreResult(await call(engine, 3, VERSIONED_METHOD.secretsRestore, params));
 
@@ -2071,7 +2081,7 @@ describe("loopback contract enforcement", () => {
     // MUTATION: remove the name lookup before minting the id -> duplicate succeeds.
   });
 
-  it("classifies overlapping divergent edits as conflict and disjoint edits as merged", async () => {
+  it("returns all three states for both overlapping and cleanly mergeable divergence", async () => {
     const engine = new VersionedLoopbackEngine();
     engine.seedTextFile({ workspace: WORKSPACE, path: "overlap.md", text: "a\nb\nc" });
     engine.seedTextFile({ workspace: WORKSPACE, path: "disjoint.md", text: "a\nb\nc" });
@@ -2113,14 +2123,24 @@ describe("loopback contract enforcement", () => {
         targetVersionId: "main",
         path: "overlap.md",
       }),
-    ).toEqual({ status: "conflict" });
+    ).toMatchObject({
+      path: "overlap.md",
+      status: "diverged",
+      current: { text: "a\ntarget\nc" },
+      incoming: { text: "a\nsource\nc" },
+    });
     expect(
       await call(engine, 7, VERSIONED_METHOD.versionsCompare, {
         sourceVersionId: feature.id,
         targetVersionId: "main",
         path: "disjoint.md",
       }),
-    ).toEqual({ status: "merged" });
+    ).toMatchObject({
+      path: "disjoint.md",
+      status: "diverged",
+      current: { text: "target\nb\nc" },
+      incoming: { text: "a\nb\nsource" },
+    });
   });
 
   it("writes clean three-way merges and refuses overlapping merge hunks", async () => {

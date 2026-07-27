@@ -336,3 +336,4 @@ is recoverable and visible, an advanced cursor over a dropped lineage is
 neither. If you would rather take the silent-drop behaviour for liveness, say
 so and this flips; the program's judgement is that data-loss-by-ack is the worse
 failure during a cutover.
+

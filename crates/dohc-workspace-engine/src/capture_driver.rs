@@ -30,8 +30,8 @@ use dohc_engine_files::{
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Serializes every capture reconcile+apply with an active-version switch.
@@ -1504,6 +1504,7 @@ pub(crate) struct CaptureDriver {
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
     status: Arc<DriverStatus>,
+    author_json: Arc<Mutex<Option<String>>>,
     /// Bounded: a caller flood means capture is already busy doing exactly
     /// what flush asks for; excess callers wait for a slot.
     flush_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>>,
@@ -1539,10 +1540,12 @@ impl CaptureDriver {
         workspace_id: String,
         self_writes: SelfWriteSuppression,
         apply_gate: ApplyGate,
+        initial_author_json: Option<String>,
         #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
     ) -> CaptureDriver {
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
+        let author_json = Arc::new(Mutex::new(initial_author_json));
         let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1555,6 +1558,7 @@ impl CaptureDriver {
             self_writes,
             cancel.clone(),
             Arc::clone(&status),
+            Arc::clone(&author_json),
             baseline_tx,
             flush_rx,
             apply_gate,
@@ -1566,6 +1570,7 @@ impl CaptureDriver {
             cancel,
             task: Some(task),
             status,
+            author_json,
             flush_tx,
             baseline,
             refresh_epoch,
@@ -1581,6 +1586,20 @@ impl CaptureDriver {
         &self,
     ) -> tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>> {
         self.flush_tx.clone()
+    }
+
+    pub(crate) fn set_author_json(&self, author_json: Option<String>) {
+        *self
+            .author_json
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = author_json;
+    }
+
+    pub(crate) fn author_json(&self) -> Option<String> {
+        self.author_json
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Wait until the startup baseline reconcile has been applied (or the
@@ -2257,6 +2276,7 @@ struct RealEnv {
     actor: ActorHandle,
     workspace_id: String,
     status: Arc<DriverStatus>,
+    author_json: Arc<Mutex<Option<String>>>,
     self_writes: SelfWriteSuppression,
     apply_gate: ApplyGate,
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
@@ -2264,7 +2284,25 @@ struct RealEnv {
     apply_probe: Option<CaptureApplyProbe>,
 }
 
-impl RealEnv {}
+impl RealEnv {
+    fn capture_author(&self) -> Option<String> {
+        self.author_json
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn apply_context(&self) -> ApplyRunContext<'_> {
+        ApplyRunContext {
+            root: &self.root,
+            actor: &self.actor,
+            workspace_id: &self.workspace_id,
+            status: &self.status,
+            self_writes: &self.self_writes,
+            author_json: self.capture_author(),
+        }
+    }
+}
 
 impl DriverEnv for RealEnv {
     type Layer = FilesLayer;
@@ -2320,16 +2358,7 @@ impl DriverEnv for RealEnv {
         .await
         .map_err(|_| ())?;
 
-        let mut settled = apply_run(
-            &self.root,
-            &self.actor,
-            &self.workspace_id,
-            &fresh,
-            initial,
-            &self.status,
-            &self.self_writes,
-        )
-        .await;
+        let mut settled = apply_run(self.apply_context(), &fresh, initial).await;
         // The open barrier must not release on a FAILED baseline: a caller
         // whose first write lands before the retry could have it overwritten
         // by the retry's capture of stale closed-period disk bytes. Retry a
@@ -2349,18 +2378,7 @@ impl DriverEnv for RealEnv {
                 .reconcile_if_dirty(cancel.child_token())
                 .await
             {
-                Ok(run) => {
-                    apply_run(
-                        &self.root,
-                        &self.actor,
-                        &self.workspace_id,
-                        &fresh,
-                        run,
-                        &self.status,
-                        &self.self_writes,
-                    )
-                    .await
-                }
+                Ok(run) => apply_run(self.apply_context(), &fresh, run).await,
                 Err(_) => false,
             };
         }
@@ -2417,16 +2435,7 @@ impl DriverEnv for RealEnv {
                 }
             }
             Ok(run) => {
-                let clean = apply_run(
-                    &self.root,
-                    &self.actor,
-                    &self.workspace_id,
-                    layer,
-                    run,
-                    &self.status,
-                    &self.self_writes,
-                )
-                .await;
+                let clean = apply_run(self.apply_context(), layer, run).await;
                 // A clean-looking tick with a NON-EMPTY quarantine is not
                 // health: the controller parks persistently failing paths on
                 // its own degraded-rescan backoff and stops self-forcing
@@ -2470,6 +2479,7 @@ async fn drive(
     self_writes: SelfWriteSuppression,
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
+    author_json: Arc<Mutex<Option<String>>>,
     baseline_tx: tokio::sync::watch::Sender<bool>,
     flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
     apply_gate: ApplyGate,
@@ -2481,6 +2491,7 @@ async fn drive(
         actor,
         workspace_id,
         status: Arc::clone(&status),
+        author_json,
         self_writes,
         apply_gate,
         refresh_epoch,
@@ -2501,6 +2512,7 @@ pub(crate) async fn reconcile_full_for_switch(
     workspace_id: &str,
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
+    author_json: Option<String>,
     token: CancellationToken,
 ) -> Result<bool, SwitchReconcileError> {
     if token.is_cancelled() {
@@ -2540,9 +2552,15 @@ pub(crate) async fn reconcile_full_for_switch(
                 ReconcileRun::Completed(plan)
                     if !plan.ops.is_empty() || !plan.retained_over_cap.is_empty()
             );
-            if apply_run_with_handle(root, actor, workspace_id, &handle, run, status, self_writes)
-                .await
-            {
+            let context = ApplyRunContext {
+                root,
+                actor,
+                workspace_id,
+                status,
+                self_writes,
+                author_json,
+            };
+            if apply_run_with_handle(context, &handle, run).await {
                 Ok(manifest_changed)
             } else {
                 Err(SwitchReconcileError::ApplyFailed)
@@ -2600,6 +2618,15 @@ impl Drop for FilesActorCloseGuard {
     }
 }
 
+struct ApplyRunContext<'a> {
+    root: &'a Path,
+    actor: &'a ActorHandle,
+    workspace_id: &'a str,
+    status: &'a Arc<DriverStatus>,
+    self_writes: &'a SelfWriteSuppression,
+    author_json: Option<String>,
+}
+
 /// Apply one reconcile run through the capture sink and acknowledge it.
 ///
 /// INVARIANT: a prepared plan is ALWAYS acknowledged — the controller's
@@ -2608,36 +2635,23 @@ impl Drop for FilesActorCloseGuard {
 /// abnormal paths (version fetch failure, apply-thread spawn failure or
 /// panic) the plan is acked with an ALL-FAILED receipt: the latch clears,
 /// the paths stay dirty, and the next cycle retries.
-async fn apply_run(
-    root: &Path,
-    actor: &ActorHandle,
-    workspace_id: &str,
-    layer: &FilesLayer,
-    run: ReconcileRun,
-    status: &Arc<DriverStatus>,
-    self_writes: &SelfWriteSuppression,
-) -> bool {
-    apply_run_with_handle(
-        root,
-        actor,
-        workspace_id,
-        &layer.files.handle(),
-        run,
-        status,
-        self_writes,
-    )
-    .await
+async fn apply_run(context: ApplyRunContext<'_>, layer: &FilesLayer, run: ReconcileRun) -> bool {
+    apply_run_with_handle(context, &layer.files.handle(), run).await
 }
 
 async fn apply_run_with_handle(
-    root: &Path,
-    actor: &ActorHandle,
-    workspace_id: &str,
+    context: ApplyRunContext<'_>,
     files: &FilesHandle,
     run: ReconcileRun,
-    status: &Arc<DriverStatus>,
-    self_writes: &SelfWriteSuppression,
 ) -> bool {
+    let ApplyRunContext {
+        root,
+        actor,
+        workspace_id,
+        status,
+        self_writes,
+        author_json,
+    } = context;
     let plan = match run {
         ReconcileRun::Completed(plan) => plan,
         ReconcileRun::Converged | ReconcileRun::Cancelled => return true,
@@ -2671,6 +2685,7 @@ async fn apply_run_with_handle(
     // teardown cannot interrupt a half-applied plan.
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let apply_plan = plan.clone();
+    let apply_author_json = author_json.clone();
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
         .spawn(move || {
@@ -2683,7 +2698,7 @@ async fn apply_run_with_handle(
                 version_id,
                 apply_root,
                 now_ms,
-                None,
+                apply_author_json,
                 apply_self_writes,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
@@ -2741,6 +2756,7 @@ async fn apply_run_with_handle(
             let retire_path = path.clone();
             let retire_root = root.to_path_buf();
             let retire_self_writes = self_writes.clone();
+            let retire_author_json = author_json.clone();
             let retired = tokio::task::spawn_blocking(move || {
                 let mut sink = StoreCaptureSink::new_with_self_writes(
                     retire_actor,
@@ -2748,7 +2764,7 @@ async fn apply_run_with_handle(
                     retire_version,
                     retire_root,
                     now_ms,
-                    None,
+                    retire_author_json,
                     retire_self_writes,
                 );
                 sink.retire_policy_excluded(&retire_path)

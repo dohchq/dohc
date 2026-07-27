@@ -10,6 +10,7 @@ export const WORKSPACE_METHOD = {
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
   captureFlush: "capture.flush",
+  captureSetAuthor: "capture.setAuthor",
 } as const;
 
 export type WorkspaceMethod =
@@ -21,6 +22,14 @@ export type WorkspaceJsonObject = {
 export type WorkspaceOpenParams = WorkspaceJsonObject & {
   rootDir: string;
   workspaceId: string;
+  captureAuthor?:
+    | (WorkspaceJsonObject & {
+        kind: "agent";
+        agentId: string;
+        onBehalfOf: string;
+        agentRunId?: string;
+      })
+    | null;
   recoverRunningDispatches?: boolean;
 };
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
@@ -74,6 +83,10 @@ export type ConflictFileState = WorkspaceJsonObject & {
   path: string;
   contentKind: "text" | "binary";
   snapshot: ConflictSnapshot | null;
+  binarySha256: string | null;
+  binaryByteLength: number | null;
+  binaryObjectId: string | null;
+  binaryLatestMomentId: string | null;
   metadataSummary: string | null;
   metadataCorrelationId: string | null;
 };
@@ -134,7 +147,11 @@ export type ConflictOpenResult =
   | (WorkspaceJsonObject & { inserted: boolean })
   | ReplicatedConflictResult;
 export type ConflictResolveResult =
-  | (WorkspaceJsonObject & { conflict: ConflictRecord })
+  | (WorkspaceJsonObject & {
+      conflict: ConflictRecord;
+      write: WorkspaceJsonObject | null;
+      delete: WorkspaceJsonObject | null;
+    })
   | ReplicatedConflictResult;
 
 export type SearchResult = WorkspaceJsonObject & {
@@ -168,6 +185,19 @@ export type CaptureFlushResult = WorkspaceJsonObject & {
   running: boolean;
   degraded: boolean;
 };
+export type CaptureSetAuthorParams = WorkspaceJsonObject & {
+  author:
+    | (WorkspaceJsonObject & {
+        kind: "agent";
+        agentId: string;
+        onBehalfOf: string;
+        agentRunId?: string;
+      })
+    | null;
+};
+export type CaptureSetAuthorResult = WorkspaceJsonObject & {
+  updated: true;
+};
 
 export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.open]: WorkspaceOpenParams;
@@ -179,6 +209,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
 };
 
 export type WorkspaceMethodResultMap = {
@@ -191,6 +222,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResponse;
   [WORKSPACE_METHOD.watcherStatus]: WatcherStatusResult;
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResult;
+  [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorResult;
 };
 
 export class WorkspaceProtocolShapeError extends Error {
@@ -289,6 +321,23 @@ function integerValue(
   return value;
 }
 
+function nullableInteger(
+  object: WorkspaceJsonObject,
+  key: string,
+  label: string,
+): number | null {
+  const value = object[key];
+  if (
+    value !== null &&
+    (typeof value !== "number" || !Number.isSafeInteger(value))
+  ) {
+    throw new WorkspaceProtocolShapeError(
+      `${label}.${key} must be a safe integer or null.`,
+    );
+  }
+  return value;
+}
+
 function enumValue<T extends string>(
   object: WorkspaceJsonObject,
   key: string,
@@ -346,6 +395,10 @@ function decodeConflictState(
     "path",
     "contentKind",
     "snapshot",
+    "binarySha256",
+    "binaryByteLength",
+    "binaryObjectId",
+    "binaryLatestMomentId",
     "metadataSummary",
     "metadataCorrelationId",
   ]);
@@ -356,6 +409,14 @@ function decodeConflictState(
       object.snapshot === null
         ? null
         : decodeSnapshot(object.snapshot ?? null, `${label}.snapshot`),
+    binarySha256: nullableString(object, "binarySha256", label),
+    binaryByteLength: nullableInteger(object, "binaryByteLength", label),
+    binaryObjectId: nullableString(object, "binaryObjectId", label),
+    binaryLatestMomentId: nullableString(
+      object,
+      "binaryLatestMomentId",
+      label,
+    ),
     metadataSummary: nullableString(object, "metadataSummary", label),
     metadataCorrelationId: nullableString(
       object,
@@ -613,12 +674,20 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
       if (object.replicated === true) {
         result = decodeReplicatedConflict(value, label);
       } else {
-        const local = objectValue(value, label, ["conflict"]);
+        const local = objectValue(value, label, ["conflict", "write", "delete"]);
         result = {
           conflict: decodeConflictRecord(
             local.conflict ?? null,
             `${label}.conflict`,
           ),
+          write:
+            local.write === null
+              ? null
+              : recordValue(local.write ?? null, `${label}.write`),
+          delete:
+            local.delete === null
+              ? null
+              : recordValue(local.delete ?? null, `${label}.delete`),
         };
       }
       break;
@@ -658,6 +727,16 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
         running: booleanValue(object, "running", label),
         degraded: booleanValue(object, "degraded", label),
       };
+      break;
+    }
+    case WORKSPACE_METHOD.captureSetAuthor: {
+      const object = objectValue(value, label, ["updated"]);
+      if (object.updated !== true) {
+        throw new WorkspaceProtocolShapeError(
+          `${label}.updated must be true.`,
+        );
+      }
+      result = { updated: true };
       break;
     }
     default: {
