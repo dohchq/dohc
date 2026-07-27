@@ -826,6 +826,7 @@ interface StoredRunMessageLink extends CliRunMessageLink {
 
 class RunMessageLinkRecoveryQueue {
   private readonly pending = new Map<string, PendingRunMessageLink>();
+  private readonly deferred = new Map<string, StoredRunMessageLink>();
   private restored = false;
   private closed = false;
 
@@ -876,7 +877,8 @@ class RunMessageLinkRecoveryQueue {
             `Could not restore CLI provenance link for unavailable workspace ${link.workspaceId}.`,
           ),
         );
-        return;
+        this.deferred.set(this.key(link), link);
+        continue;
       }
       try {
         let context = contexts.get(link.workspaceId);
@@ -892,7 +894,8 @@ class RunMessageLinkRecoveryQueue {
             { cause: error },
           ),
         );
-        return;
+        this.deferred.set(this.key(link), link);
+        continue;
       }
     }
     for (const { context, link } of restored) {
@@ -916,7 +919,18 @@ class RunMessageLinkRecoveryQueue {
     input: RunMessageLinkInput & { runId: string },
   ): boolean {
     if (this.closed) return false;
-    if (this.pending.size >= this.maxPending()) return false;
+    const key = this.key({
+      workspaceId: context.workspaceId,
+      runId: input.runId,
+      messageId: input.messageId,
+    });
+    if (
+      !this.pending.has(key) &&
+      !this.deferred.has(key) &&
+      this.pending.size + this.deferred.size >= this.maxPending()
+    ) {
+      return false;
+    }
     return this.add(context, input, 0, Date.now());
   }
 
@@ -932,8 +946,9 @@ class RunMessageLinkRecoveryQueue {
       runId: input.runId,
       messageId: input.messageId,
     };
-    const key = `${link.workspaceId}\u0000${link.runId}\u0000${link.messageId}`;
+    const key = this.key(link);
     if (this.pending.has(key)) return true;
+    this.deferred.delete(key);
     const pending = {
       context,
       input,
@@ -1038,21 +1053,28 @@ class RunMessageLinkRecoveryQueue {
     return join(this.options.stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE);
   }
 
+  private key(link: CliRunMessageLink): string {
+    return `${link.workspaceId}\u0000${link.runId}\u0000${link.messageId}`;
+  }
+
   private persist(): boolean {
     const path = this.persistencePath();
     try {
-      if (this.pending.size === 0) {
+      if (this.pending.size === 0 && this.deferred.size === 0) {
         rmSync(path, { force: true });
         return true;
       }
       mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 });
-      const stored: StoredRunMessageLink[] = [...this.pending.values()].map(
-        ({ link, attempt, createdAtMs }) => ({
-          ...link,
-          attempt,
-          createdAtMs,
-        }),
-      );
+      const stored: StoredRunMessageLink[] = [
+        ...this.deferred.values(),
+        ...[...this.pending.values()].map(
+          ({ link, attempt, createdAtMs }) => ({
+            ...link,
+            attempt,
+            createdAtMs,
+          }),
+        ),
+      ];
       const temporaryPath = `${path}.${process.pid}.tmp`;
       writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
         encoding: "utf8",

@@ -814,6 +814,88 @@ describe("CLI socket server", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("restores available provenance links past an unavailable workspace", async () => {
+    // MUTATION: return from restore when one workspace is absent -> the valid
+    // link later in the file is never re-armed during this app session.
+    const posted = await post({
+      actor: "human",
+      title: "Existing message",
+      body: "This message will receive restored provenance.",
+    });
+    const engineMessageId = posted.messageId.replace(/^msg_/u, "message_");
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_mixed_restore_trigger",
+      threadId: "thread_mixed_restore",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected a run for mixed restore.");
+    const unavailable = {
+      workspaceId: "workspace-not-registered",
+      runId: "run_deferred",
+      messageId: "message_deferred",
+      attempt: 0,
+      createdAtMs: SERVER_NOW_MS,
+    };
+    const available = {
+      workspaceId: WORKSPACE_ID,
+      runId: claim.run.runId,
+      messageId: engineMessageId,
+      attempt: 0,
+      createdAtMs: SERVER_NOW_MS,
+    };
+
+    disposeCliServerRuntime(serverOptions);
+    await writeFile(
+      join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE),
+      `${JSON.stringify([unavailable, available])}\n`,
+      "utf8",
+    );
+    const restoredOptions: CliServerOptions = {
+      ...serverOptions,
+      runMessageLinkRecoveryRetryMs: 0,
+    };
+    serverOptions = restoredOptions;
+    await restoreCliServerRuntime(restoredOptions);
+    for (
+      let index = 0;
+      index < 50 &&
+      dispatchStore.runIdForMessage(WORKSPACE_ID, engineMessageId) === null;
+      index += 1
+    ) {
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+    for (let index = 0; index < 50; index += 1) {
+      const stored = JSON.parse(
+        await readFile(
+          join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE),
+          "utf8",
+        ),
+      ) as unknown[];
+      if (stored.length === 1) break;
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+
+    expect(
+      dispatchStore.runIdForMessage(WORKSPACE_ID, engineMessageId),
+    ).toBe(claim.run.runId);
+    expect(
+      JSON.parse(
+        await readFile(
+          join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE),
+          "utf8",
+        ),
+      ),
+    ).toEqual([unavailable]);
+    expect(
+      errors.some(
+        (error) =>
+          error instanceof Error &&
+          error.message.includes("workspace-not-registered"),
+      ),
+    ).toBe(true);
+  });
+
   it("bounds the provenance recovery queue and abandons after its attempt cap", async () => {
     // MUTATION: remove the size and attempt limits -> both links enter the
     // queue and the first continues retrying after the asserted cap.

@@ -6056,7 +6056,7 @@ impl<'a> LinkedChatStore<'a> {
                      WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
                        AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
                          OR r.failure_reason = 'app restart during run') \
-                       AND r.failure_note_posted = 0 AND l.state = 'failed' \
+                       AND l.state = 'failed' \
                        AND (SELECT COUNT(*) FROM agent_run_records all_runs \
                          WHERE all_runs.run_id = r.run_id) <> 1)",
                     params![workspace_id],
@@ -6077,7 +6077,7 @@ impl<'a> LinkedChatStore<'a> {
                      WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
                        AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
                          OR r.failure_reason = 'app restart during run') \
-                       AND r.failure_note_posted = 0 AND l.state = 'failed' \
+                       AND l.state = 'failed' \
                        AND (?2 = 0 OR r.started_at_ms > ?3 \
                          OR (r.started_at_ms = ?3 AND r.run_id > ?4)) \
                      ORDER BY r.started_at_ms, r.run_id LIMIT ?5",

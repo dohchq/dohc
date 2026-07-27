@@ -1079,15 +1079,18 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         throw error;
       }
       if (uncertainClaim) {
-        budgetBypassThreads.delete(
-          threadKey(workspace.workspaceId, uncertainClaim.run.threadId),
+        const bypassKey = threadKey(
+          workspace.workspaceId,
+          uncertainClaim.run.threadId,
         );
+        const bypassBudget = budgetBypassThreads.delete(bypassKey);
         let releaseWorkspace: (() => Promise<void>) | null;
         try {
           releaseWorkspace =
             (await options.prepareRunWorkspace?.(workspace)) ?? null;
         } catch (error) {
           runReservations.delete(workspace.workspaceId);
+          if (bypassBudget) budgetBypassThreads.add(bypassKey);
           throw error;
         }
         await startClaim(workspace, uncertainClaim, runner, releaseWorkspace);
@@ -1493,7 +1496,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         reportError(error);
         // A stopped run is terminal even when its cosmetic note cannot be
         // stored. Mark it handled so app-quit recovery never retries it.
-        await dispatch.markFailureNotePosted(live.claim.run.runId);
+        await dispatch.markFailureNotePosted(
+          live.claim.run.runId,
+          durableDispatchRequest,
+        );
       }
       notifyRunUpdated(workspaceId);
     });

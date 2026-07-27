@@ -112,6 +112,8 @@ interface FixtureOptions {
   requeueFailures?: Error[];
   recordEligibleTriggerFailures?: Error[];
   claimFailures?: Error[];
+  prepareRunWorkspaceFailures?: Array<Error | null>;
+  markFailureNoteFailures?: Error[];
   ambiguousClaimOnce?: boolean;
   deferClaim?: boolean;
   hasPendingRunMessageLink?: (workspaceId: string, runId: string) => boolean;
@@ -248,7 +250,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
          WHERE r.workspace_id = ?
            AND ((r.exit_code = ? AND r.failure_reason = 'app-quit')
              OR r.failure_reason = 'app restart during run')
-           AND r.failure_note_posted = 0
            AND l.state = 'failed'`,
       )
       .all(workspaceId, APP_QUIT_EXIT_CODE)
@@ -423,6 +424,14 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
             });
             break;
           case "chats.dispatch.markFailureNotePosted":
+            if (options.markFailureNoteFailures?.length) {
+              daemonGeneration += 1;
+              daemon = {
+                close: () => undefined,
+                sendRequest,
+              };
+              throw options.markFailureNoteFailures.shift()!;
+            }
             result = dispatch.markFailureNotePosted(String(params.runId));
             break;
           case "chats.dispatch.complete":
@@ -533,6 +542,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   ) {
     const baseDispatch = serviceDispatch;
     let unresolvedClaim: AgentDispatchClaim | null = null;
+    let ambiguousClaimInjected = false;
     serviceDispatch = {
       ...baseDispatch,
       async claimNextPending(workspaceId, claimOptions) {
@@ -544,7 +554,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
           workspaceId,
           claimOptions,
         );
-        if (options.ambiguousClaimOnce && unresolvedClaim === null && claim) {
+        if (
+          options.ambiguousClaimOnce &&
+          !ambiguousClaimInjected &&
+          unresolvedClaim === null &&
+          claim
+        ) {
+          ambiguousClaimInjected = true;
           unresolvedClaim = claim;
           throw new EngineClientError(
             "transport-error",
@@ -592,9 +608,11 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       syncRequests.push(workspaceId);
       return options.onQueueSync?.(workspaceId, chat);
     },
-    ...(options.temporaryRunActivity
+    ...(options.temporaryRunActivity || options.prepareRunWorkspaceFailures
       ? {
           prepareRunWorkspace: async () => {
+            const failure = options.prepareRunWorkspaceFailures?.shift();
+            if (failure) throw failure;
             runActivity.acquires += 1;
             let released = false;
             return async () => {
@@ -1646,6 +1664,70 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toHaveLength(1);
   });
 
+  it("restores a Resume budget bypass when uncertain-claim preparation rejects", async () => {
+    // MUTATION: omit bypass restoration from the uncertain-claim preparation
+    // catch -> the next pending trigger immediately re-pauses this thread.
+    const preparationError = new Error("workspace hydration failed");
+    const fixture = await createFixture({
+      ambiguousClaimOnce: true,
+      prepareRunWorkspaceFailures: [null, preparationError],
+    });
+    const pending = await createAgentThread(fixture, {
+      body: "Resume through uncertain claim preparation.",
+      authorUserId: "user_local",
+    });
+    for (let index = 0; index < CHAT_DISPATCH_BUDGET_MAX; index += 1) {
+      fixture.dispatch.recordTrigger({
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId: `uncertain_resume_seed_${index}`,
+        threadId: pending.threadId,
+      });
+      const claim = fixture.dispatch.claimNextPending(WORKSPACE_ID);
+      if (!claim) throw new Error("Expected a seeded budget claim.");
+      fixture.dispatch.completeRun({ runId: claim.run.runId, exitCode: 0 });
+    }
+    fixture.dispatch.setThreadDispatchPaused({
+      workspaceId: WORKSPACE_ID,
+      threadId: pending.threadId,
+      paused: true,
+      reason: "re-dispatch budget exceeded",
+    });
+
+    fixture.service.start();
+    await expect(
+      fixture.service.resumeThreadDispatch(WORKSPACE_ID, pending.threadId),
+    ).rejects.toMatchObject({ code: "transport-error" });
+    await expect(
+      fixture.service.scanWorkspace(WORKSPACE_ID),
+    ).rejects.toBe(preparationError);
+
+    const uncertain = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!uncertain) throw new Error("Expected the ambiguously committed claim.");
+    fixture.dispatch.failRun({
+      runId: uncertain.run.runId,
+      reason: "clear failed preparation",
+    });
+    const followUp = await fixture.chat.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: pending.threadId,
+      author: { kind: "human", displayName: "Ice" },
+      authorUserId: "user_local",
+      body: "Continue after workspace hydration recovers.",
+    });
+    fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: followUp.id,
+      threadId: pending.threadId,
+    });
+
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(
+      fixture.dispatch.threadDispatchPaused(WORKSPACE_ID, pending.threadId),
+    ).toBe(false);
+    expect(fixture.spawnCalls).toHaveLength(1);
+  });
+
   it("posts a nonzero-exit failure note exactly once", async () => {
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
@@ -1873,8 +1955,8 @@ describe("chatDispatchService", () => {
   });
 
   it("recovers a restart-failed row left behind before its requeue", async () => {
-    // MUTATION: query only exit-143 app-quit rows -> this durable restart
-    // failure is invisible after a crash between failRun and requeue.
+    // MUTATION: require failureNotePosted=false for restart failures -> the
+    // normal note-then-fail ordering is invisible after a crash before requeue.
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
       body: "Recover the persisted half of restart recovery.",
@@ -1887,6 +1969,7 @@ describe("chatDispatchService", () => {
     });
     const interrupted = fixture.dispatch.claimNextPending(WORKSPACE_ID);
     if (!interrupted) throw new Error("Expected an interrupted run.");
+    fixture.dispatch.markFailureNotePosted(interrupted.run.runId);
     fixture.dispatch.failRun({
       runId: interrupted.run.runId,
       reason: "app restart during run",
@@ -1905,17 +1988,10 @@ describe("chatDispatchService", () => {
       triggerMessageId: trigger.messageId,
       attemptCount: 2,
     });
-    const messages = await fixture.chat.listMessages({
-      workspaceId: WORKSPACE_ID,
-      threadId: trigger.threadId,
+    expect(fixture.dispatch.getRunRecord(interrupted.run.runId)).toMatchObject({
+      failureNotePosted: true,
+      failureReason: "app restart during run",
     });
-    expect(
-      messages.some((message) =>
-        message.body.startsWith(
-          "⚠ Agent run failed (app restarted during run).",
-        ),
-      ),
-    ).toBe(true);
   });
 
   it("retains an interrupted requeue intent until the ledger transition persists", async () => {
@@ -2428,6 +2504,49 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(followUp.threadId);
+  });
+
+  it("deadlines and transport-retries the stopped-run failure-note fallback", async () => {
+    // MUTATION: omit durableDispatchRequest from the fallback mark -> the first
+    // transport loss rejects stopAgentRun and its request has no deadline.
+    const fixture = await createFixture({
+      dispatchBackend: "live",
+      markFailureNoteFailures: [
+        new EngineClientError(
+          "transport-error",
+          "daemon restarted while marking the stopped run",
+        ),
+      ],
+    });
+    await createAgentThread(fixture, {
+      body: "Stop after the note store fails.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!claim) throw new Error("Expected a live run.");
+    const noteError = new Error("failure note store unavailable");
+    vi.spyOn(fixture.chat, "listMessages").mockRejectedValueOnce(noteError);
+
+    await expect(
+      fixture.service.stopAgentRun(WORKSPACE_ID),
+    ).resolves.toBe(true);
+
+    const marks = fixture.dispatchRequests.filter(
+      ({ method }) => method === "chats.dispatch.markFailureNotePosted",
+    );
+    expect(marks).toHaveLength(2);
+    expect(
+      marks.every(
+        ({ deadlineMs }) =>
+          deadlineMs === AGENT_DISPATCH_RPC_DEADLINE_MS,
+      ),
+    ).toBe(true);
+    expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
+      failureNotePosted: true,
+      failureReason: "user-stop",
+    });
+    expect(fixture.errors).toContain(noteError);
   });
 
   it("passes the real spawn contract in a successful runner self-test", async () => {
