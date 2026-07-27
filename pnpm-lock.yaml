@@ -53,6 +53,9 @@ importers:
       '@dohc/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../../packages/security-contract
       '@dohc/sqlite-worker':
         specifier: workspace:*
         version: link:../../services/sqlite-worker
