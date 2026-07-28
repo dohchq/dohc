@@ -117,13 +117,15 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
 // wire — identity-less /log calls 409 once adoption happens. A headless
 // "other machine" harness therefore learns the adopted coordinate the only
 // way a harness can: from the relay's own SQLite row.
-// Only "the db or its schema does not exist yet" reads as "not adopted yet"
-// to a poll; anything else (schema drift, corruption) must fail loud.
-function isRelayDbNotReady(error: unknown): boolean {
+// Only "the db file does not exist yet" reads as "not adopted yet" to a
+// poll; anything else — including schema drift ("no such table") and the
+// malformed-row throw below (whose message embeds raw values that could
+// contain arbitrary text) — must fail loud. Classify by error CODE, and only
+// for the open failure, never by matching message text.
+function isRelayDbNotReady(error: unknown, dbOpened: boolean): boolean {
+  if (dbOpened) return false;
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  if (code === "ENOENT" || code === "SQLITE_CANTOPEN") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /unable to open database|cannot open|no such file|no such table/i.test(message);
+  return code === "ENOENT" || code === "SQLITE_CANTOPEN";
 }
 
 export function relayAdoptedIdentity(
@@ -153,7 +155,7 @@ export function relayAdoptedIdentity(
     }
     return { replicationEpoch: epoch, streamIdentity: stream };
   } catch (error) {
-    if (isRelayDbNotReady(error)) return null;
+    if (isRelayDbNotReady(error, db !== null)) return null;
     throw error;
   } finally {
     db?.close();
