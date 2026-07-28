@@ -23,8 +23,7 @@ export async function captureForFlaggedWorkspace(
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions?: EngineWorkspaceSessions | null,
 ): Promise<WorkspaceEngineCapture | null> {
-  const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
-  if (!settings.experimental.workspaceEngineAlpha) return null;
+  if (!(await workspaceEngineEnabled(workspace.rootPath))) return null;
   return createWorkspaceEngineCapture({
     workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
@@ -39,4 +38,14 @@ export async function captureForFlaggedWorkspace(
       ? { rustEngineSessions, daemonOwnsCapture: true }
       : {}),
   });
+}
+
+// The gate's predicate on its own, for callers that must honor the opt-out
+// WITHOUT touching the engine (e.g. the chat dispatch scan — for an opted-out
+// workspace, merely resolving its stores would create .dohc/engine/).
+export async function workspaceEngineEnabled(
+  rootPath: string,
+): Promise<boolean> {
+  const { settings } = await readWorkspaceSettingsFile(rootPath);
+  return settings.experimental.workspaceEngineAlpha;
 }

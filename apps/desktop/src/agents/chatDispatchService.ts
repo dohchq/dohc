@@ -117,6 +117,13 @@ export interface ChatDispatchServiceOptions {
   isPackaged(): boolean;
   resourcesPath?: () => string | undefined;
   queueSync(workspaceId: string): void | boolean | Promise<void | boolean>;
+  // The engine opt-out gate: when it resolves false, a scan is a no-op.
+  // Merely resolving the chat/dispatch stores opens the workspace in the
+  // engine daemon, which would create an engine store for a workspace that
+  // opted out of recording anything.
+  scanEligible?(
+    workspace: ChatDispatchWorkspace,
+  ): boolean | Promise<boolean>;
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
   ): Promise<void | (() => Promise<void>)>;
@@ -1430,6 +1437,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const scan = enqueue(workspaceId, async () => {
       const workspace = options.workspaceFor(workspaceId);
       if (!workspace || stopped) return;
+      if ((await options.scanEligible?.(workspace)) === false) return;
       await scanAndDrain(workspace);
     });
     void scan.catch(() => scheduleRecoveryScan(workspaceId));

@@ -384,6 +384,7 @@ import {
 import {
   captureForFlaggedWorkspace,
   configureWorkspaceKernelRuntime,
+  workspaceEngineEnabled,
 } from "./workspaces/engineCaptureGate";
 import {
   readWorkspaceEnginePolicy,
@@ -2052,6 +2053,10 @@ const chatDispatchService = createChatDispatchService({
   resourcesPath: () =>
     (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
   queueSync: syncWorkspaceForDispatch,
+  // An opted-out workspace must record NOTHING: without this gate the
+  // workspace-open scan reaches dispatchStoreFor/chatStoreFor, whose daemon
+  // workspace.open creates .dohc/engine/engine.db. Same rule as captureFor.
+  scanEligible: (workspace) => workspaceEngineEnabled(workspace.rootPath),
   prepareRunWorkspace: async (workspace) => {
     const registered = findWorkspace(workspace.workspaceId);
     if (!registered) {
