@@ -262,7 +262,7 @@ impl<'a> VersionedTextStore<'a> {
     {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
-        non_empty(&input.moment_id, "moment_id")?;
+        validate_moment_id(&input.moment_id)?;
         let mut normalized_input = input.clone();
         normalized_input.from_path = validate_addressable_plaintext_path(&input.from_path)?;
         normalized_input.to_path = validate_plaintext_storable_path(&input.to_path)?;
@@ -1830,7 +1830,7 @@ pub(crate) struct RecordedRequest {
 fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
     non_empty(&input.workspace_id, "workspace_id")?;
     non_empty(&input.version_id, "version_id")?;
-    non_empty(&input.moment_id, "moment_id")?;
+    validate_moment_id(&input.moment_id)?;
     let mut normalized = input.clone();
     normalized.path = validate_plaintext_storable_path(&input.path)?;
     validate_text(&normalized.text)?;
@@ -1859,7 +1859,7 @@ fn reject_reserved_capture_origin(metadata_origin: &str) -> Result<(), DomainErr
 fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, DomainError> {
     non_empty(&input.workspace_id, "workspace_id")?;
     non_empty(&input.version_id, "version_id")?;
-    non_empty(&input.moment_id, "moment_id")?;
+    validate_moment_id(&input.moment_id)?;
     let mut normalized = input.clone();
     normalized.path = validate_addressable_plaintext_path(&input.path)?;
     Ok(normalized)
@@ -2407,9 +2407,10 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 /// scan diff it as "removed" and RETIRE it — capture deleting content it
 /// never owned.
 ///
-/// Pending rollback deletes are emitted as transient last-known-disk entries.
-/// This keeps a surviving delete target out of capture until the compensating
-/// job becomes terminal, without creating a database head for that path.
+/// Matching pending rollback deletes are emitted as transient last-known-disk
+/// entries. This keeps a surviving delete target out of capture until the
+/// compensating job becomes terminal, without crossing version boundaries or
+/// creating a database head for that path.
 pub fn capture_manifest_seed(
     store: &EngineStore,
     workspace_id: &str,
@@ -2417,6 +2418,7 @@ pub fn capture_manifest_seed(
 ) -> Result<Vec<CaptureManifestSeedEntry>, DomainError> {
     let ws = workspace_id.to_owned();
     let version = version_id.to_owned();
+    let rollback_version_prefix = binary_rollback_job_version_prefix(&ws, &version);
     store.read_with(move |conn| {
         let mut entries = Vec::new();
         let mut stmt = conn
@@ -2451,18 +2453,39 @@ pub fn capture_manifest_seed(
                  FROM materialization_jobs j \
                  JOIN binary_blobs bb ON bb.sha256 = j.content_sha256 \
                  WHERE j.status = 'pending' AND j.operation = 'delete' \
-                   AND (j.job_id GLOB 'rollback-restore_*' \
-                        OR j.job_id GLOB \
-                           'binary-rename-1-delete-mat_rollback-restore_*') \
-                   AND NOT EXISTS ( \
-                       SELECT 1 FROM path_aliases a \
-                       WHERE a.workspace_id = ?1 AND a.version_id = ?2 \
+                    AND (substr(j.job_id, 1, length(?3)) = ?3 \
+                         OR (j.job_id GLOB \
+                                'binary-rename-1-delete-mat_rollback-restore_*' \
+                             AND EXISTS ( \
+                                 SELECT 1 \
+                                 FROM materialization_jobs restore \
+                                 JOIN path_aliases restore_alias \
+                                   ON restore_alias.workspace_id = ?1 \
+                                  AND restore_alias.version_id = ?2 \
+                                  AND restore_alias.path = restore.target_path \
+                                 JOIN snapshots restore_snapshot \
+                                   ON restore_snapshot.workspace_id = restore_alias.workspace_id \
+                                  AND restore_snapshot.version_id = restore_alias.version_id \
+                                  AND restore_snapshot.object_id = restore_alias.object_id \
+                                 WHERE restore.job_id = \
+                                     'binary-rename-0-write-mat_' || \
+                                     substr(j.job_id, \
+                                         length('binary-rename-1-delete-mat_') + 1) \
+                                   AND restore.operation = 'write' \
+                                   AND restore.content_sha256 = j.content_sha256 \
+                                   AND CASE COALESCE(restore_snapshot.content_kind, 'text') \
+                                       WHEN 'binary' THEN restore_snapshot.binary_sha256 \
+                                       ELSE restore_snapshot.blob_sha256 END = \
+                                       restore.content_sha256))) \
+                    AND NOT EXISTS ( \
+                        SELECT 1 FROM path_aliases a \
+                        WHERE a.workspace_id = ?1 AND a.version_id = ?2 \
                          AND a.path = j.target_path) \
                  ORDER BY 1",
             )
             .map_err(DomainError::sql_corrupt)?;
         let rows = stmt
-            .query_map(params![ws, version], |row| {
+            .query_map(params![ws, version, rollback_version_prefix], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -2819,7 +2842,7 @@ pub fn write_binary_in_tx(
     reject_reserved_capture_origin(&input.metadata_origin)?;
     non_empty(&input.workspace_id, "workspace_id")?;
     non_empty(&input.version_id, "version_id")?;
-    non_empty(&input.moment_id, "moment_id")?;
+    validate_moment_id(&input.moment_id)?;
     let path = validate_plaintext_storable_path(&input.path)?;
     if !version_exists(tx, &input.workspace_id, &input.version_id)? {
         return Err(DomainError::VersionNotFound);
@@ -3524,6 +3547,16 @@ fn non_empty(value: &str, field: &'static str) -> Result<(), DomainError> {
     }
 }
 
+pub(crate) fn validate_moment_id(value: &str) -> Result<(), DomainError> {
+    non_empty(value, "moment_id")?;
+    if value.contains('\u{1f}') {
+        return Err(DomainError::InvalidInput {
+            reason: "moment_id contains a reserved character",
+        });
+    }
+    Ok(())
+}
+
 /// Minimal path floor for the calibration slice. This is NOT the full
 /// `validateUserWritePath` parity — normalization (NFC, forward-slash),
 /// percent-decoding, and the complete reserved-name set are owned by the
@@ -3763,16 +3796,20 @@ fn alias_object_id(
 }
 
 pub(crate) fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
-    // Materialization rows are the durable high-water mark when rollback
-    // history surgery removes a tip moment. Including pending and terminal
-    // jobs guarantees that every later mutation is strictly newer than an
-    // already-issued compensating restore.
+    // Ordinary materialization rows are the durable high-water mark when
+    // rollback history surgery removes a tip moment. Pending and terminal
+    // mutation/restore jobs guarantee that every later mutation is strictly
+    // newer than an already-issued compensating restore. Version-switch
+    // projections use snapshot timestamps as generations, so they are a
+    // separate ordering domain and must not advance the mutation sequence.
     let max: Option<i64> = conn
         .query_row(
             "SELECT MAX(generation) FROM ( \
                  SELECT moment_order AS generation FROM moments \
                  UNION ALL \
-                 SELECT target_generation AS generation FROM materialization_jobs)",
+                 SELECT target_generation AS generation FROM materialization_jobs \
+                 WHERE job_id NOT GLOB 'version-switch-mat_*' \
+                   AND job_id NOT GLOB 'version-switch-secret-mat_*')",
             [],
             |row| row.get(0),
         )
@@ -3911,7 +3948,11 @@ fn enqueue_binary_rollback_restore(
     written_sha256: &str,
     now_ms: i64,
 ) -> Result<(), DomainError> {
-    let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
+    let job_id = binary_rollback_job_identity(
+        &input.workspace_id,
+        &input.version_id,
+        &input.mutation_moment_id,
+    );
     let preimage = Preimage::Present(written_sha256.to_owned());
     match before {
         // First write: the rolled-back-to state is ABSENT → delete the file.
@@ -3976,7 +4017,11 @@ fn enqueue_binary_delete_rollback_restore(
     enqueue_job(
         tx,
         &MaterializationJobSpec {
-            job_id: format!("rollback-restore_{}", input.mutation_moment_id),
+            job_id: binary_rollback_job_identity(
+                &input.workspace_id,
+                &input.version_id,
+                &input.mutation_moment_id,
+            ),
             target_path: before.path.clone(),
             content_sha256: sha256,
             preimage: Preimage::Absent,
@@ -4001,7 +4046,11 @@ fn enqueue_binary_rename_rollback_restore(
         .ok_or(DomainError::StateCorrupt {
             reason: "binary rename rollback snapshot has no binary hash",
         })?;
-    let rollback_id = format!("rollback-restore_{}", input.mutation_moment_id);
+    let rollback_id = binary_rollback_job_identity(
+        &input.workspace_id,
+        &input.version_id,
+        &input.mutation_moment_id,
+    );
     enqueue_job(
         tx,
         &MaterializationJobSpec {
@@ -4026,6 +4075,28 @@ fn enqueue_binary_rename_rollback_restore(
         },
     )
     .map_err(DomainError::from)
+}
+
+/// Keep binary rollback materialization identities outside caller namespaces
+/// and bind them to the version whose disk state they compensate.
+#[doc(hidden)]
+pub fn binary_rollback_job_identity(
+    workspace_id: &str,
+    version_id: &str,
+    mutation_moment_id: &str,
+) -> String {
+    format!(
+        "{}{mutation_moment_id}",
+        binary_rollback_job_version_prefix(workspace_id, version_id)
+    )
+}
+
+fn binary_rollback_job_version_prefix(workspace_id: &str, version_id: &str) -> String {
+    format!(
+        "rollback-restore_\u{1f}{}:{workspace_id}{}:{version_id}:",
+        workspace_id.len(),
+        version_id.len()
+    )
 }
 
 /// Remove a still-replayable disk intent only when it is provably owned by the

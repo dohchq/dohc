@@ -481,3 +481,108 @@ async fn switch_jobs_are_distinct_and_match_their_active_workspace() {
         "each workspace needs its own durable switch projection identity"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_projection_generation_does_not_advance_moment_order() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = scratch.engine_db_path().expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .versioned_text_write(
+            write("main", "main", "watermark-main", 2),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main write");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "watermark-feature".to_owned(),
+                name: "Watermark feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 3,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature");
+    actor
+        .versioned_text_write(
+            write(
+                "watermark-feature",
+                "feature",
+                "watermark-feature-write",
+                i64::MAX,
+            ),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("timestamp-scale snapshot");
+    std::fs::write(scratch.path().join("ordered.md"), "main").expect("seed disk");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "watermark-feature".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 4,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("switch with maximum projection generation");
+    actor
+        .versioned_text_write(
+            write(
+                "watermark-feature",
+                "after switch",
+                "watermark-post-switch",
+                5,
+            ),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("post-switch mutation");
+
+    supervisor.close(&database).expect("close");
+    let connection = Connection::open(&database).expect("sqlite");
+    let projection_generation: i64 = connection
+        .query_row(
+            "SELECT MAX(target_generation) FROM materialization_jobs \
+             WHERE job_id GLOB 'version-switch-mat_*'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("projection generation");
+    let mutation_order: i64 = connection
+        .query_row(
+            "SELECT moment_order FROM moments \
+             WHERE workspace_id = ?1 AND moment_id = 'watermark-post-switch'",
+            [WORKSPACE],
+            |row| row.get(0),
+        )
+        .expect("post-switch moment order");
+    assert_eq!(projection_generation, i64::MAX);
+    assert_eq!(
+        mutation_order, 3,
+        "projection timestamps must not enter the moment-order sequence"
+    );
+}

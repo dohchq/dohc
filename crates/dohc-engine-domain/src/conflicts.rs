@@ -6,8 +6,8 @@ use crate::records::{
 };
 use crate::store::{
     VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
-    next_moment_order, record_request, validate_delete_input, validate_path, validate_write_input,
-    version_is_active, write_text_in_tx,
+    next_moment_order, record_request, validate_delete_input, validate_moment_id, validate_path,
+    validate_write_input, version_is_active, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -947,7 +947,7 @@ pub fn write_binary_file_in_tx(
     validate_path_like_id(&input.workspace_id, "workspace id must not be empty")?;
     validate_path_like_id(&input.version_id, "version id must not be empty")?;
     validate_path_like_id(&input.object_id, "object id must not be empty")?;
-    validate_path_like_id(&input.moment_id, "moment id must not be empty")?;
+    validate_moment_id(&input.moment_id)?;
     if !has_binary_blob(tx, &input.binary_sha256)? {
         return Err(DomainError::InvalidInput {
             reason: "binary file write references a missing binary blob",

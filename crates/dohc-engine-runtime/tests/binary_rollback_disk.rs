@@ -1,6 +1,7 @@
 use dohc_engine_domain::{
     CaptureIngestBinary, CaptureRetire, CreateNamedVersion, DeleteTextFile, RenameTextFile,
-    RollbackTextFileMutation, WriteBinary,
+    RollbackTextFileMutation, WriteBinary, binary_rename_delete_job_id, binary_rename_write_job_id,
+    binary_rollback_job_identity,
 };
 use dohc_engine_files::{
     CaptureOp, ManifestEntry, ReconcileController, ReconcileRun, ScanBounds, ScanGeneration,
@@ -225,13 +226,14 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
     );
 
     let connection = rusqlite::Connection::open(&db).expect("read generations");
+    let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "main-mutation");
     let (higher_generation, restore_generation): (i64, i64) = connection
         .query_row(
             "SELECT higher.target_generation, restore.target_generation \
              FROM materialization_jobs higher, materialization_jobs restore \
              WHERE higher.job_id = 'higher-generation' \
-               AND restore.job_id = 'rollback-restore_main-mutation'",
-            [],
+               AND restore.job_id = ?1",
+            [restore_job_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("materialization generations");
@@ -321,6 +323,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
     );
 
     let connection = rusqlite::Connection::open(&db).expect("read job ledger");
+    let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "tip-mutation");
     let (restore_generation, write_generation, restore_status, write_status): (
         i64,
         i64,
@@ -331,9 +334,9 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
             "SELECT restore.target_generation, newer.target_generation, \
                     restore.status, newer.status \
              FROM materialization_jobs restore, materialization_jobs newer \
-             WHERE restore.job_id = 'rollback-restore_tip-mutation' \
+             WHERE restore.job_id = ?1 \
                AND newer.job_id = 'post-rollback-write'",
-            [],
+            [restore_job_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("restore and new-write jobs");
@@ -577,16 +580,344 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
         .expect("retry pending rename delete");
     assert!(!scratch.path().join("new-pending.bin").exists());
     let connection = rusqlite::Connection::open(&db).expect("read delete job");
+    let rollback_identity = binary_rollback_job_identity(WORKSPACE, "main", "pending-rename");
+    let delete_job_id = binary_rename_delete_job_id(&rollback_identity);
     let status: String = connection
         .query_row(
-            "SELECT status FROM materialization_jobs \
-             WHERE job_id = \
-               'binary-rename-1-delete-mat_rollback-restore_pending-rename'",
-            [],
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            [delete_job_id],
             |row| row.get(0),
         )
         .expect("rename delete status");
     assert_eq!(status, "complete");
+    drop(connection);
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "inactive-rename".to_owned(),
+                name: "Inactive rename".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "inactive-rename".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 3,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("activate branch");
+    actor
+        .versioned_binary_write(
+            binary_write_for("inactive-rename", "branch-old.bin", "branch-seed", BYTES),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch binary");
+    actor
+        .versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "inactive-rename".to_owned(),
+                from_path: "branch-old.bin".to_owned(),
+                to_path: "branch-new.bin".to_owned(),
+                moment_id: "branch-rename".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 10,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch rename");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 20,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("reactivate empty main");
+
+    let rolled_back = actor
+        .versioned_text_rollback(
+            rollback("inactive-rename", "branch-new.bin", "branch-rename"),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("inactive rename rollback");
+    assert!(rolled_back.materialize_enqueued);
+    assert_eq!(
+        rolled_back.materialize_outcome,
+        PostCommitMaterializeOutcome::Skipped
+    );
+
+    std::fs::write(scratch.path().join("branch-new.bin"), BYTES)
+        .expect("user-created active-version file");
+    let seed = actor
+        .capture_manifest_seed(WORKSPACE.to_owned(), "main".to_owned())
+        .await
+        .expect("main capture seed");
+    assert!(
+        !seed.iter().any(|entry| entry.path == "branch-new.bin"),
+        "an inactive version's rollback delete must not suppress active capture"
+    );
+    let manifest = ScanManifest::from_entries(seed.into_iter().map(|entry| {
+        (
+            entry.path,
+            ManifestEntry {
+                size: entry.size,
+                sha256: entry.sha256,
+            },
+        )
+    }));
+    let mut capture = ReconcileController::rehydrated(manifest, ScanGeneration::default());
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let plan = match capture
+        .reconcile(&scanner, scratch.path(), &CancellationToken::new())
+        .expect("capture active version")
+    {
+        ReconcileRun::Completed(plan) => plan,
+        other => panic!("unexpected capture run: {other:?}"),
+    };
+    assert!(plan.ops.iter().any(|op| matches!(
+        op,
+        CaptureOp::Ingest { path, .. } if path == "branch-new.bin"
+    )));
+    actor
+        .capture_ingest_binary(
+            CaptureIngestBinary {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                path: "branch-new.bin".to_owned(),
+                bytes: BYTES.to_vec(),
+                metadata_origin: "capture".to_owned(),
+                author_json: None,
+                now_ms: 30,
+                request_id: None,
+                claim_foreign_head: false,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("ingest user file into active version");
+    assert_eq!(
+        actor
+            .read_binary(
+                WORKSPACE.to_owned(),
+                "main".to_owned(),
+                "branch-new.bin".to_owned(),
+            )
+            .await
+            .expect("read active capture")
+            .expect("captured active head")
+            .bytes,
+        BYTES
+    );
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+
+    actor
+        .versioned_binary_write(
+            binary_write("target-old.bin", "target-seed"),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("target seed");
+    actor
+        .versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                from_path: "target-old.bin".to_owned(),
+                to_path: "target-new.bin".to_owned(),
+                moment_id: "target".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("target rename");
+    actor
+        .versioned_binary_write(
+            binary_write("unrelated-old.bin", "unrelated-seed"),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("unrelated seed");
+    actor
+        .versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                from_path: "unrelated-old.bin".to_owned(),
+                to_path: "unrelated-new.bin".to_owned(),
+                moment_id: "rollback-restore_target".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 30,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("colliding normal rename");
+
+    let connection = rusqlite::Connection::open(&db).expect("read retained rows");
+    let retained_before: Vec<(String, String, String, i64)> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT job_id, status, target_path, target_generation \
+                 FROM materialization_jobs \
+                 WHERE job_id IN ( \
+                     'binary-rename-0-write-mat_rollback-restore_target', \
+                     'binary-rename-1-delete-mat_rollback-restore_target') \
+                 ORDER BY job_id",
+            )
+            .expect("prepare retained rows");
+        statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("query retained rows")
+            .collect::<Result<_, _>>()
+            .expect("collect retained rows")
+    };
+    assert_eq!(retained_before.len(), 2);
+    drop(connection);
+
+    let result = actor
+        .versioned_text_rollback(
+            rollback("main", "target-new.bin", "target"),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rollback despite retained job-id collision");
+    assert!(result.materialized);
+    assert_eq!(
+        std::fs::read(scratch.path().join("target-old.bin")).expect("restored target"),
+        BYTES
+    );
+    assert!(!scratch.path().join("target-new.bin").exists());
+    assert_eq!(
+        std::fs::read(scratch.path().join("unrelated-new.bin")).expect("unrelated rename"),
+        BYTES
+    );
+    assert!(!scratch.path().join("unrelated-old.bin").exists());
+
+    let connection = rusqlite::Connection::open(&db).expect("verify retained rows");
+    let retained_after: Vec<(String, String, String, i64)> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT job_id, status, target_path, target_generation \
+                 FROM materialization_jobs \
+                 WHERE job_id IN ( \
+                     'binary-rename-0-write-mat_rollback-restore_target', \
+                     'binary-rename-1-delete-mat_rollback-restore_target') \
+                 ORDER BY job_id",
+            )
+            .expect("prepare retained rows after rollback");
+        statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("query retained rows after rollback")
+            .collect::<Result<_, _>>()
+            .expect("collect retained rows after rollback")
+    };
+    assert_eq!(retained_after, retained_before);
+    let rollback_identity = binary_rollback_job_identity(WORKSPACE, "main", "target");
+    let rollback_write_id = binary_rename_write_job_id(&rollback_identity);
+    let rollback_delete_id = binary_rename_delete_job_id(&rollback_identity);
+    let namespaced_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id IN (?1, ?2) \
+               AND status = 'complete'",
+            rusqlite::params![rollback_write_id, rollback_delete_id],
+            |row| row.get(0),
+        )
+        .expect("namespaced rollback rows");
+    assert_eq!(namespaced_rows, 2);
     drop(connection);
     supervisor.close(&db).expect("close actor");
 }
@@ -783,11 +1114,11 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
     );
 
     let connection = rusqlite::Connection::open(&db).expect("read job ledger");
+    let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "inactive-delete");
     let status: String = connection
         .query_row(
-            "SELECT status FROM materialization_jobs \
-             WHERE job_id = 'rollback-restore_inactive-delete'",
-            [],
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            [restore_job_id],
             |row| row.get(0),
         )
         .expect("restore job");
@@ -814,11 +1145,11 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
         BYTES
     );
     let connection = rusqlite::Connection::open(&db).expect("read drained job ledger");
+    let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "inactive-delete");
     let status: String = connection
         .query_row(
-            "SELECT status FROM materialization_jobs \
-             WHERE job_id = 'rollback-restore_inactive-delete'",
-            [],
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            [restore_job_id],
             |row| row.get(0),
         )
         .expect("drained restore job");
@@ -939,11 +1270,11 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
         BYTES
     );
     let connection = rusqlite::Connection::open(&db).expect("read restore status");
+    let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "switch-back-delete");
     let status: String = connection
         .query_row(
-            "SELECT status FROM materialization_jobs \
-             WHERE job_id = 'rollback-restore_switch-back-delete'",
-            [],
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            [restore_job_id],
             |row| row.get(0),
         )
         .expect("restore job");
@@ -1001,11 +1332,11 @@ async fn post_commit_active_version_lookup_failure_returns_committed_rollback() 
     );
 
     let connection = rusqlite::Connection::open(&db).expect("read pending restore");
+    let restore_job_id = binary_rollback_job_identity(WORKSPACE, "main", "lookup-mutation");
     let status: String = connection
         .query_row(
-            "SELECT status FROM materialization_jobs \
-             WHERE job_id = 'rollback-restore_lookup-mutation'",
-            [],
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            [restore_job_id],
             |row| row.get(0),
         )
         .expect("durable restore job");

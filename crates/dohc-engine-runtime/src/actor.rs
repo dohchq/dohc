@@ -59,8 +59,8 @@ use dohc_engine_domain::{
     ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
     VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
     apply_secret_file_from_version, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, capture_ingest_binary_in_tx, capture_ingest_in_tx,
-    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire,
+    binary_rename_write_job_id, binary_rollback_job_identity, capture_ingest_binary_in_tx,
+    capture_ingest_in_tx, capture_manifest_seed, capture_retire_in_tx, capture_secret_retire,
     compare_secret_files_page_keyless, delete_secret_file_keyless, derive_capture_object_id,
     enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless,
     get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
@@ -9540,7 +9540,11 @@ fn versioned_text_rollback_on_store(
             Ok(())
         },
     )?;
-    let job_id = format!("{ROLLBACK_RESTORE_PREFIX}{}", input.mutation_moment_id);
+    let job_id = binary_rollback_job_identity(
+        &input.workspace_id,
+        &input.version_id,
+        &input.mutation_moment_id,
+    );
     let rename_write_job_id = binary_rename_write_job_id(&job_id);
     let rename_delete_job_id = binary_rename_delete_job_id(&job_id);
     // The rollback tx is already committed: a failed job load must not turn
@@ -9564,6 +9568,34 @@ fn versioned_text_rollback_on_store(
             });
         }
     };
+    // Fall back only when the new namespace is absent, preserving legacy replay
+    // without mistaking an unrelated legacy collision for this rollback.
+    let (job, rename_write_job, rename_delete_job) =
+        if job.is_none() && rename_write_job.is_none() && rename_delete_job.is_none() {
+            let legacy_job_id = format!("{ROLLBACK_RESTORE_PREFIX}{}", input.mutation_moment_id);
+            let legacy_write_job_id = binary_rename_write_job_id(&legacy_job_id);
+            let legacy_delete_job_id = binary_rename_delete_job_id(&legacy_job_id);
+            match (
+                store.load_materialization_job(&legacy_job_id),
+                store.load_materialization_job(&legacy_write_job_id),
+                store.load_materialization_job(&legacy_delete_job_id),
+            ) {
+                (Ok(job), Ok(write_job), Ok(delete_job)) => (job, write_job, delete_job),
+                _ => {
+                    eprintln!(
+                        "engine: rollback committed but loading its legacy restore job(s) failed"
+                    );
+                    return Ok(RollbackExecutionResult {
+                        deduped,
+                        materialize_enqueued: true,
+                        materialized: false,
+                        materialize_outcome: PostCommitMaterializeOutcome::Error,
+                    });
+                }
+            }
+        } else {
+            (job, rename_write_job, rename_delete_job)
+        };
     let has_jobs = job.is_some() || rename_write_job.is_some() || rename_delete_job.is_some();
     if !has_jobs {
         return Ok(RollbackExecutionResult {

@@ -6,7 +6,7 @@
 
 use dohc_engine_domain::{
     EngineStore, NoFaults, RollbackTextFileMutation, VersionedTextStore, WriteBinaryFile,
-    WriteText, write_binary_file_in_tx,
+    WriteText, binary_rollback_job_identity, write_binary_file_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
 use dohc_engine_storage::{
@@ -307,6 +307,7 @@ fn rollback_first_binary_write_removes_file_and_object() {
     // never re-materialize the rolled-back bytes. A compensating restore job is
     // enqueued unconditionally (a harmless no-op here, since the bytes never
     // reached disk in this pending-no-drain case).
+    let restore_job_id = binary_rollback_job_identity(WS, "main", "bin-job");
     let (orig, restore): (i64, i64) = store
         .read_with(|conn| {
             let o: i64 = conn.query_row(
@@ -316,8 +317,8 @@ fn rollback_first_binary_write_removes_file_and_object() {
             )?;
             let r: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM materialization_jobs \
-                 WHERE job_id = 'rollback-restore_bin-job' AND status = 'pending'",
-                [],
+                 WHERE job_id = ?1 AND status = 'pending'",
+                [restore_job_id],
                 |r| r.get(0),
             )?;
             Ok::<_, rusqlite::Error>((o, r))
