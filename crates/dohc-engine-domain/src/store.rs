@@ -1552,6 +1552,19 @@ impl<'a> VersionedTextStore<'a> {
         input: &CreateNamedVersion,
         faults: &dyn FaultInjector,
     ) -> Result<VersionRecord, DomainError> {
+        self.create_named_version_with(input, faults, |_, _| Ok(()))
+    }
+
+    /// Fork a named version with a caller-supplied same-transaction side effect.
+    pub fn create_named_version_with<F>(
+        &mut self,
+        input: &CreateNamedVersion,
+        faults: &dyn FaultInjector,
+        after: F,
+    ) -> Result<VersionRecord, DomainError>
+    where
+        F: FnOnce(&Transaction<'_>, &VersionRecord) -> Result<(), DomainError>,
+    {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.new_version_id, "version_id")?;
         non_empty(&input.from_version_id, "version_id")?;
@@ -1667,6 +1680,7 @@ impl<'a> VersionedTextStore<'a> {
                 input.now_ms,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms)?;
+            after(tx, &record)?;
             Ok::<_, DomainError>(record.clone())
         })?;
         committed(outcome)
@@ -1830,7 +1844,8 @@ fn normalized_capture_retire(input: &CaptureRetire) -> Result<CaptureRetire, Dom
     Ok(normalized)
 }
 
-fn capture_ingest_in_tx(
+#[doc(hidden)]
+pub fn capture_ingest_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
 ) -> Result<WriteResult, DomainError> {
@@ -1953,7 +1968,8 @@ fn capture_ingest_in_tx(
     Ok(result)
 }
 
-fn capture_retire_in_tx(
+#[doc(hidden)]
+pub fn capture_retire_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureRetire,
 ) -> Result<CaptureRetireResult, DomainError> {
@@ -2118,7 +2134,8 @@ pub const YDOC_ORIGIN: &str = "ydoc";
 /// the generic ceiling for non-capture writers.
 pub const MAX_CAPTURE_BINARY_FILE_BYTES: usize = 5 * 1024 * 1024;
 
-fn capture_ingest_binary_in_tx(
+#[doc(hidden)]
+pub fn capture_ingest_binary_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngestBinary,
 ) -> Result<CaptureIngestBinaryResult, DomainError> {

@@ -59,9 +59,7 @@ pub fn apply_version_envelope(
     if envelope.op_kind != "version.create" {
         return Err(SyncError::UnsupportedOperation);
     }
-    apply_envelope_with(store, envelope, faults, |tx, op| {
-        apply_version_create(tx, op)
-    })
+    apply_envelope_with(store, envelope, faults, apply_version_create)
 }
 
 fn apply_workspace_init(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {

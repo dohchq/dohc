@@ -13,6 +13,7 @@ mod apply;
 mod conflict_apply;
 mod cursor;
 mod error;
+mod file_search;
 mod hydration;
 mod journal;
 mod model;

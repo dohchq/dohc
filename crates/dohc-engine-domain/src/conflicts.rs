@@ -551,6 +551,19 @@ impl VersionedTextStore<'_> {
         input: &ResolveTextConflict,
         faults: &dyn FaultInjector,
     ) -> Result<ResolveTextConflictResult, DomainError> {
+        self.resolve_text_conflict_with(input, faults, |_, _| Ok(()))
+    }
+
+    /// Resolve a conflict with a caller-supplied same-transaction side effect.
+    pub fn resolve_text_conflict_with<F>(
+        &mut self,
+        input: &ResolveTextConflict,
+        faults: &dyn FaultInjector,
+        after: F,
+    ) -> Result<ResolveTextConflictResult, DomainError>
+    where
+        F: FnOnce(&Transaction<'_>, &ResolveTextConflictResult) -> Result<(), DomainError>,
+    {
         validate_path_like_id(&input.workspace_id, "workspace_id")?;
         validate_path_like_id(&input.conflict_id, "conflict_id")?;
         let (resolution_kind, merged_text) = match &input.resolution {
@@ -728,11 +741,13 @@ impl VersionedTextStore<'_> {
             conflict.chosen_from = update.chosen_from;
             conflict.resolution = update.resolution;
             conflict.updated_at_ms = update.updated_at_ms;
-            Ok::<_, DomainError>(ResolveTextConflictResult {
+            let result = ResolveTextConflictResult {
                 conflict,
                 write,
                 delete: deletion,
-            })
+            };
+            after(tx, &result)?;
+            Ok::<_, DomainError>(result)
         })?;
         committed(outcome)
     }
