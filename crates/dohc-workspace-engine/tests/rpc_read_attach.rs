@@ -145,11 +145,77 @@ async fn read_attach_respects_the_open_handle_cap() {
             }
         }
     }
-    let refused_at = refused_at.expect("read attaches must hit the handle cap");
-    assert!(
-        refused_at < 100,
-        "the cap must refuse before unbounded growth"
+    refused_at.expect("read attaches must hit the handle cap before unbounded growth");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
+    // MUTATION: keep the owner's mode on the attached clone (drop the
+    // `attached.mode = WorkspaceOpenMode::ReadOnly` line) and this write
+    // reaches the desktop's Full binding through a "read" handle.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "ws-attach-write-isolation";
+    let desktop = open(&transport, &scratch, 1, workspace_id, json!({}))
+        .await
+        .expect("desktop full open");
+    let cli = open(
+        &transport,
+        &scratch,
+        2,
+        workspace_id,
+        json!({ "skipStartupMaintenance": true }),
+    )
+    .await
+    .expect("CLI read attach");
+    assert_ne!(cli, desktop);
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "versionedText.write",
+                Some(cli.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "notes/isolated.md",
+                    "text": "a read handle must not write",
+                    "origin": "api",
+                    "requestId": "attach-write-1",
+                }),
+            ),
+        )
+        .await
+        .expect_err("a mutating method through a read attachment must refuse");
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    assert_eq!(
+        error.message,
+        "method is unavailable on a read-only workspace handle"
     );
+    // The same write through the OWNER handle proceeds — the refusal above is
+    // the attachment's mode, not a broken method.
+    let written = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "versionedText.write",
+                Some(desktop.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "notes/isolated.md",
+                    "text": "the owner still writes",
+                    "origin": "api",
+                    "requestId": "attach-write-2",
+                }),
+            ),
+        )
+        .await
+        .expect("owner write")
+        .result;
+    assert!(written["moment"]["momentId"].is_string());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

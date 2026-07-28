@@ -1218,6 +1218,10 @@ impl EngineService {
             // closed actor (its worker died) is stale — drop it and reopen fresh.
             if open.actor.lifecycle() != LifecycleState::Closed {
                 if requested_mode == WorkspaceOpenMode::ReadOnly {
+                    // Caller-supplied relay params and captureAuthor are
+                    // deliberately ignored here: the attachment rides the
+                    // OWNER's binding, and read-only handles cannot reach
+                    // sync/relay/capture methods anyway.
                     let sequence = self
                         .next_handle
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

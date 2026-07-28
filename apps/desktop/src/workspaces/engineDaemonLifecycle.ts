@@ -259,16 +259,26 @@ export class EngineDaemonLifecycle {
         )
       ).result;
     } finally {
-      await this.sendSmokeRequest(
-        client,
-        {
-          id: this.requestId(),
-          method: "workspace.close",
-          workspace,
-          params: {},
-        },
-        "workspace.close",
-      );
+      // Best-effort release: the desktop closing the owner concurrently drops
+      // this attachment daemon-side, and a close error thrown from a finally
+      // would replace an already-obtained read result. The daemon reaps
+      // attachments with their owner, so a missed close cannot leak.
+      try {
+        await this.sendSmokeRequest(
+          client,
+          {
+            id: this.requestId(),
+            method: "workspace.close",
+            workspace,
+            params: {},
+          },
+          "workspace.close",
+        );
+      } catch (error) {
+        console.debug(
+          `[engine-daemon] read-attach close failed (owner likely closed concurrently): ${String(error)}`,
+        );
+      }
     }
   }
 
