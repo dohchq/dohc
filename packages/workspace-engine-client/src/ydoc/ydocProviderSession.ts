@@ -1,4 +1,5 @@
 import type * as Y from "yjs";
+import { isYdocSessionNotFoundRefusal } from "../live/daemonLiveAdapter";
 import {
   RemoteYdocApplyError,
   YdocLiveAdapter,
@@ -82,6 +83,7 @@ export async function openEngineYdocProviderSession(
   let settleChain: Promise<void> = Promise.resolve();
   let cancelSettle: (() => void) | null = null;
   let localEditError: unknown = null;
+  let closeError: unknown = null;
 
   function notifyError(
     callback: ((error: unknown) => void) | undefined,
@@ -149,7 +151,16 @@ export async function openEngineYdocProviderSession(
     path: session.path,
 
     applyLocalUpdate(update) {
-      if (closed) return Promise.resolve();
+      if (closed) {
+        if (closeComplete) return Promise.resolve();
+        return Promise.reject(
+          localEditError ??
+            closeError ??
+            new Error(
+              `Y.Doc provider session for ${options.path} is closing and has not released its daemon session.`,
+            ),
+        );
+      }
       let operation: Promise<unknown>;
       try {
         operation = session.applyLocalUpdate(update);
@@ -206,9 +217,27 @@ export async function openEngineYdocProviderSession(
           preCloseError = error;
         }
       }
-      await session.close({ settle: false });
-      if (ownsAdapter) adapter.dispose();
-      closeComplete = true;
+      try {
+        try {
+          await session.close({ settle: false });
+        } catch (error) {
+          if (!isYdocSessionNotFoundRefusal(error)) {
+            try {
+              await session.close({ settle: true });
+            } catch (settlingCloseError) {
+              if (!isYdocSessionNotFoundRefusal(settlingCloseError)) {
+                throw settlingCloseError;
+              }
+            }
+          }
+        }
+        if (ownsAdapter) adapter.dispose();
+        closeComplete = true;
+        closeError = null;
+      } catch (error) {
+        closeError = error;
+        throw error;
+      }
       if (preCloseError !== undefined) throw preCloseError;
     },
   };

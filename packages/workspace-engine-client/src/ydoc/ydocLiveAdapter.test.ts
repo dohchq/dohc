@@ -499,7 +499,10 @@ describe("YdocLiveAdapter", () => {
           text.insert(0, "refused");
         }),
       ),
-    ).rejects.toBe(resyncFailure);
+    ).rejects.toMatchObject({
+      message: expect.stringContaining(resyncFailure.message),
+      cause: recordFailure,
+    });
     await expect(session.close({ settle: false })).resolves.toBeUndefined();
 
     expect(methods.at(-1)).toBe(YDOC_METHOD.close);
@@ -540,14 +543,136 @@ describe("YdocLiveAdapter", () => {
       text.insert(0, "local");
     });
 
-    await expect(provider.applyLocalUpdate(update)).rejects.toBe(recordFailure);
-    await expect(provider.settleNow()).rejects.toBe(recordFailure);
-    expect(localErrors).toEqual([recordFailure]);
+    const journalFailure = await provider.applyLocalUpdate(update).catch(
+      (error: unknown) => error,
+    );
+    expect(journalFailure).toMatchObject({
+      message: expect.stringContaining(recordFailure.message),
+      cause: recordFailure,
+    });
+    await expect(provider.settleNow()).rejects.toBe(journalFailure);
+    expect(localErrors).toEqual([journalFailure]);
     expect(engine.requests.map((request) => request.method)).not.toContain(
       YDOC_METHOD.settle,
     );
     await expect(provider.close({ settle: false })).resolves.toBeUndefined();
     expect(methods.at(-1)).toBe(YDOC_METHOD.close);
+  });
+
+  it("retries a provider release with settle true after an unsettled close refusal", async () => {
+    const engine = seedPlaintextEngine();
+    const unsettledClose = new Error("injected unsettled close");
+    const closes: Array<boolean | undefined> = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.close) {
+          const settle = (request.params as { settle?: boolean }).settle;
+          closes.push(settle);
+          if (settle === false) throw unsettledClose;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+
+    await expect(provider.close({ settle: false })).resolves.toBeUndefined();
+    expect(closes).toEqual([false, true]);
+    expect(engine.activeSessionIds()).toHaveLength(0);
+  });
+
+  it("rejects edits while a failed provider close is incomplete, then converges on retry", async () => {
+    const engine = seedPlaintextEngine();
+    const firstCloseFailure = new Error("injected plain close failure");
+    const settlingCloseFailure = new Error("injected settling close failure");
+    const closes: Array<boolean | undefined> = [];
+    let allowClose = false;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.close) {
+          const settle = (request.params as { settle?: boolean }).settle;
+          closes.push(settle);
+          if (!allowClose) {
+            throw settle === false
+              ? firstCloseFailure
+              : settlingCloseFailure;
+          }
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+    const update = plaintextUpdate(provider.initialUpdate, (text) => {
+      text.insert(0, "must reject");
+    });
+
+    await expect(provider.close({ settle: false })).rejects.toBe(
+      settlingCloseFailure,
+    );
+    await expect(provider.applyLocalUpdate(update)).rejects.toBe(
+      settlingCloseFailure,
+    );
+    expect(engine.recordedUpdates).toHaveLength(0);
+
+    allowClose = true;
+    await expect(provider.close({ settle: false })).resolves.toBeUndefined();
+    expect(closes).toEqual([false, true, false]);
+    expect(engine.activeSessionIds()).toHaveLength(0);
+  });
+
+  it("treats typed ydoc-session-not-found close refusal as an already-complete release", async () => {
+    const engine = seedPlaintextEngine();
+    const closes: Array<boolean | undefined> = [];
+    const notFound = Object.assign(new Error("ydoc-session-not-found"), {
+      code: "wire-error",
+      wireError: {
+        code: "INVALID_PARAMS",
+        message: "ydoc-session-not-found",
+        retry: "no",
+      },
+    });
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.close) {
+          closes.push((request.params as { settle?: boolean }).settle);
+          await engine.sendRequest(request);
+          throw notFound;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+
+    await expect(provider.close({ settle: false })).resolves.toBeUndefined();
+    expect(closes).toEqual([false]);
+    expect(engine.activeSessionIds()).toHaveLength(0);
+    await expect(provider.close({ settle: false })).resolves.toBeUndefined();
   });
 
   it("detects a per-session event sequence gap and marks the session stale", async () => {
@@ -911,7 +1036,10 @@ describe("YdocLiveAdapter", () => {
         path: PATH,
         contentKind: "plaintext",
       }),
-    ).rejects.toBe(seedFailure);
+    ).rejects.toMatchObject({
+      message: expect.stringContaining(seedFailure.message),
+      cause: seedFailure,
+    });
     expect(closes).toEqual([false, true]);
     adapter.dispose();
   });

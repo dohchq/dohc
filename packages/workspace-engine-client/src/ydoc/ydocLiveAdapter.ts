@@ -1,5 +1,6 @@
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { isYdocSessionNotFoundRefusal } from "../live/daemonLiveAdapter";
 import type { Event } from "./generated/Event";
 import type { Request } from "./generated/Request";
 import type { Response } from "./generated/Response";
@@ -531,8 +532,21 @@ export class YdocAdapterSession {
       this.assertOpen();
       try {
         return await this.requestRecordUpdate(update, options);
-      } catch {
-        return await this.recoverCanonicalState(update, options);
+      } catch (refusal) {
+        try {
+          return await this.recoverCanonicalState(update, options);
+        } catch (recoveryFailure) {
+          const refusalMessage =
+            refusal instanceof Error ? refusal.message : String(refusal);
+          const recoveryMessage =
+            recoveryFailure instanceof Error
+              ? recoveryFailure.message
+              : String(recoveryFailure);
+          throw new Error(
+            `Y.Doc update recovery failed: ${recoveryMessage}. Original record refusal: ${refusalMessage}.`,
+            { cause: refusal },
+          );
+        }
       }
     });
     const guardedOperation = operation.catch((error: unknown) => {
@@ -778,9 +792,13 @@ export class YdocAdapterSession {
       ...(options?.settle !== undefined ? { settle: options.settle } : {}),
       ...(options?.summary ? { summary: options.summary } : {}),
     };
-    decodeYdocCloseResult(
-      await this.adapter.request(this.workspace, YDOC_METHOD.close, params),
-    );
+    try {
+      decodeYdocCloseResult(
+        await this.adapter.request(this.workspace, YDOC_METHOD.close, params),
+      );
+    } catch (error) {
+      if (!isYdocSessionNotFoundRefusal(error)) throw error;
+    }
     this.closed = true;
     this.doc.off("update", this.handleDocUpdate);
     this.adapter.releaseSession(this.sessionId);
