@@ -665,7 +665,7 @@ describe("YdocLiveAdapter", () => {
     expect(engine.activeSessionIds()).toHaveLength(0);
   });
 
-  it("retries a transient richdoc release without requesting an unsupported settle", async () => {
+  it("escalates a transient richdoc release to a settling close, like plaintext", async () => {
     const engine = new YdocLoopbackEngine();
     engine.seedFile({
       workspace: WORKSPACE,
@@ -698,8 +698,9 @@ describe("YdocLiveAdapter", () => {
     });
 
     await expect(provider.close({ settle: false })).resolves.toBeUndefined();
-    expect(closes).toEqual([false, false]);
-    expect(closes).not.toContain(true);
+    // Richdoc settles since R15-3's full-fidelity projection: the retry
+    // escalates to a settling close so pending edits are preserved.
+    expect(closes).toEqual([false, true]);
     expect(engine.activeSessionIds()).toHaveLength(0);
   });
 

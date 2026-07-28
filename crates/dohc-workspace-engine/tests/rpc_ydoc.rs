@@ -326,23 +326,47 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     let rich_session = rich["sessionId"].as_str().expect("rich session");
-    let rich_refusal = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                16,
-                "ydoc.settle",
-                Some(handle.clone()),
-                json!({ "sessionId": rich_session }),
-            ),
-        )
-        .await
-        .expect_err("richdoc settle is gated in C1");
-    assert_eq!(rich_refusal.message, "richdoc-settle-unsupported");
-    call(
+    // Richdoc settles since the full-fidelity projection landed (R15-3): the
+    // body fragment projects to markdown, and the settle materializes the .md
+    // like plaintext does. (The C1-era refusal was a stale guard — the desktop
+    // editor could journal rich edits that never reached the file.)
+    let rich_update = {
+        let doc = Ydoc::wire();
+        base64::engine::general_purpose::STANDARD
+            .encode(doc.richdoc_append_paragraph("Rich settled body."))
+    };
+    let recorded = call(
+        &transport,
+        &handle,
+        16,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": rich_session, "updateBase64": rich_update }),
+    )
+    .await;
+    assert_eq!(recorded["seq"], json!(1));
+    let rich_settled = call(
         &transport,
         &handle,
         17,
+        "ydoc.settle",
+        json!({ "sessionId": rich_session }),
+    )
+    .await;
+    let rich_markdown = rich_settled["markdown"].as_str().expect("rich markdown");
+    assert!(
+        rich_markdown.contains("Rich settled body."),
+        "richdoc settle must project the body fragment, got {rich_markdown:?}"
+    );
+    let rich_on_disk = std::fs::read_to_string(scratch.path().join("notes/rich.md"))
+        .expect("richdoc settle materializes notes/rich.md");
+    assert!(
+        rich_on_disk.contains("Rich settled body."),
+        "materialized .md must carry the settled body, got {rich_on_disk:?}"
+    );
+    call(
+        &transport,
+        &handle,
+        19,
         "ydoc.close",
         json!({ "sessionId": rich_session }),
     )

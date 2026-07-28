@@ -202,13 +202,8 @@ export async function openEngineYdocProviderSession(
       await journalChain.catch(() => undefined);
       await settleChain.catch(() => undefined);
       let preCloseError: unknown;
-      // Richdoc settle is a C1 daemon refusal (richdoc-settle-unsupported):
-      // the provider's pre-close settle would error before the close RPC ran,
-      // stranding the session and its lease. The daemon's default close
-      // persists the closed richdoc CRDT instead — nothing is lost.
       if (
         closeOptions?.settle !== false &&
-        session.contentKind !== "richdoc" &&
         localEditError === null
       ) {
         try {
@@ -223,12 +218,9 @@ export async function openEngineYdocProviderSession(
         } catch (error) {
           if (!isYdocSessionNotFoundRefusal(error)) {
             try {
-              // Richdoc settle is unsupported by the daemon, so retry the
-              // release-only close after a transient failure. Plaintext can
-              // still escalate to a settling close to preserve pending edits.
-              await session.close({
-                settle: session.contentKind === "richdoc" ? false : true,
-              });
+              // Escalate to a settling close after a transient failure so
+              // pending edits are preserved.
+              await session.close({ settle: true });
             } catch (settlingCloseError) {
               if (!isYdocSessionNotFoundRefusal(settlingCloseError)) {
                 throw settlingCloseError;
