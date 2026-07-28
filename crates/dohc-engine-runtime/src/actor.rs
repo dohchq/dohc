@@ -5549,6 +5549,106 @@ struct MaterializationReplaySummary {
     selected_seen: usize,
 }
 
+const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_";
+
+fn rollback_write_matches_active_snapshot(
+    store: &EngineStore,
+    write_job: &MaterializationJob,
+    additionally_absent_path: Option<&str>,
+) -> Result<bool, RuntimeError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT 1 \
+                 FROM versioned_workspaces w \
+                 JOIN path_aliases a ON a.workspace_id = w.workspace_id \
+                   AND a.version_id = COALESCE( \
+                       (SELECT av.version_id FROM active_versions av \
+                        WHERE av.workspace_id = w.workspace_id), \
+                       w.main_version_id) \
+                   AND a.path = ?1 \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id \
+                   AND s.version_id = a.version_id AND s.object_id = a.object_id \
+                 WHERE CASE COALESCE(s.content_kind, 'text') \
+                         WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END = ?2 \
+                   AND (?3 IS NULL OR NOT EXISTS ( \
+                       SELECT 1 FROM path_aliases occupied \
+                       WHERE occupied.workspace_id = a.workspace_id \
+                         AND occupied.version_id = a.version_id \
+                         AND occupied.path = ?3)) \
+                 LIMIT 1",
+                params![
+                    write_job.target_path,
+                    write_job.content_sha256,
+                    additionally_absent_path
+                ],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|match_| match_.is_some())
+            .map_err(StorageError::corrupt_public)
+        })
+        .map_err(RuntimeError::from)
+}
+
+fn rollback_delete_matches_active_absence(
+    store: &EngineStore,
+    delete_job: &MaterializationJob,
+) -> Result<bool, RuntimeError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT 1 FROM versioned_workspaces w \
+                 WHERE NOT EXISTS ( \
+                     SELECT 1 FROM path_aliases a \
+                     WHERE a.workspace_id = w.workspace_id \
+                       AND a.version_id = COALESCE( \
+                           (SELECT av.version_id FROM active_versions av \
+                            WHERE av.workspace_id = w.workspace_id), \
+                           w.main_version_id) \
+                       AND a.path = ?1) \
+                 LIMIT 1",
+                [delete_job.target_path.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|match_| match_.is_some())
+            .map_err(StorageError::corrupt_public)
+        })
+        .map_err(RuntimeError::from)
+}
+
+fn rollback_job_matches_active(
+    store: &EngineStore,
+    job: &MaterializationJob,
+) -> Result<bool, RuntimeError> {
+    if let Some(rollback_id) = job
+        .job_id
+        .strip_prefix("binary-rename-1-delete-mat_")
+        .filter(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
+    {
+        let write_id = binary_rename_write_job_id(rollback_id);
+        let Some(write_job) = store.load_materialization_job(&write_id)? else {
+            return Ok(false);
+        };
+        return rollback_write_matches_active_snapshot(store, &write_job, Some(&job.target_path));
+    }
+    if job.job_id.starts_with(ROLLBACK_RESTORE_PREFIX)
+        || job
+            .job_id
+            .strip_prefix("binary-rename-0-write-mat_")
+            .is_some_and(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
+    {
+        return match job.operation {
+            MaterializationOperation::Write => {
+                rollback_write_matches_active_snapshot(store, job, None)
+            }
+            MaterializationOperation::Delete => rollback_delete_matches_active_absence(store, job),
+        };
+    }
+    Ok(true)
+}
+
 fn replay_pending_materializations(
     store: &mut EngineStore,
     root_dir: &std::path::Path,
@@ -5691,6 +5791,9 @@ fn replay_pending_materializations(
             if selected.is_some() {
                 summary.failed += 1;
             }
+            continue;
+        }
+        if !rollback_job_matches_active(store, &job)? {
             continue;
         }
         if let Some(moment_id) = job.job_id.strip_prefix("binary-rename-1-delete-mat_") {
@@ -9397,30 +9500,22 @@ fn versioned_text_rollback_on_store(
             Ok(())
         },
     )?;
-    let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
+    let job_id = format!("{ROLLBACK_RESTORE_PREFIX}{}", input.mutation_moment_id);
+    let rename_write_job_id = binary_rename_write_job_id(&job_id);
+    let rename_delete_job_id = binary_rename_delete_job_id(&job_id);
     // The rollback tx is already committed: a failed job load must not turn
     // into an RPC refusal — the caller would believe a durable rollback
     // failed. Mirror the binary-write seam and self-describe the outcome.
-    let job = match store.load_materialization_job(&job_id) {
-        Ok(Some(job)) => job,
-        Ok(None) if deduped => {
-            return Ok(RollbackExecutionResult {
-                deduped: true,
-                materialize_enqueued: false,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-            });
+    let (job, rename_write_job, rename_delete_job) = match (
+        store.load_materialization_job(&job_id),
+        store.load_materialization_job(&rename_write_job_id),
+        store.load_materialization_job(&rename_delete_job_id),
+    ) {
+        (Ok(job), Ok(rename_write_job), Ok(rename_delete_job)) => {
+            (job, rename_write_job, rename_delete_job)
         }
-        Ok(None) => {
-            return Ok(RollbackExecutionResult {
-                deduped,
-                materialize_enqueued: false,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-            });
-        }
-        Err(error) => {
-            eprintln!("engine: rollback committed but loading its restore job failed: {error}");
+        _ => {
+            eprintln!("engine: rollback committed but loading its restore job(s) failed");
             return Ok(RollbackExecutionResult {
                 deduped,
                 materialize_enqueued: true,
@@ -9429,7 +9524,70 @@ fn versioned_text_rollback_on_store(
             });
         }
     };
-    if deduped && job.status != JobStatus::Pending {
+    let has_jobs = job.is_some() || rename_write_job.is_some() || rename_delete_job.is_some();
+    if !has_jobs {
+        return Ok(RollbackExecutionResult {
+            deduped,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+
+    let target_is_active = VersionedTextStore::new(store)
+        .get_active_version(&input.workspace_id)?
+        .version_id
+        == input.version_id;
+    if !target_is_active {
+        return Ok(RollbackExecutionResult {
+            deduped,
+            materialize_enqueued: true,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+
+    if let Some(job) = job {
+        if deduped && job.status != JobStatus::Pending {
+            return Ok(RollbackExecutionResult {
+                deduped: true,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+        let (materialized, materialize_outcome) = match job.status {
+            JobStatus::Complete => (true, PostCommitMaterializeOutcome::Applied),
+            JobStatus::Pending => materialize_pending_job(
+                store,
+                root_dir,
+                &input.workspace_id,
+                &job,
+                self_writes,
+                job.created_at_ms,
+                faults,
+            ),
+            JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
+        };
+        return Ok(RollbackExecutionResult {
+            deduped,
+            materialize_enqueued: true,
+            materialized,
+            materialize_outcome,
+        });
+    }
+
+    let (Some(write_job), Some(delete_job)) = (rename_write_job, rename_delete_job) else {
+        eprintln!("engine: rollback committed with an incomplete rename restore job pair");
+        return Ok(RollbackExecutionResult {
+            deduped,
+            materialize_enqueued: true,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Error,
+        });
+    };
+    if deduped && write_job.status != JobStatus::Pending && delete_job.status != JobStatus::Pending
+    {
         return Ok(RollbackExecutionResult {
             deduped: true,
             materialize_enqueued: false,
@@ -9437,15 +9595,51 @@ fn versioned_text_rollback_on_store(
             materialize_outcome: PostCommitMaterializeOutcome::Skipped,
         });
     }
-    let (materialized, materialize_outcome) = materialize_pending_job(
-        store,
-        root_dir,
-        &input.workspace_id,
-        &job,
-        self_writes,
-        job.created_at_ms,
-        faults,
-    );
+    let (write_materialized, write_outcome) = match write_job.status {
+        JobStatus::Complete => (true, PostCommitMaterializeOutcome::Applied),
+        JobStatus::Pending => materialize_pending_job(
+            store,
+            root_dir,
+            &input.workspace_id,
+            &write_job,
+            self_writes,
+            write_job.created_at_ms,
+            faults,
+        ),
+        JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
+    };
+    if !write_materialized {
+        return Ok(RollbackExecutionResult {
+            deduped,
+            materialize_enqueued: true,
+            materialized: false,
+            materialize_outcome: write_outcome,
+        });
+    }
+    let delete_job = match store.load_materialization_job(&delete_job.job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) | Err(_) => {
+            return Ok(RollbackExecutionResult {
+                deduped,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+    };
+    let (materialized, materialize_outcome) = match delete_job.status {
+        JobStatus::Complete => (true, PostCommitMaterializeOutcome::Applied),
+        JobStatus::Pending => materialize_pending_job(
+            store,
+            root_dir,
+            &input.workspace_id,
+            &delete_job,
+            self_writes,
+            delete_job.created_at_ms,
+            faults,
+        ),
+        JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
+    };
     Ok(RollbackExecutionResult {
         deduped,
         materialize_enqueued: true,

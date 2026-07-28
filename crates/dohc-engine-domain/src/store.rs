@@ -610,6 +610,42 @@ impl<'a> VersionedTextStore<'a> {
                 }
             }
 
+            // A completed binary delete/rename already changed DISK, so
+            // cancelling the original PENDING intent is insufficient. Commit
+            // the inverse intent beside the restored DB head. These jobs are
+            // durable even when the version is currently inactive; the
+            // runtime executes them only while their restored state is active,
+            // otherwise activation/open replay leaves them PENDING.
+            if prep.moment.operation == MomentOp::Delete
+                && prep.moment.before_content_kind == "binary"
+            {
+                let before = prep.before.as_ref().ok_or(DomainError::StateCorrupt {
+                    reason: "binary delete rollback has no restored snapshot",
+                })?;
+                enqueue_binary_delete_rollback_restore(
+                    tx,
+                    input,
+                    before,
+                    prep.moment.moment_order,
+                    prep.moment.recorded_at_ms,
+                )?;
+            }
+            if prep.moment.operation == MomentOp::Rename
+                && prep.moment.after_content_kind == "binary"
+            {
+                let before = prep.before.as_ref().ok_or(DomainError::StateCorrupt {
+                    reason: "binary rename rollback has no restored snapshot",
+                })?;
+                enqueue_binary_rename_rollback_restore(
+                    tx,
+                    input,
+                    before,
+                    &prep.moment.path,
+                    prep.moment.moment_order,
+                    prep.moment.recorded_at_ms,
+                )?;
+            }
+
             // Reconcile DISK with an active-version rolled-back binary WRITE:
             //   * a PENDING job does NOT prove disk is clean — the materializer
             //     can crash AFTER the atomic rename lands but BEFORE marking the
@@ -2382,7 +2418,22 @@ pub fn capture_manifest_seed(
                    AND s.version_id = a.version_id AND s.object_id = a.object_id \
                  LEFT JOIN blobs tb ON tb.sha256 = s.blob_sha256 \
                  LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
-                 WHERE a.workspace_id = ?1 AND a.version_id = ?2                    AND (s.metadata_origin = 'capture'                        OR (s.metadata_origin = 'ydoc'                            AND NOT EXISTS (                                SELECT 1 FROM materialization_jobs j                                WHERE j.job_id = 'ydoc-mat_' || s.latest_moment_id                                  AND j.status = 'pending')))",
+                 WHERE a.workspace_id = ?1 AND a.version_id = ?2 \
+                   AND (s.metadata_origin = 'capture' \
+                        OR (s.metadata_origin = 'ydoc' \
+                            AND NOT EXISTS ( \
+                                SELECT 1 FROM materialization_jobs j \
+                                WHERE j.job_id = 'ydoc-mat_' || s.latest_moment_id \
+                                  AND j.status = 'pending'))) \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM materialization_jobs j \
+                       WHERE j.status = 'pending' AND j.operation = 'write' \
+                         AND j.target_path = a.path \
+                         AND j.content_sha256 = CASE COALESCE(s.content_kind, 'text') \
+                             WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END \
+                         AND (j.job_id GLOB 'rollback-restore_*' \
+                              OR j.job_id GLOB \
+                                 'binary-rename-0-write-mat_rollback-restore_*'))",
             )
             .map_err(DomainError::sql_corrupt)?;
         let rows = stmt
@@ -3876,6 +3927,74 @@ fn enqueue_binary_rollback_restore(
         }
     }
     Ok(())
+}
+
+fn enqueue_binary_delete_rollback_restore(
+    tx: &Transaction<'_>,
+    input: &RollbackTextFileMutation,
+    before: &SnapshotRecord,
+    generation: i64,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    let sha256 = before
+        .binary_sha256
+        .clone()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "binary delete rollback snapshot has no binary hash",
+        })?;
+    enqueue_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: format!("rollback-restore_{}", input.mutation_moment_id),
+            target_path: before.path.clone(),
+            content_sha256: sha256,
+            preimage: Preimage::Absent,
+            target_generation: generation,
+            now_ms,
+        },
+    )
+    .map_err(DomainError::from)
+}
+
+fn enqueue_binary_rename_rollback_restore(
+    tx: &Transaction<'_>,
+    input: &RollbackTextFileMutation,
+    before: &SnapshotRecord,
+    renamed_path: &str,
+    generation: i64,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    let sha256 = before
+        .binary_sha256
+        .clone()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "binary rename rollback snapshot has no binary hash",
+        })?;
+    let rollback_id = format!("rollback-restore_{}", input.mutation_moment_id);
+    enqueue_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: binary_rename_write_job_id(&rollback_id),
+            target_path: before.path.clone(),
+            content_sha256: sha256.clone(),
+            preimage: Preimage::Absent,
+            target_generation: generation,
+            now_ms,
+        },
+    )
+    .map_err(DomainError::from)?;
+    enqueue_delete_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: binary_rename_delete_job_id(&rollback_id),
+            target_path: renamed_path.to_owned(),
+            content_sha256: sha256.clone(),
+            preimage: Preimage::Present(sha256),
+            target_generation: generation,
+            now_ms,
+        },
+    )
+    .map_err(DomainError::from)
 }
 
 /// Remove a still-replayable disk intent only when it is provably owned by the
