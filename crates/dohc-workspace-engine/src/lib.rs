@@ -7406,21 +7406,18 @@ impl EngineService {
                 "search-result-exceeds-wire-limit",
             ));
         }
-        if included == 0 && page.has_more {
-            return Err(wire(
-                ErrorCode::LimitExceeded,
-                "search-page-made-no-progress",
-            ));
-        }
         let total_consumed = consumed.saturating_add(included);
         let needs_continuation =
             total_consumed < limit && (included < row_values.len() || page.has_more);
         let next_cursor = if needs_continuation {
-            let key = page
-                .results
-                .get(included.saturating_sub(1))
-                .map(|keyed| keyed.key)
-                .ok_or_else(|| wire(ErrorCode::Internal, "search-page-made-no-progress"))?;
+            let key = if included < row_values.len() {
+                page.results
+                    .get(included.saturating_sub(1))
+                    .map(|keyed| keyed.key)
+            } else {
+                page.continuation
+            }
+            .ok_or_else(|| wire(ErrorCode::Internal, "search-page-made-no-progress"))?;
             Some(encode_search_cursor(&SearchPageCursor {
                 version: 2,
                 binding,

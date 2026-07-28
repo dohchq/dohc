@@ -44,7 +44,7 @@ pub use query::{
     query_chat_messages_granular_bounded, query_search_index, query_search_index_keyset,
 };
 
-use dohc_engine_domain::{MAX_MESSAGE_BODY_BYTES, linked_chat_projection_path};
+use dohc_engine_domain::{MAX_MESSAGE_BODY_BYTES, is_js_trim_ws, linked_chat_projection_path};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
@@ -76,9 +76,11 @@ pub const DEFAULT_SEARCH_LIMIT: i64 = 100;
 /// (`WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS` in the TypeScript oracle).
 pub const WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS: usize = 180;
 
-/// The short-query fallback never owns more than these source-text bytes.
-pub const SHORT_QUERY_RESULT_SOURCE_BYTE_BUDGET: usize = 1024 * 1024;
-pub const SHORT_QUERY_PAGE_SOURCE_BYTE_BUDGET: usize = 4 * 1024 * 1024;
+/// File candidate source is bounded before text is copied out of SQLite. Short
+/// queries additionally cap every raw FTS row inspected, including non-matches.
+pub const FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET: usize = 1024 * 1024;
+pub const FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET: usize = 4 * 1024 * 1024;
+pub const SHORT_QUERY_PAGE_ROW_BUDGET: usize = 1024;
 
 /// A chat hit hydrates one message at most, and one actor page owns only this
 /// much chat source text before returning a keyset continuation.
@@ -179,13 +181,16 @@ pub struct SearchPageBatch {
     pub generation: u64,
     pub results: Vec<KeyedSearchResult>,
     pub has_more: bool,
+    /// Cursor key for the next actor page. A line of zero is an exclusive scan
+    /// cursor and need not correspond to a returned result.
+    pub continuation: Option<SearchResultKey>,
 }
 
 /// Normalize a query the way the search entry point does: trim + lowercase.
 /// Matching is case-insensitive substring, so callers pass the normalized query
 /// to [`preview_line_matches`].
 pub fn normalize_query(query: &str) -> String {
-    query.trim().to_lowercase()
+    query.trim_matches(is_js_trim_ws).to_lowercase()
 }
 
 /// Split `text` into lines the way `workspaceSearch.ts` does: `\r\n` and a lone
@@ -252,6 +257,14 @@ fn preview_for_line(line: &str, match_index: usize, query_len: usize) -> (String
         }
         window_units = window_units.saturating_add(width);
         window_end += 1;
+    }
+    while window_end == chars.len() && window_start > 0 {
+        let width = chars[window_start - 1].len_utf16();
+        if window_units.saturating_add(width) > WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS {
+            break;
+        }
+        window_units = window_units.saturating_add(width);
+        window_start -= 1;
     }
     let preview: String = chars[window_start..window_end].iter().collect();
     let match_start_char = match_index
@@ -328,18 +341,50 @@ pub fn search_workspace(
     limit: Option<i64>,
     now_ms: i64,
 ) -> Result<Vec<SearchResult>, SearchError> {
-    let page = search_workspace_page(
-        conn,
-        root_dir,
-        workspace_id,
-        version_id,
-        query,
-        limit,
-        now_ms,
-        None,
-        None,
-    )?;
-    Ok(page.results.into_iter().map(|keyed| keyed.result).collect())
+    let requested = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+    let Some(cap) = query::clamp_limit(requested, MAX_RESULT_LIMIT) else {
+        return Ok(Vec::new());
+    };
+    let mut results = Vec::with_capacity(cap);
+    let mut expected_generation = None;
+    let mut after = None;
+    loop {
+        let remaining = cap.saturating_sub(results.len());
+        let page = search_workspace_page(
+            conn,
+            root_dir,
+            workspace_id,
+            version_id,
+            query,
+            Some(i64::try_from(remaining).unwrap_or(i64::MAX)),
+            now_ms,
+            expected_generation,
+            after,
+        )?;
+        if page.disposition == SearchPageDisposition::Restart {
+            return Err(SearchError::Corrupt(
+                "search generation changed during an unpaged read",
+            ));
+        }
+        expected_generation = Some(page.generation);
+        results.extend(page.results.into_iter().map(|keyed| keyed.result));
+        if results.len() >= cap || !page.has_more {
+            break;
+        }
+        let Some(next) = page.continuation else {
+            return Err(SearchError::Bounds(
+                "search page made no progress while continuation was required",
+            ));
+        };
+        if after == Some(next) {
+            return Err(SearchError::Bounds(
+                "search page repeated its continuation cursor",
+            ));
+        }
+        after = Some(next);
+    }
+    results.truncate(cap);
+    Ok(results)
 }
 
 /// Ensure the index, bind the read to a monotonic connection generation, and
@@ -365,6 +410,7 @@ pub fn search_workspace_page(
             generation: conn.total_changes(),
             results: Vec::new(),
             has_more: false,
+            continuation: None,
         });
     }
     let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
@@ -374,6 +420,7 @@ pub fn search_workspace_page(
             generation: conn.total_changes(),
             results: Vec::new(),
             has_more: false,
+            continuation: None,
         });
     }
     let cap = usize::try_from(limit)
@@ -395,11 +442,13 @@ pub fn search_workspace_page(
             generation,
             results: Vec::new(),
             has_more: false,
+            continuation: None,
         });
     }
     let candidate_after = after.map(|key| SearchCandidateAnchor {
         surface: key.surface,
         rowid: key.rowid,
+        inclusive: key.line > 0,
     });
     let Some(candidate_batch) = query::query_search_index_keyset(
         conn,
@@ -409,8 +458,9 @@ pub fn search_workspace_page(
         query,
         limit,
         candidate_after,
-        SHORT_QUERY_RESULT_SOURCE_BYTE_BUDGET,
-        SHORT_QUERY_PAGE_SOURCE_BYTE_BUDGET,
+        FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET,
+        FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
+        SHORT_QUERY_PAGE_ROW_BUDGET,
     )?
     else {
         return Ok(SearchPageBatch {
@@ -418,15 +468,25 @@ pub fn search_workspace_page(
             generation,
             results: Vec::new(),
             has_more: false,
+            continuation: None,
         });
     };
 
+    let batch_has_more = candidate_batch.has_more;
+    let batch_resume_after = candidate_batch.resume_after;
+    let candidates = candidate_batch.candidates;
+    let candidate_count = candidates.len();
     let mut results: Vec<KeyedSearchResult> = Vec::new();
-    let mut has_more = candidate_batch.has_more;
+    let mut has_more = false;
+    let mut continuation: Option<SearchResultKey> = None;
+    let mut processed_through: Option<SearchResultKey> = None;
+    let mut processed_all_candidates = true;
     let mut chat_source_bytes = 0usize;
-    for candidate in candidate_batch.candidates {
+    for (candidate_index, candidate) in candidates.into_iter().enumerate() {
         if results.len() >= cap {
             has_more = true;
+            continuation = processed_through.or_else(|| results.last().map(|row| row.key));
+            processed_all_candidates = false;
             break;
         }
         match candidate {
@@ -438,7 +498,9 @@ pub fn search_workspace_page(
             } => {
                 let remaining = cap.saturating_sub(results.len());
                 let anchored_lines = after.filter(|anchor| {
-                    anchor.surface == SearchSurface::File && anchor.rowid == rowid
+                    anchor.surface == SearchSurface::File
+                        && anchor.rowid == rowid
+                        && anchor.line > 0
                 });
                 let scan_cap = remaining
                     .saturating_add(anchored_lines.map_or(0, |anchor| anchor.line))
@@ -447,9 +509,7 @@ pub fn search_workspace_page(
                     .into_iter()
                     .filter(|hit| anchored_lines.is_none_or(|anchor| hit.line > anchor.line))
                     .collect();
-                if hits.len() > remaining {
-                    has_more = true;
-                }
+                let candidate_has_more_lines = hits.len() > remaining;
                 for hit in hits.into_iter().take(remaining) {
                     let key = SearchResultKey {
                         surface: SearchSurface::File,
@@ -471,6 +531,17 @@ pub fn search_workspace_page(
                         },
                     });
                 }
+                if candidate_has_more_lines {
+                    has_more = true;
+                    continuation = results.last().map(|row| row.key);
+                    processed_all_candidates = false;
+                    break;
+                }
+                processed_through = Some(SearchResultKey {
+                    surface: SearchSurface::File,
+                    rowid,
+                    line: 0,
+                });
             }
             SearchCandidate::Chat {
                 rowid,
@@ -487,16 +558,28 @@ pub fn search_workspace_page(
                     remaining_source,
                 )? {
                     ChatHydration::Ready(fragment) => fragment,
-                    ChatHydration::Missing => continue,
+                    ChatHydration::Missing => {
+                        processed_through = Some(SearchResultKey {
+                            surface: SearchSurface::Chat,
+                            rowid,
+                            line: 0,
+                        });
+                        continue;
+                    }
                     ChatHydration::PageFull => {
                         has_more = true;
+                        continuation =
+                            processed_through.or_else(|| results.last().map(|row| row.key));
+                        processed_all_candidates = false;
                         break;
                     }
                 };
                 chat_source_bytes = chat_source_bytes.saturating_add(fragment.source_bytes);
                 let remaining = cap.saturating_sub(results.len());
                 let anchored_lines = after.filter(|anchor| {
-                    anchor.surface == SearchSurface::Chat && anchor.rowid == rowid
+                    anchor.surface == SearchSurface::Chat
+                        && anchor.rowid == rowid
+                        && anchor.line > 0
                 });
                 let scan_cap = remaining
                     .saturating_add(anchored_lines.map_or(0, |anchor| anchor.line))
@@ -505,9 +588,7 @@ pub fn search_workspace_page(
                     .into_iter()
                     .filter(|hit| anchored_lines.is_none_or(|anchor| hit.line > anchor.line))
                     .collect();
-                if hits.len() > remaining {
-                    has_more = true;
-                }
+                let candidate_has_more_lines = hits.len() > remaining;
                 for hit in hits.into_iter().take(remaining) {
                     let key = SearchResultKey {
                         surface: SearchSurface::Chat,
@@ -529,8 +610,40 @@ pub fn search_workspace_page(
                         },
                     });
                 }
+                if candidate_has_more_lines {
+                    has_more = true;
+                    continuation = results.last().map(|row| row.key);
+                    processed_all_candidates = false;
+                    break;
+                }
+                processed_through = Some(SearchResultKey {
+                    surface: SearchSurface::Chat,
+                    rowid,
+                    line: 0,
+                });
             }
         }
+        if results.len() >= cap
+            && (candidate_index.saturating_add(1) < candidate_count || batch_has_more)
+        {
+            has_more = true;
+            continuation = processed_through;
+            processed_all_candidates = false;
+            break;
+        }
+    }
+    if processed_all_candidates && batch_has_more {
+        has_more = true;
+        continuation = batch_resume_after.map(|anchor| SearchResultKey {
+            surface: anchor.surface,
+            rowid: anchor.rowid,
+            line: 0,
+        });
+    }
+    if has_more && continuation.is_none() {
+        return Err(SearchError::Bounds(
+            "search page made no progress while continuation was required",
+        ));
     }
     results.truncate(cap);
     Ok(SearchPageBatch {
@@ -538,6 +651,7 @@ pub fn search_workspace_page(
         generation,
         results,
         has_more,
+        continuation,
     })
 }
 
@@ -565,7 +679,9 @@ fn hydrate_chat_search_fragment(
     let metadata = conn
         .query_row(
             "SELECT t.title, t.linked_object_id, \
-                    (SELECT substr(m.body, 1, 160) FROM chat_messages m \
+                    (SELECT CASE WHEN instr(m.body, char(10)) = 0 THEN m.body \
+                                 ELSE substr(m.body, 1, instr(m.body, char(10)) - 1) END \
+                     FROM chat_messages m \
                      WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
                      ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
              FROM chat_threads t WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
@@ -620,7 +736,8 @@ fn hydrate_chat_search_fragment(
         "SELECT m.author_kind, m.author_display_name, \
                 length(CAST(m.body AS BLOB)), m.body, \
                 COALESCE(( \
-                  SELECT 4 * COUNT(*) \
+                  SELECT SUM(4 + length(prior.body) \
+                    - length(replace(prior.body, char(10), ''))) \
                   FROM chat_messages prior \
                   WHERE prior.workspace_id = m.workspace_id AND prior.thread_id = m.thread_id \
                     AND (prior.created_at_ms < m.created_at_ms \
@@ -679,6 +796,8 @@ mod tests {
     #[test]
     fn normalize_trims_and_lowercases() {
         assert_eq!(normalize_query("  HeLLo "), "hello");
+        assert_eq!(normalize_query("\u{feff}HeLLo\u{feff}"), "hello");
+        assert_eq!(normalize_query("\u{0085}HeLLo"), "\u{0085}hello");
     }
 
     #[test]
@@ -710,6 +829,21 @@ mod tests {
             &hits[0].preview[hits[0].match_start..hits[0].match_end],
             "needle"
         );
+    }
+
+    #[test]
+    fn preview_backfills_context_when_match_is_near_line_end() {
+        let line = format!("{}needle", "x".repeat(300));
+        let hit = preview_line_matches(&line, "needle", 1)
+            .into_iter()
+            .next()
+            .expect("hit");
+        assert_eq!(
+            hit.preview.encode_utf16().count(),
+            WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS
+        );
+        assert_eq!(hit.match_end, hit.preview.len());
+        assert_eq!(&hit.preview[hit.match_start..hit.match_end], "needle");
     }
 
     #[test]

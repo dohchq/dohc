@@ -70,14 +70,21 @@ pub enum SearchCandidate {
 pub struct SearchCandidateAnchor {
     pub surface: crate::search::SearchSurface,
     pub rowid: i64,
+    /// Result cursors resume inclusively so later matching lines from the same
+    /// candidate remain visible. Scan cursors resume exclusively because that
+    /// row was fully examined without producing a cursor-visible result.
+    pub inclusive: bool,
 }
 
 /// A keyset page of indexed candidates. `has_more` is true when the caller
-/// should continue after the last returned candidate.
+/// should continue from `resume_after`. The resume anchor may advance beyond
+/// the last matching candidate when a bounded short-query scan inspected
+/// non-matching rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchCandidateBatch {
     pub candidates: Vec<SearchCandidate>,
     pub has_more: bool,
+    pub resume_after: Option<SearchCandidateAnchor>,
 }
 
 /// A granular chat-message search hit (`GranularChatMessageSearchResult`).
@@ -129,7 +136,7 @@ fn classify_query(query: &str) -> QueryTerm {
 
 /// Clamp an incoming result limit to the DoS ceiling. A non-positive limit
 /// yields `None` (no work).
-fn clamp_limit(limit: i64, maximum: usize) -> Option<usize> {
+pub(super) fn clamp_limit(limit: i64, maximum: usize) -> Option<usize> {
     if limit <= 0 {
         return None;
     }
@@ -173,7 +180,7 @@ pub fn query_search_index(
         QueryTerm::TooLong => return Ok(Some(Vec::new())),
         QueryTerm::Match(_) => {}
     }
-    Ok(query_search_index_keyset(
+    let mut candidates = query_search_index_keyset(
         conn,
         root_dir,
         workspace_id,
@@ -183,8 +190,14 @@ pub fn query_search_index(
         None,
         usize::MAX,
         usize::MAX,
+        usize::MAX,
     )?
-    .map(|batch| batch.candidates))
+    .map(|batch| batch.candidates);
+    if let (Some(candidates), Some(limit)) = (&mut candidates, clamp_limit(limit, MAX_RESULT_LIMIT))
+    {
+        candidates.truncate(limit);
+    }
+    Ok(candidates)
 }
 
 /// Keyset form of [`query_search_index`] used by the bounded daemon page.
@@ -201,8 +214,9 @@ pub fn query_search_index_keyset(
     query: &str,
     limit: i64,
     after: Option<SearchCandidateAnchor>,
-    short_query_row_byte_budget: usize,
-    short_query_page_byte_budget: usize,
+    file_row_byte_budget: usize,
+    file_page_byte_budget: usize,
+    short_query_page_row_budget: usize,
 ) -> Result<Option<SearchCandidateBatch>, SearchError> {
     let policy = read_engine_search_policy(root_dir);
     // A too-short query is the only case that may fall back to a linear scan (and
@@ -220,6 +234,7 @@ pub fn query_search_index_keyset(
         return Ok(fallback_or_empty().map(|candidates| SearchCandidateBatch {
             candidates,
             has_more: false,
+            resume_after: None,
         }));
     };
     let query_term = classify_query(query);
@@ -227,23 +242,28 @@ pub fn query_search_index_keyset(
         return Ok(Some(SearchCandidateBatch {
             candidates: Vec::new(),
             has_more: false,
+            resume_after: None,
         }));
     }
     if matches!(query_term, QueryTerm::TooLong) {
         return Ok(Some(SearchCandidateBatch {
             candidates: Vec::new(),
             has_more: false,
+            resume_after: None,
         }));
     }
     let normalized = query.trim_matches(is_js_trim_ws).to_lowercase();
     let after_surface = after.map(|value| value.surface);
     let after_rowid = after.map_or(0, |value| value.rowid);
+    let after_inclusive = after.is_some_and(|value| value.inclusive);
     let probe_limit = limit
         .saturating_add(1)
         .min(MAX_RESULT_LIMIT.saturating_add(1));
     let probe_limit_i64 = i64::try_from(probe_limit).unwrap_or(i64::MAX);
-    let mut short_query_materialized_bytes = 0usize;
+    let mut source_text_bytes = 0usize;
+    let mut short_query_rows_examined = 0usize;
     let is_short = matches!(query_term, QueryTerm::TooShort);
+    let mut resume_after: Option<SearchCandidateAnchor> = None;
 
     let file_after = if after_surface == Some(crate::search::SearchSurface::File) {
         after_rowid
@@ -254,41 +274,93 @@ pub fn query_search_index_keyset(
     let mut candidates: Vec<SearchCandidate> = Vec::new();
     let skip_files = after_surface == Some(crate::search::SearchSurface::Chat);
     if !skip_files {
+        let comparison =
+            if after_surface == Some(crate::search::SearchSurface::File) && after_inclusive {
+                ">="
+            } else {
+                ">"
+            };
         let sql = if is_short {
-            "SELECT rowid, path, object_id, length(CAST(text AS BLOB)), text \
+            format!(
+                "SELECT rowid, workspace_id, version_id, path, object_id, \
+                        length(CAST(text AS BLOB)), text \
              FROM engine_search_files_fts \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND rowid >= ?3 \
-               AND instr(lower(text), ?4) > 0 \
-             ORDER BY rowid LIMIT ?5"
+             WHERE rowid {comparison} ?1 \
+             ORDER BY rowid LIMIT ?2"
+            )
         } else {
-            "SELECT rowid, path, object_id, length(CAST(text AS BLOB)), text \
+            format!(
+                "SELECT rowid, path, object_id, length(CAST(text AS BLOB)), text \
              FROM engine_search_files_fts \
              WHERE engine_search_files_fts MATCH ?4 \
-               AND workspace_id = ?1 AND version_id = ?2 AND rowid >= ?3 \
+               AND workspace_id = ?1 AND version_id = ?2 AND rowid {comparison} ?3 \
              ORDER BY rowid LIMIT ?5"
+            )
         };
-        let mut stmt = conn.prepare(sql)?;
-        let term = match &query_term {
-            QueryTerm::Match(term) => term.as_str(),
-            QueryTerm::TooShort => normalized.as_str(),
-            QueryTerm::TooLong => unreachable!("handled above"),
+        let raw_limit = if is_short {
+            short_query_page_row_budget
+        } else {
+            usize::try_from(fetch_size(probe_limit, 4).max(probe_limit_i64)).unwrap_or(usize::MAX)
         };
-        let mut rows = stmt.query(params![
-            workspace_id,
-            version_id,
-            file_after,
-            term,
-            fetch_size(probe_limit, 4).max(probe_limit_i64),
-        ])?;
+        if raw_limit == 0 {
+            return Err(SearchError::Bounds(
+                "short-query page row budget cannot fit one candidate",
+            ));
+        }
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = if is_short {
+            stmt.query(params![
+                file_after,
+                i64::try_from(raw_limit).unwrap_or(i64::MAX),
+            ])?
+        } else {
+            let QueryTerm::Match(term) = &query_term else {
+                unreachable!("handled above")
+            };
+            stmt.query(params![
+                workspace_id,
+                version_id,
+                file_after,
+                term,
+                i64::try_from(raw_limit).unwrap_or(i64::MAX),
+            ])?
+        };
+        let mut raw_rows = 0usize;
         while let Some(row) = rows.next()? {
+            raw_rows = raw_rows.saturating_add(1);
+            if is_short {
+                short_query_rows_examined = short_query_rows_examined.saturating_add(1);
+            }
             let rowid: i64 = row.get(0)?;
-            let path: String = row.get(1)?;
+            let scanned_anchor = SearchCandidateAnchor {
+                surface: crate::search::SearchSurface::File,
+                rowid,
+                inclusive: false,
+            };
+            let (path_column, object_id_column, length_column, text_column): (
+                usize,
+                usize,
+                usize,
+                usize,
+            ) = if is_short {
+                let row_workspace_id: String = row.get(1)?;
+                let row_version_id: String = row.get(2)?;
+                if row_workspace_id != workspace_id || row_version_id != version_id {
+                    resume_after = Some(scanned_anchor);
+                    continue;
+                }
+                (3, 4, 5, 6)
+            } else {
+                (1, 2, 3, 4)
+            };
+            let path: String = row.get(path_column)?;
             // Live re-check: a policy changed after indexing still applies. A
             // degraded policy makes this false for every path (file half closed).
             if !path_is_search_indexed(&policy, &path) {
+                resume_after = Some(scanned_anchor);
                 continue;
             }
-            let object_id: String = row.get(2)?;
+            let object_id: String = row.get(object_id_column)?;
             // Live re-check (reader invariant): a path indexed while it was TEXT
             // but now backed by a BINARY head must not be served by its stale
             // former text. The file index "freezes, doesn't drop" (rebuild-time
@@ -296,28 +368,34 @@ pub fn query_search_index_keyset(
             // as for the policy re-check above — the reader filters a now-binary
             // head out here.
             if live_head_is_binary(conn, workspace_id, version_id, &object_id)? {
+                resume_after = Some(scanned_anchor);
                 continue;
             }
-            let text_bytes = usize::try_from(row.get::<_, i64>(3)?)
+            let text_bytes = usize::try_from(row.get::<_, i64>(length_column)?)
                 .map_err(|_| SearchError::Corrupt("negative search candidate length"))?;
-            if is_short {
-                if text_bytes > short_query_row_byte_budget {
+            if text_bytes > file_row_byte_budget {
+                return Err(SearchError::Bounds(
+                    "file search candidate exceeded per-result byte budget",
+                ));
+            }
+            if text_bytes > file_page_byte_budget.saturating_sub(source_text_bytes) {
+                if resume_after.is_none() {
                     return Err(SearchError::Bounds(
-                        "short-query candidate exceeded per-result byte budget",
+                        "file search page byte budget cannot fit one candidate",
                     ));
                 }
-                if text_bytes
-                    > short_query_page_byte_budget.saturating_sub(short_query_materialized_bytes)
-                {
-                    return Ok(Some(SearchCandidateBatch {
-                        candidates,
-                        has_more: true,
-                    }));
-                }
-                short_query_materialized_bytes =
-                    short_query_materialized_bytes.saturating_add(text_bytes);
+                return Ok(Some(SearchCandidateBatch {
+                    candidates,
+                    has_more: true,
+                    resume_after,
+                }));
             }
-            let text: String = row.get(4)?;
+            let text: String = row.get(text_column)?;
+            source_text_bytes = source_text_bytes.saturating_add(text_bytes);
+            resume_after = Some(scanned_anchor);
+            if is_short && !text.to_lowercase().contains(&normalized) {
+                continue;
+            }
             candidates.push(SearchCandidate::File {
                 rowid,
                 path,
@@ -325,12 +403,21 @@ pub fn query_search_index_keyset(
                 text,
             });
             if candidates.len() >= probe_limit {
-                candidates.truncate(limit);
                 return Ok(Some(SearchCandidateBatch {
                     candidates,
                     has_more: true,
+                    resume_after,
                 }));
             }
+        }
+        if raw_rows == raw_limit
+            || (is_short && short_query_rows_examined >= short_query_page_row_budget)
+        {
+            return Ok(Some(SearchCandidateBatch {
+                candidates,
+                has_more: true,
+                resume_after,
+            }));
         }
     }
 
@@ -340,50 +427,137 @@ pub fn query_search_index_keyset(
         0
     };
     {
+        let comparison =
+            if after_surface == Some(crate::search::SearchSurface::Chat) && after_inclusive {
+                ">="
+            } else {
+                ">"
+            };
         let sql = if is_short {
-            "SELECT rowid, thread_id, message_id \
+            format!(
+                "SELECT rowid, workspace_id, length(CAST(text AS BLOB)), text, \
+                        thread_id, message_id \
              FROM engine_search_chat_messages_fts \
-             WHERE workspace_id = ?1 AND rowid >= ?2 AND instr(lower(text), ?3) > 0 \
-             ORDER BY rowid LIMIT ?4"
+             WHERE rowid {comparison} ?1 \
+             ORDER BY rowid LIMIT ?2"
+            )
         } else {
-            "SELECT rowid, thread_id, message_id \
+            format!(
+                "SELECT rowid, thread_id, message_id \
              FROM engine_search_chat_messages_fts \
              WHERE engine_search_chat_messages_fts MATCH ?3 \
-               AND workspace_id = ?1 AND rowid >= ?2 \
+               AND workspace_id = ?1 AND rowid {comparison} ?2 \
              ORDER BY rowid LIMIT ?4"
-        };
-        let mut stmt = conn.prepare(sql)?;
-        let term = match &query_term {
-            QueryTerm::Match(term) => term.as_str(),
-            QueryTerm::TooShort => normalized.as_str(),
-            QueryTerm::TooLong => unreachable!("handled above"),
+            )
         };
         let remaining_probe = probe_limit.saturating_sub(candidates.len());
-        let mut rows = stmt.query(params![
-            workspace_id,
-            chat_after,
-            term,
-            fetch_size(remaining_probe.max(1), 8)
-                .max(i64::try_from(remaining_probe).unwrap_or(i64::MAX)),
-        ])?;
+        let raw_limit = if is_short {
+            short_query_page_row_budget.saturating_sub(short_query_rows_examined)
+        } else {
+            usize::try_from(
+                fetch_size(remaining_probe.max(1), 8)
+                    .max(i64::try_from(remaining_probe).unwrap_or(i64::MAX)),
+            )
+            .unwrap_or(usize::MAX)
+        };
+        if raw_limit == 0 {
+            return Ok(Some(SearchCandidateBatch {
+                candidates,
+                has_more: true,
+                resume_after,
+            }));
+        }
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = if is_short {
+            stmt.query(params![
+                chat_after,
+                i64::try_from(raw_limit).unwrap_or(i64::MAX),
+            ])?
+        } else {
+            let QueryTerm::Match(term) = &query_term else {
+                unreachable!("handled above")
+            };
+            stmt.query(params![
+                workspace_id,
+                chat_after,
+                term,
+                i64::try_from(raw_limit).unwrap_or(i64::MAX),
+            ])?
+        };
+        let mut raw_rows = 0usize;
         while let Some(row) = rows.next()? {
-            candidates.push(SearchCandidate::Chat {
-                rowid: row.get(0)?,
-                thread_id: row.get(1)?,
-                message_id: row.get(2)?,
-            });
+            raw_rows = raw_rows.saturating_add(1);
+            let rowid: i64 = row.get(0)?;
+            let scanned_anchor = SearchCandidateAnchor {
+                surface: crate::search::SearchSurface::Chat,
+                rowid,
+                inclusive: false,
+            };
+            if is_short {
+                short_query_rows_examined = short_query_rows_examined.saturating_add(1);
+                let row_workspace_id: String = row.get(1)?;
+                if row_workspace_id != workspace_id {
+                    resume_after = Some(scanned_anchor);
+                    continue;
+                }
+                let text_bytes = usize::try_from(row.get::<_, i64>(2)?)
+                    .map_err(|_| SearchError::Corrupt("negative search candidate length"))?;
+                if text_bytes > file_row_byte_budget {
+                    return Err(SearchError::Bounds(
+                        "short-query candidate exceeded per-result byte budget",
+                    ));
+                }
+                if text_bytes > file_page_byte_budget.saturating_sub(source_text_bytes) {
+                    if resume_after.is_none() {
+                        return Err(SearchError::Bounds(
+                            "short-query page byte budget cannot fit one candidate",
+                        ));
+                    }
+                    return Ok(Some(SearchCandidateBatch {
+                        candidates,
+                        has_more: true,
+                        resume_after,
+                    }));
+                }
+                let text: String = row.get(3)?;
+                source_text_bytes = source_text_bytes.saturating_add(text_bytes);
+                resume_after = Some(scanned_anchor);
+                if !text.to_lowercase().contains(&normalized) {
+                    continue;
+                }
+                candidates.push(SearchCandidate::Chat {
+                    rowid,
+                    thread_id: row.get(4)?,
+                    message_id: row.get(5)?,
+                });
+            } else {
+                resume_after = Some(scanned_anchor);
+                candidates.push(SearchCandidate::Chat {
+                    rowid,
+                    thread_id: row.get(1)?,
+                    message_id: row.get(2)?,
+                });
+            }
             if candidates.len() >= probe_limit {
-                candidates.truncate(limit);
                 return Ok(Some(SearchCandidateBatch {
                     candidates,
                     has_more: true,
+                    resume_after,
                 }));
             }
+        }
+        if raw_rows == raw_limit {
+            return Ok(Some(SearchCandidateBatch {
+                candidates,
+                has_more: true,
+                resume_after,
+            }));
         }
     }
     Ok(Some(SearchCandidateBatch {
         candidates,
         has_more: false,
+        resume_after,
     }))
 }
 
