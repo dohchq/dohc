@@ -15,10 +15,23 @@
 # green, because vitest and tsc resolve TypeScript sources directly.
 #
 # Scope is deliberately correctness, not release. Packaging, signing and update
-# manifests stay in Desktop Release; reviving that pipeline is a separate job
-# and its July 1 logs have expired, so its failure cause is unknown. This
-# workflow only claims to answer: does the tree typecheck, do the tests pass,
-# and does the Rust engine gate hold.
+# manifests stay in Desktop Release. This workflow only claims to answer: does
+# the tree typecheck, do the tests pass, and does the Rust engine gate hold.
+#
+# COST MODEL (why every choice below looks the way it does): the whole gate
+# must fit Blacksmith's free tier -- 3,000 x64-2vCPU-minutes per month, where a
+# 4vCPU minute burns 2x. The three levers:
+#   1. Blacksmith rust-cache -- the previous incarnation compiled the entire
+#      workspace from scratch on every run.
+#   2. Prebuilt cargo-deny/cargo-audit via taiki-e/install-action (seconds,
+#      not ~15 compile-minutes each), still pinned to exact versions.
+#   3. Path filtering -- docs-only PRs cost ~1 minute; TypeScript-only PRs
+#      skip the engine gate. crates/** triggers BOTH jobs on purpose: the
+#      desktop e2e drives the real daemon binary, so a Rust change can break
+#      the JavaScript job.
+# Windows and macOS legs stay out of PR CI for the same budget reason: macOS
+# burns 20x, Windows 2x on slower runs. The canonical Windows gate runs
+# locally; macOS evidence stays workflow_dispatch.
 name: PR checks
 
 on:
@@ -38,9 +51,51 @@ env:
   CARGO_AUDIT_VERSION: "0.22.2"
 
 jobs:
+  # ~30 seconds on the smallest runner. For pull_request events dorny reads
+  # the diff through the API (no checkout needed). merge_group and
+  # workflow_dispatch bypass the filter and run everything -- a merge queue and
+  # a manual dispatch both want the full answer, not a shortcut.
+  changes:
+    name: what changed
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      js: ${{ steps.filter.outputs.js }}
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'deny.toml'
+              - 'tools/rust-engine-program/**'
+              - 'packages/ydoc-projection/**'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/pr-checks.yml'
+            js:
+              - 'apps/**'
+              - 'packages/**'
+              - 'crates/**'
+              - 'scripts/**'
+              - 'tools/**'
+              - 'package.json'
+              - 'pnpm-workspace.yaml'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/pr-checks.yml'
+
   javascript:
     name: typecheck + tests
-    runs-on: ubuntu-latest
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.js == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     # packages/workspace-auth exercises Better Auth against a REAL Postgres: it
     # applies the actual 0002_better_auth.sql migration and drives session and
@@ -100,6 +155,14 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           cargo --version
 
+      # Registry + ./target cache for the daemon debug build below. Keyed
+      # separately from the engine gate's cache: the two jobs build different
+      # subsets and would thrash a shared target cache.
+      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+        with:
+          shared-key: js-daemon
+          cache-workspace-crates: "true"
+
       # crates/workspace-kernel is deliberately EXCLUDED from the cargo
       # workspace (Cargo.toml documents why: build-workspace-kernel.mjs copies
       # from a hard-coded crates/workspace-kernel/target/... path that workspace
@@ -132,7 +195,9 @@ jobs:
 
   rust:
     name: engine gate
-    runs-on: ubuntu-latest
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -161,12 +226,24 @@ jobs:
           rustc -vV
           cargo --version
 
-      # Pinned to the same version the macOS evidence workflow uses, so
-      # "cargo-deny=PASS" means the same thing in both places.
-      - name: Install pinned cargo-deny
+      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+        with:
+          shared-key: engine-gate
+          cache-workspace-crates: "true"
+
+      # Prebuilt binaries, pinned to the same versions the macOS evidence
+      # workflow uses so "cargo-deny=PASS" means the same thing in both places.
+      # The previous incarnation ran `cargo install` for both -- compiling the
+      # two tools from source cost more minutes than the rest of the gate
+      # combined. The verification steps below are what make the pin a checked
+      # fact rather than an intention.
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
+
+      - name: Verify pinned cargo-deny
         run: |
           set -euo pipefail
-          cargo install cargo-deny --locked --force --version "$CARGO_DENY_VERSION"
           RESOLVED_CARGO_DENY_VERSION="$(cargo-deny --version)"
           if [ "$RESOLVED_CARGO_DENY_VERSION" != "cargo-deny $CARGO_DENY_VERSION" ]; then
             echo "::error::expected cargo-deny $CARGO_DENY_VERSION, got $RESOLVED_CARGO_DENY_VERSION"
@@ -177,13 +254,10 @@ jobs:
       # absent -- honest, but it meant every PR reported "cargo-audit=SKIP"
       # beside a row of PASSes and no advisory scan ever ran in CI. That is
       # not hypothetical: the first run after this tool was actually installed
-      # flagged a real DoS advisory that had been sitting on main. Installing
-      # it here turns the row into a result. Pinned for the same reason
-      # cargo-deny is: so a PASS means the same thing across runs.
-      - name: Install pinned cargo-audit
+      # flagged a real DoS advisory that had been sitting on main.
+      - name: Verify pinned cargo-audit
         run: |
           set -euo pipefail
-          cargo install cargo-audit --locked --force --version "$CARGO_AUDIT_VERSION"
           # `cargo audit --version` prints "cargo-audit-audit <version>" --
           # the cargo subcommand prefix is doubled -- so the version field is
           # compared rather than the whole line.
