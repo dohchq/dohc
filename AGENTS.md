@@ -138,11 +138,21 @@ there is no automated safety net, so before merging any PR you must run the
 canonical Rust gate (`node tools/rust-engine-program/run-rust-checks.mjs`)
 and the JS `typecheck` + `test` suites locally and say so in the PR.
 
-When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. These are setup (coderabbit and codex) to review every PR reliably.
+When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. All three are setup to review every PR automatically.
 
 For codex, you have to tag the bot (In a pull request comment, mention @codex review) to trigger a rereview after you commit and push the fixes.
 
-Claude is not setup to review PRs automatically (not part of my subscription), so you have to invoke this review locally (ideally after the PR is created and in parallel with coderabbit and codex reviews). So you have to manually ask claude via the local cli to review the PR and manually go back and forth with it until no issues remain. Everytime claude finishes a review please update the PR via commenting what claude reviewed, then address them. So basically we're trying to do a pseudo claude PR review bot we orchestrate ourselves. Use fable-5 and fallback to opus-5 if fable is unavailable or rate limited.
+Claude reviews every PR automatically via the `Claude Review` GitHub Action
+(`.github/workflows/claude-review.yml`): fable-5 (fallback opus-5) reviews on
+open, on ready-for-review, and again on every push — no tagging needed for
+rereviews. Findings are labeled P1/P2/P3; address them like codex's. Mention
+`@claude` in a PR comment for follow-up questions or a manual pass
+(`.github/workflows/claude.yml`). Billing rides the Max subscription through
+the `CLAUDE_CODE_OAUTH_TOKEN` repo secret — a one-year token from
+`claude setup-token`; if runs start failing auth, regenerate it and update the
+secret. If the action is down entirely, fall back to the old manual flow:
+review locally with fable-5 (fallback opus-5), comment findings on the PR, and
+iterate until clean.
 
 ## Regarding long code comments
 
