@@ -858,6 +858,7 @@ fn apply_mirrored_text_write(
         request_id: None,
     };
     let preimage = state_preimage(live);
+    let mut written_object_id = None;
     let outcome = apply_within_savepoint(
         tx,
         "mirrored_text_apply",
@@ -865,16 +866,16 @@ fn apply_mirrored_text_write(
         |tx| {
             validate_write_input(&input)?;
             let result = write_text_in_tx(tx, &input)?;
-            enqueue_write(tx, &result, preimage, "sync-resolve")
+            let object_id = result.snapshot.object_id.clone();
+            enqueue_write(tx, &result, preimage, "sync-resolve")?;
+            written_object_id = Some(object_id);
+            Ok(())
         },
     )?;
     if outcome == MirroredOutcome::Applied {
-        let object_id = live
-            .snapshot
-            .as_ref()
-            .map_or(input.object_id.as_str(), |snapshot| {
-                snapshot.object_id.as_str()
-            });
+        let object_id = written_object_id.as_deref().ok_or_else(|| {
+            local_corruption("applied mirrored text write returned no object identity")
+        })?;
         upsert_file_search_index(
             tx,
             &envelope.workspace_id,

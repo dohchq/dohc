@@ -451,15 +451,17 @@ pub fn project_and_write_in_tx(
         },
     )
     .map_err(|error| map_domain_payload_error(error, "ydoc.update projection write failed"))?;
-    upsert_file_search_index(
-        tx,
-        &key.workspace_id,
-        &key.version_id,
-        &result.snapshot.object_id,
-        &result.snapshot.path,
-        Some(&result.snapshot.text),
-        search_policy,
-    )?;
+    if !result.deduped {
+        upsert_file_search_index(
+            tx,
+            &key.workspace_id,
+            &key.version_id,
+            &result.snapshot.object_id,
+            &result.snapshot.path,
+            Some(&result.snapshot.text),
+            search_policy,
+        )?;
+    }
     enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the

@@ -83,8 +83,9 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
         .expect("certify index before tested mutation");
 
     actor
-        .capture_ingest(
+        .capture_ingest_indexed(
             capture_text(WS, PATH, NEEDLE, 30),
+            scratch.path().to_path_buf(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -123,6 +124,59 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
     );
 
     supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test]
+async fn aliased_database_capture_uses_session_root_and_indexes() {
+    const WS: &str = "ws-aliased-capture-fts";
+    const PATH: &str = "notes/aliased.md";
+    const NEEDLE: &str = "aliasedcapturemutationneedle";
+    let scratch = ScratchDir::new().expect("scratch");
+    let canonical_db = scratch.engine_db_path().expect("canonical db");
+    drop(EngineStore::open(&canonical_db, 1).expect("create canonical db"));
+    let alias_dir = scratch.path().join("database-alias");
+    std::fs::create_dir_all(&alias_dir).expect("alias dir");
+    let aliased_db = alias_dir.join("not-the-canonical-name.db");
+    std::fs::hard_link(&canonical_db, &aliased_db).expect("hard-link database alias");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor
+        .open(&aliased_db, 2)
+        .expect("open actor through alias")
+        .actor;
+    actor
+        .ensure_search_index(
+            scratch.path().to_path_buf(),
+            WS.to_owned(),
+            VERSION.to_owned(),
+            10,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("certify index");
+
+    let captured = actor
+        .capture_ingest_indexed(
+            capture_text(WS, PATH, NEEDLE, 20),
+            scratch.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture through aliased database");
+    assert_eq!(captured.snapshot.path, PATH);
+    assert_eq!(
+        search(&actor, scratch.path(), WS, NEEDLE, 30)
+            .await
+            .iter()
+            .map(|result| result.path.as_str())
+            .collect::<Vec<_>>(),
+        [PATH],
+        "capture must use the session root instead of parsing the database alias"
+    );
+
+    supervisor.close(&aliased_db).expect("close aliased actor");
 }
 
 #[tokio::test]

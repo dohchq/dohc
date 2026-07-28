@@ -428,7 +428,7 @@ impl StoreCaptureSink {
         text: String,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        match self.actor.capture_ingest_blocking(
+        match self.actor.capture_ingest_indexed_blocking(
             CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -440,6 +440,7 @@ impl StoreCaptureSink {
                 request_id: None,
                 claim_foreign_head,
             },
+            self.shadow_root.clone(),
             Arc::new(NoFaults),
         ) {
             Ok(_) => Ok(DomainIngest::Persisted),

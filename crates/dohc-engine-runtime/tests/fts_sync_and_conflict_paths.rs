@@ -4,14 +4,14 @@ use std::sync::Arc;
 use dohc_engine_domain::{
     CaptureIngest, ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus,
     CreateNamedVersion, ResolveConflictKind, ResolveTextConflict, TextConflict, TextSnapshot,
-    VersionedTextStore, WriteText,
+    VersionedTextStore, WriteBinary, WriteText,
 };
 use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace};
 use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
 use dohc_engine_sync::{
-    ApplyOutcome, NoLiveLeases, ReplicationEnvelope, SyncError, apply_conflict_envelope,
-    apply_envelope_with, apply_ydoc_envelope,
+    ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, SyncError,
+    apply_conflict_envelope, apply_envelope_with, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
 };
 use dohc_engine_testkit::ScratchDir;
 use rusqlite::params;
@@ -19,6 +19,14 @@ use serde_json::json;
 
 const WS: &str = "ws";
 const VERSION: &str = "main";
+
+struct AlwaysLive;
+
+impl LeaseProbe for AlwaysLive {
+    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
+        true
+    }
+}
 
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
@@ -61,17 +69,31 @@ fn write_text(
 }
 
 fn certify(store: &EngineStore, root: &Path, now_ms: i64) {
+    certify_version(store, root, VERSION, now_ms);
+}
+
+fn certify_version(store: &EngineStore, root: &Path, version_id: &str, now_ms: i64) {
     store
         .read_with(|connection| {
-            ensure_search_index_for_version(connection, root, WS, VERSION, now_ms, &NoFaults)
+            ensure_search_index_for_version(connection, root, WS, version_id, now_ms, &NoFaults)
         })
         .expect("certify search index");
 }
 
 fn search_store(store: &EngineStore, root: &Path, query: &str, now_ms: i64) -> Vec<SearchResult> {
+    search_store_version(store, root, VERSION, query, now_ms)
+}
+
+fn search_store_version(
+    store: &EngineStore,
+    root: &Path,
+    version_id: &str,
+    query: &str,
+    now_ms: i64,
+) -> Vec<SearchResult> {
     store
         .read_with(|connection| {
-            search_workspace(connection, root, WS, VERSION, query, Some(100), now_ms)
+            search_workspace(connection, root, WS, version_id, query, Some(100), now_ms)
         })
         .expect("search workspace")
 }
@@ -228,6 +250,278 @@ fn mirrored_text_conflict_resolution_replaces_certified_search_content() {
     assert!(
         search_store(&store, scratch.path(), OLD, 1_501).is_empty(),
         "mirrored conflict resolution must remove the old indexed body"
+    );
+}
+
+#[test]
+fn binary_to_text_mirrored_resolve_indexes_the_live_object_id() {
+    const PATH: &str = "doc.md";
+    const NEW: &str = "binarytotextresolvedneedle";
+    let (scratch, mut store) = open_store();
+    let binary = VersionedTextStore::new(&mut store)
+        .write_binary(
+            &WriteBinary {
+                workspace_id: WS.to_owned(),
+                version_id: VERSION.to_owned(),
+                object_id: "live-binary-object".to_owned(),
+                path: PATH.to_owned(),
+                bytes: b"\x00binary live head\xff".to_vec(),
+                moment_id: "live-binary-moment".to_owned(),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_100,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("seed binary head");
+    certify(&store, scratch.path(), 1_200);
+
+    let opened = envelope(
+        "binary-text-peer",
+        0,
+        "conflict.open",
+        json!({
+            "id": "binary-text-conflict",
+            "workspaceId": WS,
+            "path": PATH,
+            "targetVersionId": VERSION,
+            "sourceVersionId": "peer-version",
+            "createdAtMs": 1_300,
+            "updatedAtMs": 1_300,
+            "base": { "exists": false, "path": PATH, "contentKind": "text" },
+            "current": {
+                "exists": true,
+                "path": PATH,
+                "objectId": binary.object_id,
+                "contentKind": "text",
+                "text": "placeholder",
+                "updatedAtMs": 1_100,
+                "latestMomentId": binary.moment.moment_id,
+                "metadata": { "origin": "sync" }
+            },
+            "incoming": {
+                "exists": true,
+                "path": PATH,
+                "objectId": "synthetic-incoming-object",
+                "contentKind": "text",
+                "text": NEW,
+                "updatedAtMs": 1_250,
+                "latestMomentId": "incoming-text-moment",
+                "metadata": { "origin": "sync" }
+            },
+            "status": "open",
+            "chosenFrom": "current",
+            "metadata": { "origin": "sync" }
+        }),
+        1_300,
+    );
+    assert!(matches!(
+        apply_conflict_envelope(&mut store, &opened, &NoFaults),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE conflicts SET current_content_kind='binary', \
+                 current_blob_sha256=NULL, current_binary_sha256=?1, \
+                 current_object_id=?2, current_latest_moment_id=?3 \
+                 WHERE workspace_id=?4 AND conflict_id='binary-text-conflict'",
+                params![binary.sha256, binary.object_id, binary.moment.moment_id, WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("record exact binary current side");
+
+    let resolved = envelope(
+        "binary-text-peer",
+        1,
+        "conflict.resolve",
+        json!({
+            "conflictId": "binary-text-conflict",
+            "status": "resolved",
+            "chosenFrom": "current",
+            "resolution": "kept-current",
+            "updatedAtMs": 1_400,
+            "targetVersionId": VERSION
+        }),
+        1_400,
+    );
+    assert!(matches!(
+        apply_conflict_envelope(&mut store, &resolved, &NoFaults),
+        Ok(ApplyOutcome::Applied(result)) if result.matched && !result.deferred()
+    ));
+
+    let (head_object_id, fts_object_id): (String, String) = store
+        .read_with(|connection| {
+            Ok::<_, rusqlite::Error>((
+                connection.query_row(
+                    "SELECT object_id FROM snapshots \
+                     WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+                    params![WS, VERSION, PATH],
+                    |row| row.get(0),
+                )?,
+                connection.query_row(
+                    "SELECT object_id FROM engine_search_files_fts \
+                     WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+                    params![WS, VERSION, PATH],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("compare head and FTS identities");
+    assert_eq!(head_object_id, binary.object_id);
+    assert_eq!(
+        fts_object_id, head_object_id,
+        "mirrored resolve must index the object identity reused by the write"
+    );
+    assert_eq!(
+        search_store(&store, scratch.path(), NEW, 1_500)
+            .iter()
+            .map(|result| result.path.as_str())
+            .collect::<Vec<_>>(),
+        [PATH]
+    );
+}
+
+#[test]
+fn retained_ydoc_drain_replay_keeps_current_search_content() {
+    const PATH: &str = "notes/replayed.md";
+    const HISTORICAL: &str = "historicalreplayneedle";
+    const CURRENT: &str = "currentreplayneedle";
+    const OBJECT: &str = "replayed-ydoc-object";
+    const REPLAY_VERSION: &str = "replay-version";
+    let (scratch, mut store) = open_store();
+    VersionedTextStore::new(&mut store)
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: REPLAY_VERSION.to_owned(),
+                name: "Replay".to_owned(),
+                from_version_id: VERSION.to_owned(),
+                now_ms: 1_050,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("create inactive replay version");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES (?1,?2,1_100)",
+                params![WS, OBJECT],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("preallocate Y.Doc object");
+    let key =
+        dohc_engine_collab::DocKey::new(WS, REPLAY_VERSION, OBJECT).expect("replayed Y.Doc key");
+    dohc_engine_collab::ensure_marker(
+        &mut store,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::Replicated,
+        &NoFaults,
+        1_110,
+    )
+    .expect("replicated marker");
+    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, HISTORICAL);
+    let update_sha = store.put_binary_blob(&update).expect("store update");
+    let operation = envelope(
+        "replay-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": REPLAY_VERSION,
+            "objectId": OBJECT,
+            "path": PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": update_sha,
+            "isBaseState": false
+        }),
+        1_120,
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut store, &operation, &NoFaults, &AlwaysLive),
+        Ok(ApplyOutcome::Applied(result)) if result.deferred
+    ));
+    assert_eq!(
+        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults)
+            .expect("first drain")
+            .drained,
+        1
+    );
+
+    // Model a crash after projection but before the durable drain marker was
+    // cleared. The next drain reconstructs the exact historical write result.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates \
+                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+                 VALUES (?1,?2,?3,'replay-peer',0,1_120)",
+                params![WS, REPLAY_VERSION, OBJECT],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("restore retained drain marker");
+    let current = VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: REPLAY_VERSION.to_owned(),
+                object_id: OBJECT.to_owned(),
+                path: PATH.to_owned(),
+                text: CURRENT.to_owned(),
+                moment_id: "current-after-drain".to_owned(),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_200,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("advance replay-version head")
+        .snapshot;
+    assert_eq!(current.object_id, OBJECT);
+    certify_version(&store, scratch.path(), REPLAY_VERSION, 1_210);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO active_versions (workspace_id,version_id) VALUES (?1,?2) \
+                 ON CONFLICT(workspace_id) DO UPDATE SET version_id=excluded.version_id",
+                params![WS, REPLAY_VERSION],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("activate replay version");
+
+    assert_eq!(
+        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults)
+            .expect("historical replay drain")
+            .drained,
+        1
+    );
+    assert_eq!(
+        search_store_version(&store, scratch.path(), REPLAY_VERSION, CURRENT, 1_300)
+            .iter()
+            .map(|result| result.path.as_str())
+            .collect::<Vec<_>>(),
+        [PATH],
+        "historical replay must not overwrite the current FTS body"
+    );
+    assert!(
+        search_store_version(&store, scratch.path(), REPLAY_VERSION, HISTORICAL, 1_301).is_empty(),
+        "historical replay must remain absent from live search"
     );
 }
 
@@ -426,8 +720,9 @@ async fn local_conflict_resolution_actor_indexes_text_and_deletion() {
         .await
         .expect("open local text conflict");
     let written = actor
-        .conflict_resolve(
+        .conflict_resolve_indexed(
             local_resolution("local-text-conflict", "text", 1_400),
+            scratch.path().to_path_buf(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -468,8 +763,9 @@ async fn local_conflict_resolution_actor_indexes_text_and_deletion() {
         .await
         .expect("open local delete conflict");
     actor
-        .conflict_resolve(
+        .conflict_resolve_indexed(
             local_resolution("local-delete-conflict", "delete", 1_700),
+            scratch.path().to_path_buf(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

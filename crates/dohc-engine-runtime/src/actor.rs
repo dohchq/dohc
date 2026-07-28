@@ -847,6 +847,7 @@ enum Command {
     },
     CaptureIngest {
         input: CaptureIngest,
+        root_dir: Option<PathBuf>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
@@ -1189,6 +1190,7 @@ enum Command {
     },
     ConflictResolve {
         input: ResolveTextConflict,
+        root_dir: Option<PathBuf>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<ResolveTextConflictResult, RuntimeError>>,
@@ -1920,11 +1922,32 @@ impl ActorHandle {
         input: CaptureIngest,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
+        self.capture_ingest_blocking_with_root(input, None, faults)
+    }
+
+    /// Capture and index a text file when the owning workspace session can
+    /// supply its authoritative root.
+    pub fn capture_ingest_indexed_blocking(
+        &self,
+        input: CaptureIngest,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<WriteResult, RuntimeError> {
+        self.capture_ingest_blocking_with_root(input, Some(root_dir), faults)
+    }
+
+    fn capture_ingest_blocking_with_root(
+        &self,
+        input: CaptureIngest,
+        root_dir: Option<PathBuf>,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<WriteResult, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::CaptureIngest {
                 input,
+                root_dir,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2312,10 +2335,35 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
+        self.capture_ingest_with_root(input, None, faults, token)
+            .await
+    }
+
+    /// Capture and index a text file when the owning workspace session can
+    /// supply its authoritative root.
+    pub async fn capture_ingest_indexed(
+        &self,
+        input: CaptureIngest,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<WriteResult, RuntimeError> {
+        self.capture_ingest_with_root(input, Some(root_dir), faults, token)
+            .await
+    }
+
+    async fn capture_ingest_with_root(
+        &self,
+        input: CaptureIngest,
+        root_dir: Option<PathBuf>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<WriteResult, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::CaptureIngest {
                 input,
+                root_dir,
                 faults,
                 token,
                 reply,
@@ -3358,10 +3406,35 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
+        self.conflict_resolve_with_root(input, None, faults, token)
+            .await
+    }
+
+    /// Resolve and index a text conflict with the workspace root owned by the
+    /// calling session.
+    pub async fn conflict_resolve_indexed(
+        &self,
+        input: ResolveTextConflict,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<ResolveTextConflictResult, RuntimeError> {
+        self.conflict_resolve_with_root(input, Some(root_dir), faults, token)
+            .await
+    }
+
+    async fn conflict_resolve_with_root(
+        &self,
+        input: ResolveTextConflict,
+        root_dir: Option<PathBuf>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<ResolveTextConflictResult, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ConflictResolve {
                 input,
+                root_dir,
                 faults,
                 token,
                 reply,
@@ -6126,11 +6199,18 @@ fn worker_main(
             }
             Command::CaptureIngest {
                 input,
+                root_dir,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome = capture_ingest_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome = capture_ingest_on_store(
+                    &mut store,
+                    &input,
+                    root_dir.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::CaptureIngestBinary {
@@ -6859,12 +6939,18 @@ fn worker_main(
             }
             Command::ConflictResolve {
                 input,
+                root_dir,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    conflict_resolve_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome = conflict_resolve_on_store(
+                    &mut store,
+                    &input,
+                    root_dir.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::ConflictApplyReplicated {
@@ -8607,16 +8693,18 @@ fn ydoc_settle_on_store(
                 request_id: None,
             },
         )?;
-        upsert_file_search_index(
-            tx,
-            root_dir,
-            &key.workspace_id,
-            &key.version_id,
-            &result.snapshot.object_id,
-            &result.snapshot.path,
-            &result.snapshot.text,
-        )
-        .map_err(search_domain)?;
+        if !result.deduped {
+            upsert_file_search_index(
+                tx,
+                root_dir,
+                &key.workspace_id,
+                &key.version_id,
+                &result.snapshot.object_id,
+                &result.snapshot.path,
+                &result.snapshot.text,
+            )
+            .map_err(search_domain)?;
+        }
         enqueue_write(tx, &result, preimage, "ydoc")?;
         // The settle marker commits ATOMICALLY with the moment: a crash can
         // never leave a minted settlement moment whose lineage still reads
@@ -9024,18 +9112,6 @@ fn search_domain(error: crate::search::SearchError) -> dohc_engine_domain::Domai
     }
 }
 
-fn workspace_root_from_database(database_path: &std::path::Path) -> Option<&std::path::Path> {
-    let engine_dir = database_path.parent()?;
-    let dohc_dir = engine_dir.parent()?;
-    if database_path.file_name()? != "engine.db"
-        || engine_dir.file_name()? != "engine"
-        || dohc_dir.file_name()? != ".dohc"
-    {
-        return None;
-    }
-    dohc_dir.parent()
-}
-
 fn versioned_text_rename_on_store(
     store: &mut EngineStore,
     input: &RenameTextFile,
@@ -9391,6 +9467,7 @@ fn versioned_text_merge_on_store(
 fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
+    root_dir: Option<&std::path::Path>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -9407,17 +9484,14 @@ fn capture_ingest_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let root_dir = workspace_root_from_database(store.database_path())
-        .ok_or(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "capture requires the canonical workspace database path",
-        })?
-        .to_path_buf();
     let outcome = store.write_with(faults, |tx| {
         let result = capture_ingest_in_tx(tx, input).map_err(RuntimeError::from)?;
-        if !result.deduped {
+        if !result.deduped
+            && let Some(root_dir) = root_dir
+        {
             upsert_file_search_index(
                 tx,
-                &root_dir,
+                root_dir,
                 &input.workspace_id,
                 &input.version_id,
                 &result.snapshot.object_id,
@@ -9591,17 +9665,13 @@ fn conflict_open_on_store(
 fn conflict_resolve_on_store(
     store: &mut EngineStore,
     input: &ResolveTextConflict,
+    root_dir: Option<&std::path::Path>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<ResolveTextConflictResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let root_dir = workspace_root_from_database(store.database_path())
-        .ok_or(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "conflict resolution requires the canonical workspace database path",
-        })?
-        .to_path_buf();
     VersionedTextStore::new(store)
         .resolve_text_conflict_with(input, faults, |tx, result| {
             if let Some(delete) = result.delete.as_ref() {
@@ -9613,10 +9683,12 @@ fn conflict_resolve_on_store(
                 )
                 .map_err(search_domain)?;
             }
-            if let Some(write) = result.write.as_ref() {
+            if let Some(write) = result.write.as_ref()
+                && let Some(root_dir) = root_dir
+            {
                 upsert_file_search_index(
                     tx,
-                    &root_dir,
+                    root_dir,
                     &input.workspace_id,
                     &write.snapshot.version_id,
                     &write.snapshot.object_id,

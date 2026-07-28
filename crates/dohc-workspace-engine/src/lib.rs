@@ -7141,7 +7141,7 @@ impl EngineService {
         };
         let result = open
             .actor
-            .conflict_resolve(
+            .conflict_resolve_indexed(
                 ResolveTextConflict {
                     workspace_id: open.workspace_id,
                     conflict_id: local.conflict_id,
@@ -7156,6 +7156,7 @@ impl EngineService {
                     now_ms: local.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
+                open.root,
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
