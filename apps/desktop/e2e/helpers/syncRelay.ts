@@ -117,6 +117,15 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
 // wire — identity-less /log calls 409 once adoption happens. A headless
 // "other machine" harness therefore learns the adopted coordinate the only
 // way a harness can: from the relay's own SQLite row.
+// Only "the db or its schema does not exist yet" reads as "not adopted yet"
+// to a poll; anything else (schema drift, corruption) must fail loud.
+function isRelayDbNotReady(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "ENOENT" || code === "SQLITE_CANTOPEN") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /unable to open database|cannot open|no such file|no such table/i.test(message);
+}
+
 export function relayAdoptedIdentity(
   dbPath: string,
   workspaceId: string,
@@ -133,9 +142,9 @@ export function relayAdoptedIdentity(
     return typeof row?.replicationEpoch === "string" && typeof row.streamIdentity === "string"
       ? { replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity }
       : null;
-  } catch {
-    // The db (or its schema) may not exist yet — "not adopted yet" to a poll.
-    return null;
+  } catch (error) {
+    if (isRelayDbNotReady(error)) return null;
+    throw error;
   } finally {
     db?.close();
   }

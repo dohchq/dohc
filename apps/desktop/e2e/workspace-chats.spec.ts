@@ -84,6 +84,13 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     // AGENT starts a second chat through the engine daemon over RPC — the
     // external write path post-cutover (the retired TS in-process store is
     // refused by daemon-owned workspaces). It must arrive UNREAD.
+    //
+    // TRACKED GAP (#333): this used to happen while the app was RUNNING,
+    // proving live cross-process unread invalidation. Single-daemon ownership
+    // makes that impossible here (a second daemon cannot attach to the app's
+    // store, and the CLI socket — the real concurrent path into the RUNNING
+    // app's daemon — is Unix-only). A replacement live-unread test is filed
+    // as https://github.com/dohc-ai/dohc/issues/333.
     await desktop.close();
     await seedThroughDaemon(
       { workspaceId, rootPath: temp.rootPath },

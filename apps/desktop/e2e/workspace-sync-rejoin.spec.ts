@@ -424,23 +424,59 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     // it can never push boilerplate INTO the shared workspace. The relay log
     // carries no `.context/me.md` op, and the ORIGINAL machine's next pull
     // converges without conflicts or a boilerplate me.md.
-    const relayLog = (await (
-      await fetch(
-        `${relay.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?since=0&limit=500`,
-        { headers: { authorization: `Bearer ${TOKEN}` } },
+    //
+    // The joining app adopts the relay's replication identity at a timing the
+    // spec does not control (its first claim/push), so both reads below learn
+    // the current identity and retry across an adoption racing them — the
+    // same pattern as spec 1's polls.
+    let identity: RelayWorkspaceIdentity | null = null;
+    const loggedPaths: string[] = [];
+    await expect
+      .poll(
+        async () => {
+          identity ??= relayAdoptedIdentity(relayDb, workspaceId);
+          const connection = identityConnection(relay!.baseUrl, identity);
+          const response = await (connection.fetch ?? fetch)(
+            `${relay!.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?since=0&limit=500`,
+            { headers: { authorization: `Bearer ${TOKEN}` } },
+          );
+          if (response.status === 409) {
+            // Identity was adopted between our read and this request (or
+            // rotated); relearn on the next interval.
+            identity = null;
+            return null;
+          }
+          if (!response.ok) throw new Error(`relay log read failed (${response.status})`);
+          const body = (await response.json()) as {
+            ops: Array<{ payload?: { path?: string } }>;
+          };
+          loggedPaths.length = 0;
+          for (const op of body.ops) {
+            if (typeof op.payload?.path === "string") loggedPaths.push(op.payload.path);
+          }
+          return true;
+        },
+        { timeout: 30_000, intervals: [500] },
       )
-    ).json()) as { ops: Array<{ payload?: { path?: string } }> };
-    const loggedPaths = relayLog.ops
-      .map((op) => op.payload?.path)
-      .filter((path): path is string => typeof path === "string");
+      .toBe(true);
     expect(loggedPaths).not.toContain(".context/me.md");
-    // The joining app adopted the relay's replication identity; machine 1's
-    // later pulls must present it (see identityConnection).
-    const pullBack = await pullAndCommit(
-      machine1,
-      workspaceId,
-      identityConnection(relay.baseUrl, relayAdoptedIdentity(relayDb, workspaceId)),
-    );
+    // Machine 1's pull-back must present the adopted identity too.
+    const pullBack = await (async () => {
+      for (let attempt = 0; ; attempt += 1) {
+        identity ??= relayAdoptedIdentity(relayDb, workspaceId);
+        try {
+          return await pullAndCommit(
+            machine1,
+            workspaceId,
+            identityConnection(relay!.baseUrl, identity),
+          );
+        } catch (error) {
+          if (!(error instanceof RelayConflictError) || attempt >= 20) throw error;
+          identity = null;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      }
+    })();
     expect(pullBack.conflictsOpened).toBe(0);
     expect(await engineText(machine1, workspaceId, ".context/me.md")).toBeNull();
 
