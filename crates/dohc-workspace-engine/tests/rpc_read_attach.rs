@@ -116,6 +116,43 @@ async fn cli_read_attaches_to_full_relay_binding_and_close_preserves_owner() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_attach_respects_the_open_handle_cap() {
+    // MUTATION: insert the attachment without the MAX_OPEN_HANDLES check and
+    // this loop mints handles far past the cap instead of refusing.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "ws-attach-cap";
+    open(&transport, &scratch, 1, workspace_id, json!({}))
+        .await
+        .expect("owner open");
+    let mut refused_at = None;
+    for attempt in 0..100u64 {
+        match open(
+            &transport,
+            &scratch,
+            2 + attempt,
+            workspace_id,
+            json!({ "skipStartupMaintenance": true }),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::Overloaded);
+                refused_at = Some(attempt);
+                break;
+            }
+        }
+    }
+    let refused_at = refused_at.expect("read attaches must hit the handle cap");
+    assert!(
+        refused_at < 100,
+        "the cap must refuse before unbounded growth"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn read_attach_preserves_workspace_id_binding() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");

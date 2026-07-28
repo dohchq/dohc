@@ -1225,7 +1225,16 @@ impl EngineService {
                     let mut attached = open;
                     attached.mode = WorkspaceOpenMode::ReadOnly;
                     attached.handle_kind = WorkspaceHandleKind::ReadOnlyAttach { owner: handle };
-                    lock(&self.handles).insert(attached_handle.clone(), attached);
+                    {
+                        let mut handles = lock(&self.handles);
+                        if handles.len() >= MAX_OPEN_HANDLES {
+                            return Err(wire(
+                                ErrorCode::Overloaded,
+                                "workspace handle limit reached",
+                            ));
+                        }
+                        handles.insert(attached_handle.clone(), attached);
+                    }
                     return Ok(json!({ "workspace": attached_handle }));
                 }
                 if open.mode != requested_mode {
