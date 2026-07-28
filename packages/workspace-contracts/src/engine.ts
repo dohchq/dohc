@@ -35,6 +35,32 @@ export type WorkspaceId = string;
 export type VersionedTextMomentId = string;
 export type VersionedTextConflictId = string;
 
+/**
+ * Opaque key-envelope relay contracts.
+ *
+ * Data-key bytes are deliberately absent: wrapping, unwrapping, and key
+ * installation belong to the desktop custody boundary. The daemon may only
+ * transport the serialized wrapped envelope and its relay fingerprint.
+ */
+export interface KeyEnvelopeUploadParams {
+  workspaceId: WorkspaceId;
+  envelopeJson: string;
+  ifMatch?: string;
+}
+
+export interface KeyEnvelopeUploadResult {
+  etag: string;
+}
+
+export interface KeyEnvelopeDownloadParams {
+  workspaceId: WorkspaceId;
+}
+
+export interface KeyEnvelopeDownloadResult {
+  envelopeJson: string;
+  etag: string;
+}
+
 export type VersionedTextStoreErrorCode =
   | "conflict-not-found"
   | "conflict-stale-target"

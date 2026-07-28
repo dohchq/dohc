@@ -1,336 +1,472 @@
-# P1 relay transport routing fix
+# AUDIT-KEYENV completion report
 
-## Result
+Date: 2026-07-28
 
-Rooted desktop workspaces no longer inspect `.dohc/engine/SHADOW_CLONE` to
-choose a relay implementation. Every rooted stateful relay push/pull surface,
-including share mounts, binds the Rust daemon client. The remaining TypeScript
-HTTP surface is the transient rootless join probe plus share metadata reads;
-those reads open no store and perform no writes.
+Branch: `codex/rust-engine-keyenv-daemon`
 
-If the Rust relay client is unavailable, rooted relay construction throws
-`Rust engine relay client is unavailable.` No rooted call site can omit daemon
-operations and silently enter the legacy TypeScript SQLite path.
+Base: `edaeb5754fa8c8d51b612abc2211d50467b4786e`
 
-## Design implemented
+## Outcome
 
-- Deleted `relayTransportModeForRoot`, including its synchronous filesystem
-  imports and marker validation.
-- Made `relayClientForWorkspace` return a non-null
-  `EngineRelayWorkspaceClient`. It either binds `rustEngineRelayClient` or
-  throws.
-- Removed the rooted TypeScript fallbacks from:
-  - workspace push, pull, and origin recovery;
-  - relay workspace claim;
-  - joined shared-channel push and pull;
-  - manual shared-channel join;
-  - received-DM auto-join;
-  - shared-view bootstrap and refresh.
-- Kept `RelayTransportRouteGuard`. Rooted binds still pass through
-  `EngineRelayClient.bind`, which locks the route to `daemon`.
-- Bound the synthetic `relay-probe:<workspaceId>` route explicitly to
-  `typescript` and release it in `finally`. This is necessary so a successful
-  preflight cannot poison the subsequent rooted daemon bind for the same
-  workspace ID. Probe cleanup is mode-conditional, so a late cleanup cannot
-  release a newer daemon route.
+Desktop enrollment no longer imports or invokes the identity-less TypeScript
+key-envelope HTTP client. The existing desktop-side wrap, unwrap, and install
+operations remain on the desktop side of the daemon RPC boundary. The daemon
+client now transports only opaque `envelopeJson` values through `keys.upload`
+and `keys.download`.
 
-## Bind ordering audit
+The legacy uploader's replacement behavior was preserved: create is attempted
+without `ifMatch`; a `CONFLICT` causes a `keys.download` for the current ETag
+and a bounded compare-and-swap retry, for at most three upload attempts.
 
-`EngineRelayClient.bind` does not read the filesystem, open `engine.db`, or
-send `workspace.open`. At bind time it only:
+## Daemon contract studied
 
-1. records the daemon relay route and credentials;
-2. captures the workspace identity and connection key;
-3. returns RPC-backed operation closures.
+Sources read without modification:
 
-The first operation enters `EngineWorkspaceSessions.run`. Its open path calls
-`openWithClient`, which awaits `prepareWorkspace(rootPath)` before sending
-`workspace.open`. `prepareWorkspace` creates or validates the shadow marker and
-the engine directories. Therefore the existing session lifecycle already
-provides the required ordering: preparation is awaited before daemon open, not
-before relay bind.
+- `crates/dohc-workspace-engine/src/lib.rs`: dispatch at 597-601, handlers at
+  1786-1829, parameter structs at 7651-7687, result serialization at
+  9882-9901, relay error mapping at 10152-10192.
+- `crates/dohc-engine-sync-http/src/lib.rs`: key HTTP transport at 390-451,
+  HTTP/server-code mapping at 639-700, strict ETag parsing at 702-715.
+- `crates/dohc-engine-protocol/src/error.rs`: wire codes and default retry
+  dispositions.
+- `packages/workspace-contracts` and `packages/workspace-engine-client`: before
+  this change there were no key-envelope-specific request/result types. The
+  requester accepted generic method strings and JSON, and its runtime refusal
+  decoder recognized only the original protocol codes.
 
-Preparation, daemon availability, open, and RPC failures propagate through the
-daemon operation. No code catches them to select the legacy relay.
+### `keys.upload`
 
-## Rootless probe verification
+The RPC requires a live daemon workspace handle whose open workspace identity
+matches `params.workspaceId`, and that workspace must have relay configuration
+from `workspace.open`.
 
-I read `probeRelayWorkspace` in
-`packages/workspace-engine/src/syncRelay.ts`. It calls `jsonRelay` exactly once
-with:
+Parameters are camel-case, unknown fields are rejected:
 
-```text
-GET /sync/<workspaceId>/log?since=0&limit=1
+```ts
+{
+  workspaceId: string;
+  envelopeJson: string;
+  ifMatch?: string;
+}
 ```
 
-It returns `hasContent: page.ops.length > 0`. The function accepts only a
-workspace ID and relay connection: no root path, engine store, database, or
-filesystem argument is constructed or accessed. It performs no HTTP write.
-The four existing probe tests cover synced, owned-empty, unavailable, and
-unauthorized workspaces.
+`ifMatch` defaults to absent. The daemon treats `envelopeJson` as opaque text;
+it neither parses nor decrypts it. The daemon's workspace actor supplies the
+replication epoch and stream identity internally, then issues the relay `PUT
+/sync/:workspaceId/keys`. If present, `ifMatch` becomes a quoted `If-Match`
+header.
 
-## `relayTransportModeForRoot` callers
+Success:
 
-Before:
+```ts
+{ etag: string }
+```
 
-1. `main.ts` `relayClientForWorkspace(input.rootPath)` — rooted routing for
-   seven desktop surfaces.
-2. `main.ts` `probeWorkspaceRelay(null)` — rootless preflight routing.
-3. `engineRelayClient.test.ts` — the old test called it four times to assert
-   marker-less/forged roots were TypeScript and a valid marker selected daemon.
+The HTTP transport accepts only a lowercase 64-hex ETag. A missing, malformed,
+or non-hex ETag is a relay-invalid-response error.
 
-The seven rooted `relayClientForWorkspace` call sites were:
+### `keys.download`
 
-1. periodic joined shared-channel sync;
-2. cloud relay engine construction;
-3. enable-sync workspace claim;
-4. manual shared-channel join;
-5. initial shared-view pull;
-6. shared-view refresh;
-7. received-DM auto-join.
+The same live, matching, relay-configured workspace handle is required.
+Parameters are camel-case and unknown fields are rejected:
 
-After ROUND 2:
+```ts
+{ workspaceId: string }
+```
 
-- `relayTransportModeForRoot` has been deleted; there are zero callers.
-- All nine rooted stateful sites call the non-null daemon binder: the seven
-  listed above plus mount bootstrap and bulk mount refresh.
-- `probeWorkspaceRelay` is the only production `mode: "typescript"` guard
-  bind and uses the synthetic root `relay-probe:<workspaceId>`.
-- Direct TypeScript HTTP remains for `fetchShareViewInfo` and
-  `fetchSharedChannelInfo`. These are metadata-only reads with no daemon
-  method, local store access, or write.
+The actor again supplies epoch and stream identity internally and issues the
+relay `GET /sync/:workspaceId/keys`.
 
-## Tests added or rewritten
+Success:
 
-- Replaced the marker-sniff behavior test with:
-  `binds a marker-less rooted workspace to the daemon before session preparation`.
-  It asserts the route is already `daemon` while no daemon request or session
-  preparation has occurred.
-- Added:
-  `allows a rooted daemon bind after a rootless probe route is released`.
-- Renamed and retained the mocked legacy-operation assertion as:
-  `never invokes legacy TypeScript relay operations for a rooted daemon operation set`.
-  Its mocks assert `pushWorkspaceToRelay`, `pullWorkspaceFromRelay`, and
-  `recoverRelayOrigin` are never invoked.
-- Re-ran the four rootless probe tests.
+```ts
+{
+  envelopeJson: string;
+  etag: string;
+}
+```
 
-## Mutation proof
+The response body is bounded to 16 KiB and must be UTF-8; the ETag has the same
+strict 64-hex requirement.
 
-Mutation: changed the rooted route in `EngineRelayClient.bind` from
-`mode: "daemon"` to `mode: "typescript"`.
+### Error codes and dispositions
 
-Fail:
+`WireError::new` assigns each code's default retryability. The TypeScript
+requester exposes `retry: "no"` as disposition `"terminal"`.
+
+| Condition | Wire code | Disposition |
+| --- | --- | --- |
+| Missing/unknown handle | `WORKSPACE_UNAVAILABLE` | `afterReconnect` |
+| Workspace id does not match handle | `INVALID_PARAMS` (`invalid-workspace`) | terminal |
+| Missing relay configuration | `INVALID_PARAMS` (`relay-not-configured`) | terminal |
+| Missing/wrong/unknown params | `INVALID_PARAMS` (`invalid parameters`) | terminal |
+| Relay 401 | `AUTH_FAILED` | terminal |
+| Relay CAS 409 | `CONFLICT` | terminal |
+| Download `key_envelope_not_found` | `KEY_ENVELOPE_MISSING` | terminal |
+| Generic key-route 404 | `WORKSPACE_UNAVAILABLE` | `afterReconnect` |
+| Identity/epoch refusal | `EPOCH_SUPERSEDED`, `IDENTITY_NOT_RECOGNIZED`, `IDENTITY_REQUIRED`, or `STREAM_IDENTITY_MISMATCH` | terminal |
+| Relay 403 | `FORBIDDEN` | terminal |
+| Payload/quota refusal | `PAYLOAD_TOO_LARGE` or `QUOTA_EXCEEDED` | terminal |
+| Relay partition/transport I/O | `WORKSPACE_UNAVAILABLE` | `afterReconnect` |
+| Bad relay URL/request | `INVALID_PARAMS` | terminal |
+| Invalid response, unknown server code, or server/internal HTTP failure | `RELAY_INVALID_RESPONSE` or `INTERNAL` | terminal |
+| Daemon deadline/overload while executing | `DEADLINE_EXCEEDED` or `OVERLOADED` | `afterBackoff` |
+| Cancellation | `CANCELLED` | terminal |
+
+Desktop translates the enrollment-relevant conditions back to the established
+desktop error classes: auth, conflict, missing envelope, and unavailable
+workspace. Other recognized daemon refusals retain `DaemonRefusalError` with
+their wire code, retryability, and disposition.
+
+The TypeScript client now has explicit key-envelope request/result contracts
+owned by `@dohc/workspace-contracts`, a typed method/result decoder in
+`@dohc/workspace-engine-client`, and runtime recognition of the daemon's full
+relay error-code family. No generated file under
+`packages/workspace-engine-client/src/ydoc/**` was touched.
+
+## Call-site enumeration
+
+### Before
+
+Production desktop:
+
+- `apps/desktop/src/main.ts`: imported both legacy functions.
+- `apps/desktop/src/main.ts`: one `uploadKeyEnvelope(...)` call in the local-key
+  enroll/re-wrap branch.
+- `apps/desktop/src/main.ts`: one `downloadKeyEnvelope(...)` call in the
+  missing-local-key join/unlock branch.
+
+Other executable test callers found repo-wide and intentionally unchanged:
+
+- `packages/workspace-engine/src/syncRelay.test.ts`: three legacy upload test
+  calls.
+- `services/sync-relay/src/main.integration.test.ts`: one legacy upload and one
+  legacy download call testing the relay service directly.
+- `crates/dohc-workspace-engine/tests/rpc_relay.rs`: direct Rust RPC coverage
+  for both methods and their cross-workspace refusal.
+
+Definitions/exports, not callers:
+
+- `packages/workspace-engine/src/index.ts`
+- `packages/workspace-engine/src/syncRelay.ts`
+- Rust dispatch and handler definitions in
+  `crates/dohc-workspace-engine/src/lib.rs`
+
+### After
+
+Production desktop:
+
+- `apps/desktop/src/main.ts` invokes `enrollWorkspaceKeyEnvelope(...)` with the
+  already-bound `EngineRelayWorkspaceClient`.
+- `workspaceKeyEnvelopeEnrollment.ts` invokes the typed daemon methods. It has
+  one upload call, one CAS-fingerprint download call, and one enrollment
+  download call.
+- `engineRelayClient.ts` maps those methods to the real daemon
+  `keys.upload`/`keys.download` requests.
+- Wrap, unwrap, zeroization, passphrase normalization, and
+  `installWorkspaceDataKey` remain desktop-side.
+
+The non-desktop service/package tests above remain legacy-client tests by
+design. `packages/workspace-engine` was not modified.
+
+Grep/test proof:
 
 ```text
-FAIL src/workspaces/engineRelayClient.test.ts > EngineRelayClient >
-binds a marker-less rooted workspace to the daemon before session preparation
+key-envelope transport migration > has no desktop import of the legacy envelope transport
+Test Files  1 passed (1)
+Tests       1 passed (1)
+```
 
-AssertionError: MUTATION: a rooted workspace must never bind the legacy
-TypeScript relay: expected 'typescript' to be 'daemon'
+The named guard recursively scans every TypeScript/TSX source under
+`apps/desktop/src` for named imports of `uploadKeyEnvelope` or
+`downloadKeyEnvelope` from `@dohc/workspace-engine`.
 
-Expected: "daemon"
-Received: "typescript"
+## Sentinel boundary acceptance test
 
+Test:
+`apps/desktop/src/workspaces/workspaceKeyEnvelopeEnrollment.test.ts`
+
+Sentinel: the fixed 32 raw bytes represented by
+`DOHC_RAW_KEY_SENTINEL_20260728!!`.
+
+The test uses the real desktop crypto helpers and the real enrollment unit,
+`EngineRelayClient`, `EngineWorkspaceSessions`,
+`RelayConfiguredDaemonClientSource`, and `WorkspaceDaemonRequester`. Only the
+daemon process/relay endpoint is mocked.
+
+The boundary recorder captures:
+
+- every outbound daemon `Request`, including decorated `workspace.open` and
+  all `keys.*` frames;
+- every inbound success `Response`;
+- every inbound error frame;
+- every mock-daemon event and every event observed by the real registered
+  transport listener; the event payload is populated from the actual
+  `keys.*` request/response content, including the opaque envelope;
+- the mock-daemon stderr diagnostic channel, likewise populated from the
+  actual `keys.*` request/response content;
+- raw transport error objects, translated desktop error objects, and the
+  final error rejected by the enrollment unit.
+
+The RPC frames and error objects are live captures through the production
+desktop client stack. Events and stderr are deliberately mock-authored
+diagnostic surfaces carrying live boundary content; they are not captured
+output from a real Rust daemon process.
+
+Paths driven:
+
+1. Local sentinel key -> real wrap -> successful real `keys.upload` request.
+2. Opaque pre-wrapped sentinel envelope -> successful real `keys.download`
+   response -> real unwrap -> desktop install callback. The installed bytes
+   are proven equal to the sentinel without including that desktop-only
+   callback argument in the RPC capture.
+3. Upload refusal with `FORBIDDEN`, proven to become a terminal
+   `DaemonRefusalError`.
+4. Missing download with `KEY_ENVELOPE_MISSING`, proven to become
+   `RelayKeyEnvelopeMissingError` and follow the real enrollment no-envelope
+   path.
+
+Every recorded surface is checked for:
+
+- raw/ASCII bytes;
+- base64;
+- hex;
+- JSON string encoding;
+- per-byte `\u00xx` encoding;
+- JSON numeric byte-array encoding.
+
+Only the randomized wrapped envelope crosses the boundary.
+
+Passing tail:
+
+```text
+✓ workspaceKeyEnvelopeEnrollment.test.ts (4 tests)
+  > keeps the raw-key sentinel out of live RPC/error captures and mock diagnostics
+Test Files  1 passed (1)
+Tests       4 passed (4)
+```
+
+## Mutation proofs
+
+### A. Leak the raw key in place of the envelope
+
+Mutation applied temporarily:
+
+```ts
+await uploadReplacingCurrentEnvelope(
+  input.transport,
+  input.dataKey.toString("ascii"),
+);
+```
+
+Behavioral failure:
+
+```text
+FAIL workspace key-envelope daemon custody boundary
+AssertionError: MUTATION: raw workspace key sentinel leaked into upload boundary
+as DOHC_RAW_KEY_SENTINEL_20260728!!: expected true to be false
+- Expected false
++ Received true
 Test Files  1 failed (1)
-Tests       1 failed | 8 skipped (9)
+Tests       1 failed (1)
 ```
 
-After restoring `mode: "daemon"`:
+After restoring `envelopeJson`:
 
 ```text
 Test Files  1 passed (1)
-Tests       1 passed | 8 skipped (9)
-Duration    1.96s
+Tests       1 passed (1)
 ```
 
-## Verification output tails
+### B. Route a call through the legacy TypeScript relay client
 
-Focused relay tests, final state:
+Mutation applied temporarily: reintroduced the
+`downloadKeyEnvelope` import in `main.ts` and invoked it with the enrollment
+relay connection before the daemon enrollment call.
+
+Named guard failure:
 
 ```text
-✓ src/workspaces/relaySyncEngine.test.ts (18 tests)
-✓ src/workspaces/engineRelayClient.test.ts (10 tests)
-Test Files  2 passed (2)
-Tests       28 passed (28)
+FAIL key-envelope transport migration
+  > has no desktop import of the legacy envelope transport
+AssertionError: MUTATION: desktop key enrollment routed back through the
+identity-less TypeScript relay client
++ { "name": "downloadKeyEnvelope", "path": "main.ts" }
+Test Files  1 failed (1)
+Tests       1 failed (1)
 ```
 
-Rootless probe:
+After restoring the daemon-only route:
 
 ```text
-✓ src/syncRelay.test.ts (26 tests | 22 skipped)
 Test Files  1 passed (1)
-Tests       4 passed | 22 skipped (26)
+Tests       1 passed (1)
 ```
 
-Recursive typecheck:
+## Validation
+
+No `cargo` command was run.
+
+`pnpm --filter @dohc/desktop test` final run:
 
 ```text
-Scope: 22 of 23 workspace projects
+Test Files  181 passed | 1 skipped (182)
+Tests       2262 passed | 4 skipped (2266)
+Duration    36.52s
+```
+
+The first full run had two unrelated timing flakes
+(`FileInspector.test.tsx` timeout and the daemon lifecycle restart timer).
+Both passed together in isolation (68 passed, 1 skipped), and the unchanged
+full suite then passed as shown above.
+
+`pnpm -r --if-present typecheck` tail:
+
+```text
+packages/workspace-engine-client typecheck: Done
+services/agent-sandbox typecheck: Done
 packages/workspace-engine typecheck: Done
 apps/desktop typecheck: Done
 services/sync-relay typecheck: Done
-Exit code: 0
 ```
 
-Complete desktop suite, final source, one worker:
+`git diff --check`: clean.
 
-```text
-pnpm --filter @dohc/desktop exec vitest run --maxWorkers=1 --minWorkers=1
-Test Files  179 passed | 1 skipped (180)
-Tests       2260 passed | 4 skipped (2264)
-Exit code: 0
+## Unclosed items / daemon-surface gaps
+
+For a daemon-routed workspace, no `keys.upload`/`keys.download` parameter,
+result, or error-disposition gap remains.
+
+One rollout dependency remains outside this shard's allowed routing scope:
+the handlers require a daemon workspace handle, while
+`relayClientForWorkspace` returns `null` for a root that is still selected for
+TypeScript transport. Enrollment now fails closed before claiming the relay in
+that case, with
+`Rust engine relay transport is required to claim and enroll this workspace.`,
+rather than mixing an identity-less envelope client with daemon sync or
+bypassing the transport-mode authority. The in-flight transport-selection
+shard must make production enrollment roots daemon-routed before the flip.
+`relayClientForWorkspace` and `engineRelayClient.ts` transport-mode selection
+were not changed.
+
+The checked-in generated TypeScript `ErrorCode` union predates the relay codes.
+Because `packages/workspace-engine-client/src/ydoc/**` is explicitly owned by
+another shard, this change adds the current relay codes to the non-generated
+daemon decoder/type. Regenerating those bindings remains a protocol-generation
+follow-up; it is not a runtime blocker for this flow.
+
+## ROUND2 — conflict retry coverage and review follow-ups
+
+### Production-stack conflict coverage
+
+`workspaceKeyEnvelopeEnrollment.test.ts` now drives the private
+`uploadReplacingCurrentEnvelope` loop through the public
+`enrollWorkspaceKeyEnvelope` entry point and the production
+`EngineRelayClient` -> `EngineWorkspaceSessions` -> daemon-requester stack.
+The recording daemon scripts and verifies three nontrivial sequences:
+
+1. create upload -> `CONFLICT` -> `keys.download` returns a current etag ->
+   second upload succeeds with that exact etag in `ifMatch`;
+2. create upload -> `CONFLICT` -> `keys.download` returns
+   `KEY_ENVELOPE_MISSING` -> second create-only upload succeeds without
+   `ifMatch`;
+3. three upload conflicts (with the intervening current-envelope downloads)
+   -> terminal `RelayConflictError` with
+   `Relay key envelope kept changing concurrently; upload did not complete.`;
+   the recorder proves exactly three upload attempts.
+
+The fail-closed guard now says the Rust relay transport is required to
+`claim and enroll this workspace`, matching the fact that it gates both
+operations.
+
+### Mutation proof — retry loses `ifMatch`
+
+Temporary mutation: removed the conditional `ifMatch` property from the
+production retry upload:
+
+```ts
+await transport.uploadKeyEnvelope({
+  envelopeJson,
+});
 ```
 
-## Anything not closed
-
-The exact default parallel command `pnpm --filter @dohc/desktop test` did not
-produce a green run on this machine despite repeated attempts. Failures changed
-between attempts and were unrelated to this patch:
-
-- `DocumentMenu` delayed export calls leaked into the next test; that file
-  passed 8/8 in isolation.
-- `FileInspector` lazy editor waits timed out under parallel load.
-- `engineDaemonLifecycle` restart timing failed once.
-- `workspaceFiles` oversized-zip timing exceeded its 5-second test timeout once.
-
-The complete suite passed twice with one worker, including once against the
-final source. Focused relay tests, probe tests, desktop typecheck, and the
-recursive typecheck are green. No Cargo command was run.
-
----
-
-# ROUND 2
-
-## Result
-
-Both requested P1 fixes are implemented.
-
-Share mounts now take the daemon path, not the sanctioned-TypeScript-enclave
-alternative. A mount has all information required by the existing daemon
-binder:
-
-- root: `shared-with-me/<label>`;
-- store workspace ID: `share-mount-<shareId>`;
-- relay origin and bearer token.
-
-`relayTargetForShareMount` derives that nested target. Mount bootstrap and bulk
-refresh bind it with `relayClientForWorkspace`, then pass
-`daemonRelay.pullShareView` into the now-required `refreshShareMountOnce.pull`
-operation. The daemon therefore opens and serves the mount's own nested
-`engine.db`. Rollback, ended-share cleanup, and unmount close that nested daemon
-session before deleting its folder, which also avoids deleting an open SQLite
-store on Windows.
-
-The daemon's `SHARE_UNAVAILABLE` refusal is now accepted by the TypeScript wire
-decoder and translated to `ShareUnavailableError`. Shared-view and
-shared-channel consumers can consequently downgrade revoked shares to `ended`
-instead of logging/retrying them as transient failures.
-
-## Latent fallback removal
-
-The following operation seams are now required at compile time:
-
-- `refreshSharedViewOnce.pull`;
-- `refreshShareMountOnce.pull`;
-- `syncJoinedSharedChannels.pull` and `.push`;
-- `createRelaySyncEngine.operations`.
-
-The legacy TypeScript implementations remain only as type references in these
-modules. There is no runtime default expression that can select them.
-
-## Remaining TypeScript relay HTTP surface
-
-Known remaining direct TypeScript HTTP calls are:
-
-1. rootless join preflight through `probeWorkspaceRelay`;
-2. `fetchShareViewInfo` for shared-view open and mount bootstrap;
-3. `fetchSharedChannelInfo` for manual channel join and received-DM auto-join.
-
-The metadata calls have no daemon method on this branch. They do not open or
-write a local engine store. The rootless probe remains explicitly bound
-`typescript` and is released in `finally`.
-
-## Regression tests
-
-- `opens a share mount's nested store and pulls it through the daemon` runs
-  `refreshShareMountOnce` with a bound daemon client and asserts
-  `workspace.open` targets the nested mount root/store ID before
-  `share.view.pull`.
-- `translates a revoked daemon share and lets the shared-view consumer report
-  ended` throws the daemon's actual wire shape (`SHARE_UNAVAILABLE`,
-  `workspace operation failed`, retry `no`) through `EngineRequestError` and
-  the real daemon refusal decoder. It first asserts `ShareUnavailableError`,
-  then asserts the shared-view consumer returns `{ status: "ended" }` and the
-  shared-channel consumer records the revoked channel in `endedShareIds`.
-- `allows a rooted daemon bind after a rootless probe route is released` now
-  executes the production `probeWorkspaceRelay` helper. Its probe is held
-  in-flight while a newer daemon route is installed; the mode-conditional
-  `finally` cleanup must preserve that daemon route.
-
-Focused final state:
+Named behavioral failure:
 
 ```text
-Test Files  5 passed (5)
-Tests       61 passed (61)
-```
-
-## Required mutation proof
-
-Mutation: removed only the new
-`SHARE_UNAVAILABLE -> ShareUnavailableError` branch.
-
-```text
-FAIL EngineRelayClient >
-translates a revoked daemon share and lets the shared-view consumer report ended
-
-expected DaemonRefusalError: workspace operation failed
-to be an instance of ShareUnavailableError
-
+FAIL workspace key-envelope conflict retries
+  > retries a create conflict with the downloaded etag as ifMatch
+AssertionError: expected the second keys.upload params to match
+{ ifMatch: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+Received keys.upload params with only envelopeJson and workspaceId.
 Test Files  1 failed (1)
-Tests       1 failed | 11 skipped (12)
+Tests       1 failed | 3 skipped (4)
 ```
 
-After restoring the mapping:
+After restoring the conditional property:
 
 ```text
 Test Files  1 passed (1)
-Tests       1 passed | 11 skipped (12)
+Tests       4 passed (4)
 ```
 
-## Requested validation
+### Mutation proof — raw key leaks through the enrollment error
+
+Temporary mutation: on an upload error, appended both `envelopeJson` and
+`input.dataKey.toString("ascii")` to the propagated error message. The
+sentinel test now records the final enrollment rejection as well as the raw
+transport and translated errors.
+
+Named behavioral failure:
 
 ```text
-pnpm -r --if-present typecheck
-Scope: 22 of 23 workspace projects
-apps/desktop typecheck: Done
+FAIL workspace key-envelope daemon custody boundary
+  > keeps the raw-key sentinel out of live RPC/error captures and mock diagnostics
+AssertionError: MUTATION: raw workspace key sentinel leaked into upload
+refusal boundary as DOHC_RAW_KEY_SENTINEL_20260728!!
+Test Files  1 failed (1)
+Tests       1 failed | 3 skipped (4)
+```
+
+After restoring the error path:
+
+```text
+Test Files  1 passed (1)
+Tests       4 passed (4)
+```
+
+### ROUND2 validation
+
+No `cargo` command was run.
+
+`pnpm -r --if-present typecheck` passed across all 22 participating projects:
+
+```text
+packages/workspace-engine typecheck: Done
+services/agent-sandbox typecheck: Done
+packages/workspace-engine-client typecheck: Done
 services/sync-relay typecheck: Done
-Exit code: 0
+apps/desktop typecheck: Done
 ```
+
+`pnpm --filter @dohc/desktop test` final run:
 
 ```text
-pnpm --filter @dohc/desktop test
-Test Files  179 passed | 1 skipped (180)
-Tests       2263 passed | 4 skipped (2267)
-Exit code: 0
+Test Files  181 passed | 1 skipped (182)
+Tests       2265 passed | 4 skipped (2269)
+Duration    40.58s
 ```
 
-The exact parallel command completed green once. A final rerun after expanding
-the same daemon regression test to cover the shared-channel consumer hit one
-unrelated, already-known `FileInspector` 5-second timeout:
+Two preceding full runs each hit one of the already-documented, unrelated
+timing flakes under full-suite load:
 
-```text
-Test Files  1 failed | 178 passed | 1 skipped (180)
-Tests       1 failed | 2262 passed | 4 skipped (2267)
-```
+- `FileInspector.test.tsx` remained on `Loading editor...` past the default
+  query timeout; the unchanged file then passed in isolation (53/53).
+- `engineDaemonLifecycle.test.ts` missed the third restart inside its
+  `vi.waitFor` window; the unchanged file then passed in isolation
+  (15 passed, 1 skipped).
 
-The timed-out test passed immediately in isolation:
+The third unchanged exact full-suite run passed as shown above.
 
-```text
-Test Files  1 passed (1)
-Tests       1 passed | 52 skipped (53)
-```
-
-The final `engineRelayClient.test.ts` passed 12/12, and the final desktop
-typecheck passed.
-
-No Cargo command was run.
+Protocol-generation follow-up: the hand-maintained `DaemonErrorCode` list
+duplicates the Rust enum. Regenerating the ts-rs `ErrorCode.ts` mirror is the
+right long-term fix and remains owned by the protocol-generation tooling.

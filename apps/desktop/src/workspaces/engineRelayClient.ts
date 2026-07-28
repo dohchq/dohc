@@ -1,4 +1,6 @@
 import {
+  RelayConflictError,
+  RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
@@ -17,8 +19,12 @@ import {
 } from "@dohc/workspace-engine";
 import {
   DaemonRefusalError,
+  decodeKeyEnvelopeResult,
+  KEY_ENVELOPE_METHOD,
   WorkspaceDaemonRequester,
   type JsonValue,
+  type KeyEnvelopeDownloadResult,
+  type KeyEnvelopeUploadResult,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
@@ -384,6 +390,10 @@ function translateRelayError(method: string, error: unknown): never {
   if (error.wireCode === "SHARE_UNAVAILABLE") {
     throw new ShareUnavailableError();
   }
+  if (error.wireCode === "CONFLICT") throw new RelayConflictError();
+  if (error.wireCode === "KEY_ENVELOPE_MISSING") {
+    throw new RelayKeyEnvelopeMissingError();
+  }
   if (error.wireCode === "WORKSPACE_UNAVAILABLE") {
     if (method.startsWith("share.")) throw new ShareUnavailableError();
     throw new RelayWorkspaceUnavailableError();
@@ -412,6 +422,11 @@ export interface EngineRelayWorkspaceClient {
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
   probe(): Promise<ProbeRelayWorkspaceResult>;
+  uploadKeyEnvelope(input: {
+    envelopeJson: string;
+    ifMatch?: string;
+  }): Promise<KeyEnvelopeUploadResult>;
+  downloadKeyEnvelope(): Promise<KeyEnvelopeDownloadResult>;
   pullSharedChannel(input: {
     shareId: string;
     channelWireId: string;
@@ -636,6 +651,22 @@ export class EngineRelayClient {
         );
         return { hasContent: booleanField(result, "hasContent", "sync.probe") };
       },
+      uploadKeyEnvelope: async ({ envelopeJson, ifMatch }) =>
+        decodeKeyEnvelopeResult(
+          KEY_ENVELOPE_METHOD.upload,
+          await request(KEY_ENVELOPE_METHOD.upload, {
+            workspaceId: workspace.workspaceId,
+            envelopeJson,
+            ...(ifMatch === undefined ? {} : { ifMatch }),
+          }),
+        ),
+      downloadKeyEnvelope: async () =>
+        decodeKeyEnvelopeResult(
+          KEY_ENVELOPE_METHOD.download,
+          await request(KEY_ENVELOPE_METHOD.download, {
+            workspaceId: workspace.workspaceId,
+          }),
+        ),
       pullSharedChannel: async ({ shareId, channelWireId }) => {
         let fetched = 0;
         let applied = 0;
