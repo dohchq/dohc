@@ -4,7 +4,8 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 use dohc_engine_domain::chats::{
-    index_replicated_chat_message_search_rows, upsert_chat_search_index_row,
+    chat_thread_display_title, index_replicated_chat_message_search_rows,
+    upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, DomainError,
@@ -966,7 +967,7 @@ fn apply_thread(
         &op.workspace_id,
         &payload.thread_id,
         CHAT_THREAD_HEADER_MESSAGE_ID,
-        &payload.title,
+        &chat_thread_display_title(&payload.title, None),
     )
     .map_err(SyncError::persist)?;
     Ok(())

@@ -39,6 +39,13 @@ fn should_crash(faults: &dyn FaultInjector, point: FaultPoint) -> bool {
 /// closed rather than building an unbounded in-flight statement stream.
 const MAX_REBUILD_ROWS: usize = 5_000_000;
 
+/// Reserved `indexed_at_ms` value certifying the chat-index generation that
+/// transactionally indexes replicated writes. Older builds stored ordinary
+/// nonnegative timestamps, so their otherwise-healthy rows rebuild exactly once
+/// after upgrade without a schema migration. A future chat-index change can
+/// bump this sentinel again.
+const CHAT_INDEX_CERTIFICATION: i64 = -1;
+
 /// Stored title (`""` = untitled) + first message body -> display title. Ports
 /// `threadDisplayTitle` (`chatThreadTitle.ts`).
 fn thread_display_title(stored_title: &str, first_body: Option<&str>) -> String {
@@ -346,10 +353,13 @@ fn rebuild_chat_index_for_workspace(
 /// the Rust query path can run on a bare connection, so the savepoint carries
 /// the guarantee instead of the caller.)
 ///
-/// **Durable degraded marker.** `engine_search_index_state.file_policy_degraded`
-/// records whether a generation was built under a broken FILE policy. Work
-/// happens only when there is no state row OR the degraded status CHANGED since
-/// the last build:
+/// **Durable generation markers.**
+/// `engine_search_index_state.file_policy_degraded` records whether a generation
+/// was built under a broken FILE policy, while `indexed_at_ms` carries the
+/// reserved [`CHAT_INDEX_CERTIFICATION`] sentinel for the current chat-index
+/// generation. Legacy rows contain timestamps instead, forcing one rebuild after
+/// upgrade without a migration. Work happens only when there is no current
+/// certification OR the degraded status CHANGED since the last build:
 /// - healthy build: wipe+rebuild the version's files, rebuild chat, mark `0`.
 /// - degraded build: FREEZE the file FTS (leave every row — nothing dropped),
 ///   rebuild chat (chat is independent of the FILE policy), mark `1`.
@@ -364,27 +374,32 @@ pub fn ensure_search_index_for_version(
     root_dir: &Path,
     workspace_id: &str,
     version_id: &str,
-    now_ms: i64,
+    _now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<(), SearchError> {
     let policy = read_engine_search_policy(root_dir);
     let current_degraded = policy.is_degraded();
 
-    // The last-built degraded status for this version, if any. `None` = never
-    // built; `Some(stored)` = built under that FILE-policy health.
-    let stored_degraded: Option<bool> = conn
+    // The last-built degraded status and chat generation for this version, if
+    // any. A legacy timestamp is deliberately not a current certification.
+    let stored_state: Option<(bool, bool)> = conn
         .query_row(
-            "SELECT file_policy_degraded FROM engine_search_index_state \
+            "SELECT file_policy_degraded, indexed_at_ms FROM engine_search_index_state \
              WHERE workspace_id = ?1 AND version_id = ?2",
             params![workspace_id, version_id],
-            |row| row.get::<_, i64>(0),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, i64>(1)? == CHAT_INDEX_CERTIFICATION,
+                ))
+            },
         )
-        .map(|v| Some(v != 0))
+        .map(Some)
         .or_else(|err| match err {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(SearchError::from(other)),
         })?;
-    if stored_degraded == Some(current_degraded) {
+    if stored_state == Some((current_degraded, true)) {
         // Up to date: healthy-stable or degraded-stable. No rebuild, no per-query
         // chat wipe.
         return Ok(());
@@ -399,7 +414,6 @@ pub fn ensure_search_index_for_version(
         &policy,
         workspace_id,
         version_id,
-        now_ms,
         current_degraded,
         faults,
     ) {
@@ -428,7 +442,6 @@ fn rebuild_within_savepoint(
     policy: &SearchPolicySnapshot,
     workspace_id: &str,
     version_id: &str,
-    now_ms: i64,
     current_degraded: bool,
     faults: &dyn FaultInjector,
 ) -> Result<bool, SearchError> {
@@ -465,7 +478,7 @@ fn rebuild_within_savepoint(
         params![
             workspace_id,
             version_id,
-            now_ms,
+            CHAT_INDEX_CERTIFICATION,
             i64::from(current_degraded)
         ],
     )?;

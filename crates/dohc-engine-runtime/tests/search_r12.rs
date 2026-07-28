@@ -726,7 +726,58 @@ fn orphan_thread_does_not_disable_all_search() {
     );
 }
 
-// ------------------------------ 10. degraded policy does not re-index chat per query
+// ----------------------- 10. legacy certification heals replicated chat once
+
+#[test]
+fn legacy_certified_store_backfills_missing_chat_fts_on_first_search() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+
+    start_thread(
+        &mut store,
+        "legacy-channel",
+        "legacy-thread",
+        "Legacy replicated backfill needle",
+        20,
+    );
+    ensure_index(&mut store, &root, 30);
+
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "DELETE FROM engine_search_chat_messages_fts WHERE workspace_id=?1",
+                rusqlite::params![WS],
+            )?;
+            tx.execute(
+                "UPDATE engine_search_index_state SET indexed_at_ms=30 \
+                 WHERE workspace_id=?1 AND version_id=?2",
+                rusqlite::params![WS, V],
+            )?;
+            Ok::<(), dohc_engine_runtime::SearchError>(())
+        })
+        .expect("simulate legacy certified store");
+
+    let before = store
+        .read_with(|conn| query_chat_messages_granular(conn, WS, "backfill", 100))
+        .expect("pre-upgrade granular query");
+    assert!(
+        before.is_empty(),
+        "fixture must begin without a chat FTS row"
+    );
+
+    let results = run_search(&store, &root, "backfill");
+    assert!(
+        results
+            .iter()
+            .any(|result| result.surface == SearchSurface::Chat
+                && result.thread_id.as_deref() == Some("legacy-thread")),
+        "the first search after upgrade must rebuild legacy-certified chat rows: {results:?}"
+    );
+}
+
+// ------------------------------ 11. degraded policy does not re-index chat per query
 
 #[test]
 fn degraded_policy_does_not_reindex_chat_per_query() {
@@ -773,7 +824,7 @@ fn degraded_policy_does_not_reindex_chat_per_query() {
     );
 }
 
-// ------------------------------------ 11. many chat threads all return (single fetch)
+// ------------------------------------ 12. many chat threads all return (single fetch)
 
 #[test]
 fn multiple_chat_threads_all_return() {
@@ -865,7 +916,7 @@ fn binary_overwrite_of_indexed_text_is_no_longer_searchable() {
     );
 }
 
-// ------------------------------ 12. replicated chat writes feed the real reader
+// ------------------------------ 13. replicated chat writes feed the real reader
 
 #[test]
 fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
