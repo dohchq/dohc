@@ -33,7 +33,10 @@ import {
   type EngineYdocProviderSessionRust,
   type EngineYdocProviderSessionRustOptions,
 } from "../collab/ydocEngineProviderSessionRust";
-import type { EngineTransport } from "@dohc/workspace-engine-client";
+import {
+  isYdocSessionNotFoundRefusal,
+  type EngineTransport,
+} from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
 import {
   isTextMediaType,
@@ -952,6 +955,28 @@ export function createWorkspaceEngineCapture(
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
+  // A healthy watcher batch cannot clear the workspace notice while any dead
+  // editor session is still rejecting the user's edits.
+  const deadYDocSessions = new Set<object>();
+  // Dead-session failures are an independent penalty, so retain the latest
+  // watcher/health result when that penalty is added and later removed.
+  let backgroundCaptureHealthy = true;
+
+  const publishCaptureOutcome = (): void => {
+    options.onCaptureOutcome?.({
+      ok: backgroundCaptureHealthy && deadYDocSessions.size === 0,
+    });
+  };
+
+  const emitCaptureOutcome = (ok: boolean): void => {
+    backgroundCaptureHealthy = ok;
+    publishCaptureOutcome();
+  };
+
+  const clearDeadYDocSession = (token: object): void => {
+    if (!deadYDocSessions.delete(token)) return;
+    if (deadYDocSessions.size === 0) publishCaptureOutcome();
+  };
 
   // THE AUTHORITATIVE live-session registry (WS-G2-C-2 gate fix). One entry per
   // path with a LIVE engine Y.Doc session; the single-canonical reservation
@@ -990,6 +1015,7 @@ export function createWorkspaceEngineCapture(
     versionId: string;
     path: string;
     contentKind?: YDocContentKind;
+    onDead: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
     onSettled: (result: {
       sha256: string;
@@ -1003,7 +1029,10 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath };
     let canonicalDoc: Y.Doc | null = null;
     let current: EngineYdocProviderSessionRust | null = null;
+    let releaseObligation: EngineYdocProviderSessionRust | null = null;
     let closed = false;
+    let dead = false;
+    const deadSessionToken = {};
     let operationChain: Promise<void> = Promise.resolve();
     const openingRemoteUpdates = new WeakMap<
       EngineYdocProviderSessionRust,
@@ -1017,6 +1046,34 @@ export function createWorkspaceEngineCapture(
         () => undefined,
       );
       return pending;
+    };
+
+    const markDead = (
+      unreleased: EngineYdocProviderSessionRust | null,
+    ): void => {
+      releaseObligation ??= unreleased;
+      current = null;
+      input.onDead();
+      if (dead) return;
+      dead = true;
+      deadYDocSessions.add(deadSessionToken);
+      publishCaptureOutcome();
+    };
+
+    const releaseGeneration = async (
+      generation: EngineYdocProviderSessionRust,
+    ): Promise<void> => {
+      try {
+        await generation.close({ settle: false });
+      } catch (error) {
+        if (isYdocSessionNotFoundRefusal(error)) return;
+        try {
+          await generation.close({ settle: true });
+        } catch (settlingCloseError) {
+          if (isYdocSessionNotFoundRefusal(settlingCloseError)) return;
+          throw settlingCloseError;
+        }
+      }
     };
 
     const openGeneration = async (): Promise<EngineYdocProviderSessionRust> =>
@@ -1073,40 +1130,73 @@ export function createWorkspaceEngineCapture(
 
     const rebind = async (
       failed: EngineYdocProviderSessionRust,
+      options?: { releaseBeforeOpen?: boolean },
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
-      const replacement = await openGeneration();
-      const opening = openingRemoteUpdates.get(replacement);
-      const updatesIncludedInRemoteDelta = opening?.updates.length ?? 0;
-
-      // Reconcile daemon-side edits into the stable renderer document first,
-      // then replay every renderer edit missing from the replacement. The
-      // exposed Y.Doc never changes identity across daemon generations.
-      const remoteDelta = Y.encodeStateAsUpdate(
-        replacement.doc,
-        Y.encodeStateVector(canonicalDoc),
-      );
-      if (remoteDelta.byteLength > 2) {
-        Y.applyUpdate(canonicalDoc, remoteDelta);
-        input.onRemoteUpdate(remoteDelta);
-      }
-      const replay = Y.encodeStateAsUpdate(
-        canonicalDoc,
-        Y.encodeStateVector(replacement.doc),
-      );
-      if (replay.byteLength > 2) {
-        await replacement.applyLocalUpdate(replay);
-      }
-      current = replacement;
-      if (opening) {
-        opening.installed = true;
-        openingRemoteUpdates.delete(replacement);
-        for (const update of opening.updates.slice(updatesIncludedInRemoteDelta)) {
-          Y.applyUpdate(canonicalDoc, update);
-          input.onRemoteUpdate(update);
+      if (options?.releaseBeforeOpen) {
+        try {
+          await releaseGeneration(failed);
+        } catch (error) {
+          markDead(failed);
+          throw error;
         }
+        if (current !== failed || closed) return;
+        current = null;
       }
-      await failed.close({ settle: false }).catch(() => undefined);
+      let replacement: EngineYdocProviderSessionRust;
+      try {
+        replacement = await openGeneration();
+      } catch (error) {
+        markDead(failed);
+        throw error;
+      }
+      try {
+        const opening = openingRemoteUpdates.get(replacement);
+        const updatesIncludedInRemoteDelta = opening?.updates.length ?? 0;
+
+        // Reconcile daemon-side edits into the stable renderer document first,
+        // then replay every renderer edit missing from the replacement. The
+        // exposed Y.Doc never changes identity across daemon generations.
+        const remoteDelta = Y.encodeStateAsUpdate(
+          replacement.doc,
+          Y.encodeStateVector(canonicalDoc),
+        );
+        if (remoteDelta.byteLength > 2) {
+          Y.applyUpdate(canonicalDoc, remoteDelta);
+          input.onRemoteUpdate(remoteDelta);
+        }
+        const replay = Y.encodeStateAsUpdate(
+          canonicalDoc,
+          Y.encodeStateVector(replacement.doc),
+        );
+        if (replay.byteLength > 2) {
+          await replacement.applyLocalUpdate(replay);
+        }
+        current = replacement;
+        if (opening) {
+          opening.installed = true;
+          openingRemoteUpdates.delete(replacement);
+          for (const update of opening.updates.slice(
+            updatesIncludedInRemoteDelta,
+          )) {
+            Y.applyUpdate(canonicalDoc, update);
+            input.onRemoteUpdate(update);
+          }
+        }
+      } catch (error) {
+        openingRemoteUpdates.delete(replacement);
+        try {
+          await releaseGeneration(replacement);
+          markDead(null);
+        } catch {
+          markDead(replacement);
+        }
+        throw error;
+      }
+      // A reconnect-class failure means the prior daemon/workspace binding is
+      // gone. Opening the replacement first is the release boundary; sending a
+      // close through the broken transport can only fail and must not turn a
+      // recoverable daemon restart into a dead session.
     };
 
     const executeWithReconnect = async <T>(
@@ -1151,13 +1241,24 @@ export function createWorkspaceEngineCapture(
       path: sessionPath,
       applyLocalUpdate(update) {
         void append(async () => {
-          if (canonicalDoc === null) {
+          if (canonicalDoc === null || current === null || closed) {
             throw new Error(`Y.Doc session for ${input.path} is closed.`);
           }
-          Y.applyUpdate(canonicalDoc, update);
-          await executeWithReconnect(async (session) => {
-            await session.applyLocalUpdate(update);
-          });
+          const generation = current;
+          try {
+            await generation.applyLocalUpdate(update);
+            Y.applyUpdate(canonicalDoc, update);
+          } catch (error) {
+            // The renderer has already accepted this update. Preserve it in
+            // the stable canonical doc before rebuilding the daemon generation
+            // so rebind can replay it instead of silently dropping visible
+            // text. A live refusal still owns its lease and must close first;
+            // a transport restart opens first because the old daemon is gone.
+            Y.applyUpdate(canonicalDoc, update);
+            await rebind(generation, {
+              releaseBeforeOpen: !isEngineSessionReconnectError(error),
+            });
+          }
         }).catch((error: unknown) => {
           onError(`Y.Doc local update of ${input.path}`, error);
         });
@@ -1179,11 +1280,22 @@ export function createWorkspaceEngineCapture(
       },
       close(closeOptions) {
         return append(async () => {
-          if (closed || current === null) return;
+          if (closed) return;
+          if (current === null) {
+            if (releaseObligation !== null) {
+              await releaseGeneration(releaseObligation);
+              releaseObligation = null;
+            }
+            closed = true;
+            clearDeadYDocSession(deadSessionToken);
+            return;
+          }
           await executeWithReconnect(async (session) => {
             await session.close(closeOptions);
           });
           closed = true;
+          current = null;
+          clearDeadYDocSession(deadSessionToken);
         });
       },
     };
@@ -1936,7 +2048,7 @@ export function createWorkspaceEngineCapture(
     try {
       ok = await task();
     } finally {
-      options.onCaptureOutcome?.({ ok });
+      emitCaptureOutcome(ok);
     }
   }
 
@@ -2061,6 +2173,7 @@ export function createWorkspaceEngineCapture(
           onError(`ydoc settle disk write of ${input.path}`, error);
         }
       };
+      let entry: LiveYDocSession | null = null;
       const session = useRustEngine
         ? await openRestartSafeRustYDocSession({
             versionId,
@@ -2068,6 +2181,14 @@ export function createWorkspaceEngineCapture(
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
+            onDead: () => {
+              if (
+                entry !== null &&
+                liveYDocSessions.get(input.path) === entry
+              ) {
+                entry.status = "failing-close";
+              }
+            },
             onRemoteUpdate: input.onRemoteUpdate,
             onSettled,
           })
@@ -2110,7 +2231,7 @@ export function createWorkspaceEngineCapture(
           liveYDocSessions.delete(input.path);
         }
       };
-      const entry: LiveYDocSession = {
+      entry = {
         path: input.path,
         versionId,
         session,
@@ -3340,6 +3461,10 @@ export function createWorkspaceEngineCapture(
           await store.flushCapture?.();
         }
       } finally {
+        // App quit may abandon a dead generation's retained release obligation:
+        // the daemon process exits immediately afterward and releases every
+        // workspace/session lease. Interactive lifecycle operations never use
+        // this force-drop path; they must converge through closeEntry first.
         // Release the SQLite handles for the stores THIS capture created, so
         // repeated workspace switches never accumulate handles/WAL locks. An
         // injected store belongs to its creator and is left open. A degraded

@@ -96,6 +96,34 @@ export class DaemonRefusalError extends Error {
   }
 }
 
+export function isDaemonReconnectError(error: unknown): boolean {
+  return (
+    (error instanceof DaemonRefusalError &&
+      error.disposition === "afterReconnect") ||
+    (typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "transport-error")
+  );
+}
+
+export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
+  // The daemon wire enum currently groups both ydoc-session-not-found and
+  // ydoc-unsettled-close under INVALID_PARAMS. Keep the canonical discriminator
+  // check at this protocol boundary so release callers cannot accidentally
+  // reinterpret every INVALID_PARAMS refusal as an already-released session.
+  const wireError =
+    error instanceof DaemonRefusalError
+      ? { code: error.wireCode, message: error.message }
+      : isRecord(error) && isRecord(error.wireError)
+        ? error.wireError
+        : null;
+  return (
+    wireError?.code === "INVALID_PARAMS" &&
+    wireError.message === "ydoc-session-not-found"
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

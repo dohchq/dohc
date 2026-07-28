@@ -1,4 +1,5 @@
 import type * as Y from "yjs";
+import { isYdocSessionNotFoundRefusal } from "../live/daemonLiveAdapter";
 import {
   RemoteYdocApplyError,
   YdocLiveAdapter,
@@ -82,6 +83,7 @@ export async function openEngineYdocProviderSession(
   let settleChain: Promise<void> = Promise.resolve();
   let cancelSettle: (() => void) | null = null;
   let localEditError: unknown = null;
+  let closeError: unknown = null;
 
   function notifyError(
     callback: ((error: unknown) => void) | undefined,
@@ -149,7 +151,16 @@ export async function openEngineYdocProviderSession(
     path: session.path,
 
     applyLocalUpdate(update) {
-      if (closed) return Promise.resolve();
+      if (closed) {
+        if (closeComplete) return Promise.resolve();
+        return Promise.reject(
+          localEditError ??
+            closeError ??
+            new Error(
+              `Y.Doc provider session for ${options.path} is closing and has not released its daemon session.`,
+            ),
+        );
+      }
       let operation: Promise<unknown>;
       try {
         operation = session.applyLocalUpdate(update);
@@ -188,18 +199,51 @@ export async function openEngineYdocProviderSession(
       unsubscribeRemoteError();
       unsubscribeResync();
       unsubscribeSessionError();
-      await journalChain;
-      await settleChain;
+      await journalChain.catch(() => undefined);
+      await settleChain.catch(() => undefined);
+      let preCloseError: unknown;
       // Richdoc settle is a C1 daemon refusal (richdoc-settle-unsupported):
       // the provider's pre-close settle would error before the close RPC ran,
       // stranding the session and its lease. The daemon's default close
       // persists the closed richdoc CRDT instead — nothing is lost.
-      if (closeOptions?.settle !== false && session.contentKind !== "richdoc") {
-        await runSettle(closeOptions?.summary ?? "session close");
+      if (
+        closeOptions?.settle !== false &&
+        session.contentKind !== "richdoc" &&
+        localEditError === null
+      ) {
+        try {
+          await runSettle(closeOptions?.summary ?? "session close");
+        } catch (error) {
+          preCloseError = error;
+        }
       }
-      await session.close({ settle: false });
-      if (ownsAdapter) adapter.dispose();
-      closeComplete = true;
+      try {
+        try {
+          await session.close({ settle: false });
+        } catch (error) {
+          if (!isYdocSessionNotFoundRefusal(error)) {
+            try {
+              // Richdoc settle is unsupported by the daemon, so retry the
+              // release-only close after a transient failure. Plaintext can
+              // still escalate to a settling close to preserve pending edits.
+              await session.close({
+                settle: session.contentKind === "richdoc" ? false : true,
+              });
+            } catch (settlingCloseError) {
+              if (!isYdocSessionNotFoundRefusal(settlingCloseError)) {
+                throw settlingCloseError;
+              }
+            }
+          }
+        }
+        if (ownsAdapter) adapter.dispose();
+        closeComplete = true;
+        closeError = null;
+      } catch (error) {
+        closeError = error;
+        throw error;
+      }
+      if (preCloseError !== undefined) throw preCloseError;
     },
   };
 }
