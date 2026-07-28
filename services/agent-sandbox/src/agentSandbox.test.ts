@@ -119,7 +119,7 @@ describe("agent workspace shell sandbox", () => {
       await expect(runWorkspaceShellCommand(session, { command: "cat", args: ["notes/day.md"] }))
         .resolves.toMatchObject({ exitCode: 0, stdout: expect.stringContaining("# Day") });
       await expect(runWorkspaceShellCommand(session, { command: "rg", args: ["Day", "notes"] }))
-        .resolves.toMatchObject({ exitCode: 0, stdout: expect.stringContaining("notes/day.md") });
+        .resolves.toMatchObject({ exitCode: 0, stdout: expect.stringMatching(/notes[/\\]day\.md/) });
       await expect(runWorkspaceShellCommand(session, { command: "node", args: ["-e", "console.log('node-ok')"] }))
         .resolves.toMatchObject({ exitCode: 0, stdout: expect.stringContaining("node-ok") });
       await expect(runWorkspaceShellCommand(session, { command: "python", args: ["-c", "print('python-ok')"] }))

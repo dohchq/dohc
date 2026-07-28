@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { access, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { spawn } from "node:child_process";
 import { resolveWorkspacePath } from "@dohc/workspace-fs";
 import type { SandboxSession } from "./session";
@@ -198,12 +198,17 @@ async function runSqliteFallback(
 }
 
 async function executableExists(command: string) {
-  for (const dir of safePath().split(":")) {
-    try {
-      await access(join(dir, command), constants.X_OK);
-      return true;
-    } catch {
-      // Keep looking.
+  const names = process.platform === "win32"
+    ? [`${command}.exe`, `${command}.cmd`, `${command}.bat`, command]
+    : [command];
+  for (const dir of safePath().split(delimiter)) {
+    for (const name of names) {
+      try {
+        await access(join(dir, name), constants.X_OK);
+        return true;
+      } catch {
+        // Keep looking.
+      }
     }
   }
   return false;
