@@ -273,6 +273,7 @@ struct OpenWorkspace {
     workspace_id: String,
     actor: ActorHandle,
     mode: WorkspaceOpenMode,
+    handle_kind: WorkspaceHandleKind,
     relay: Option<RelayConfiguration>,
     /// The autonomous capture driver (files actor + watcher + reconcile
     /// loop), spawned only after the shadow binding succeeded. Shared so the
@@ -293,6 +294,22 @@ struct OpenWorkspace {
 enum WorkspaceOpenMode {
     Full,
     ReadOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WorkspaceHandleKind {
+    Owner,
+    ReadOnlyAttach { owner: WorkspaceHandle },
+}
+
+impl WorkspaceHandleKind {
+    fn owns_binding(&self) -> bool {
+        matches!(self, Self::Owner)
+    }
+
+    fn is_attached_to(&self, handle: &WorkspaceHandle) -> bool {
+        matches!(self, Self::ReadOnlyAttach { owner } if owner == handle)
+    }
 }
 
 #[derive(Clone)]
@@ -380,8 +397,8 @@ enum VersionFenceOutcome {
 /// writable `EngineStore` connection.
 ///
 /// INVARIANT: exactly one `EngineService` owns each live physical `engine.db`.
-/// Repeated opens on that service reuse its handle; cross-service or aliased
-/// attachments are rejected so capture/session/version barriers cannot split.
+/// Read-intent opens get non-owning handles over that service's binding;
+/// cross-service or aliased attachments remain rejected so barriers cannot split.
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
@@ -413,8 +430,15 @@ pub struct EngineService {
 impl Drop for EngineService {
     fn drop(&mut self) {
         let open: Vec<(WorkspaceHandle, OpenWorkspace)> = match self.handles.get_mut() {
-            Ok(handles) => handles.drain().collect(),
-            Err(poisoned) => poisoned.into_inner().drain().collect(),
+            Ok(handles) => handles
+                .drain()
+                .filter(|(_, open)| open.handle_kind.owns_binding())
+                .collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .drain()
+                .filter(|(_, open)| open.handle_kind.owns_binding())
+                .collect(),
         };
         if open.is_empty() {
             return;
@@ -1130,7 +1154,11 @@ impl EngineService {
     /// daemon start re-offers it from the dirty baseline), and this drain
     /// joins the watcher/files threads so the process exits clean.
     pub async fn shutdown_all_capture(&self) {
-        let open: Vec<OpenWorkspace> = lock(&self.handles).values().cloned().collect();
+        let open: Vec<OpenWorkspace> = lock(&self.handles)
+            .values()
+            .filter(|open| open.handle_kind.owns_binding())
+            .cloned()
+            .collect();
         for workspace in open {
             workspace.shutdown_capture().await;
         }
@@ -1171,7 +1199,7 @@ impl EngineService {
             let guard = lock(&self.handles);
             guard
                 .iter()
-                .find(|(_, open)| open.root == root)
+                .find(|(_, open)| open.root == root && open.handle_kind.owns_binding())
                 .map(|(handle, open)| (handle.clone(), open.clone()))
         };
         if let Some((handle, open)) = existing {
@@ -1183,21 +1211,35 @@ impl EngineService {
                     "workspace root is already bound to another workspace",
                 ));
             }
-            if open.mode != requested_mode {
-                return Err(wire(
-                    ErrorCode::InvalidParams,
-                    "workspace root is already open in a different mode",
-                ));
-            }
-            if open.relay != params.relay.as_ref().map(RelayOpenParams::configuration) {
-                return Err(wire(
-                    ErrorCode::InvalidParams,
-                    "workspace relay configuration mismatch",
-                ));
-            }
+            // A maintenance-free open is read intent, not a request for
+            // ownership. Mint a non-owning token over the live binding so its
+            // close cannot tear down the desktop's actor, capture, or relay.
             // Same workspace: short-circuit only on a LIVE binding. A bound-but-
             // closed actor (its worker died) is stale — drop it and reopen fresh.
             if open.actor.lifecycle() != LifecycleState::Closed {
+                if requested_mode == WorkspaceOpenMode::ReadOnly {
+                    let sequence = self
+                        .next_handle
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let attached_handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
+                    let mut attached = open;
+                    attached.mode = WorkspaceOpenMode::ReadOnly;
+                    attached.handle_kind = WorkspaceHandleKind::ReadOnlyAttach { owner: handle };
+                    lock(&self.handles).insert(attached_handle.clone(), attached);
+                    return Ok(json!({ "workspace": attached_handle }));
+                }
+                if open.mode != requested_mode {
+                    return Err(wire(
+                        ErrorCode::InvalidParams,
+                        "workspace root is already open in a different mode",
+                    ));
+                }
+                if open.relay != params.relay.as_ref().map(RelayOpenParams::configuration) {
+                    return Err(wire(
+                        ErrorCode::InvalidParams,
+                        "workspace relay configuration mismatch",
+                    ));
+                }
                 if let Some(author_json) = capture_author_json.clone() {
                     let _apply = tokio::select! {
                         biased;
@@ -1220,6 +1262,18 @@ impl EngineService {
                 return Ok(json!({ "workspace": handle }));
             }
             lock(&self.handles).remove(&handle);
+            let attached_handles = {
+                let mut handles = lock(&self.handles);
+                let attached: Vec<WorkspaceHandle> = handles
+                    .iter()
+                    .filter(|(_, open)| open.handle_kind.is_attached_to(&handle))
+                    .map(|(attached, _)| attached.clone())
+                    .collect();
+                for attached in &attached {
+                    handles.remove(attached);
+                }
+                attached
+            };
             // The normal close path drops pending cursors with the handle;
             // eviction dropped the handle and the sessions but left them.
             // Handles are minted from a monotonic counter, so the orphans were
@@ -1227,8 +1281,12 @@ impl EngineService {
             // consume_pending_cursor matches on it — they simply accumulated
             // in the map for the life of the process, one per issued cursor
             // per evicted binding, with nothing able to remove them.
-            lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
-            lock(&self.sessions).retain(|_, session| session.workspace != handle);
+            lock(&self.pending_cursors).retain(|_, pending| {
+                pending.handle != handle && !attached_handles.contains(&pending.handle)
+            });
+            lock(&self.sessions).retain(|_, session| {
+                session.workspace != handle && !attached_handles.contains(&session.workspace)
+            });
             // The evicted binding's files layer must not outlive it. Clear
             // suppression only AFTER the shutdown drain — an in-flight
             // reconcile apply still consults the registry.
@@ -1369,6 +1427,7 @@ impl EngineService {
                 workspace_id: params.workspace_id,
                 actor,
                 mode: requested_mode,
+                handle_kind: WorkspaceHandleKind::Owner,
                 relay: params
                     .relay
                     .map(|configuration| configuration.configuration()),
@@ -1438,6 +1497,13 @@ impl EngineService {
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = self.open(Some(&handle))?;
+        if !open.handle_kind.owns_binding() {
+            let _serial = self.open_lock.lock().await;
+            let removed = lock(&self.handles).remove(&handle).is_some();
+            lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
+            lock(&self.sessions).retain(|_, session| session.workspace != handle);
+            return Ok(json!({ "closed": false, "attachmentClosed": removed }));
+        }
         // The same capture→sessions order as `fence_version_snapshot`.
         // Holding the capture gate through driver cancellation/drain means no
         // apply can be queued behind a session-first close and form the
@@ -1467,14 +1533,30 @@ impl EngineService {
             // service's open_lock) observes Closing at supervisor.open and waits
             // for a fresh actor instead of the one being torn down.
             let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
-            let removed = lock(&self.handles).remove(&handle);
-            lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
+            let (removed, attached_handles) = {
+                let mut handles = lock(&self.handles);
+                let removed = handles.remove(&handle);
+                let attached: Vec<WorkspaceHandle> = handles
+                    .iter()
+                    .filter(|(_, open)| open.handle_kind.is_attached_to(&handle))
+                    .map(|(attached, _)| attached.clone())
+                    .collect();
+                for attached in &attached {
+                    handles.remove(attached);
+                }
+                (removed, attached)
+            };
+            lock(&self.pending_cursors).retain(|_, pending| {
+                pending.handle != handle && !attached_handles.contains(&pending.handle)
+            });
             // Sessions (and their lease guards) evict only AFTER this close
             // owns the teardown — evicting earlier meant a close future
             // dropped while waiting on open_lock had already stranded live
             // editors (ydoc-session-not-found) and released their leases for
             // a workspace that stayed open.
-            lock(&self.sessions).retain(|_, session| session.workspace != handle);
+            lock(&self.sessions).retain(|_, session| {
+                session.workspace != handle && !attached_handles.contains(&session.workspace)
+            });
             (closing, removed)
         };
         // The capture driver is CANCELLED synchronously here (an aborted close

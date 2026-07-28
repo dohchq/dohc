@@ -173,6 +173,7 @@ describe("CLI socket server", () => {
   let token: string;
   let calls: CallCounts;
   let errors: unknown[];
+  let debugLines: string[];
   let registryWorkspace: CliRegistryWorkspace;
   let context: CliWorkspaceContext;
   let serverOptions: CliServerOptions;
@@ -265,6 +266,7 @@ describe("CLI socket server", () => {
       writes: 0,
     };
     errors = [];
+    debugLines = [];
     const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
 
     context = {
@@ -312,6 +314,9 @@ describe("CLI socket server", () => {
       },
       onError(error) {
         errors.push(error);
+      },
+      onDebug(message) {
+        debugLines.push(message);
       },
       nowMs: () => SERVER_NOW_MS,
       platform: process.platform,
@@ -1915,6 +1920,30 @@ describe("CLI socket server", () => {
       expect("matches" in fallback && fallback.matches).toHaveLength(1);
       expect(new Set(loadedThreadIds).size).toBe(2);
       expect(daemonCalls).toBe(2);
+
+      loadedThreadIds.length = 0;
+      context.daemonReads.queryChatMessagesGranular = async () => {
+        throw new Error("workspace root is already open in a different mode");
+      };
+      const failedPrefilterFallback = await invoke("grep", {
+        cwd: workspaceRoot,
+        actor: "human",
+        pattern: "daemon-prefilter-needle",
+        ignoreCase: true,
+        filesWithMatches: false,
+        context: 0,
+        limit: 20,
+        regex: false,
+      });
+      expect(
+        "matches" in failedPrefilterFallback &&
+          failedPrefilterFallback.matches,
+      ).toHaveLength(1);
+      expect(new Set(loadedThreadIds).size).toBe(2);
+      expect(debugLines).toEqual([
+        "grep daemon prefilter failed; falling back to full scan: " +
+          "workspace root is already open in a different mode",
+      ]);
     } finally {
       store.listMessages = originalListMessages;
       delete context.daemonReads;

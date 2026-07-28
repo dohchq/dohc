@@ -439,6 +439,113 @@ describe("Rust engine daemon lifecycle", () => {
     await lifecycle.stop();
   });
 
+  it("reads through an attachment while a full relay session stays live", async () => {
+    let ownerHandle: string | null = null;
+    const attachments = new Set<string>();
+    let nextAttachment = 0;
+    const client = new FakeClient((request) => {
+      if (request.method === "workspace.open") {
+        const openParams = request.params as Record<string, unknown>;
+        const readIntent =
+          openParams.skipStartupMaintenance === true;
+        if (readIntent && ownerHandle) {
+          nextAttachment += 1;
+          const handle = `cli-attachment-${nextAttachment}`;
+          attachments.add(handle);
+          return { id: request.id, result: { workspace: handle } };
+        }
+        ownerHandle = "desktop-owner";
+        return { id: request.id, result: { workspace: ownerHandle } };
+      }
+      if (request.method === "search.queryChatMessagesGranular") {
+        if (
+          typeof request.workspace !== "string" ||
+          !attachments.has(request.workspace)
+        ) {
+          throw new Error("read did not use an attachment");
+        }
+        return {
+          id: request.id,
+          result: {
+            results: [{ threadId: "thread", messageId: null, text: "needle" }],
+            saturated: false,
+          },
+        };
+      }
+      if (request.method === "versions.active") {
+        if (request.workspace !== ownerHandle) {
+          throw new Error("desktop owner was torn down");
+        }
+        return { id: request.id, result: { id: "main", kind: "main" } };
+      }
+      if (request.method === "workspace.close") {
+        if (
+          typeof request.workspace === "string" &&
+          attachments.delete(request.workspace)
+        ) {
+          return {
+            id: request.id,
+            result: { closed: false, attachmentClosed: true },
+          };
+        }
+        if (request.workspace === ownerHandle) ownerHandle = null;
+        return { id: request.id, result: { closed: true } };
+      }
+      return { id: request.id, result: {} };
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      launch: async () => client,
+    });
+    await lifecycle.start();
+    client.requests.length = 0;
+
+    const desktopOpen = await client.sendRequest({
+      id: 10_000,
+      method: "workspace.open",
+      params: {
+        rootDir: "C:\\workspace",
+        workspaceId: "workspace",
+        relay: {
+          baseUrl: "https://relay.example.test",
+          bearerToken: "desktop-token",
+        },
+      },
+    });
+    const desktopHandle = (
+      desktopOpen.result as { workspace: string }
+    ).workspace;
+
+    await expect(
+      lifecycle.requestWorkspace(
+        "C:\\workspace",
+        "workspace",
+        "search.queryChatMessagesGranular",
+        { query: "needle", limit: 50_000 },
+      ),
+    ).resolves.toEqual({
+      results: [{ threadId: "thread", messageId: null, text: "needle" }],
+      saturated: false,
+    });
+    expect(attachments.size).toBe(0);
+    await expect(
+      client.sendRequest({
+        id: 10_001,
+        method: "versions.active",
+        workspace: desktopHandle,
+        params: {},
+      }),
+    ).resolves.toMatchObject({ result: { id: "main", kind: "main" } });
+
+    await client.sendRequest({
+      id: 10_002,
+      method: "workspace.close",
+      workspace: desktopHandle,
+      params: {},
+    });
+    await lifecycle.stop();
+  });
+
   it("serializes concurrent CLI reads that share a workspace handle", async () => {
     let releaseFirst!: (response: Response) => void;
     let readCount = 0;

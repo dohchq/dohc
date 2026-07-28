@@ -183,6 +183,7 @@ export interface CliServerOptions {
   identity(): Promise<CliMainIdentity>;
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   onError?(error: unknown): void;
+  onDebug?(message: string): void;
   nowMs?: () => number;
   platform?: NodeJS.Platform;
   regexScanTimeoutMs?: number;
@@ -780,6 +781,7 @@ async function regexMatchesForTexts(
 async function queryFtsCandidates(
   context: CliWorkspaceContext,
   query: string,
+  onDebug?: (message: string) => void,
 ): Promise<{ threadIds: Set<string>; messageIds: Set<string> } | null> {
   if ([...query.trim()].length < 3) return null;
   if (
@@ -818,7 +820,13 @@ async function queryFtsCandidates(
       if (row.messageId) messageIds.add(row.messageId);
     }
     return { threadIds, messageIds };
-  } catch {
+  } catch (error) {
+    const detail = oneLine(
+      error instanceof Error ? error.message : "unknown daemon read failure",
+    );
+    onDebug?.(
+      `grep daemon prefilter failed; falling back to full scan: ${detail}`,
+    );
     return null;
   }
 }
@@ -1960,7 +1968,11 @@ async function dispatch(
       // deadline-bounded full scan.
       const fts = request.args.regex
         ? null
-        : await queryFtsCandidates(context, request.args.pattern);
+        : await queryFtsCandidates(
+            context,
+            request.args.pattern,
+            options.onDebug,
+          );
       const scanThreads = !request.args.regex && fts
         ? selected.filter((thread) => fts.threadIds.has(thread.thread.id))
         : selected;
