@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { createLinkedChatStore, createVersionedTextStore } from "@dohc/workspace-engine";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  explorerRow,
+  openFileChatsPanel,
   openWorkspaceFromFirstRun,
+  revealExplorerPath,
   seedWorkspaceManifest,
   seedWorkspaceSettings,
   waitForWorkspaceFile,
@@ -21,6 +23,28 @@ import {
 // raw FTS tables. Unflagged workspaces keep the streamed ripgrep path.
 
 const SECRET_VALUE = "E2E_INDEX_SECRET_z9y8x7w6";
+
+async function waitForFileObjectId(
+  page: import("@playwright/test").Page,
+  workspaceId: string,
+  path: string,
+): Promise<void> {
+  await page.waitForFunction(
+    async ({ id, filePath }) => {
+      const api = (window as unknown as {
+        dohcDesktop?: {
+          listFileChats(payload: { workspaceId: string; path: string }): Promise<{
+            fileObjectId: string | null;
+          }>;
+        };
+      }).dohcDesktop;
+      if (!api) return false;
+      const result = await api.listFileChats({ workspaceId: id, path: filePath });
+      return result.fileObjectId !== null;
+    },
+    { id: workspaceId, filePath: path },
+  );
+}
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
@@ -68,38 +92,28 @@ test("flagged: search finds file content and a chat message; .env.local content 
       { path: "notes/roadmap.md", contents: "# Roadmap\n\nThe galaxy-brain milestone lands next.\n" },
       { path: ".env.local", contents: `API_TOKEN=${SECRET_VALUE}\n` },
     ]);
-    // Seed the engine BEFORE launch (the linked-chats E2E idiom): the file
-    // identical to disk so startup reconciliation is a no-op, plus a linked
-    // chat thread carrying the message the search must find.
-    const engineStore = createVersionedTextStore(temp.rootPath);
-    await engineStore.ensureMainVersion({ workspaceId });
-    const seeded = await engineStore.writeTextFile({
-      workspaceId,
-      versionId: "main",
-      path: "notes/roadmap.md",
-      text: "# Roadmap\n\nThe galaxy-brain milestone lands next.\n",
-      metadata: { origin: "local-file" },
-    });
-    const chatStore = createLinkedChatStore(temp.rootPath);
-    const thread = await chatStore.createThread({
-      workspaceId,
-      title: "Roadmap sync",
-      linkedFile: { objectId: seeded.object.id, pathHint: "notes/roadmap.md" },
-    });
-    await chatStore.sendMessage({
-      workspaceId,
-      threadId: thread.id,
-      author: { kind: "human", displayName: "Ice" },
-      body: "Let's settle the quasar sync cadence this week.",
-    });
-    await chatStore.close();
-    await engineStore.close();
-
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     expect(workspace.workspaceId).toBe(workspaceId);
     await waitForWorkspaceFile(page, workspaceId, "notes/roadmap.md");
+    await waitForFileObjectId(page, workspaceId, "notes/roadmap.md");
+
+    // Seed the chat through the product/daemon boundary. No test-side
+    // versioned-text store may open a second writable engine.db connection.
+    await revealExplorerPath(page, "notes/roadmap.md");
+    await explorerRow(page, "notes/roadmap.md").click();
+    await openFileChatsPanel(page);
+    await page.getByTestId("linked-chat-new").click();
+    const titleInput = page.getByTestId("linked-chat-new-title");
+    await titleInput.fill("Roadmap sync");
+    await titleInput.press("Enter");
+    const composer = page.getByTestId("linked-chat-composer");
+    await composer.fill("Let's settle the quasar sync cadence this week.");
+    await composer.press("Enter");
+    await expect(page.getByTestId("linked-chat-message-body")).toContainText(
+      "quasar sync cadence",
+    );
 
     await page.getByTestId("activity-search").click();
     await expect(page.getByTestId("search-view")).toBeVisible();

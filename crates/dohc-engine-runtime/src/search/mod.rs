@@ -43,8 +43,11 @@ pub use query::{
     query_chat_messages_granular, query_chat_messages_granular_bounded, query_search_index,
 };
 
+use dohc_engine_domain::{
+    ChatActorKind, ChatMessage, ChatProjectionFileAccess, ChatThread, linked_chat_projection_path,
+    render_chat_thread_projection,
+};
 use rusqlite::Connection;
-use std::collections::HashMap;
 use std::path::Path;
 
 /// The sentinel message id for a thread's header row, shared with domain writes.
@@ -265,14 +268,12 @@ pub fn preview_line_matches(text: &str, query: &str, remaining: usize) -> Vec<Pr
 /// Ensure the index for `version_id` is built, then run `query`, returning
 /// line-level results capped at `limit` (default [`DEFAULT_SEARCH_LIMIT`]). This
 /// is the index-backed orchestration: file results carry inline text and are
-/// previewed directly; chat results are previewed from the matching indexed
-/// message/header text of each candidate thread.
+/// previewed directly; chat candidates are hydrated into the same read-only
+/// Markdown projection the TypeScript workspace-search contract scans.
 ///
-/// This is deliberately the INDEX-backed subset of `searchWorkspaceEngine`; the
-/// custom-visibility-hook and real-snapshot/projection re-read orchestration is
-/// a desktop-adapter concern (R13b) that layers on top of these primitives. A
-/// too-short query (under [`MIN_TRIGRAM_QUERY_CHARS`]) yields no results here
-/// rather than a linear fallback.
+/// A too-short query (under [`MIN_TRIGRAM_QUERY_CHARS`]) yields no results here
+/// rather than a linear fallback. Custom visibility hooks remain an adapter
+/// concern; the daemon-owned desktop surface uses the engine's live file policy.
 ///
 /// MUST be called on the actor's writer connection (it ensures the index inside
 /// the same connection it queries) so results are read-your-writes.
@@ -313,28 +314,6 @@ pub fn search_workspace(
         return Ok(Vec::new());
     };
 
-    // Fetch the matching chat rows ONCE and group by thread (rowid order
-    // preserved), instead of re-running the FTS MATCH per chat candidate.
-    let chat_rows_by_thread = if candidates
-        .iter()
-        .any(|c| matches!(c, SearchCandidate::Chat { .. }))
-    {
-        let rows = query::query_chat_messages_granular(
-            conn,
-            workspace_id,
-            query,
-            i64::try_from(MAX_FTS_FETCH).unwrap_or(i64::MAX),
-        )?;
-        let mut grouped: HashMap<String, Vec<query::GranularChatMessageSearchResult>> =
-            HashMap::new();
-        for row in rows {
-            grouped.entry(row.thread_id.clone()).or_default().push(row);
-        }
-        grouped
-    } else {
-        HashMap::new()
-    };
-
     let mut results: Vec<SearchResult> = Vec::new();
     for candidate in candidates {
         if results.len() >= cap {
@@ -362,30 +341,21 @@ pub fn search_workspace(
                 }
             }
             SearchCandidate::Chat { thread_id } => {
-                let title = chat_thread_display_title(conn, workspace_id, &thread_id)?;
-                // Preview this thread's matching indexed rows (header + messages)
-                // in rowid order — from the single grouped fetch above.
-                let Some(rows) = chat_rows_by_thread.get(&thread_id) else {
-                    continue;
-                };
-                for row in rows {
-                    if results.len() >= cap {
-                        break;
-                    }
-                    let remaining = cap.saturating_sub(results.len());
-                    for hit in preview_line_matches(&row.text, &normalized, remaining) {
-                        results.push(SearchResult {
-                            surface: SearchSurface::Chat,
-                            path: format!("chat/{thread_id}"),
-                            title: title.clone(),
-                            line: hit.line,
-                            preview: hit.preview,
-                            match_start: hit.match_start,
-                            match_end: hit.match_end,
-                            thread_id: Some(thread_id.clone()),
-                            object_id: None,
-                        });
-                    }
+                let (path, title, projection) =
+                    chat_thread_search_projection(conn, workspace_id, &thread_id)?;
+                let remaining = cap.saturating_sub(results.len());
+                for hit in preview_line_matches(&projection, &normalized, remaining) {
+                    results.push(SearchResult {
+                        surface: SearchSurface::Chat,
+                        path: path.clone(),
+                        title: title.clone(),
+                        line: hit.line,
+                        preview: hit.preview,
+                        match_start: hit.match_start,
+                        match_end: hit.match_end,
+                        thread_id: Some(thread_id.clone()),
+                        object_id: None,
+                    });
                 }
             }
         }
@@ -394,31 +364,78 @@ pub fn search_workspace(
     Ok(results)
 }
 
-/// The display title for a thread, derived the same way the index rebuild does.
-fn chat_thread_display_title(
+fn chat_thread_search_projection(
     conn: &Connection,
     workspace_id: &str,
     thread_id: &str,
-) -> Result<String, SearchError> {
-    let row = conn
+) -> Result<(String, String, String), SearchError> {
+    let (mut thread, first_body) = conn
         .query_row(
-            "SELECT t.title, \
+            "SELECT t.title, t.created_at_ms, t.updated_at_ms, t.channel_id, \
+                    t.linked_object_id, t.linked_path_hint, t.linked_at_ms, \
                     (SELECT m.body FROM chat_messages m \
                      WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
-                     ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
+                     ORDER BY m.message_order LIMIT 1) \
              FROM chat_threads t WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
             rusqlite::params![workspace_id, thread_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| {
+                Ok((
+                    ChatThread {
+                        workspace_id: workspace_id.to_owned(),
+                        thread_id: thread_id.to_owned(),
+                        title: row.get(0)?,
+                        created_at_ms: row.get(1)?,
+                        updated_at_ms: row.get(2)?,
+                        channel_id: row.get(3)?,
+                        linked_object_id: row.get(4)?,
+                        linked_path_hint: row.get(5)?,
+                        linked_at_ms: row.get(6)?,
+                    },
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
         )
-        .map(Some)
-        .or_else(|err| match err {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(SearchError::from(other)),
-        })?;
-    Ok(match row {
-        Some((title, first_body)) => index::display_title_for(&title, first_body.as_deref()),
-        None => thread_id.to_owned(),
-    })
+        .map_err(SearchError::from)?;
+    thread.title = index::display_title_for(&thread.title, first_body.as_deref());
+    let mut messages = Vec::new();
+    let mut statement = conn.prepare(
+        "SELECT message_order, message_id, author_kind, author_display_name, \
+                author_user_id, parent_message_id, origin, body, created_at_ms \
+         FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
+         ORDER BY message_order",
+    )?;
+    let mut rows = statement.query(rusqlite::params![workspace_id, thread_id])?;
+    while let Some(row) = rows.next()? {
+        let author_kind = match row.get::<_, String>(2)?.as_str() {
+            "human" => ChatActorKind::Human,
+            "agent" => ChatActorKind::Agent,
+            _ => {
+                return Err(SearchError::Corrupt(
+                    "chat message has an unknown author kind",
+                ));
+            }
+        };
+        messages.push(ChatMessage {
+            workspace_id: workspace_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+            message_order: row.get(0)?,
+            message_id: row.get(1)?,
+            author_kind,
+            author_display_name: row.get(3)?,
+            author_user_id: row.get(4)?,
+            parent_message_id: row.get(5)?,
+            origin: row.get(6)?,
+            body: row.get(7)?,
+            created_at_ms: row.get(8)?,
+            attachments: Vec::new(),
+        });
+    }
+    let path = linked_chat_projection_path(workspace_id, thread_id, None)
+        .map_err(|_| SearchError::Corrupt("chat projection path is invalid"))?;
+    let projection =
+        render_chat_thread_projection(&thread, &messages, &ChatProjectionFileAccess::Unknown)
+            .map_err(|_| SearchError::Corrupt("chat projection is invalid"))?;
+    Ok((path, thread.title, projection))
 }
 
 #[cfg(test)]
