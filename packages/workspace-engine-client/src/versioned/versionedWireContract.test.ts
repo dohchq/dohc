@@ -430,7 +430,7 @@ describe("versioned typed loopback", () => {
         {
           versionId: "main",
           kind: "main",
-          name: "main",
+          name: "Main",
           createdAtMs: expect.any(Number),
           forkVersionId: null,
           forkMomentId: null,

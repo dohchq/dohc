@@ -1884,9 +1884,18 @@ pub(crate) const MATERIALIZATION_WORKSPACE_MIGRATION_ID: &str = "v1-materializat
 /// while the TS engine and the replication applier write 'Main'. New stores
 /// are fixed in `dohc-engine-domain`; this renames rows bootstrapped by older
 /// builds. Scoped to `kind = 'main'` so user-named versions — even one
-/// literally named 'main' — are untouched.
+/// literally named 'main' — are untouched, and guarded so a workspace where a
+/// USER version already took the name 'Main' (legal while bootstrap was
+/// lowercase) keeps its lowercase bootstrap name rather than gaining two
+/// versions displaying 'Main'.
 const V1_MAIN_VERSION_NAME_DDL: &str = "\
-UPDATE versions SET name = 'Main' WHERE kind = 'main' AND name = 'main';
+UPDATE versions SET name = 'Main'
+ WHERE kind = 'main' AND name = 'main'
+   AND NOT EXISTS (
+       SELECT 1 FROM versions AS other
+        WHERE other.workspace_id = versions.workspace_id
+          AND other.name = 'Main'
+   );
 ";
 
 pub(crate) const MAIN_VERSION_NAME_MIGRATION_ID: &str = "v1-main-version-name";
@@ -2466,12 +2475,14 @@ mod tests {
         .expect("pre-rename migrations");
         conn.execute_batch(
             "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main'), ('ws-new', 'main');
+                 VALUES ('ws', 'main'), ('ws-new', 'main'), ('ws-collide', 'main');
              INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
                  VALUES
                  ('ws', 'main', 'main', 'main', 1),
                  ('ws', 'v-user', 'main', 'named', 2),
-                 ('ws-new', 'main', 'Main', 'main', 3);",
+                 ('ws-new', 'main', 'Main', 'main', 3),
+                 ('ws-collide', 'main', 'main', 'main', 4),
+                 ('ws-collide', 'v-taken', 'Main', 'named', 5);",
         )
         .expect("legacy version rows");
 
@@ -2492,6 +2503,18 @@ mod tests {
         assert_eq!(name("ws", "v-user"), "main");
         // An already-correct main row is left as-is.
         assert_eq!(name("ws-new", "main"), "Main");
+        // A workspace where a USER version already took 'Main' keeps its
+        // lowercase bootstrap name — never two versions displaying 'Main'.
+        assert_eq!(name("ws-collide", "main"), "main");
+        assert_eq!(name("ws-collide", "v-taken"), "Main");
+        let collide_main_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM versions WHERE workspace_id = 'ws-collide' AND name = 'Main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("collision count");
+        assert_eq!(collide_main_count, 1);
     }
 
     #[test]
