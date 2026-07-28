@@ -12,10 +12,12 @@ import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
 } from "@dohc/workspace-engine";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineDaemonClient } from "./engineDaemonLifecycle";
 import {
+  allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
+  INSECURE_LOOPBACK_RELAY_TEST_ENV,
   MixedRelayTransportError,
   probeWorkspaceRelay,
   RelayConfiguredDaemonClientSource,
@@ -798,5 +800,102 @@ describe("EngineRelayClient", () => {
         mode: "daemon",
       }),
     ).toThrow("different relay origin");
+  });
+});
+
+describe("allowInsecureLoopbackRelayForTests", () => {
+  const enabled = { [INSECURE_LOOPBACK_RELAY_TEST_ENV]: "1" };
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("allows plain-http loopback relays when the e2e env flag is set", () => {
+    expect(
+      allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", enabled),
+    ).toBe(true);
+    expect(
+      allowInsecureLoopbackRelayForTests("http://localhost:8787/relay", enabled),
+    ).toBe(true);
+    expect(
+      allowInsecureLoopbackRelayForTests("http://[::1]:8787", enabled),
+    ).toBe(true);
+  });
+
+  it("refuses non-loopback http hosts even with the flag set", () => {
+    expect(
+      allowInsecureLoopbackRelayForTests("http://relay.example.com", enabled),
+    ).toBe(false);
+    expect(
+      allowInsecureLoopbackRelayForTests(
+        "http://localhost.evil.test:8787",
+        enabled,
+      ),
+    ).toBe(false);
+    expect(
+      allowInsecureLoopbackRelayForTests("http://192.168.1.10:8787", enabled),
+    ).toBe(false);
+  });
+
+  it("stays off without the exact flag, for https, and for junk URLs", () => {
+    expect(allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {})).toBe(
+      false,
+    );
+    expect(
+      allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {
+        [INSECURE_LOOPBACK_RELAY_TEST_ENV]: "true",
+      }),
+    ).toBe(false);
+    expect(
+      allowInsecureLoopbackRelayForTests("https://relay.test", enabled),
+    ).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(false);
+  });
+
+  it("flows from the env flag into the daemon workspace.open relay config", async () => {
+    vi.stubEnv(INSECURE_LOOPBACK_RELAY_TEST_ENV, "1");
+    const { rootPath, daemon, live, sessions } = await harness();
+    const client = live.bind({
+      workspaceId: "workspace-loopback",
+      rootPath,
+      relay: { baseUrl: "http://127.0.0.1:8787", token: "loopback-token" },
+    });
+    await client.push();
+    const open = daemon.requests.find(
+      (request) =>
+        request.method === "workspace.open" &&
+        request.params &&
+        typeof request.params === "object" &&
+        !Array.isArray(request.params) &&
+        request.params.workspaceId === "workspace-loopback",
+    );
+    expect(open?.params).toMatchObject({
+      relay: {
+        baseUrl: "http://127.0.0.1:8787",
+        bearerToken: "loopback-token",
+        allowInsecureLoopbackForTests: true,
+      },
+    });
+    await sessions.closeAll();
+  });
+
+  it("keeps the flag out of workspace.open when the env flag is unset", async () => {
+    const { daemon, sessions, client } = await harness();
+    await client.push();
+    const open = daemon.requests.find(
+      (request) => request.method === "workspace.open",
+    );
+    expect(open?.params).toMatchObject({
+      relay: { baseUrl: "https://relay.test" },
+    });
+    const relayParams =
+      open &&
+      open.params &&
+      typeof open.params === "object" &&
+      !Array.isArray(open.params)
+        ? open.params.relay
+        : null;
+    expect(relayParams).not.toHaveProperty("allowInsecureLoopbackForTests");
+    await sessions.closeAll();
   });
 });

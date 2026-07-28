@@ -53,6 +53,9 @@ function launchEnv(input: {
     ...process.env,
     CI: process.env.CI ?? "0",
     DOHC_DESKTOP_TEST: "1",
+    // The e2e relay is a local plain-http server; the daemon transport only
+    // accepts it when this explicit flag is set (and the URL is loopback).
+    DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "1",
     DOHC_TEST_HOME: input.workspace.homeDir,
     DOHC_TEST_PICK_PATH: input.workspace.rootPath,
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
