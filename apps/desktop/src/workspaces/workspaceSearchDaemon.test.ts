@@ -22,6 +22,7 @@ describe("queryWorkspaceSearchDaemon", () => {
         ],
         nextCursor: "page-2",
         versionId: "main",
+        restartRequired: false,
       })
       .mockResolvedValueOnce({
         results: [
@@ -39,6 +40,7 @@ describe("queryWorkspaceSearchDaemon", () => {
         ],
         nextCursor: null,
         versionId: "main",
+        restartRequired: false,
       });
 
     const results = await queryWorkspaceSearchDaemon({
@@ -74,6 +76,107 @@ describe("queryWorkspaceSearchDaemon", () => {
         isCurrent: () => true,
       }),
     ).rejects.toThrow("must be a JSON object");
+  });
+
+  it("restarts from page one when the daemon reports an index generation change", async () => {
+    // MUTATION: ignore restartRequired and the final array mixes old-generation
+    // first.md with new-generation replacement.md.
+    const queryPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        results: [
+          {
+            surface: "file",
+            path: "first.md",
+            title: "first.md",
+            line: 1,
+            preview: "needle",
+            matchStart: 0,
+            matchEnd: 6,
+            threadId: null,
+            objectId: "first",
+          },
+        ],
+        nextCursor: "old-generation",
+        versionId: "main",
+        restartRequired: false,
+      })
+      .mockResolvedValueOnce({
+        results: [],
+        nextCursor: null,
+        versionId: "main",
+        restartRequired: true,
+      })
+      .mockResolvedValueOnce({
+        results: [
+          {
+            surface: "file",
+            path: "replacement.md",
+            title: "replacement.md",
+            line: 1,
+            preview: "needle",
+            matchStart: 0,
+            matchEnd: 6,
+            threadId: null,
+            objectId: "replacement",
+          },
+        ],
+        nextCursor: null,
+        versionId: "main",
+        restartRequired: false,
+      });
+
+    const results = await queryWorkspaceSearchDaemon({
+      daemon: { queryPage },
+      query: "needle",
+      limit: 50,
+      isCurrent: () => true,
+    });
+
+    expect(results?.map((result) => result.path)).toEqual(["replacement.md"]);
+    expect(queryPage).toHaveBeenNthCalledWith(3, { query: "needle", limit: 50 });
+  });
+
+  it("converts astral preview byte offsets to in-bounds UTF-16 offsets", async () => {
+    // MUTATION: pass Rust byte offsets through and matchEnd exceeds the
+    // JavaScript preview length, causing the IPC result validator to reject it.
+    const prefix = "😀".repeat(80);
+    const preview = `${prefix}needle`;
+    const matchStart = Buffer.byteLength(prefix);
+    const queryPage = vi.fn().mockResolvedValue({
+      results: [
+        {
+          surface: "file",
+          path: "astral.md",
+          title: "astral.md",
+          line: 1,
+          preview,
+          matchStart,
+          matchEnd: matchStart + Buffer.byteLength("needle"),
+          threadId: null,
+          objectId: "astral",
+        },
+      ],
+      nextCursor: null,
+      versionId: "main",
+      restartRequired: false,
+    });
+
+    const results = await queryWorkspaceSearchDaemon({
+      daemon: { queryPage },
+      query: "needle",
+      limit: 50,
+      isCurrent: () => true,
+    });
+
+    expect(preview.length).toBeLessThanOrEqual(250);
+    expect(results?.[0]).toMatchObject({
+      matchStart: prefix.length,
+      matchEnd: prefix.length + "needle".length,
+    });
+    expect(
+      preview.slice(results![0].matchStart, results![0].matchEnd),
+    ).toBe("needle");
   });
 });
 

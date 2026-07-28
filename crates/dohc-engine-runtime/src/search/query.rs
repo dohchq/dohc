@@ -25,7 +25,6 @@ use crate::search::{
 };
 use dohc_engine_domain::is_js_trim_ws;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::collections::HashSet;
 use std::path::Path;
 
 /// Whether the live head for `object_id` in this version is a BINARY head. Used
@@ -54,13 +53,31 @@ fn live_head_is_binary(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchCandidate {
     File {
+        rowid: i64,
         path: String,
         object_id: String,
         text: String,
     },
     Chat {
+        rowid: i64,
         thread_id: String,
+        message_id: String,
     },
+}
+
+/// Stable candidate-stream coordinate used by daemon search pagination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchCandidateAnchor {
+    pub surface: crate::search::SearchSurface,
+    pub rowid: i64,
+}
+
+/// A keyset page of indexed candidates. `has_more` is true when the caller
+/// should continue after the last returned candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchCandidateBatch {
+    pub candidates: Vec<SearchCandidate>,
+    pub has_more: bool,
 }
 
 /// A granular chat-message search hit (`GranularChatMessageSearchResult`).
@@ -145,6 +162,48 @@ pub fn query_search_index(
     query: &str,
     limit: i64,
 ) -> Result<Option<Vec<SearchCandidate>>, SearchError> {
+    match classify_query(query) {
+        QueryTerm::TooShort => {
+            return Ok(if read_engine_search_policy(root_dir).is_degraded() {
+                Some(Vec::new())
+            } else {
+                None
+            });
+        }
+        QueryTerm::TooLong => return Ok(Some(Vec::new())),
+        QueryTerm::Match(_) => {}
+    }
+    Ok(query_search_index_keyset(
+        conn,
+        root_dir,
+        workspace_id,
+        version_id,
+        query,
+        limit,
+        None,
+        usize::MAX,
+        usize::MAX,
+    )?
+    .map(|batch| batch.candidates))
+}
+
+/// Keyset form of [`query_search_index`] used by the bounded daemon page.
+///
+/// Queries under the trigram minimum use the legacy linear fallback over the
+/// stored FTS content. That fallback inspects candidate byte lengths before
+/// materializing text and stops at both a per-row and per-page budget.
+#[allow(clippy::too_many_arguments)]
+pub fn query_search_index_keyset(
+    conn: &Connection,
+    root_dir: &Path,
+    workspace_id: &str,
+    version_id: &str,
+    query: &str,
+    limit: i64,
+    after: Option<SearchCandidateAnchor>,
+    short_query_row_byte_budget: usize,
+    short_query_page_byte_budget: usize,
+) -> Result<Option<SearchCandidateBatch>, SearchError> {
     let policy = read_engine_search_policy(root_dir);
     // A too-short query is the only case that may fall back to a linear scan (and
     // only under a healthy policy). Everything else that yields no FTS term
@@ -158,37 +217,78 @@ pub fn query_search_index(
         }
     };
     let Some(limit) = clamp_limit(limit, MAX_RESULT_LIMIT) else {
-        return Ok(fallback_or_empty());
+        return Ok(fallback_or_empty().map(|candidates| SearchCandidateBatch {
+            candidates,
+            has_more: false,
+        }));
     };
-    let match_expr = match classify_query(query) {
-        QueryTerm::Match(term) => term,
-        QueryTerm::TooShort => return Ok(fallback_or_empty()),
-        QueryTerm::TooLong => return Ok(Some(Vec::new())),
+    let query_term = classify_query(query);
+    if matches!(query_term, QueryTerm::TooShort) && policy.is_degraded() {
+        return Ok(Some(SearchCandidateBatch {
+            candidates: Vec::new(),
+            has_more: false,
+        }));
+    }
+    if matches!(query_term, QueryTerm::TooLong) {
+        return Ok(Some(SearchCandidateBatch {
+            candidates: Vec::new(),
+            has_more: false,
+        }));
+    }
+    let normalized = query.trim_matches(is_js_trim_ws).to_lowercase();
+    let after_surface = after.map(|value| value.surface);
+    let after_rowid = after.map_or(0, |value| value.rowid);
+    let probe_limit = limit
+        .saturating_add(1)
+        .min(MAX_RESULT_LIMIT.saturating_add(1));
+    let probe_limit_i64 = i64::try_from(probe_limit).unwrap_or(i64::MAX);
+    let mut short_query_materialized_bytes = 0usize;
+    let is_short = matches!(query_term, QueryTerm::TooShort);
+
+    let file_after = if after_surface == Some(crate::search::SearchSurface::File) {
+        after_rowid
+    } else {
+        0
     };
 
     let mut candidates: Vec<SearchCandidate> = Vec::new();
-    let mut seen_files: HashSet<String> = HashSet::new();
-    {
-        let mut stmt = conn.prepare(
-            "SELECT path, object_id, text FROM engine_search_files_fts \
-             WHERE engine_search_files_fts MATCH ?1 \
-               AND workspace_id = ?2 AND version_id = ?3 \
-             ORDER BY rowid LIMIT ?4",
-        )?;
+    let skip_files = after_surface == Some(crate::search::SearchSurface::Chat);
+    if !skip_files {
+        let sql = if is_short {
+            "SELECT rowid, path, object_id, length(CAST(text AS BLOB)), text \
+             FROM engine_search_files_fts \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND rowid >= ?3 \
+               AND instr(lower(text), ?4) > 0 \
+             ORDER BY rowid LIMIT ?5"
+        } else {
+            "SELECT rowid, path, object_id, length(CAST(text AS BLOB)), text \
+             FROM engine_search_files_fts \
+             WHERE engine_search_files_fts MATCH ?4 \
+               AND workspace_id = ?1 AND version_id = ?2 AND rowid >= ?3 \
+             ORDER BY rowid LIMIT ?5"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let term = match &query_term {
+            QueryTerm::Match(term) => term.as_str(),
+            QueryTerm::TooShort => normalized.as_str(),
+            QueryTerm::TooLong => unreachable!("handled above"),
+        };
         let mut rows = stmt.query(params![
-            match_expr,
             workspace_id,
             version_id,
-            fetch_size(limit, 4)
+            file_after,
+            term,
+            fetch_size(probe_limit, 4).max(probe_limit_i64),
         ])?;
         while let Some(row) = rows.next()? {
-            let path: String = row.get(0)?;
+            let rowid: i64 = row.get(0)?;
+            let path: String = row.get(1)?;
             // Live re-check: a policy changed after indexing still applies. A
             // degraded policy makes this false for every path (file half closed).
             if !path_is_search_indexed(&policy, &path) {
                 continue;
             }
-            let object_id: String = row.get(1)?;
+            let object_id: String = row.get(2)?;
             // Live re-check (reader invariant): a path indexed while it was TEXT
             // but now backed by a BINARY head must not be served by its stale
             // former text. The file index "freezes, doesn't drop" (rebuild-time
@@ -198,42 +298,93 @@ pub fn query_search_index(
             if live_head_is_binary(conn, workspace_id, version_id, &object_id)? {
                 continue;
             }
-            let key = format!("{path}\u{0}{object_id}");
-            if !seen_files.insert(key) {
-                continue;
+            let text_bytes = usize::try_from(row.get::<_, i64>(3)?)
+                .map_err(|_| SearchError::Corrupt("negative search candidate length"))?;
+            if is_short {
+                if text_bytes > short_query_row_byte_budget {
+                    return Err(SearchError::Bounds(
+                        "short-query candidate exceeded per-result byte budget",
+                    ));
+                }
+                if text_bytes
+                    > short_query_page_byte_budget.saturating_sub(short_query_materialized_bytes)
+                {
+                    return Ok(Some(SearchCandidateBatch {
+                        candidates,
+                        has_more: true,
+                    }));
+                }
+                short_query_materialized_bytes =
+                    short_query_materialized_bytes.saturating_add(text_bytes);
             }
-            let text: String = row.get(2)?;
+            let text: String = row.get(4)?;
             candidates.push(SearchCandidate::File {
+                rowid,
                 path,
                 object_id,
                 text,
             });
-            if candidates.len() >= limit {
-                return Ok(Some(candidates));
+            if candidates.len() >= probe_limit {
+                candidates.truncate(limit);
+                return Ok(Some(SearchCandidateBatch {
+                    candidates,
+                    has_more: true,
+                }));
             }
         }
     }
 
-    let mut seen_threads: HashSet<String> = HashSet::new();
+    let chat_after = if after_surface == Some(crate::search::SearchSurface::Chat) {
+        after_rowid
+    } else {
+        0
+    };
     {
-        let mut stmt = conn.prepare(
-            "SELECT thread_id FROM engine_search_chat_messages_fts \
-             WHERE engine_search_chat_messages_fts MATCH ?1 AND workspace_id = ?2 \
-             ORDER BY rowid LIMIT ?3",
-        )?;
-        let mut rows = stmt.query(params![match_expr, workspace_id, fetch_size(limit, 8)])?;
+        let sql = if is_short {
+            "SELECT rowid, thread_id, message_id \
+             FROM engine_search_chat_messages_fts \
+             WHERE workspace_id = ?1 AND rowid >= ?2 AND instr(lower(text), ?3) > 0 \
+             ORDER BY rowid LIMIT ?4"
+        } else {
+            "SELECT rowid, thread_id, message_id \
+             FROM engine_search_chat_messages_fts \
+             WHERE engine_search_chat_messages_fts MATCH ?3 \
+               AND workspace_id = ?1 AND rowid >= ?2 \
+             ORDER BY rowid LIMIT ?4"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let term = match &query_term {
+            QueryTerm::Match(term) => term.as_str(),
+            QueryTerm::TooShort => normalized.as_str(),
+            QueryTerm::TooLong => unreachable!("handled above"),
+        };
+        let remaining_probe = probe_limit.saturating_sub(candidates.len());
+        let mut rows = stmt.query(params![
+            workspace_id,
+            chat_after,
+            term,
+            fetch_size(remaining_probe.max(1), 8)
+                .max(i64::try_from(remaining_probe).unwrap_or(i64::MAX)),
+        ])?;
         while let Some(row) = rows.next()? {
-            let thread_id: String = row.get(0)?;
-            if !seen_threads.insert(thread_id.clone()) {
-                continue;
-            }
-            candidates.push(SearchCandidate::Chat { thread_id });
-            if candidates.len() >= limit {
-                return Ok(Some(candidates));
+            candidates.push(SearchCandidate::Chat {
+                rowid: row.get(0)?,
+                thread_id: row.get(1)?,
+                message_id: row.get(2)?,
+            });
+            if candidates.len() >= probe_limit {
+                candidates.truncate(limit);
+                return Ok(Some(SearchCandidateBatch {
+                    candidates,
+                    has_more: true,
+                }));
             }
         }
     }
-    Ok(Some(candidates))
+    Ok(Some(SearchCandidateBatch {
+        candidates,
+        has_more: false,
+    }))
 }
 
 /// Query chat-message rows granularly (`queryChatMessagesGranular`). Returns

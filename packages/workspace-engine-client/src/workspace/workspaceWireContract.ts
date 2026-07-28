@@ -182,6 +182,7 @@ export type SearchQueryPageResult = WorkspaceJsonObject & {
   results: SearchResult[];
   nextCursor: string | null;
   versionId: string;
+  restartRequired: boolean;
 };
 export type GranularChatMessageSearchResult = WorkspaceJsonObject & {
   threadId: string;
@@ -620,6 +621,7 @@ export function decodeSearchQueryPageResult(
     "results",
     "nextCursor",
     "versionId",
+    "restartRequired",
   ]);
   if (!Array.isArray(object.results)) {
     throw new WorkspaceProtocolShapeError(`${label}.results must be an array.`);
@@ -634,6 +636,7 @@ export function decodeSearchQueryPageResult(
     ),
     nextCursor,
     versionId: nonEmptyStringValue(object, "versionId", label),
+    restartRequired: booleanValue(object, "restartRequired", label),
   };
 }
 

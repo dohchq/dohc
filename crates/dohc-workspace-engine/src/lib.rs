@@ -42,7 +42,8 @@ use dohc_engine_protocol::{
 use dohc_engine_runtime::{
     ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
     PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
-    RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
+    RuntimeError, SearchError, SearchPageDisposition, SearchResultKey, SearchSurface,
+    WorkspaceSupervisor,
 };
 use dohc_engine_sync::{
     RelayCursor, RelayError, ReplicationEnvelope, ShareCursor, SyncError, SyncPassOutcome,
@@ -198,15 +199,17 @@ struct ChatKeysetCursor {
     third: Option<String>,
 }
 
-/// Opaque offset cursor for the bounded workspace-search projection. Search
-/// ordering is deterministic for one active version, and the binding prevents a
-/// continuation from being replayed against another workspace/version/query.
+/// Opaque generation-bound keyset cursor for workspace search.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SearchPageCursor {
     version: u8,
     binding: String,
     consumed: usize,
+    generation: u64,
+    surface: String,
+    rowid: i64,
+    line: usize,
 }
 
 fn chat_cursor_binding(method: &str, workspace_id: &str, filters: &[&str]) -> String {
@@ -270,10 +273,13 @@ fn decode_search_cursor(
     let invalid = || wire(ErrorCode::InvalidParams, "invalid-cursor");
     let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
     let cursor: SearchPageCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    if cursor.version != 1
+    if cursor.version != 2
         || cursor.binding != expected_binding
         || cursor.consumed == 0
         || cursor.consumed >= limit
+        || !matches!(cursor.surface.as_str(), "file" | "chat")
+        || cursor.rowid <= 0
+        || cursor.line == 0
     {
         return Err(invalid());
     }
@@ -7341,23 +7347,45 @@ impl EngineService {
         );
         let cursor = decode_search_cursor(params.cursor.as_deref(), &binding, limit)?;
         let consumed = cursor.as_ref().map_or(0, |cursor| cursor.consumed);
-        let results = open
+        let remaining = limit.saturating_sub(consumed);
+        let expected_generation = cursor.as_ref().map(|cursor| cursor.generation);
+        let after = cursor.as_ref().map(|cursor| SearchResultKey {
+            surface: if cursor.surface == "file" {
+                SearchSurface::File
+            } else {
+                SearchSurface::Chat
+            },
+            rowid: cursor.rowid,
+            line: cursor.line,
+        });
+        let page = open
             .actor
-            .search(
+            .search_page(
                 open.root,
                 open.workspace_id,
                 active_version_id.clone(),
                 params.query,
-                Some(i64::try_from(limit).unwrap_or(i64::MAX)),
+                Some(i64::try_from(remaining).unwrap_or(i64::MAX)),
                 params.now_ms.unwrap_or(now_ms()?),
+                expected_generation,
+                after,
                 cancellation.token(),
             )
             .await
             .map_err(map_runtime)?;
-        let row_values: Vec<Value> = results
-            .into_iter()
-            .skip(consumed)
-            .map(|result| {
+        if page.disposition == SearchPageDisposition::Restart {
+            return Ok(json!({
+                "results": [],
+                "nextCursor": null,
+                "versionId": active_version_id,
+                "restartRequired": true,
+            }));
+        }
+        let row_values: Vec<Value> = page
+            .results
+            .iter()
+            .map(|keyed| {
+                let result = &keyed.result;
                 json!({
                     "surface": match result.surface { SearchSurface::File => "file", SearchSurface::Chat => "chat" },
                     "path": result.path,
@@ -7378,11 +7406,33 @@ impl EngineService {
                 "search-result-exceeds-wire-limit",
             ));
         }
-        let next_cursor = if included < row_values.len() {
+        if included == 0 && page.has_more {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "search-page-made-no-progress",
+            ));
+        }
+        let total_consumed = consumed.saturating_add(included);
+        let needs_continuation =
+            total_consumed < limit && (included < row_values.len() || page.has_more);
+        let next_cursor = if needs_continuation {
+            let key = page
+                .results
+                .get(included.saturating_sub(1))
+                .map(|keyed| keyed.key)
+                .ok_or_else(|| wire(ErrorCode::Internal, "search-page-made-no-progress"))?;
             Some(encode_search_cursor(&SearchPageCursor {
-                version: 1,
+                version: 2,
                 binding,
-                consumed: consumed.saturating_add(included),
+                consumed: total_consumed,
+                generation: page.generation,
+                surface: match key.surface {
+                    SearchSurface::File => "file",
+                    SearchSurface::Chat => "chat",
+                }
+                .to_owned(),
+                rowid: key.rowid,
+                line: key.line,
             })?)
         } else {
             None
@@ -7391,6 +7441,7 @@ impl EngineService {
             "results": &row_values[..included],
             "nextCursor": next_cursor,
             "versionId": active_version_id,
+            "restartRequired": false,
         }))
     }
 

@@ -40,6 +40,7 @@ export async function queryWorkspaceSearchDaemon(
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
   let versionId: string | undefined;
+  let restartCount = 0;
 
   for (;;) {
     if (!input.isCurrent()) return null;
@@ -51,6 +52,20 @@ export async function queryWorkspaceSearchDaemon(
       }),
     );
     if (!input.isCurrent()) return null;
+    if (page.restartRequired) {
+      if (cursor === undefined || page.results.length !== 0 || page.nextCursor !== null) {
+        throw new Error("Daemon workspace search returned an invalid restart disposition.");
+      }
+      restartCount += 1;
+      if (restartCount > 3) {
+        throw new Error("Daemon workspace search index kept changing between pages.");
+      }
+      results.length = 0;
+      seenCursors.clear();
+      cursor = undefined;
+      versionId = undefined;
+      continue;
+    }
     if (versionId !== undefined && page.versionId !== versionId) {
       throw new Error("Daemon workspace search changed active version between pages.");
     }

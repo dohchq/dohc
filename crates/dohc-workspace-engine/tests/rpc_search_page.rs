@@ -338,6 +338,114 @@ async fn query_page_byte_budget_pages_an_oversized_result_set() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_page_short_query_finds_seeded_content() {
+    // MUTATION: return an empty page for the trigram TooShort sentinel and this
+    // loses the legacy daemon-side fallback.
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "workspace-search-short").await;
+    write(
+        &transport,
+        &handle,
+        2,
+        "main",
+        "notes/ai.md",
+        "AI planning notes",
+    )
+    .await;
+
+    let page = call(
+        &transport,
+        &handle,
+        3,
+        "search.queryPage",
+        json!({ "query": "AI", "limit": 50 }),
+    )
+    .await;
+    assert_eq!(page["results"][0]["path"], "notes/ai.md");
+    assert_eq!(page["restartRequired"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_page_cursor_signals_restart_after_index_mutation() {
+    // MUTATION: omit the generation comparison and the second request applies
+    // its keyset to a different index generation without an explicit restart.
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "workspace-search-generation").await;
+    let text = std::iter::repeat_n("needle", 1_000)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let oversized_path = format!("{}.md", "generation-path-".repeat(12));
+    write(&transport, &handle, 2, "main", &oversized_path, &text).await;
+
+    let first = call(
+        &transport,
+        &handle,
+        3,
+        "search.queryPage",
+        json!({ "query": "needle", "limit": 1_000 }),
+    )
+    .await;
+    let cursor = first["nextCursor"]
+        .as_str()
+        .expect("byte-cut first page cursor")
+        .to_owned();
+    write(
+        &transport,
+        &handle,
+        4,
+        "main",
+        "inserted-between-pages.md",
+        "needle inserted",
+    )
+    .await;
+
+    let continuation = call(
+        &transport,
+        &handle,
+        5,
+        "search.queryPage",
+        json!({ "query": "needle", "limit": 1_000, "cursor": cursor }),
+    )
+    .await;
+    assert_eq!(continuation["restartRequired"], true);
+    assert!(
+        continuation["results"]
+            .as_array()
+            .expect("results")
+            .is_empty()
+    );
+    assert!(continuation["nextCursor"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_page_astral_preview_fits_renderer_utf16_contract() {
+    // MUTATION: window by Unicode scalar count and the emoji-heavy preview is
+    // 360 UTF-16 units, so main-to-renderer validation rejects the result.
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "workspace-search-astral").await;
+    let text = format!("{}needle{}", "😀".repeat(120), "🚀".repeat(120));
+    write(&transport, &handle, 2, "main", "notes/astral.md", &text).await;
+
+    let page = call(
+        &transport,
+        &handle,
+        3,
+        "search.queryPage",
+        json!({ "query": "needle", "limit": 50 }),
+    )
+    .await;
+    let hit = &page["results"][0];
+    let preview = hit["preview"].as_str().expect("preview");
+    assert!(preview.encode_utf16().count() <= 180);
+    let start = hit["matchStart"].as_u64().expect("start") as usize;
+    let end = hit["matchEnd"].as_u64().expect("end") as usize;
+    assert_eq!(&preview[start..end], "needle");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_reads_a_write_committed_through_rpc_immediately() {
     // MUTATION: omit the in-transaction FTS maintenance or index certification
     // and the second query remains empty.

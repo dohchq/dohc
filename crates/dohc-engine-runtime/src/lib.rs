@@ -38,7 +38,10 @@ pub use actor::{
 };
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;
-pub use search::{SearchCandidate, SearchError, SearchResult, SearchSurface};
+pub use search::{
+    SearchCandidate, SearchError, SearchPageDisposition, SearchResult, SearchResultKey,
+    SearchSurface,
+};
 pub use supervisor::{SupervisorOpen, WorkspaceSupervisor};
 
 // Re-export the storage surface callers need so a downstream host depends on

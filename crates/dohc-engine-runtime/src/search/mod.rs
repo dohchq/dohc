@@ -40,14 +40,12 @@ pub use policy::{
 };
 pub use query::{
     GranularChatMessageSearchBatch, GranularChatMessageSearchResult, SearchCandidate,
-    query_chat_messages_granular, query_chat_messages_granular_bounded, query_search_index,
+    SearchCandidateAnchor, SearchCandidateBatch, query_chat_messages_granular,
+    query_chat_messages_granular_bounded, query_search_index, query_search_index_keyset,
 };
 
-use dohc_engine_domain::{
-    ChatActorKind, ChatMessage, ChatProjectionFileAccess, ChatThread, linked_chat_projection_path,
-    render_chat_thread_projection,
-};
-use rusqlite::Connection;
+use dohc_engine_domain::{MAX_MESSAGE_BODY_BYTES, linked_chat_projection_path};
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
 /// The sentinel message id for a thread's header row, shared with domain writes.
@@ -74,8 +72,18 @@ pub const MAX_FTS_FETCH: usize = 20_000;
 /// Default result limit when the caller supplies none (`workspaceSearch.ts`).
 pub const DEFAULT_SEARCH_LIMIT: i64 = 100;
 
-/// Preview-window width in chars (`WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS`).
+/// Preview-window width in JavaScript UTF-16 code units
+/// (`WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS` in the TypeScript oracle).
 pub const WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS: usize = 180;
+
+/// The short-query fallback never owns more than these source-text bytes.
+pub const SHORT_QUERY_RESULT_SOURCE_BYTE_BUDGET: usize = 1024 * 1024;
+pub const SHORT_QUERY_PAGE_SOURCE_BYTE_BUDGET: usize = 4 * 1024 * 1024;
+
+/// A chat hit hydrates one message at most, and one actor page owns only this
+/// much chat source text before returning a keyset continuation.
+pub const CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET: usize = MAX_MESSAGE_BODY_BYTES + 8 * 1024;
+pub const CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET: usize = 256 * 1024;
 
 /// Errors from the search index/query surface. Policy read failures are NOT
 /// errors — they fail closed and surface as diagnostics; only storage faults and
@@ -142,6 +150,37 @@ pub struct SearchResult {
     pub object_id: Option<String>,
 }
 
+/// Opaque-to-wire key for one line-level result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchResultKey {
+    pub surface: SearchSurface,
+    pub rowid: i64,
+    pub line: usize,
+}
+
+/// One result plus the key the daemon cursor resumes after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyedSearchResult {
+    pub result: SearchResult,
+    pub key: SearchResultKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchPageDisposition {
+    Results,
+    Restart,
+}
+
+/// Actor-owned bounded page. `generation` is the monotonic SQLite connection
+/// change counter captured after index ensure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchPageBatch {
+    pub disposition: SearchPageDisposition,
+    pub generation: u64,
+    pub results: Vec<KeyedSearchResult>,
+    pub has_more: bool,
+}
+
 /// Normalize a query the way the search entry point does: trim + lowercase.
 /// Matching is case-insensitive substring, so callers pass the normalized query
 /// to [`preview_line_matches`].
@@ -180,43 +219,57 @@ fn split_lines(text: &str) -> Vec<&str> {
     lines
 }
 
-/// The UTF-8 byte offset of the `n`-th char in `s` (or `s.len()` if past the
-/// end). Used to convert a char position into a byte offset into the preview so
-/// the returned offsets are safe to byte-slice.
-fn char_to_byte(s: &str, char_index: usize) -> usize {
-    s.char_indices()
-        .nth(char_index)
-        .map_or_else(|| s.len(), |(byte, _)| byte)
-}
-
 /// A single line's preview window (`previewForLine`). The window is centered by
-/// CHAR position (matching the JS char/UTF-16 windowing for BMP text; astral
-/// text can shift the window a few code units — the match itself is always
-/// correct). The returned offsets are UTF-8 **byte** offsets into the preview
-/// string so a Rust consumer can byte-slice them without panicking.
+/// UTF-16 code units, so even an all-astral preview stays within the renderer's
+/// string-length contract. Boundaries remain Unicode scalar boundaries; the
+/// returned offsets are UTF-8 bytes into the resulting Rust string.
 fn preview_for_line(line: &str, match_index: usize, query_len: usize) -> (String, usize, usize) {
     let chars: Vec<char> = line.chars().collect();
-    let line_len = chars.len();
+    let utf16_width = |range: std::ops::Range<usize>| -> usize {
+        chars[range].iter().map(|ch| ch.len_utf16()).sum()
+    };
+    let line_units = utf16_width(0..chars.len());
     let mut window_start = 0usize;
-    if line_len > WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS {
-        window_start = match_index.saturating_sub(WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS / 3);
-        window_start = window_start.min(line_len - WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS);
+    if line_units > WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS {
+        let target_left = WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS / 3;
+        window_start = match_index.min(chars.len());
+        let mut left_units = 0usize;
+        while window_start > 0 {
+            let width = chars[window_start - 1].len_utf16();
+            if left_units.saturating_add(width) > target_left {
+                break;
+            }
+            left_units = left_units.saturating_add(width);
+            window_start -= 1;
+        }
     }
-    let window_end = window_start
-        .saturating_add(WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS)
-        .min(line_len);
+    let mut window_end = window_start;
+    let mut window_units = 0usize;
+    while window_end < chars.len() {
+        let width = chars[window_end].len_utf16();
+        if window_units.saturating_add(width) > WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS {
+            break;
+        }
+        window_units = window_units.saturating_add(width);
+        window_end += 1;
+    }
     let preview: String = chars[window_start..window_end].iter().collect();
-    let preview_char_len = window_end.saturating_sub(window_start);
     let match_start_char = match_index
         .saturating_sub(window_start)
-        .min(preview_char_len);
+        .min(window_end - window_start);
     let match_end_char = match_index
         .saturating_add(query_len)
         .saturating_sub(window_start)
-        .min(preview_char_len)
+        .min(window_end - window_start)
         .max(match_start_char);
-    let match_start = char_to_byte(&preview, match_start_char);
-    let match_end = char_to_byte(&preview, match_end_char);
+    let match_start = chars[window_start..window_start + match_start_char]
+        .iter()
+        .map(|ch| ch.len_utf8())
+        .sum();
+    let match_end = chars[window_start..window_start + match_end_char]
+        .iter()
+        .map(|ch| ch.len_utf8())
+        .sum();
     (preview, match_start, match_end)
 }
 
@@ -265,18 +318,7 @@ pub fn preview_line_matches(text: &str, query: &str, remaining: usize) -> Vec<Pr
     out
 }
 
-/// Ensure the index for `version_id` is built, then run `query`, returning
-/// line-level results capped at `limit` (default [`DEFAULT_SEARCH_LIMIT`]). This
-/// is the index-backed orchestration: file results carry inline text and are
-/// previewed directly; chat candidates are hydrated into the same read-only
-/// Markdown projection the TypeScript workspace-search contract scans.
-///
-/// A too-short query (under [`MIN_TRIGRAM_QUERY_CHARS`]) yields no results here
-/// rather than a linear fallback. Custom visibility hooks remain an adapter
-/// concern; the daemon-owned desktop surface uses the engine's live file policy.
-///
-/// MUST be called on the actor's writer connection (it ensures the index inside
-/// the same connection it queries) so results are read-your-writes.
+/// Compatibility wrapper for the unpaged runtime surface.
 pub fn search_workspace(
     conn: &Connection,
     root_dir: &Path,
@@ -286,13 +328,53 @@ pub fn search_workspace(
     limit: Option<i64>,
     now_ms: i64,
 ) -> Result<Vec<SearchResult>, SearchError> {
+    let page = search_workspace_page(
+        conn,
+        root_dir,
+        workspace_id,
+        version_id,
+        query,
+        limit,
+        now_ms,
+        None,
+        None,
+    )?;
+    Ok(page.results.into_iter().map(|keyed| keyed.result).collect())
+}
+
+/// Ensure the index, bind the read to a monotonic connection generation, and
+/// return a keyset page. Chat candidates hydrate only the exact matching
+/// message; canonical message placement is derived from `(created_at_ms,
+/// message_id)` ranks without loading the rest of the thread.
+#[allow(clippy::too_many_arguments)]
+pub fn search_workspace_page(
+    conn: &Connection,
+    root_dir: &Path,
+    workspace_id: &str,
+    version_id: &str,
+    query: &str,
+    limit: Option<i64>,
+    now_ms: i64,
+    expected_generation: Option<u64>,
+    after: Option<SearchResultKey>,
+) -> Result<SearchPageBatch, SearchError> {
     let normalized = normalize_query(query);
     if normalized.is_empty() {
-        return Ok(Vec::new());
+        return Ok(SearchPageBatch {
+            disposition: SearchPageDisposition::Results,
+            generation: conn.total_changes(),
+            results: Vec::new(),
+            has_more: false,
+        });
     }
     let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
     if limit <= 0 {
-        return Ok(Vec::new());
+        return Ok(SearchPageBatch {
+            disposition: SearchPageDisposition::Results,
+            generation: conn.total_changes(),
+            results: Vec::new(),
+            has_more: false,
+        });
     }
     let cap = usize::try_from(limit)
         .unwrap_or(MAX_RESULT_LIMIT)
@@ -306,136 +388,288 @@ pub fn search_workspace(
         now_ms,
         &dohc_engine_storage::NoFaults,
     )?;
-    let Some(candidates) =
-        query::query_search_index(conn, root_dir, workspace_id, version_id, query, limit)?
+    let generation = conn.total_changes();
+    if expected_generation.is_some_and(|expected| expected != generation) {
+        return Ok(SearchPageBatch {
+            disposition: SearchPageDisposition::Restart,
+            generation,
+            results: Vec::new(),
+            has_more: false,
+        });
+    }
+    let candidate_after = after.map(|key| SearchCandidateAnchor {
+        surface: key.surface,
+        rowid: key.rowid,
+    });
+    let Some(candidate_batch) = query::query_search_index_keyset(
+        conn,
+        root_dir,
+        workspace_id,
+        version_id,
+        query,
+        limit,
+        candidate_after,
+        SHORT_QUERY_RESULT_SOURCE_BYTE_BUDGET,
+        SHORT_QUERY_PAGE_SOURCE_BYTE_BUDGET,
+    )?
     else {
-        // Too short for the trigram index and policy healthy: no index-backed
-        // results (the linear fallback is a desktop-adapter concern).
-        return Ok(Vec::new());
+        return Ok(SearchPageBatch {
+            disposition: SearchPageDisposition::Results,
+            generation,
+            results: Vec::new(),
+            has_more: false,
+        });
     };
 
-    let mut results: Vec<SearchResult> = Vec::new();
-    for candidate in candidates {
+    let mut results: Vec<KeyedSearchResult> = Vec::new();
+    let mut has_more = candidate_batch.has_more;
+    let mut chat_source_bytes = 0usize;
+    for candidate in candidate_batch.candidates {
         if results.len() >= cap {
+            has_more = true;
             break;
         }
         match candidate {
             SearchCandidate::File {
+                rowid,
                 path,
                 object_id,
                 text,
             } => {
                 let remaining = cap.saturating_sub(results.len());
-                for hit in preview_line_matches(&text, &normalized, remaining) {
-                    results.push(SearchResult {
+                let anchored_lines = after.filter(|anchor| {
+                    anchor.surface == SearchSurface::File && anchor.rowid == rowid
+                });
+                let scan_cap = remaining
+                    .saturating_add(anchored_lines.map_or(0, |anchor| anchor.line))
+                    .saturating_add(1);
+                let hits: Vec<_> = preview_line_matches(&text, &normalized, scan_cap)
+                    .into_iter()
+                    .filter(|hit| anchored_lines.is_none_or(|anchor| hit.line > anchor.line))
+                    .collect();
+                if hits.len() > remaining {
+                    has_more = true;
+                }
+                for hit in hits.into_iter().take(remaining) {
+                    let key = SearchResultKey {
                         surface: SearchSurface::File,
-                        path: path.clone(),
-                        title: path.clone(),
+                        rowid,
                         line: hit.line,
-                        preview: hit.preview,
-                        match_start: hit.match_start,
-                        match_end: hit.match_end,
-                        thread_id: None,
-                        object_id: Some(object_id.clone()),
+                    };
+                    results.push(KeyedSearchResult {
+                        key,
+                        result: SearchResult {
+                            surface: SearchSurface::File,
+                            path: path.clone(),
+                            title: path.clone(),
+                            line: hit.line,
+                            preview: hit.preview,
+                            match_start: hit.match_start,
+                            match_end: hit.match_end,
+                            thread_id: None,
+                            object_id: Some(object_id.clone()),
+                        },
                     });
                 }
             }
-            SearchCandidate::Chat { thread_id } => {
-                let (path, title, projection) =
-                    chat_thread_search_projection(conn, workspace_id, &thread_id)?;
+            SearchCandidate::Chat {
+                rowid,
+                thread_id,
+                message_id,
+            } => {
+                let remaining_source =
+                    CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET.saturating_sub(chat_source_bytes);
+                let fragment = match hydrate_chat_search_fragment(
+                    conn,
+                    workspace_id,
+                    &thread_id,
+                    &message_id,
+                    remaining_source,
+                )? {
+                    ChatHydration::Ready(fragment) => fragment,
+                    ChatHydration::Missing => continue,
+                    ChatHydration::PageFull => {
+                        has_more = true;
+                        break;
+                    }
+                };
+                chat_source_bytes = chat_source_bytes.saturating_add(fragment.source_bytes);
                 let remaining = cap.saturating_sub(results.len());
-                for hit in preview_line_matches(&projection, &normalized, remaining) {
-                    results.push(SearchResult {
+                let anchored_lines = after.filter(|anchor| {
+                    anchor.surface == SearchSurface::Chat && anchor.rowid == rowid
+                });
+                let scan_cap = remaining
+                    .saturating_add(anchored_lines.map_or(0, |anchor| anchor.line))
+                    .saturating_add(1);
+                let hits: Vec<_> = preview_line_matches(&fragment.text, &normalized, scan_cap)
+                    .into_iter()
+                    .filter(|hit| anchored_lines.is_none_or(|anchor| hit.line > anchor.line))
+                    .collect();
+                if hits.len() > remaining {
+                    has_more = true;
+                }
+                for hit in hits.into_iter().take(remaining) {
+                    let key = SearchResultKey {
                         surface: SearchSurface::Chat,
-                        path: path.clone(),
-                        title: title.clone(),
+                        rowid,
                         line: hit.line,
-                        preview: hit.preview,
-                        match_start: hit.match_start,
-                        match_end: hit.match_end,
-                        thread_id: Some(thread_id.clone()),
-                        object_id: None,
+                    };
+                    results.push(KeyedSearchResult {
+                        key,
+                        result: SearchResult {
+                            surface: SearchSurface::Chat,
+                            path: fragment.path.clone(),
+                            title: fragment.title.clone(),
+                            line: fragment.line_offset.saturating_add(hit.line),
+                            preview: hit.preview,
+                            match_start: hit.match_start,
+                            match_end: hit.match_end,
+                            thread_id: Some(thread_id.clone()),
+                            object_id: None,
+                        },
                     });
                 }
             }
         }
     }
     results.truncate(cap);
-    Ok(results)
+    Ok(SearchPageBatch {
+        disposition: SearchPageDisposition::Results,
+        generation,
+        results,
+        has_more,
+    })
 }
 
-fn chat_thread_search_projection(
+struct ChatSearchFragment {
+    path: String,
+    title: String,
+    text: String,
+    line_offset: usize,
+    source_bytes: usize,
+}
+
+enum ChatHydration {
+    Ready(ChatSearchFragment),
+    Missing,
+    PageFull,
+}
+
+fn hydrate_chat_search_fragment(
     conn: &Connection,
     workspace_id: &str,
     thread_id: &str,
-) -> Result<(String, String, String), SearchError> {
-    let (mut thread, first_body) = conn
+    message_id: &str,
+    remaining_page_bytes: usize,
+) -> Result<ChatHydration, SearchError> {
+    let metadata = conn
         .query_row(
-            "SELECT t.title, t.created_at_ms, t.updated_at_ms, t.channel_id, \
-                    t.linked_object_id, t.linked_path_hint, t.linked_at_ms, \
-                    (SELECT m.body FROM chat_messages m \
+            "SELECT t.title, t.linked_object_id, \
+                    (SELECT substr(m.body, 1, 160) FROM chat_messages m \
                      WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
-                     ORDER BY m.message_order LIMIT 1) \
+                     ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
              FROM chat_threads t WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
             rusqlite::params![workspace_id, thread_id],
             |row| {
                 Ok((
-                    ChatThread {
-                        workspace_id: workspace_id.to_owned(),
-                        thread_id: thread_id.to_owned(),
-                        title: row.get(0)?,
-                        created_at_ms: row.get(1)?,
-                        updated_at_ms: row.get(2)?,
-                        channel_id: row.get(3)?,
-                        linked_object_id: row.get(4)?,
-                        linked_path_hint: row.get(5)?,
-                        linked_at_ms: row.get(6)?,
-                    },
-                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             },
         )
-        .map_err(SearchError::from)?;
-    thread.title = index::display_title_for(&thread.title, first_body.as_deref());
-    let mut messages = Vec::new();
-    let mut statement = conn.prepare(
-        "SELECT message_order, message_id, author_kind, author_display_name, \
-                author_user_id, parent_message_id, origin, body, created_at_ms \
-         FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
-         ORDER BY message_order",
-    )?;
-    let mut rows = statement.query(rusqlite::params![workspace_id, thread_id])?;
-    while let Some(row) = rows.next()? {
-        let author_kind = match row.get::<_, String>(2)?.as_str() {
-            "human" => ChatActorKind::Human,
-            "agent" => ChatActorKind::Agent,
-            _ => {
-                return Err(SearchError::Corrupt(
-                    "chat message has an unknown author kind",
-                ));
-            }
-        };
-        messages.push(ChatMessage {
-            workspace_id: workspace_id.to_owned(),
-            thread_id: thread_id.to_owned(),
-            message_order: row.get(0)?,
-            message_id: row.get(1)?,
-            author_kind,
-            author_display_name: row.get(3)?,
-            author_user_id: row.get(4)?,
-            parent_message_id: row.get(5)?,
-            origin: row.get(6)?,
-            body: row.get(7)?,
-            created_at_ms: row.get(8)?,
-            attachments: Vec::new(),
-        });
-    }
+        .optional()?;
+    let Some((stored_title, linked_object_id, first_body)) = metadata else {
+        return Ok(ChatHydration::Missing);
+    };
+    let title = index::display_title_for(&stored_title, first_body.as_deref());
     let path = linked_chat_projection_path(workspace_id, thread_id, None)
         .map_err(|_| SearchError::Corrupt("chat projection path is invalid"))?;
-    let projection =
-        render_chat_thread_projection(&thread, &messages, &ChatProjectionFileAccess::Unknown)
-            .map_err(|_| SearchError::Corrupt("chat projection is invalid"))?;
-    Ok((path, thread.title, projection))
+    let metadata_bytes = path
+        .len()
+        .saturating_add(title.len())
+        .saturating_add(thread_id.len())
+        .saturating_add(message_id.len())
+        .saturating_add(first_body.as_ref().map_or(0, String::len));
+
+    if message_id == THREAD_HEADER_MESSAGE_ID {
+        let text = if linked_object_id.is_some() {
+            format!("# {title}\n\nRead-only chat projection.\n\nLinked file: unavailable\n")
+        } else {
+            format!("# {title}\n\nRead-only chat projection.\n")
+        };
+        let source_bytes = metadata_bytes.saturating_add(text.len());
+        if source_bytes > CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET {
+            return Err(SearchError::Bounds(
+                "chat search result exceeded hydration byte budget",
+            ));
+        }
+        if source_bytes > remaining_page_bytes {
+            return Ok(ChatHydration::PageFull);
+        }
+        return Ok(ChatHydration::Ready(ChatSearchFragment {
+            path,
+            title,
+            text,
+            line_offset: 0,
+            source_bytes,
+        }));
+    }
+
+    let mut statement = conn.prepare(
+        "SELECT m.author_kind, m.author_display_name, \
+                length(CAST(m.body AS BLOB)), m.body, \
+                COALESCE(( \
+                  SELECT 4 * COUNT(*) \
+                  FROM chat_messages prior \
+                  WHERE prior.workspace_id = m.workspace_id AND prior.thread_id = m.thread_id \
+                    AND (prior.created_at_ms < m.created_at_ms \
+                      OR (prior.created_at_ms = m.created_at_ms \
+                        AND prior.message_id < m.message_id)) \
+                ), 0) \
+         FROM chat_messages m \
+         WHERE m.workspace_id = ?1 AND m.thread_id = ?2 AND m.message_id = ?3",
+    )?;
+    let mut rows = statement.query(rusqlite::params![workspace_id, thread_id, message_id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(ChatHydration::Missing);
+    };
+    let author_kind: String = row.get(0)?;
+    let author_display_name: String = row.get(1)?;
+    let body_bytes = usize::try_from(row.get::<_, i64>(2)?)
+        .map_err(|_| SearchError::Corrupt("negative chat message body length"))?;
+    let source_bytes = metadata_bytes
+        .saturating_add(author_kind.len())
+        .saturating_add(author_display_name.len())
+        .saturating_add(body_bytes);
+    if source_bytes > CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET {
+        return Err(SearchError::Bounds(
+            "chat search result exceeded hydration byte budget",
+        ));
+    }
+    if source_bytes > remaining_page_bytes {
+        return Ok(ChatHydration::PageFull);
+    }
+    let body: String = row.get(3)?;
+    let prior_projection_lines = usize::try_from(row.get::<_, i64>(4)?)
+        .map_err(|_| SearchError::Corrupt("negative chat projection line count"))?;
+    let author = match author_kind.as_str() {
+        "human" => author_display_name,
+        "agent" => format!("{author_display_name} (agent)"),
+        _ => {
+            return Err(SearchError::Corrupt(
+                "chat message has an unknown author kind",
+            ));
+        }
+    };
+    let line_offset = if linked_object_id.is_some() { 6 } else { 4 } + prior_projection_lines;
+    Ok(ChatHydration::Ready(ChatSearchFragment {
+        path,
+        title,
+        text: format!("## {author}\n\n{body}"),
+        line_offset,
+        source_bytes,
+    }))
 }
 
 #[cfg(test)]
@@ -494,5 +728,29 @@ mod tests {
         let hit = &hits[0];
         // Byte-slice (would panic mid-emoji if the offsets were char indices).
         assert_eq!(&hit.preview[hit.match_start..hit.match_end], "needle");
+    }
+
+    #[test]
+    fn preview_is_bounded_in_utf16_units_on_astral_text() {
+        // MUTATION: window by Rust scalar count and this becomes 360 UTF-16
+        // units, exceeding the renderer's 250-unit IPC contract.
+        let line = format!(
+            "{}needle{}",
+            "\u{1f600}".repeat(120),
+            "\u{1f680}".repeat(120)
+        );
+        let hits = preview_line_matches(&line, "needle", 1);
+        let hit = hits.first().expect("astral hit");
+        assert!(hit.preview.encode_utf16().count() <= WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS);
+        let start_utf16 = hit.preview[..hit.match_start].encode_utf16().count();
+        let end_utf16 = hit.preview[..hit.match_end].encode_utf16().count();
+        assert_eq!(
+            hit.preview
+                .encode_utf16()
+                .skip(start_utf16)
+                .take(end_utf16 - start_utf16)
+                .collect::<Vec<_>>(),
+            "needle".encode_utf16().collect::<Vec<_>>()
+        );
     }
 }

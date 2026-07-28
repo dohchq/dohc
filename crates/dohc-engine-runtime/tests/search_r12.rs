@@ -13,9 +13,10 @@ use dohc_engine_domain::{
     VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
 use dohc_engine_runtime::search::{
-    SearchCandidate, SearchSurface, ensure_search_index_for_version, query_chat_messages_granular,
+    CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET, SearchCandidate, SearchPageDisposition, SearchSurface,
+    ensure_search_index_for_version, query_chat_messages_granular,
     query_chat_messages_granular_bounded, query_search_index, search_workspace,
-    upsert_file_search_index,
+    search_workspace_page, upsert_file_search_index,
 };
 use dohc_engine_storage::{
     EngineStore, FaultPoint, NoFaults, Preimage, TxnOutcome, hex_sha256, put_binary_blob,
@@ -155,6 +156,125 @@ fn run_search(
     store
         .read_with(|conn| search_workspace(conn, root, WS, V, query, Some(100), 999))
         .expect("search")
+}
+
+#[test]
+fn short_query_falls_back_to_a_bounded_linear_scan() {
+    // MUTATION: convert query_search_index's short-query sentinel to an empty
+    // candidate batch and both seeded two-character hits disappear.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    write_file(&mut store, "obj-ai", "notes/ai.md", "AI operating plan", 10);
+    start_thread(
+        &mut store,
+        "channel-ai",
+        "thread-ai",
+        "Discuss the AI plan",
+        20,
+    );
+    ensure_index(&mut store, &root, 30);
+
+    let results = run_search(&store, &root, "AI");
+    assert!(
+        results
+            .iter()
+            .any(|result| result.surface == SearchSurface::File && result.path == "notes/ai.md"),
+        "short-query file fallback missing: {results:?}"
+    );
+    assert!(
+        results.iter().any(|result| {
+            result.surface == SearchSurface::Chat
+                && result.thread_id.as_deref() == Some("thread-ai")
+        }),
+        "short-query chat fallback missing: {results:?}"
+    );
+}
+
+#[test]
+fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
+    // MUTATION: remove CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET accounting and one
+    // actor turn owns every 64 KiB body in this thread.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let body = format!("needle {}", "x".repeat(64 * 1024 - "needle ".len()));
+    start_thread(
+        &mut store,
+        "channel-oversized",
+        "thread-oversized",
+        &body,
+        100,
+    );
+    for index in 1..10 {
+        send(
+            &mut store,
+            "thread-oversized",
+            &format!("oversized-message-{index}"),
+            &body,
+            100 + index,
+        );
+    }
+    ensure_index(&mut store, &root, 200);
+
+    let page = store
+        .read_with(|conn| {
+            search_workspace_page(conn, &root, WS, V, "needle", Some(100), 999, None, None)
+        })
+        .expect("bounded search page");
+    assert_eq!(page.disposition, SearchPageDisposition::Results);
+    assert!(
+        page.has_more,
+        "oversized thread must produce a continuation"
+    );
+    assert!(
+        page.results.len() < 10,
+        "one page hydrated the whole oversized thread: {:?}",
+        page.results
+    );
+    assert_eq!(CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET, 256 * 1024);
+}
+
+#[test]
+fn chat_projection_lines_follow_canonical_replication_order() {
+    // A replicated message can receive a later local message_order while
+    // carrying an earlier source timestamp. MUTATION: order projection context
+    // by message_order and the replicated hit moves from line 11 to line 15.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    start_thread(
+        &mut store,
+        "channel-order",
+        "thread-order",
+        "opening message",
+        100,
+    );
+    send(
+        &mut store,
+        "thread-order",
+        "message-local-newer",
+        "local newer body",
+        200,
+    );
+    send(
+        &mut store,
+        "thread-order",
+        "message-replicated-older",
+        "replicated needle",
+        150,
+    );
+    ensure_index(&mut store, &root, 300);
+
+    let results = run_search(&store, &root, "replicated needle");
+    let hit = results
+        .iter()
+        .find(|result| result.thread_id.as_deref() == Some("thread-order"))
+        .expect("replicated message hit");
+    assert_eq!(hit.line, 11);
 }
 
 #[test]
@@ -520,8 +640,13 @@ fn bounds_query_length_and_limit() {
     write_file(&mut store, "obj-ok", "a.md", "needle needle needle", 10);
     ensure_index(&mut store, &root, 20);
 
-    // A too-short query returns nothing from the index-backed search.
-    assert!(run_search(&store, &root, "ne").is_empty());
+    // The orchestration consumes the primitive's fallback sentinel with a
+    // bounded linear scan.
+    assert!(
+        run_search(&store, &root, "ne")
+            .iter()
+            .any(|result| result.path == "a.md")
+    );
 
     // A pathologically long query is bounded (no results, no FTS blow-up).
     let long = "n".repeat(50_000);
