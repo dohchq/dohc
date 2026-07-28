@@ -33,7 +33,10 @@ import {
   type EngineYdocProviderSessionRust,
   type EngineYdocProviderSessionRustOptions,
 } from "../collab/ydocEngineProviderSessionRust";
-import type { EngineTransport } from "@dohc/workspace-engine-client";
+import {
+  isYdocSessionNotFoundRefusal,
+  type EngineTransport,
+} from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
 import {
   isTextMediaType,
@@ -1004,6 +1007,7 @@ export function createWorkspaceEngineCapture(
     let canonicalDoc: Y.Doc | null = null;
     let current: EngineYdocProviderSessionRust | null = null;
     let closed = false;
+    let dead = false;
     let operationChain: Promise<void> = Promise.resolve();
     const openingRemoteUpdates = new WeakMap<
       EngineYdocProviderSessionRust,
@@ -1017,6 +1021,29 @@ export function createWorkspaceEngineCapture(
         () => undefined,
       );
       return pending;
+    };
+
+    const markDead = (): void => {
+      current = null;
+      if (dead) return;
+      dead = true;
+      options.onCaptureOutcome?.({ ok: false });
+    };
+
+    const releaseGeneration = async (
+      generation: EngineYdocProviderSessionRust,
+    ): Promise<void> => {
+      try {
+        await generation.close({ settle: false });
+      } catch (error) {
+        if (isYdocSessionNotFoundRefusal(error)) return;
+        try {
+          await generation.close({ settle: true });
+        } catch (settlingCloseError) {
+          if (isYdocSessionNotFoundRefusal(settlingCloseError)) return;
+          throw settlingCloseError;
+        }
+      }
     };
 
     const openGeneration = async (): Promise<EngineYdocProviderSessionRust> =>
@@ -1077,11 +1104,22 @@ export function createWorkspaceEngineCapture(
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
       if (options?.releaseBeforeOpen) {
-        await failed.close({ settle: false });
+        try {
+          await releaseGeneration(failed);
+        } catch (error) {
+          markDead();
+          throw error;
+        }
         if (current !== failed || closed) return;
         current = null;
       }
-      const replacement = await openGeneration();
+      let replacement: EngineYdocProviderSessionRust;
+      try {
+        replacement = await openGeneration();
+      } catch (error) {
+        markDead();
+        throw error;
+      }
       try {
         const opening = openingRemoteUpdates.get(replacement);
         const updatesIncludedInRemoteDelta = opening?.updates.length ?? 0;
@@ -1117,11 +1155,12 @@ export function createWorkspaceEngineCapture(
         }
       } catch (error) {
         openingRemoteUpdates.delete(replacement);
-        await replacement.close({ settle: false }).catch(() => undefined);
+        await releaseGeneration(replacement).catch(() => undefined);
+        markDead();
         throw error;
       }
       if (!options?.releaseBeforeOpen) {
-        await failed.close({ settle: false }).catch(() => undefined);
+        await releaseGeneration(failed).catch(() => undefined);
       }
     };
 

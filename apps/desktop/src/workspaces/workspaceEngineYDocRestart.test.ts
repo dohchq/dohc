@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import {
+  DaemonRefusalError,
   VersionedLoopbackEngine,
   type EngineTransport,
   type Request,
@@ -270,6 +271,323 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
   expect(settled.markdown).toBe("seed survives");
   expect(lifecycle.slice(0, 3)).toEqual(["open-1", "close-1", "open-2"]);
   expect(onError).not.toHaveBeenCalled();
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("releases a close-latched failed generation with settle true before the next edit", async () => {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-close-retry-"));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "ydoc-close-retry" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+  const seed = new Y.Doc();
+  seed.getText("plainText").insert(0, "seed");
+  const seedUpdate = Y.encodeStateAsUpdate(seed);
+  const closeAttempts: Array<{ generation: number; settle?: boolean }> = [];
+  const journaledGenerations: number[] = [];
+  let generation = 0;
+  let leaseActive = false;
+  const refusal = new Error("record-update-refused");
+  const unsettledClose = new Error("ydoc-unsettled-close");
+
+  const openProvider = async (
+    options: EngineYdocProviderSessionRustOptions,
+  ): Promise<EngineYdocProviderSessionRust> => {
+    if (leaseActive) throw new Error("ydoc-session-busy");
+    leaseActive = true;
+    const openedGeneration = ++generation;
+    let providerClosed = false;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, seedUpdate);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      async applyLocalUpdate(update) {
+        // Models the round-1 provider latch: once close starts, another apply
+        // resolves without journaling. Capture must never leave this provider
+        // installed after the first close refusal.
+        if (providerClosed) return;
+        if (openedGeneration === 1) throw refusal;
+        Y.applyUpdate(doc, update);
+        journaledGenerations.push(openedGeneration);
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: `moment-${openedGeneration}`,
+          path: options.path,
+          markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close(closeOptions) {
+        providerClosed = true;
+        closeAttempts.push({
+          generation: openedGeneration,
+          ...(closeOptions?.settle !== undefined
+            ? { settle: closeOptions.settle }
+            : {}),
+        });
+        if (openedGeneration === 1 && closeOptions?.settle === false) {
+          throw unsettledClose;
+        }
+        leaseActive = false;
+      },
+    };
+  };
+  const outcomes: boolean[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-close-retry",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  const beforeFirst = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(4, " first");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, beforeFirst));
+  await expect(session.settleNow()).resolves.toMatchObject({
+    markdown: "seed first",
+  });
+
+  const beforeSecond = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(10, " second");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, beforeSecond));
+  await expect(session.settleNow()).resolves.toMatchObject({
+    markdown: "seed first second",
+  });
+
+  expect(closeAttempts.slice(0, 2)).toEqual([
+    { generation: 1, settle: false },
+    { generation: 1, settle: true },
+  ]);
+  expect(journaledGenerations).toEqual([2, 2]);
+  expect(generation).toBe(2);
+  expect(leaseActive).toBe(true);
+  expect(outcomes).toEqual([]);
+  await session.close({ settle: false });
+  expect(leaseActive).toBe(false);
+  await capture.stop();
+});
+
+it("marks the capture dead when both failed-generation release attempts reject", async () => {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-close-dead-"));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "ydoc-close-dead" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+  const seed = new Y.Doc();
+  seed.getText("plainText").insert(0, "seed");
+  const seedUpdate = Y.encodeStateAsUpdate(seed);
+  const closeAttempts: Array<boolean | undefined> = [];
+  const refusal = new Error("record-update-refused");
+  const settlingCloseFailure = new Error("settling close also refused");
+  let applyCount = 0;
+
+  const openProvider = async (
+    options: EngineYdocProviderSessionRustOptions,
+  ): Promise<EngineYdocProviderSessionRust> => {
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, seedUpdate);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      async applyLocalUpdate() {
+        applyCount += 1;
+        throw refusal;
+      },
+      async settleNow() {
+        throw new Error("dead generation must not settle");
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close(closeOptions) {
+        closeAttempts.push(closeOptions?.settle);
+        if (closeOptions?.settle === true) throw settlingCloseFailure;
+        throw new Error("plain close refused");
+      },
+    };
+  };
+  const outcomes: boolean[] = [];
+  const onError = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-close-dead",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    onError,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(4, " refused");
+
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect(closeAttempts).toEqual([false, true]);
+  expect(outcomes).toEqual([false]);
+  expect(onError).toHaveBeenCalledWith(
+    "Y.Doc local update of note.md",
+    settlingCloseFailure,
+  );
+
+  const beforeNext = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(12, " next");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, beforeNext));
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect(applyCount).toBe(1);
+  expect(outcomes).toEqual([false]);
+  await expect(session.close({ settle: false })).resolves.toBeUndefined();
+  await capture.stop();
+});
+
+it("treats typed session-not-found during release-first rebind as already released", async () => {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-gone-"));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "ydoc-gone" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+  const seed = new Y.Doc();
+  seed.getText("plainText").insert(0, "seed");
+  const seedUpdate = Y.encodeStateAsUpdate(seed);
+  const notFound = new DaemonRefusalError(
+    {
+      code: "INVALID_PARAMS",
+      message: "ydoc-session-not-found",
+      retry: "no",
+    },
+    new Error("daemon response"),
+  );
+  let generation = 0;
+  let closeCount = 0;
+
+  const openProvider = async (
+    options: EngineYdocProviderSessionRustOptions,
+  ): Promise<EngineYdocProviderSessionRust> => {
+    const openedGeneration = ++generation;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, seedUpdate);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      async applyLocalUpdate(update) {
+        if (openedGeneration === 1) throw new Error("record refusal");
+        Y.applyUpdate(doc, update);
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: `moment-${openedGeneration}`,
+          path: options.path,
+          markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        closeCount += 1;
+        if (openedGeneration === 1) throw notFound;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-gone",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(4, " survives");
+
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  await expect(session.settleNow()).resolves.toMatchObject({
+    markdown: "seed survives",
+  });
+  expect(generation).toBe(2);
+  expect(closeCount).toBe(1);
   await session.close({ settle: false });
   await capture.stop();
 });
