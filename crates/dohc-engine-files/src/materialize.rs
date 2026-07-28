@@ -30,12 +30,20 @@
 //! before the pipeline started is detected and preserved), not the sub-op race.
 //! Recorded in `BEHAVIOR_DELTA.md` (R04) so it is not mistaken for closed.
 //!
-//! Secret plaintext uses a stronger path-binding rule. Unix pins the workspace
-//! root and target parent with `openat2`/`openat`, then creates, reads, unlinks,
-//! renames, and syncs relative to that parent descriptor. Windows validates and
-//! retains non-delete-shared handles for the root and every below-root target
-//! ancestor until the name-based replace completes. The content preimage race
-//! above remains; the ancestor-redirection race does not.
+//! Every materialization first canonicalizes the workspace root, then rejects
+//! symlinks/reparse points in each existing below-root target component.
+//! Ordinary writes create missing parents one component at a time through that
+//! same walk. Directories above the workspace root are intentionally outside
+//! this validation, and ordinary name-based operations retain the single-user
+//! rename-TOCTOU assumption recorded in `BEHAVIOR_DELTA.md`.
+//!
+//! Secret plaintext uses a stronger path-binding rule after the shared walk.
+//! Unix pins the workspace root and target parent with `openat2`/`openat`, then
+//! creates, reads, unlinks, renames, and syncs relative to that parent
+//! descriptor. Windows validates and retains non-delete-shared handles for the
+//! root and every below-root target ancestor until the name-based replace
+//! completes. The content preimage race above remains; the
+//! ancestor-redirection race does not.
 
 use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
 use crate::floor::is_excluded_file;
@@ -355,9 +363,9 @@ pub enum MaterializeError {
     /// path floor — never materialize outside the tree or into engine scratch.
     #[error("job target path is not a safe workspace-relative path")]
     UnsafeTargetPath,
-    /// The existing target is a symlink; refusing to materialize through it
-    /// (would follow the link out of the tree). `LANGUAGE_SEMANTICS_MATRIX` 8.1.
-    #[error("job target is a symlink; refusing to overwrite through it")]
+    /// The target or a below-root ancestor is a symlink/reparse point; refusing
+    /// to materialize through it. `LANGUAGE_SEMANTICS_MATRIX` 8.1.
+    #[error("job target path contains a symlink; refusing materialization")]
     SymlinkTarget,
     /// A secret target exists but cannot safely be compared or replaced (for
     /// example, it is a directory or special file). The job remains pending.
@@ -451,7 +459,11 @@ pub fn materialize_one(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<JobOutcome, MaterializeError> {
-    let target = resolve_target(root, &job.target_path)?;
+    // Canonicalizing the root deliberately accepts aliases above (or at) the
+    // workspace boundary. The component walk below owns only descendants.
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let target = resolve_target(&canonical_root, &job.target_path)?;
 
     // `materialize.after-job-commit`: the job row is durable but nothing is on
     // disk yet. A crash here leaves the job pending for startup replay.
@@ -471,7 +483,7 @@ pub fn materialize_one(
     }
 
     if job.operation == MaterializationOperation::Delete {
-        return materialize_delete(store, &target, job, policy, now_ms, faults);
+        return materialize_delete(store, &canonical_root, &target, job, policy, now_ms, faults);
     }
 
     // Load the content blob (integrity-verified on read).
@@ -488,6 +500,7 @@ pub fn materialize_one(
     }
     materialize_write_content(
         store,
+        &canonical_root,
         &target,
         job,
         &content,
@@ -590,6 +603,7 @@ fn materialize_secret_one_with_remover(
     };
     materialize_write_content(
         store,
+        &canonical_root,
         &target,
         &plaintext_job,
         plaintext,
@@ -764,6 +778,7 @@ impl Drop for SecretPlaintextTempCleanup<'_> {
 )]
 fn materialize_write_content(
     store: &EngineStore,
+    root: &Path,
     target: &Path,
     job: &MaterializationJob,
     content: &[u8],
@@ -776,8 +791,14 @@ fn materialize_write_content(
     secret_root: Option<&Path>,
     secret_temp_remover: &dyn SecretTempRemover,
 ) -> Result<JobOutcome, MaterializeError> {
-    if let Some(root) = secret_root {
+    if secret_root.is_some() {
         ensure_target_symlink_free(root, target)?;
+    } else {
+        // This single preflight gates every ordinary target read, temp write,
+        // conflict/target rename, cleanup, unlink-adjacent sync, and directory
+        // open below. Missing parents are created one component at a time;
+        // create_dir_all would silently traverse an aliased intermediate.
+        prepare_target_parent_symlink_free(root, target)?;
     }
     // Step 1 (idempotent replay): the target already equals the desired content.
     let current = read_current_no_follow(target)?;
@@ -797,9 +818,6 @@ fn materialize_write_content(
         let parent = target.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
         Some(SecretParentGuard::open_or_create(root, target, parent)?)
     } else {
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| MaterializeError::io(parent, &e))?;
-        }
         None
     };
 
@@ -935,12 +953,16 @@ fn materialize_write_content(
 
 fn materialize_delete(
     store: &EngineStore,
+    root: &Path,
     target: &Path,
     job: &MaterializationJob,
     policy: DurabilityPolicy,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<JobOutcome, MaterializeError> {
+    // One fail-closed component walk gates both no-follow reads, the unlink,
+    // and the parent-directory durability open for this ordinary delete.
+    ensure_target_symlink_free(root, target)?;
     let current = read_current_no_follow(target)?;
     if matches!(current, CurrentTarget::Absent) {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
@@ -1084,21 +1106,67 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
     Ok(out)
 }
 
-/// Refuse every symlink/reparse point strictly below the already-canonicalized
-/// workspace root through a target. Capture never owns paths reached through
-/// aliased directories, even when the alias resolves elsewhere inside the
-/// workspace, so both projection probes and secret materialization use this
-/// component walk.
-fn ensure_target_symlink_free(root: &Path, target: &Path) -> Result<(), MaterializeError> {
+/// Visit every component strictly below an already-canonicalized workspace
+/// root. This is the one component iterator used by validation-only paths and
+/// ordinary parent creation, so a new mutation lane cannot silently acquire a
+/// weaker walk.
+fn walk_target_components(
+    root: &Path,
+    target: &Path,
+    mut visit: impl FnMut(&Path) -> Result<(), MaterializeError>,
+) -> Result<(), MaterializeError> {
     let relative = target
         .strip_prefix(root)
         .map_err(|_| MaterializeError::UnsafeTargetPath)?;
     let mut current = root.to_path_buf();
     for component in relative.components() {
         current.push(component);
-        reject_link_or_reparse(&current)?;
+        visit(&current)?;
     }
     Ok(())
+}
+
+/// Refuse every symlink/reparse point strictly below the already-canonicalized
+/// workspace root through a target. Capture never owns paths reached through
+/// aliased directories, even when the alias resolves elsewhere inside the
+/// workspace, so projection probes and every materialization lane share this
+/// component walk.
+fn ensure_target_symlink_free(root: &Path, target: &Path) -> Result<(), MaterializeError> {
+    walk_target_components(root, target, reject_link_or_reparse)
+}
+
+/// Validate existing ordinary ancestors and create missing ones without ever
+/// asking the OS to traverse an unchecked multi-component suffix.
+fn prepare_target_parent_symlink_free(root: &Path, target: &Path) -> Result<(), MaterializeError> {
+    let parent = target.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
+    walk_target_components(root, parent, ensure_real_directory)?;
+    reject_link_or_reparse(target)
+}
+
+fn ensure_real_directory(path: &Path) -> Result<(), MaterializeError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+                return Err(MaterializeError::SymlinkTarget);
+            }
+            if !metadata.is_dir() {
+                let err = std::io::Error::new(
+                    ErrorKind::NotADirectory,
+                    "materialization ancestor is not a directory",
+                );
+                return Err(MaterializeError::io(path, &err));
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => match std::fs::create_dir(path) {
+            Ok(()) => reject_link_or_reparse(path),
+            Err(create_err) if create_err.kind() == ErrorKind::AlreadyExists => {
+                ensure_real_directory(path)
+            }
+            Err(create_err) => Err(MaterializeError::io(path, &create_err)),
+        },
+        Err(err) => Err(MaterializeError::io(path, &err)),
+    }
 }
 
 fn reject_link_or_reparse(path: &Path) -> Result<(), MaterializeError> {
@@ -1757,19 +1825,21 @@ fn sanitize(id: &str) -> String {
 }
 
 fn write_temp(tmp: &Path, content: &[u8]) -> Result<std::fs::File, MaterializeError> {
-    use std::io::Write as _;
-    // Restrictive mode where supported; truncate any stale temp.
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        use std::os::fd::OwnedFd;
+
+        let parent_path = tmp.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
+        let name = tmp.file_name().ok_or(MaterializeError::UnsafeTargetPath)?;
+        let parent_fd: OwnedFd = std::fs::File::open(parent_path)
+            .map_err(|err| MaterializeError::io(parent_path, &err))?
+            .into();
+        write_secret_temp_at_unix(&parent_fd, name, tmp, content)
     }
-    let mut file = opts.open(tmp).map_err(|e| MaterializeError::io(tmp, &e))?;
-    file.write_all(content)
-        .map_err(|e| MaterializeError::io(tmp, &e))?;
-    Ok(file)
+    #[cfg(not(unix))]
+    {
+        write_secret_temp_no_follow(tmp, content)
+    }
 }
 
 /// Create a secret plaintext temp as a brand-new, non-following filesystem
