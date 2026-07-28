@@ -81,6 +81,7 @@ jobs:
             rust:
               - 'crates/**'
               - 'fuzz/**'
+              - 'fixtures/**'
               - '.cargo/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -102,6 +103,7 @@ jobs:
               - 'services/**'
               - 'crates/**'
               - 'fuzz/**'
+              - 'fixtures/**'
               - 'scripts/**'
               - 'tools/**'
               - 'docs/superpowers/plans/rust-engine/**'

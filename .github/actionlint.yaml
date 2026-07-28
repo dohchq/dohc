@@ -1,0 +1,8 @@
+# Blacksmith runner labels are external to GitHub's hosted set; declaring them
+# keeps actionlint (editor plugins / future CI lint) from flagging runs-on.
+self-hosted-runner:
+  labels:
+    - blacksmith-2vcpu-ubuntu-2404
+    - blacksmith-4vcpu-ubuntu-2404
+    - blacksmith-8vcpu-ubuntu-2404
+    - blacksmith-6vcpu-macos-15
