@@ -3680,11 +3680,6 @@ function registerIpcHandlers(
         rootPath: workspace.rootPath,
         relay,
       });
-      if (!daemonRelay) {
-        throw new Error(
-          "Rust engine relay transport is required to claim and enroll this workspace.",
-        );
-      }
       try {
         await daemonRelay.claim();
       } catch (error) {
