@@ -2684,12 +2684,21 @@ pub(crate) fn pass_correlation_id(prefix: &str) -> String {
 /// Bounded `capture.momentRecorded` payload: the renderer needs the ping and
 /// enough context to scope a refresh; a huge baseline pass must never blow
 /// the wire frame budget.
-fn moment_recorded_payload(workspace_id: &str, applied_paths: &[String]) -> serde_json::Value {
+fn moment_recorded_payload(
+    workspace_id: &str,
+    applied_paths: &[String],
+    not_owned_paths: &[String],
+) -> serde_json::Value {
     const MAX_EVENT_PATHS: usize = 32;
     serde_json::json!({
         "workspaceId": workspace_id,
         "appliedCount": applied_paths.len(),
-        "paths": applied_paths.iter().take(MAX_EVENT_PATHS).collect::<Vec<_>>(),
+        "notOwnedCount": not_owned_paths.len(),
+        "paths": applied_paths
+            .iter()
+            .chain(not_owned_paths)
+            .take(MAX_EVENT_PATHS)
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -2875,14 +2884,22 @@ async fn apply_run_with_handle(
         status.arm_policy_hold();
     }
     let clean = result.failed_applies.is_empty() && !result.degraded;
-    // ONE event per settled batch/reconcile pass that recorded anything. The
+    // ONE event per settled batch/reconcile pass that settled anything. The
     // domain writes are already durable here (each ingest/retire committed in
     // its own transaction), so the announce happens even if the files-layer
     // ack below fails — the renderer must never stay stale over bookkeeping.
-    if !result.applied_paths.is_empty() {
+    //
+    // NOT-OWNED settlements count: several of them APPEND retire/delete
+    // moments — a policy-narrowed head ("Stopped tracking by policy"),
+    // content that stops being engine-ownable ("Stopped tracking non-text
+    // content"), a secret that stops being trackable, and the over-cap
+    // retained loop above (which reports its retires via not_owned_paths).
+    // Gating on applied_paths alone left the renderer permanently stale for
+    // exactly those moments.
+    if !result.applied_paths.is_empty() || !result.not_owned_paths.is_empty() {
         events.emit(
             CAPTURE_MOMENT_RECORDED_EVENT,
-            moment_recorded_payload(workspace_id, &result.applied_paths),
+            moment_recorded_payload(workspace_id, &result.applied_paths, &result.not_owned_paths),
         );
     }
     if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {

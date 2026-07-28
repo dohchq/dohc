@@ -61,9 +61,13 @@ use std::{
 const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 
-/// Emitted once per settled capture batch / reconcile pass that recorded at
-/// least one moment. The renderer's history timeline refreshes on it — in
-/// daemon mode no TS write path runs, so nothing else announces these writes.
+/// Emitted once per settled capture batch / reconcile pass that settled any
+/// path — a REPAINT PING, not a moment ledger. Most emissions follow new
+/// moment rows (ingests, retires, policy/non-ownable/secret untracks), but
+/// content-equality dedupes and no-op retires fire it too: the renderer
+/// re-lists cheaply, and under-notifying is the staleness bug this event
+/// exists to prevent. In daemon mode no TS write path runs, so nothing else
+/// announces these writes.
 pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
 
 /// An engine-initiated notification for the transport host to deliver as a

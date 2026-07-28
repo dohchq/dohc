@@ -488,6 +488,51 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_policy_retire_pass_emits_a_moment_event() {
+    // codex round-1 P2: a policy narrow retires an existing head through an
+    // ingest that settles NotOwned — the "Stopped tracking by policy" delete
+    // moment is real, but gating the event on applied_paths alone left the
+    // renderer permanently stale for exactly those moments. MUTATION:
+    // reverting the emit gate to applied_paths-only makes the event wait
+    // below time out.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "private/journal.md", b"personal");
+
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    // Drain the baseline capture's own event(s) so the assertion below can
+    // only be satisfied by the policy pass.
+    while events.try_recv().is_ok() {}
+
+    // Narrow WITHOUT touching the file: the policy rebuild re-offers the
+    // unchanged path and the sink retires it as NotOwned.
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    );
+    wait_for_text(&transport, &handle, "private/journal.md", None).await;
+    let notice = wait_for_moment_event(&mut events, "private/journal.md").await;
+    assert!(
+        notice.payload["notOwnedCount"].as_u64().unwrap_or(0) >= 1,
+        "the policy retire settles NotOwned and must be counted: {:?}",
+        notice.payload
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_300, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_and_secret_content_capture_autonomously() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
