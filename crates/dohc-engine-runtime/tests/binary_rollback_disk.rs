@@ -2060,3 +2060,81 @@ async fn migrated_opaque_jobs_replay_and_legacy_completed_jobs_keep_fencing() {
     drop(connection);
     supervisor.close(&db).expect("close actor");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_backfill_binds_ambiguous_moment_ids_by_generation() {
+    // MUTATION: drop the target_generation = moment_order condition from the
+    // ordinal-24 backfill and this job is assigned to workspace B purely
+    // because B's reuse of the moment id is newer.
+    const WORKSPACE_A: &str = "ambiguous-workspace-a";
+    const WORKSPACE_B: &str = "ambiguous-workspace-b";
+    const SHARED_MOMENT: &str = "shared-moment-id";
+    const CONTENT: &[u8] = b"generation-bound backfill\n";
+
+    let database = ScratchDir::new().expect("database scratch");
+    let db = database.engine_db_path().expect("db");
+    let store = EngineStore::open(&db, 1).expect("create current store");
+    let content_sha = store.put_binary_blob(CONTENT).expect("stage content");
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&db).expect("open legacy fixture");
+    connection
+        .execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+                 VALUES ('ambiguous-workspace-a', 'main'), ('ambiguous-workspace-b', 'main');
+             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms) \
+                 VALUES ('ambiguous-workspace-a', 'main', 'main', 'Main', 1),
+                        ('ambiguous-workspace-b', 'main', 'main', 'Main', 1);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ambiguous-workspace-a', 'object-a', 1),
+                        ('ambiguous-workspace-b', 'object-b', 1);
+             INSERT INTO blobs (sha256, byte_length, text) \
+                 VALUES ('moment-text-sha', 4, 'text');
+             DROP INDEX idx_materialization_jobs_workspace_path_status_generation;
+             DELETE FROM engine_migrations WHERE ordinal = 24;
+             ALTER TABLE materialization_jobs DROP COLUMN workspace_id;",
+        )
+        .expect("rewind workspace-coordinate migration");
+    for (workspace, object, order) in [
+        (WORKSPACE_A, "object-a", 7_i64),
+        (WORKSPACE_B, "object-b", 99_i64),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO moments \
+                 (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+                  recorded_at_ms, operation, after_blob_sha256, before_present, \
+                  metadata_origin) \
+                 VALUES (?1, ?2, ?3, 'main', ?4, 'shared.bin', 2, 'write', ?5, 0, 'api')",
+                rusqlite::params![workspace, order, SHARED_MOMENT, object, "moment-text-sha"],
+            )
+            .expect("seed reused moment id");
+    }
+    // An ordinary binary write's job id IS its moment id; generation 7 makes
+    // workspace A the only correct owner even though B's moment is newer.
+    connection
+        .execute(
+            "INSERT INTO materialization_jobs \
+             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+              target_generation, status, created_at_ms, completed_at_ms, operation) \
+             VALUES (?1, 'shared.bin', ?2, 0, NULL, 7, 'pending', 10, NULL, 'write')",
+            rusqlite::params![SHARED_MOMENT, content_sha],
+        )
+        .expect("legacy job with ambiguous moment id");
+    drop(connection);
+
+    let migrated = EngineStore::open(&db, 20).expect("upgrade legacy store");
+    let workspace_id: String = migrated
+        .read_with(|connection| {
+            connection.query_row(
+                "SELECT workspace_id FROM materialization_jobs WHERE job_id = ?1",
+                [SHARED_MOMENT],
+                |row| row.get(0),
+            )
+        })
+        .expect("backfilled workspace");
+    assert_eq!(
+        workspace_id, WORKSPACE_A,
+        "the backfill must bind by matching generation, not by newest moment"
+    );
+}
