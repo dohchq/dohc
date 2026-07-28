@@ -955,6 +955,15 @@ export function createWorkspaceEngineCapture(
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
+  // A healthy watcher batch cannot clear the workspace notice while any dead
+  // editor session is still rejecting the user's edits.
+  const deadYDocSessions = new Set<object>();
+
+  const emitCaptureOutcome = (ok: boolean): void => {
+    options.onCaptureOutcome?.({
+      ok: ok && deadYDocSessions.size === 0,
+    });
+  };
 
   // THE AUTHORITATIVE live-session registry (WS-G2-C-2 gate fix). One entry per
   // path with a LIVE engine Y.Doc session; the single-canonical reservation
@@ -1008,6 +1017,7 @@ export function createWorkspaceEngineCapture(
     let current: EngineYdocProviderSessionRust | null = null;
     let closed = false;
     let dead = false;
+    const deadSessionToken = {};
     let operationChain: Promise<void> = Promise.resolve();
     const openingRemoteUpdates = new WeakMap<
       EngineYdocProviderSessionRust,
@@ -1027,7 +1037,8 @@ export function createWorkspaceEngineCapture(
       current = null;
       if (dead) return;
       dead = true;
-      options.onCaptureOutcome?.({ ok: false });
+      deadYDocSessions.add(deadSessionToken);
+      emitCaptureOutcome(false);
     };
 
     const releaseGeneration = async (
@@ -1248,6 +1259,7 @@ export function createWorkspaceEngineCapture(
           if (closed) return;
           if (current === null) {
             closed = true;
+            deadYDocSessions.delete(deadSessionToken);
             return;
           }
           await executeWithReconnect(async (session) => {
@@ -1255,6 +1267,7 @@ export function createWorkspaceEngineCapture(
           });
           closed = true;
           current = null;
+          deadYDocSessions.delete(deadSessionToken);
         });
       },
     };
@@ -2007,7 +2020,7 @@ export function createWorkspaceEngineCapture(
     try {
       ok = await task();
     } finally {
-      options.onCaptureOutcome?.({ ok });
+      emitCaptureOutcome(ok);
     }
   }
 

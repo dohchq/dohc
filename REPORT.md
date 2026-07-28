@@ -340,3 +340,67 @@ The configured skips are unchanged. All six
 
 Round 2 changed TypeScript and `REPORT.md` only. No Cargo command ran, no Rust
 source changed, and `packages/workspace-engine` remained unmodified.
+
+## ROUND3 — dead-session capture notice latch
+
+`workspaceActivity` consumes capture outcomes as transitions: `ok:false` raises
+`historyCaptureFailed`, while the next `ok:true` clears it. A terminal Y.Doc
+recovery previously emitted the failure once, but an unrelated successful
+watcher batch could then clear the user's only persistent warning even though
+the dead editor session kept rejecting edits.
+
+`workspaceEngineCapture` now owns a set of dead-session tokens. Terminal
+recovery registers the session before emitting failure, and every background
+capture outcome goes through one emitter that coerces success to failure while
+the set is nonempty. A successful file-session close removes that session's
+token. This preserves the notice across unrelated healthy batches, handles
+multiple dead files, and lets the first genuine successful batch after all dead
+sessions are cleaned up clear the notice.
+
+The named regression test
+`keeps the capture notice failed after unrelated success until the dead session closes`
+models the notice channel as `historyCaptureFailed`. It verifies outcomes
+`[false, false, true]`: terminal failure, latched unrelated success, then a real
+all-clear after closing the dead session and capturing another successful
+batch.
+
+### Round-3 mutation proof
+
+The centralized emitter was temporarily reverted to forward raw `ok` values.
+The named test failed behaviorally at the unrelated successful batch:
+
+```text
+FAIL keeps the capture notice failed after unrelated success until the dead session closes
+AssertionError: expected [ false, true ] to deeply equal [ false, false ]
+Test Files  1 failed (1)
+Tests       1 failed | 5 skipped (6)
+```
+
+After restoring the dead-session latch, the same named test passed:
+
+```text
+Test Files  1 passed (1)
+Tests       1 passed | 5 skipped (6)
+```
+
+### Round-3 validation
+
+Command: `pnpm -r --if-present typecheck`
+
+```text
+Scope: 22 of 23 workspace projects
+apps/desktop typecheck: Done
+services/sync-relay typecheck: Done
+Exit code: 0
+```
+
+Command: `pnpm --filter @dohc/desktop test`
+
+```text
+Test Files  179 passed | 1 skipped (180)
+Tests       2265 passed | 4 skipped (2269)
+Duration    50.97s
+```
+
+Round 3 changed TypeScript and `REPORT.md` only. No Cargo command ran and no
+Rust source changed.
