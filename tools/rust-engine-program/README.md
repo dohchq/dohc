@@ -10,16 +10,19 @@ local evidence pipeline.
 
 | Script | What it does |
 | --- | --- |
-| `run-rust-checks.mjs` | Rust policy gate: `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). Prints a pass/fail summary and a pasteable evidence line. |
+| `run-rust-checks.mjs` | Rust policy gate: fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
 | `run-native-suite.mjs` | TS-NATIVE-CI local equivalent: runs the reference `@dohc/workspace-engine` `typecheck` + `test` suites natively, asserts host arch, prints an evidence line. This is the native evidence GATE0/TS-NATIVE-CI depends on. |
 | `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 
 ## Requirements
 
-- Node >= 22 (repo uses v24). Zero npm dependencies — run with `node` directly.
+- Node >= 22 (repo uses v24). The runner scripts themselves import nothing
+  from npm, but the fixture-drift step resolves the workspace's `yjs`/`tsx`
+  packages — run `pnpm install --frozen-lockfile` first; a missing dependency
+  fails the verdict (required steps may not skip).
 - Rust toolchain pinned by `rust-toolchain.toml` (channel 1.96.1, with
   `rustfmt` + `clippy`).
-- `pnpm` on PATH for the native suite.
+- `pnpm` on PATH (JS workspace install above, plus the native suite).
 - Optional: `cargo install cargo-deny --locked` and
   `cargo install cargo-audit --locked` to enable the supply-chain checks.
 
@@ -35,7 +38,7 @@ node tools/rust-engine-program/run-native-suite.mjs
 Each prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
 
 ```
-- 2026-07-17T09:00:00.000Z | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=SKIP cargo-audit=SKIP
+- 2026-07-28T10:11:10.183Z | run-rust-checks | win32/x64 | PASS | fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
 ```
 
 Copy that line into `EXECUTION_LOG.md` under the relevant shard entry.

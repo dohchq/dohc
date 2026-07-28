@@ -9,6 +9,10 @@ const requiredSteps = [
   "clippy -D warnings",
   "build --workspace",
   "test --workspace",
+  // The collab crash tier only compiles under `--features fault-injection`,
+  // so a verdict line without this row proves the exactly-once tests never
+  // ran — exactly the omission that let them go unexecuted for a month.
+  "test collab crash tier",
   "cargo-deny",
   // cargo-audit was deliberately absent from this list because CI did not
   // install the tool, so the gate probed for it and reported SKIP -- which
