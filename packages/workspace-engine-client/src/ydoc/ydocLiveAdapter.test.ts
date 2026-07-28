@@ -412,12 +412,115 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
-  it("surfaces a lost journal update and refuses a stale provider settle", async () => {
+  it("resyncs and replays a refused update, then journals subsequent edits", async () => {
     const engine = seedPlaintextEngine();
-    const recordFailure = new Error("injected record failure");
+    const recordFailure = new Error("injected one-shot record refusal");
+    let refuseNextRecord = true;
+    const recordActors: Array<string | undefined> = [];
     const transport: EngineTransport = {
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          recordActors.push(
+            (request.params as { actorOriginId?: string }).actorOriginId,
+          );
+          if (refuseNextRecord) {
+            refuseNextRecord = false;
+            throw recordFailure;
+          }
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    const first = session.applyLocalUpdate(
+      plaintextUpdate(session.initialUpdate, (text) => {
+        text.insert(0, "first");
+      }),
+      { actorOriginId: "actor-first" },
+    );
+    const second = session.applyLocalTextEdit(
+      {
+        root: "plainText",
+        index: 5,
+        insert: " second",
+      },
+      { actorOriginId: "actor-second" },
+    );
+    await Promise.all([first, second]);
+    const settled = await session.settle();
+
+    expect(settled.markdown).toBe("first second");
+    expect(engine.recordedUpdates).toHaveLength(2);
+    expect(recordActors).toEqual([
+      "actor-first",
+      "actor-first",
+      "actor-second",
+    ]);
+    expect(
+      engine.requests.filter((request) => request.method === YDOC_METHOD.resync),
+    ).toHaveLength(1);
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("always sends ydoc.close after an unrecoverable poisoned record chain", async () => {
+    const engine = seedPlaintextEngine();
+    const recordFailure = new Error("injected record refusal");
+    const resyncFailure = new Error("injected resync refusal");
+    const methods: string[] = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        methods.push(request.method);
+        if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
+        if (request.method === YDOC_METHOD.resync) throw resyncFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await expect(
+      session.applyLocalUpdate(
+        plaintextUpdate(session.initialUpdate, (text) => {
+          text.insert(0, "refused");
+        }),
+      ),
+    ).rejects.toBe(resyncFailure);
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+
+    expect(methods.at(-1)).toBe(YDOC_METHOD.close);
+    expect(() =>
+      session.applyLocalTextEdit({
+        root: "plainText",
+        index: 0,
+        insert: "closed",
+      }),
+    ).toThrowError(/closed/i);
+    adapter.dispose();
+  });
+
+  it("surfaces an unrecoverable journal update and still closes the provider", async () => {
+    const engine = seedPlaintextEngine();
+    const recordFailure = new Error("injected record failure");
+    const methods: string[] = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        methods.push(request.method);
         if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
         return engine.sendRequest(request);
       },
@@ -437,12 +540,14 @@ describe("YdocLiveAdapter", () => {
       text.insert(0, "local");
     });
 
-    provider.applyLocalUpdate(update);
+    await expect(provider.applyLocalUpdate(update)).rejects.toBe(recordFailure);
     await expect(provider.settleNow()).rejects.toBe(recordFailure);
     expect(localErrors).toEqual([recordFailure]);
     expect(engine.requests.map((request) => request.method)).not.toContain(
       YDOC_METHOD.settle,
     );
+    await expect(provider.close({ settle: false })).resolves.toBeUndefined();
+    expect(methods.at(-1)).toBe(YDOC_METHOD.close);
   });
 
   it("detects a per-session event sequence gap and marks the session stale", async () => {

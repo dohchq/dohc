@@ -188,18 +188,28 @@ export async function openEngineYdocProviderSession(
       unsubscribeRemoteError();
       unsubscribeResync();
       unsubscribeSessionError();
-      await journalChain;
-      await settleChain;
+      await journalChain.catch(() => undefined);
+      await settleChain.catch(() => undefined);
+      let preCloseError: unknown;
       // Richdoc settle is a C1 daemon refusal (richdoc-settle-unsupported):
       // the provider's pre-close settle would error before the close RPC ran,
       // stranding the session and its lease. The daemon's default close
       // persists the closed richdoc CRDT instead — nothing is lost.
-      if (closeOptions?.settle !== false && session.contentKind !== "richdoc") {
-        await runSettle(closeOptions?.summary ?? "session close");
+      if (
+        closeOptions?.settle !== false &&
+        session.contentKind !== "richdoc" &&
+        localEditError === null
+      ) {
+        try {
+          await runSettle(closeOptions?.summary ?? "session close");
+        } catch (error) {
+          preCloseError = error;
+        }
       }
       await session.close({ settle: false });
       if (ownsAdapter) adapter.dispose();
       closeComplete = true;
+      if (preCloseError !== undefined) throw preCloseError;
     },
   };
 }
