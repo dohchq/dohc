@@ -120,10 +120,13 @@ fn seed_short_query_scan_rows(scratch: &ScratchDir, workspace_id: &str, nonmatch
                     ],
                 )?;
             }
+            // -1 is the chat-index certification sentinel; an ordinary
+            // timestamp here reads as an uncertified legacy index and the next
+            // open wipes these seeded rows in a heal rebuild.
             tx.execute(
                 "INSERT INTO engine_search_index_state \
                  (workspace_id, version_id, indexed_at_ms, file_policy_degraded) \
-                 VALUES (?1, 'main', 2, 0)",
+                 VALUES (?1, 'main', -1, 0)",
                 rusqlite::params![workspace_id],
             )?;
             Ok::<(), dohc_engine_runtime::SearchError>(())
