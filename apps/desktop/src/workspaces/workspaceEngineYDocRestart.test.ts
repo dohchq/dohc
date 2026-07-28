@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import {
@@ -402,7 +402,7 @@ it("releases a close-latched failed generation with settle true before the next 
   await capture.stop();
 });
 
-it("marks the capture dead when both failed-generation release attempts reject", async () => {
+it("keeps the capture notice failed after unrelated success until the dead session closes", async () => {
   const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-close-dead-"));
   roots.push(rootPath);
   const loopback = new VersionedLoopbackEngine();
@@ -458,13 +458,17 @@ it("marks the capture dead when both failed-generation release attempts reject",
     };
   };
   const outcomes: boolean[] = [];
+  let historyCaptureFailed = false;
   const onError = vi.fn();
   const capture = createWorkspaceEngineCapture({
     workspaceId: "ydoc-close-dead",
     rootPath,
     rustEngineSessions: sessions,
     openRustYDocProviderSession: openProvider,
-    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    onCaptureOutcome: ({ ok }) => {
+      outcomes.push(ok);
+      historyCaptureFailed = !ok;
+    },
     onError,
   });
   const session = await capture.openYDocSession({
@@ -480,6 +484,7 @@ it("marks the capture dead when both failed-generation release attempts reject",
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   expect(closeAttempts).toEqual([false, true]);
   expect(outcomes).toEqual([false]);
+  expect(historyCaptureFailed).toBe(true);
   expect(onError).toHaveBeenCalledWith(
     "Y.Doc local update of note.md",
     settlingCloseFailure,
@@ -491,7 +496,20 @@ it("marks the capture dead when both failed-generation release attempts reject",
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   expect(applyCount).toBe(1);
   expect(outcomes).toEqual([false]);
-  await expect(session.close({ settle: false })).resolves.toBeUndefined();
+  expect(historyCaptureFailed).toBe(true);
+
+  await writeFile(join(rootPath, "unrelated.md"), "captured safely\n");
+  capture.captureBatch([{ path: "unrelated.md", operation: "update" }]);
+  await capture.flush();
+  expect(outcomes).toEqual([false, false]);
+  expect(historyCaptureFailed).toBe(true);
+
+  await session.close({ settle: false });
+  await writeFile(join(rootPath, "unrelated.md"), "captured safely again\n");
+  capture.captureBatch([{ path: "unrelated.md", operation: "update" }]);
+  await capture.flush();
+  expect(outcomes).toEqual([false, false, true]);
+  expect(historyCaptureFailed).toBe(false);
   await capture.stop();
 });
 
