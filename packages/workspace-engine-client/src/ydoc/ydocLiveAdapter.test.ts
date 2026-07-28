@@ -11,7 +11,10 @@ import {
   type EngineTransport,
 } from "./ydocLiveAdapter";
 import { YdocLoopbackEngine } from "./ydocLoopbackEngine";
-import { openEngineYdocProviderSession } from "./ydocProviderSession";
+import {
+  openEngineYdocProviderSession,
+  YdocReleasedWithSettleFailureError,
+} from "./ydocProviderSession";
 import { YDOC_EVENT, YDOC_METHOD } from "./ydocWireContract";
 
 const WORKSPACE = "workspace-handle-1";
@@ -662,6 +665,35 @@ describe("YdocLiveAdapter", () => {
 
     await expect(provider.close({ settle: false })).resolves.toBeUndefined();
     expect(closes).toEqual([false, true]);
+    expect(engine.activeSessionIds()).toHaveLength(0);
+  });
+
+  it("marks a close whose settle failed but whose release succeeded as RELEASED", async () => {
+    const engine = seedPlaintextEngine("settled base");
+    const settleFailure = new Error("injected settle refusal");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle) throw settleFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+
+    // The distinction is load-bearing for the capture layer's live-session
+    // guard: a released-but-unsettled close must LIFT the path guard (nothing
+    // holds the lease), while a failed release must retain it.
+    const rejection = await provider.close().catch((error: unknown) => error);
+    expect(rejection).toBeInstanceOf(YdocReleasedWithSettleFailureError);
+    expect((rejection as YdocReleasedWithSettleFailureError).cause).toBe(settleFailure);
     expect(engine.activeSessionIds()).toHaveLength(0);
   });
 

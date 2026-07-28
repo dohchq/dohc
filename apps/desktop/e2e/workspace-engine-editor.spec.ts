@@ -96,9 +96,16 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
     // a shared workspace would collide as a P0D). Since a ydoc.update payload is
     // opaque, the sentinel plaintext must appear in NO replication op at all.
     // Post-cutover a LOCAL workspace journals no outbound replication ops at
-    // all (emit_outbound requires Regime::Replicated) — the CRDT-journal guard
-    // is the ydoc_updates assertion above. The invariant this spec carries is
-    // unchanged: the typed sentinel must appear in NO replication op.
+    // all (emit_outbound requires Regime::Replicated), so on this fixture the
+    // replication-op assertions below are structural only — the LOAD-BEARING
+    // double-journal check is the moments table: the settle projects EXACTLY
+    // ONE sentinel moment, and a capture re-observing the settle's own .md
+    // self-write (the P0D class) would append a second.
+    expect(
+      momentTextsForPath(temp.rootPath, "notes/rich.md").filter((t) =>
+        t.includes(sentinel),
+      ),
+    ).toHaveLength(1);
     const opKindsWithSentinel = replicationOpKindsMentioning(temp.rootPath, sentinel);
     expect(opKindsWithSentinel).not.toContain("moment.append");
     expect(opKindsWithSentinel).toEqual([]);

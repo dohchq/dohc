@@ -35,6 +35,7 @@ import {
 } from "../collab/ydocEngineProviderSessionRust";
 import {
   isYdocSessionNotFoundRefusal,
+  YdocReleasedWithSettleFailureError,
   type EngineTransport,
 } from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
@@ -1290,9 +1291,21 @@ export function createWorkspaceEngineCapture(
             clearDeadYDocSession(deadSessionToken);
             return;
           }
-          await executeWithReconnect(async (session) => {
-            await session.close(closeOptions);
-          });
+          try {
+            await executeWithReconnect(async (session) => {
+              await session.close(closeOptions);
+            });
+          } catch (error) {
+            // A settle failure whose RELEASE still succeeded tore the daemon
+            // session down — record the teardown before rethrowing, or every
+            // layer above would treat the path as still-reserved forever.
+            if (error instanceof YdocReleasedWithSettleFailureError) {
+              closed = true;
+              current = null;
+              clearDeadYDocSession(deadSessionToken);
+            }
+            throw error;
+          }
           closed = true;
           current = null;
           clearDeadYDocSession(deadSessionToken);
@@ -2215,6 +2228,16 @@ export function createWorkspaceEngineCapture(
         try {
           await session.close(opts);
         } catch (error) {
+          if (error instanceof YdocReleasedWithSettleFailureError) {
+            // The daemon session and its lease ARE gone — only the settle
+            // failed. Lift the guard like a clean teardown (capture of the
+            // path must resume; nothing holds the reservation) and rethrow so
+            // the settle failure still surfaces to the caller.
+            if (liveYDocSessions.get(input.path) === entry) {
+              liveYDocSessions.delete(input.path);
+            }
+            throw error;
+          }
           // The reservation may still be held and the on-disk state is
           // indeterminate — retain a failing-close guard so a retry/force-close
           // can complete the teardown, and DO NOT swallow (data-integrity

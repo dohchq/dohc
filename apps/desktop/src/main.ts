@@ -7110,6 +7110,19 @@ function registerIpcHandlers(
         await session.close().catch(() => undefined);
         return OpenEngineYDocSessionResult.parse({ available: false });
       }
+      // The daemon honors the requested kind only for state-free markers; a
+      // lineage with durable state keeps its own. Binding the rich editor's
+      // body fragment onto a plaintext session is silent data loss (empty doc
+      // over a non-empty file, typed edits pruned at close) — refuse and fall
+      // back to the plain editor, loudly.
+      if (session.contentKind !== "richdoc") {
+        console.error(
+          `[desktop] engine Y.Doc open for ${input.path} came back ${session.contentKind}; ` +
+            "falling back to the plain editor (kind-mismatched lineage).",
+        );
+        await session.close().catch(() => undefined);
+        return OpenEngineYDocSessionResult.parse({ available: false });
+      }
       if (!engineYDocCleanupHooked.has(sender)) {
         engineYDocCleanupHooked.add(sender);
         sender.once("destroyed", () => {

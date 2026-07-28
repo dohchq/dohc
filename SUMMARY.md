@@ -23,8 +23,9 @@
   non-journaled domain moment/snapshot, uses the current text SHA (or absent)
   as materialization preimage, uses `moment_order` as target generation,
   synchronously materializes only its own job, updates durable/session settle
-  state, and returns projection provenance. Richdoc settlement refuses with
-  `richdoc-settle-unsupported`.
+  state, and returns projection provenance. Richdoc settlement runs the same
+  path through the full-fidelity richdoc projection (the C1-era
+  `richdoc-settle-unsupported` refusal is gone).
 - `ydoc.applyExternalMarkdownEdit` validates session/workspace scope and
   refuses with `external-edit-unsupported-live` in C1.
 - `ydoc.close` optionally uses the same settle path, performs regime-aware
@@ -74,7 +75,7 @@ The RPC acceptance test covers settlement over an existing file with no
 spurious conflict, moment retrieval, one-and-only-one new moment after capture
 flush (with a mutation comment identifying how to restore the suppression
 bug), open/record/settle/close/reopen/resync round-trip, double-open busy,
-binary-head refusal, richdoc-settle refusal, raced-seed refusal, live external
+binary-head refusal, richdoc settle + reseeding reopen, raced-seed refusal, live external
 edit refusal, workspace-close lease release, and cross-workspace isolation.
 The sync test proves a live-key envelope advances the peer ack without
 mutating `ydoc_updates`.
@@ -169,10 +170,9 @@ the raw result alongside the existing decoder.
   lets close(settle:false) prune the CRDT artifactless. (Crash before the
   compensation = the durable pending-job case; it drains on reopen.)
 - P1 close default: missing `settle` now means SETTLE (TS driver
-  semantics). Richdoc sessions skip the markdown settle on default close
-  (the C1 refusal belongs to the explicit ydoc.settle RPC) and close with
-  persist-closed-state so the CRDT survives; the local-only prune's
-  markdown-is-the-artifact premise never applied to richdoc.
+  semantics) for both content kinds; a settled local-only richdoc prunes at
+  close like plaintext (markdown-is-the-artifact), so a reopen reseeds from
+  the settled file instead of resuming a shadowing CRDT.
 - P2 empty-workspace bootstrap: ydoc.open ensures the main version before
   resolving the head — the first live doc in a fresh workspace works.
 - P2 drain precision: new `ydoc_deferred_updates` table (migration 12)

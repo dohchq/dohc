@@ -15,6 +15,20 @@ import type {
 
 const DEFAULT_SETTLE_DEBOUNCE_MS = 800;
 
+// A close whose pre-close settle failed but whose daemon release SUCCEEDED.
+// Callers must distinguish this from a failed release: the session and its
+// lease are gone, so keeping a "still reserved" guard on the path would defer
+// its capture forever while nothing holds the reservation.
+export class YdocReleasedWithSettleFailureError extends Error {
+  constructor(path: string, cause: unknown) {
+    super(
+      `Y.Doc session for ${path} released, but its pre-close settle failed.`,
+      { cause },
+    );
+    this.name = "YdocReleasedWithSettleFailureError";
+  }
+}
+
 export interface EngineYdocProviderSessionOptions {
   transport: EngineTransport;
   // Share ONE adapter across every doc on a given transport so request ids stay
@@ -235,7 +249,9 @@ export async function openEngineYdocProviderSession(
         closeError = error;
         throw error;
       }
-      if (preCloseError !== undefined) throw preCloseError;
+      if (preCloseError !== undefined) {
+        throw new YdocReleasedWithSettleFailureError(options.path, preCloseError);
+      }
     },
   };
 }

@@ -34,7 +34,8 @@ pub use durable::{
     claim_base, claim_base_in_tx, close_session, ensure_marker, load_persisted, maybe_compact,
     read_last_settled_sha, read_marker, record_local_update, record_local_update_creating_marker,
     record_local_update_creating_marker_guarded, record_local_update_creating_marker_with_hook,
-    record_local_update_with_origin, record_local_update_with_origin_and_hook, settle,
+    record_local_update_with_origin, record_local_update_with_origin_and_hook,
+    rewrite_bare_marker_content_kind, settle,
     validate_remote_update_for, validate_remote_update_with_pending, AppendOutcome, ClaimOutcome,
     CloseOutcome, CompactOutcome, Marker, PersistedDoc, Regime, SettleOutcome,
 };
