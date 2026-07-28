@@ -7082,8 +7082,15 @@ function registerIpcHandlers(
             }
           },
         });
-      } catch {
-        // Secret path, missing file, or already-live: fall back gracefully.
+      } catch (error) {
+        // Secret path, missing file, or already-live: fall back gracefully —
+        // but never silently. A refusal here downgrades the doc to the plain
+        // editor, and an unlogged permanent refusal is indistinguishable from
+        // intended fallback (it hid a dead engine editor for weeks).
+        console.error(
+          `[desktop] engine Y.Doc open refused for ${input.path}:`,
+          error,
+        );
         return OpenEngineYDocSessionResult.parse({ available: false });
       }
       // The renderer can die or reload DURING the await above. Close the stale
