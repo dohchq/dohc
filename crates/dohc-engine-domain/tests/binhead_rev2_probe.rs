@@ -132,6 +132,7 @@ fn m2_same_path_binary_gen_is_strictly_below_next_text_and_is_superseded() {
                 tx,
                 &MaterializationJobSpec {
                     job_id: "text-job".to_owned(),
+                    workspace_id: WS.to_owned(),
                     target_path: "doc.md".to_owned(),
                     content_sha256: sha,
                     preimage: Preimage::Absent,
@@ -580,6 +581,7 @@ fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
                 tx,
                 &MaterializationJobSpec {
                     job_id: "text-moment".to_owned(),
+                    workspace_id: WS.to_owned(),
                     target_path: "unrelated.bin".to_owned(),
                     content_sha256: sha,
                     preimage: Preimage::Absent,

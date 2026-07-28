@@ -1792,6 +1792,88 @@ CREATE INDEX chat_pending_replication_by_dependency
 
 pub(crate) const CHAT_PENDING_MESSAGE_THREAD_MIGRATION_ID: &str = "v1-chat-pending-message-thread";
 
+/// Ordinal 24. Materialization generations are path-local within a workspace,
+/// not global across every workspace that happens to share an engine database.
+/// New writers always persist this coordinate. The backfill recovers it from
+/// durable moment identities where possible, then uses the documented
+/// one-workspace-per-database invariant for legacy rows that predate the
+/// coordinate.
+const V1_MATERIALIZATION_WORKSPACE_DDL: &str = "\
+ALTER TABLE materialization_jobs
+    ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';
+
+UPDATE materialization_jobs AS job
+   SET workspace_id = (
+       SELECT moment.workspace_id
+         FROM moments AS moment
+        WHERE job.job_id = moment.moment_id
+           OR job.job_id = 'ydoc-mat_' || moment.moment_id
+           OR job.job_id = 'binary-delete-mat_' || moment.moment_id
+           OR job.job_id = 'binary-rename-0-write-mat_' || moment.moment_id
+           OR job.job_id = 'binary-rename-1-delete-mat_' || moment.moment_id
+           OR substr(job.job_id, -length('-mat_' || moment.moment_id)) =
+              '-mat_' || moment.moment_id
+        ORDER BY moment.moment_order DESC
+        LIMIT 1
+   )
+ WHERE workspace_id = ''
+   AND EXISTS (
+       SELECT 1
+         FROM moments AS moment
+        WHERE job.job_id = moment.moment_id
+           OR job.job_id = 'ydoc-mat_' || moment.moment_id
+           OR job.job_id = 'binary-delete-mat_' || moment.moment_id
+           OR job.job_id = 'binary-rename-0-write-mat_' || moment.moment_id
+           OR job.job_id = 'binary-rename-1-delete-mat_' || moment.moment_id
+           OR substr(job.job_id, -length('-mat_' || moment.moment_id)) =
+              '-mat_' || moment.moment_id
+   );
+
+UPDATE materialization_jobs AS job
+   SET workspace_id = (
+       SELECT moment.workspace_id
+         FROM secret_moments AS moment
+        WHERE job.job_id = 'secret-mat_' || moment.moment_id
+        ORDER BY moment.moment_order DESC
+        LIMIT 1
+   )
+ WHERE workspace_id = ''
+   AND EXISTS (
+       SELECT 1
+         FROM secret_moments AS moment
+        WHERE job.job_id = 'secret-mat_' || moment.moment_id
+   );
+
+UPDATE materialization_jobs AS job
+   SET workspace_id = (
+       SELECT workspace.workspace_id
+         FROM versioned_workspaces AS workspace
+        WHERE instr(
+            job.job_id,
+            char(31) || length(workspace.workspace_id) || ':' || workspace.workspace_id
+        ) > 0
+        ORDER BY workspace.workspace_id
+        LIMIT 1
+   )
+ WHERE workspace_id = ''
+   AND instr(job.job_id, char(31)) > 0;
+
+UPDATE materialization_jobs
+   SET workspace_id = (SELECT workspace_id FROM versioned_workspaces LIMIT 1)
+ WHERE workspace_id = ''
+   AND (SELECT COUNT(*) FROM versioned_workspaces) = 1;
+
+CREATE INDEX idx_materialization_jobs_workspace_path_status_generation
+    ON materialization_jobs (
+        workspace_id,
+        target_path,
+        status,
+        target_generation
+    );
+";
+
+pub(crate) const MATERIALIZATION_WORKSPACE_MIGRATION_ID: &str = "v1-materialization-workspace";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1965,6 +2047,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: CHAT_PENDING_MESSAGE_THREAD_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_CHAT_PENDING_MESSAGE_THREAD_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 24,
+        id: MATERIALIZATION_WORKSPACE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_MATERIALIZATION_WORKSPACE_DDL,
         sets_user_version: None,
     },
 ];

@@ -76,6 +76,7 @@ fn spec(
 ) -> MaterializationJobSpec {
     MaterializationJobSpec {
         job_id: id.to_owned(),
+        workspace_id: "ws".to_owned(),
         target_path: path.to_owned(),
         content_sha256: sha.to_owned(),
         preimage,

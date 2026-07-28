@@ -355,7 +355,7 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // (ordinal 20), the file-object-rooted Y.Doc deferred-update queue (ordinal 21),
     // pending replication refusals (ordinal 22), and the parked
     // chat-message-before-thread coordinates (ordinal 23).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 24);
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 25);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

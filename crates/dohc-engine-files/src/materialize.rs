@@ -501,7 +501,8 @@ fn materialize_one_ordinary(
     // materialized at this path, this job is superseded — never regress the path
     // to older content (concurrent / out-of-order jobs). No-op; mark complete.
     if !job.job_id.starts_with("version-switch-")
-        && let Some(done_gen) = store.max_completed_generation_for_path(&job.target_path)?
+        && let Some(done_gen) =
+            store.max_completed_generation_for_path(&job.workspace_id, &job.target_path)?
         && done_gen > job.target_generation
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
@@ -2115,6 +2116,7 @@ mod tests {
                     tx,
                     &MaterializationJobSpec {
                         job_id: job_id.to_owned(),
+                        workspace_id: "ws".to_owned(),
                         target_path: target_path.to_owned(),
                         content_sha256: staged_sha.clone(),
                         preimage: Preimage::Absent,
@@ -2146,6 +2148,7 @@ mod tests {
                     tx,
                     &MaterializationJobSpec {
                         job_id: job_id.to_owned(),
+                        workspace_id: "ws".to_owned(),
                         target_path: target_path.to_owned(),
                         content_sha256: content_sha256.clone(),
                         preimage: Preimage::Absent,
@@ -2869,6 +2872,7 @@ mod tests {
                     tx,
                     &MaterializationJobSpec {
                         job_id: "secret-mat_conflict-remove".to_owned(),
+                        workspace_id: "ws".to_owned(),
                         target_path: ".env".to_owned(),
                         content_sha256: staged_sha.clone(),
                         preimage: Preimage::Absent,

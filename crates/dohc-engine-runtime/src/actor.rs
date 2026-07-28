@@ -5223,6 +5223,7 @@ fn planned_projection(
                 &content_sha256,
                 secret,
             ),
+            workspace_id: workspace_id.to_owned(),
             target_path: path,
             content_sha256,
             preimage,
@@ -5741,6 +5742,9 @@ fn replay_pending_materializations(
         if selected.is_some_and(|selected| !selected.contains(&job.job_id)) {
             continue;
         }
+        if job.workspace_id != scope.workspace_id {
+            continue;
+        }
         summary.selected_seen += usize::from(selected.is_some());
         let switch_secret = job.job_id.starts_with("version-switch-secret-mat_");
         let ordinary_secret = job.job_id.starts_with("secret-mat_");
@@ -5874,14 +5878,22 @@ fn replay_pending_materializations(
         }
         if let Some(moment_id) = job.job_id.strip_prefix("binary-rename-1-delete-mat_") {
             let write_job_id = binary_rename_write_job_id(moment_id);
-            let destination_ready = store
+            match store
                 .load_materialization_job(&write_job_id)?
-                .is_some_and(|write_job| write_job.status == JobStatus::Complete);
-            if !destination_ready {
-                if selected.is_some() {
+                .map(|write_job| write_job.status)
+            {
+                Some(JobStatus::Complete) => {}
+                Some(JobStatus::Conflict) => {
+                    store.mark_materialization_conflict(&job.job_id, now_ms)?;
                     summary.failed += 1;
+                    continue;
                 }
-                continue;
+                Some(JobStatus::Pending) | None => {
+                    if selected.is_some() {
+                        summary.failed += 1;
+                    }
+                    continue;
+                }
             }
         }
         let outcome = if let Some(self_writes) = scope.self_writes {
@@ -9794,6 +9806,15 @@ fn versioned_text_rollback_on_store(
         JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
     };
     if !write_materialized {
+        if write_outcome == PostCommitMaterializeOutcome::Conflict
+            && let Err(error) =
+                store.mark_materialization_conflict(&delete_job.job_id, write_job.created_at_ms)
+        {
+            eprintln!(
+                "engine: rollback rename write conflicted but terminalizing its paired delete \
+                 failed: {error}"
+            );
+        }
         return Ok(RollbackExecutionResult {
             deduped,
             materialize_enqueued: true,

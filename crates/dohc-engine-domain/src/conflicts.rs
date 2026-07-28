@@ -801,6 +801,7 @@ pub fn enqueue_write(
         tx,
         &MaterializationJobSpec {
             job_id: format!("{prefix}-mat_{}", result.moment.moment_id),
+            workspace_id: result.snapshot.workspace_id.clone(),
             target_path: result.snapshot.path.clone(),
             content_sha256: sha,
             preimage,
@@ -825,6 +826,7 @@ pub fn enqueue_delete(
         tx,
         &MaterializationJobSpec {
             job_id: format!("{prefix}-mat_{}", result.moment.moment_id),
+            workspace_id: result.before.workspace_id.clone(),
             target_path: result.before.path.clone(),
             content_sha256: sha,
             preimage: Preimage::Present(result.before.blob_sha256.clone()),
@@ -871,6 +873,7 @@ pub fn enqueue_binary_rename(
         tx,
         &MaterializationJobSpec {
             job_id: binary_rename_write_job_id(&result.moment.moment_id),
+            workspace_id: result.after.workspace_id.clone(),
             target_path: result.after.path.clone(),
             content_sha256: sha.to_owned(),
             preimage: Preimage::Absent,
@@ -882,6 +885,7 @@ pub fn enqueue_binary_rename(
         tx,
         &MaterializationJobSpec {
             job_id: binary_rename_delete_job_id(&result.moment.moment_id),
+            workspace_id: result.before.workspace_id.clone(),
             target_path: result.before.path.clone(),
             content_sha256: sha.to_owned(),
             preimage: Preimage::Present(sha.to_owned()),
@@ -915,6 +919,7 @@ pub fn enqueue_binary_delete(
         tx,
         &MaterializationJobSpec {
             job_id: binary_delete_job_id(&result.moment.moment_id),
+            workspace_id: result.before.workspace_id.clone(),
             target_path: result.before.path.clone(),
             content_sha256: sha.to_owned(),
             preimage: Preimage::Present(sha.to_owned()),
@@ -1081,6 +1086,7 @@ pub fn write_binary_file_in_tx(
             tx,
             &MaterializationJobSpec {
                 job_id: input.moment_id.clone(),
+                workspace_id: input.workspace_id.clone(),
                 target_path: input.path.clone(),
                 content_sha256: input.binary_sha256.clone(),
                 preimage: preimage.clone(),

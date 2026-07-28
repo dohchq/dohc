@@ -518,13 +518,15 @@ impl EngineStore {
         materialize::pending_job_count(&self.conn)
     }
 
-    /// The highest COMPLETE `target_generation` for `path` (staleness gate for
-    /// the materialization pipeline), or `None` if nothing is materialized there.
+    /// The highest COMPLETE `target_generation` for `path` in `workspace_id`
+    /// (staleness gate for the materialization pipeline), or `None` if nothing
+    /// is materialized there.
     pub fn max_completed_generation_for_path(
         &self,
+        workspace_id: &str,
         path: &str,
     ) -> Result<Option<i64>, StorageError> {
-        materialize::max_completed_generation_for_path(&self.conn, path)
+        materialize::max_completed_generation_for_path(&self.conn, workspace_id, path)
     }
 
     // ---- R04: backup support --------------------------------------------

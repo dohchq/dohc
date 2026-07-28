@@ -2279,6 +2279,7 @@ pub fn capture_ingest_binary_in_tx(
                 tx,
                 &MaterializationJobSpec {
                     job_id: moment.moment_id.clone(),
+                    workspace_id: input.workspace_id.clone(),
                     target_path: path.clone(),
                     content_sha256: result_sha.clone(),
                     preimage: Preimage::Present(result_sha.clone()),
@@ -2352,6 +2353,7 @@ pub fn capture_ingest_binary_in_tx(
         tx,
         &MaterializationJobSpec {
             job_id: moment_id.clone(),
+            workspace_id: input.workspace_id.clone(),
             target_path: path.clone(),
             content_sha256: binary_sha256.clone(),
             preimage: Preimage::Present(binary_sha256.clone()),
@@ -2440,8 +2442,9 @@ pub fn capture_manifest_seed(
                                   AND j.status = 'pending'))) \
                    AND NOT EXISTS ( \
                        SELECT 1 FROM materialization_jobs j \
-                       WHERE j.status = 'pending' AND j.operation = 'write' \
-                         AND j.target_path = a.path \
+                        WHERE j.status = 'pending' AND j.operation = 'write' \
+                          AND j.workspace_id = ?1 \
+                          AND j.target_path = a.path \
                          AND j.content_sha256 = CASE COALESCE(s.content_kind, 'text') \
                              WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END \
                          AND (substr(j.job_id, 1, length(?3)) = ?3 \
@@ -2466,8 +2469,9 @@ pub fn capture_manifest_seed(
                         j.content_sha256, bb.byte_length \
                  FROM materialization_jobs j \
                  JOIN binary_blobs bb ON bb.sha256 = j.content_sha256 \
-                 WHERE j.status = 'pending' AND j.operation = 'delete' \
-                    AND (substr(j.job_id, 1, length(?3)) = ?3 \
+                  WHERE j.status = 'pending' AND j.operation = 'delete' \
+                    AND j.workspace_id = ?1 \
+                     AND (substr(j.job_id, 1, length(?3)) = ?3 \
                          OR substr(j.job_id, \
                                length('binary-rename-1-delete-mat_') + 1, \
                                length(?3)) = ?3 \
@@ -2485,12 +2489,13 @@ pub fn capture_manifest_seed(
                                    ON restore_snapshot.workspace_id = restore_alias.workspace_id \
                                   AND restore_snapshot.version_id = restore_alias.version_id \
                                   AND restore_snapshot.object_id = restore_alias.object_id \
-                                 WHERE restore.job_id = \
-                                     'binary-rename-0-write-mat_' || \
+                                  WHERE restore.job_id = \
+                                      'binary-rename-0-write-mat_' || \
                                      substr(j.job_id, \
                                          length('binary-rename-1-delete-mat_') + 1) \
-                                   AND restore.operation = 'write' \
-                                   AND restore.content_sha256 = j.content_sha256 \
+                                    AND restore.operation = 'write' \
+                                    AND restore.workspace_id = ?1 \
+                                    AND restore.content_sha256 = j.content_sha256 \
                                    AND CASE COALESCE(restore_snapshot.content_kind, 'text') \
                                        WHEN 'binary' THEN restore_snapshot.binary_sha256 \
                                        ELSE restore_snapshot.blob_sha256 END = \
@@ -3980,6 +3985,7 @@ fn enqueue_binary_rollback_restore(
             tx,
             &MaterializationJobSpec {
                 job_id,
+                workspace_id: input.workspace_id.clone(),
                 target_path: input.path.clone(),
                 content_sha256: written_sha256.to_owned(),
                 preimage,
@@ -4006,6 +4012,7 @@ fn enqueue_binary_rollback_restore(
                 tx,
                 &MaterializationJobSpec {
                     job_id,
+                    workspace_id: input.workspace_id.clone(),
                     target_path: input.path.clone(),
                     content_sha256,
                     preimage,
@@ -4040,6 +4047,7 @@ fn enqueue_binary_delete_rollback_restore(
                 &input.version_id,
                 &input.mutation_moment_id,
             ),
+            workspace_id: input.workspace_id.clone(),
             target_path: before.path.clone(),
             content_sha256: sha256,
             preimage: Preimage::Absent,
@@ -4073,6 +4081,7 @@ fn enqueue_binary_rename_rollback_restore(
         tx,
         &MaterializationJobSpec {
             job_id: binary_rename_write_job_id(&rollback_id),
+            workspace_id: input.workspace_id.clone(),
             target_path: before.path.clone(),
             content_sha256: sha256.clone(),
             preimage: Preimage::Absent,
@@ -4085,6 +4094,7 @@ fn enqueue_binary_rename_rollback_restore(
         tx,
         &MaterializationJobSpec {
             job_id: binary_rename_delete_job_id(&rollback_id),
+            workspace_id: input.workspace_id.clone(),
             target_path: renamed_path.to_owned(),
             content_sha256: sha256.clone(),
             preimage: Preimage::Present(sha256),

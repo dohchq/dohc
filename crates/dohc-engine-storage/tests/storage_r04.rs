@@ -518,6 +518,7 @@ fn load_valid_backup_enforces_manifest_presence_and_checksum() {
 fn job_spec(id: &str, path: &str, content_sha: &str, now: i64) -> MaterializationJobSpec {
     MaterializationJobSpec {
         job_id: id.to_owned(),
+        workspace_id: "ws".to_owned(),
         target_path: path.to_owned(),
         content_sha256: content_sha.to_owned(),
         preimage: Preimage::Absent,
@@ -562,6 +563,52 @@ fn materialization_job_lifecycle_transitions() {
         .expect("load")
         .expect("some");
     assert_eq!(j2.status, dohc_engine_storage::JobStatus::Conflict);
+}
+
+#[test]
+fn completed_generation_watermarks_are_workspace_scoped() {
+    let scratch = Scratch::new("job-workspace-watermark");
+    let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
+    let sha = store.put_binary_blob(b"content").expect("blob");
+    let mut workspace_a = job_spec("a-job", "shared.bin", &sha, 10);
+    workspace_a.workspace_id = "workspace-a".to_owned();
+    workspace_a.target_generation = 4;
+    let mut workspace_b = job_spec("b-job", "shared.bin", &sha, 11);
+    workspace_b.workspace_id = "workspace-b".to_owned();
+    workspace_b.target_generation = 9;
+    store
+        .write_with(&NoFaults, |tx| {
+            enqueue_job(tx, &workspace_a)?;
+            enqueue_job(tx, &workspace_b)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enqueue");
+    store
+        .mark_materialization_complete("b-job", 12)
+        .expect("complete B");
+
+    assert_eq!(
+        store
+            .max_completed_generation_for_path("workspace-a", "shared.bin")
+            .expect("workspace A watermark"),
+        None
+    );
+    assert_eq!(
+        store
+            .max_completed_generation_for_path("workspace-b", "shared.bin")
+            .expect("workspace B watermark"),
+        Some(9)
+    );
+
+    store
+        .mark_materialization_complete("a-job", 13)
+        .expect("complete A");
+    assert_eq!(
+        store
+            .max_completed_generation_for_path("workspace-a", "shared.bin")
+            .expect("workspace A completed watermark"),
+        Some(4)
+    );
 }
 
 #[cfg(feature = "fault-injection")]

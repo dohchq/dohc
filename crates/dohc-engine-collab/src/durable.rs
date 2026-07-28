@@ -879,6 +879,7 @@ pub fn settle(
             tx,
             &MaterializationJobSpec {
                 job_id: job_id.clone(),
+                workspace_id: key.workspace_id.clone(),
                 target_path: target_path.to_string(),
                 content_sha256: content_sha.clone(),
                 // The preimage the materializer revalidates before replacing: the
