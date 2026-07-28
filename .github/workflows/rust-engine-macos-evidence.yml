@@ -123,10 +123,18 @@ jobs:
           rustc -vV | tee -a macos-toolversions.log
           cargo --version | tee -a macos-toolversions.log
 
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           # package.json engines: ^20.19.0 || ^22.13.0 || >=24.0.0
           node-version: "24"
+          cache: pnpm
+
+      # The gate's fixture-drift step resolves yjs/tsx from the JS workspace;
+      # a required-step SKIP now fails the verdict, so the install is load-bearing.
+      - name: Install JS workspace dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Install pinned cargo-deny (the gate counts cargo-deny=PASS as evidence)
         run: |
