@@ -2848,3 +2848,22 @@ reads join the live binding as non-owning attachments).
 - #317: 2026-07-28T10:01:30Z | run-rust-checks | win32/x64 | PASS (all rows;
   the first run caught a clippy failure codex's targeted tests missed);
   mutation — dropping the SQL LIMIT hydrates the poisoned row.
+
+### The audit P2 backlog — held for Ice's call
+
+The audit's ~10 unverified P2s are deliberately NOT riding this campaign
+(P1s only). Recommendation: hold them for the dogfood window and open them as
+one triaged shard batch, re-verifying each against post-campaign main first —
+at least two (desktop search second connection @ main.ts, sharedView mixed
+connections) look partially or wholly discharged by #315 and need re-checking
+before any work is dispatched. The list, verbatim from the audit: foreign
+user_version=2 adoption (schema.rs:274); dispatch write paths accepting
+unvalidated now_ms (chats.rs:5438); local-only close CRDT prune window
+(durable.rs:979); refused-and-acked redelivery wedge (moment_apply.rs:315);
+malformed blob-sha wedging a pull pass (relay.rs:1411); concurrent same-path
+creation stalling the inbound lane (ydoc_apply.rs:667); writeBlob copy-by-sha
+without egress budget (lib.rs:2184); sync.commitCursor one-shot token order
+(lib.rs:1701); relay adapter retrying non-idempotent recoverOrigin
+(engineRelayClient.ts:474); frozen cross-engine security-contract fixture with
+no drift guard (gen-fixtures.mjs); no Windows CI leg for cfg(windows) tests
+(pr-checks.yml — interacts with Ice's #318 dispatch-only decision).
