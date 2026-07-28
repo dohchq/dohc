@@ -36,6 +36,12 @@ name: PR checks
 
 on:
   pull_request:
+  # Squash-merge commits never match a PR branch, so PR-branch caches help
+  # nobody else. A push run on main is what seeds the caches every PR branch
+  # is allowed to read -- and with no merge queue available on this plan, it
+  # is also the only post-merge verification that main is actually green.
+  push:
+    branches: [main]
   merge_group:
   workflow_dispatch:
 
@@ -70,8 +76,12 @@ jobs:
         id: filter
         with:
           filters: |
+            # fuzz/ is a cargo workspace member the gate clippy/builds;
+            # .cargo/ holds audit.toml, where advisory ignores would hide.
             rust:
               - 'crates/**'
+              - 'fuzz/**'
+              - '.cargo/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -80,15 +90,28 @@ jobs:
               - 'packages/ydoc-projection/**'
               - 'pnpm-lock.yaml'
               - '.github/workflows/pr-checks.yml'
+            # services/ are pnpm workspace members (sync-relay, workspace-api
+            # are live product); tsconfig.base.json is extended by every
+            # package; the root suite asserts on the rust-engine plan docs
+            # (scripts/rust-engine-decisions.test.mjs), so a docs-only PR can
+            # break it; Cargo files rebuild the daemon binary the desktop
+            # e2e drives -- same rationale as crates/**.
             js:
               - 'apps/**'
               - 'packages/**'
+              - 'services/**'
               - 'crates/**'
+              - 'fuzz/**'
               - 'scripts/**'
               - 'tools/**'
+              - 'docs/superpowers/plans/rust-engine/**'
+              - 'tsconfig.base.json'
               - 'package.json'
               - 'pnpm-workspace.yaml'
               - 'pnpm-lock.yaml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
               - '.github/workflows/pr-checks.yml'
 
   javascript:
@@ -157,8 +180,11 @@ jobs:
 
       # Registry + ./target cache for the daemon debug build below. Keyed
       # separately from the engine gate's cache: the two jobs build different
-      # subsets and would thrash a shared target cache.
-      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+      # subsets and would thrash a shared target cache. Upstream Swatinem, not
+      # the useblacksmith fork -- the fork is archived (last push 2025-10);
+      # Blacksmith's cache service accelerates the standard cache API on its
+      # runners, so upstream is both maintained and fast there.
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: js-daemon
 
@@ -225,7 +251,7 @@ jobs:
           rustc -vV
           cargo --version
 
-      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: engine-gate
 
