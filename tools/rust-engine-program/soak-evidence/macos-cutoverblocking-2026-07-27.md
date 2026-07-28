@@ -4,16 +4,30 @@ The Actions artifact quota blocked uploading the evidence JSONs, and run logs
 expire after ~90 days, so the closing verdict lines are banked here verbatim.
 This is the evidence the R15-2 / GATE6 closure rests on.
 
-## Two independent PASSes under the corrected (#293) methodology
+## Two PASSes under two different criteria — attributed honestly
 
-**Run 30265974274** — head `86d5b2ed` (workflow `rust-engine-macos-evidence`,
-`blacksmith-6vcpu-macos-15`… job "macOS gate + cutoverBlocking soak"):
+The two runs did NOT pass under the same rule, and the record must not
+manufacture redundancy it does not have (an adversarial review of the first
+draft of this file caught exactly that).
+
+**Run 30265974274** — head `86d5b2ed`, created 12:27Z, nearly three hours
+BEFORE #293 merged (15:23Z), so it ran the OLD methodology. Its whole-run
+slope is OVER the 20,480 B/s bound; it passed under the **#267 tail-window
+criterion** (tail 16,996 < 20,480), which Ice ratified on 2026-07-27
+(DECISIONS.md). Full line, verbatim:
 
 ```
-2026-07-27T14:07:39Z | soak-cutoverBlocking | macos/aarch64 | PASS | cycles=11362 crashes=83 durationSecs=5524 rssDisposition=PASS ...
+2026-07-27T14:07:39Z | soak-cutoverBlocking | macos/aarch64 | PASS | cycles=11362 crashes=83 durationSecs=5524 rssDisposition=PASS rssSlopeWholeB/s=28754.2 rssSlopeTailB/s=16995.9 warmupDominatedWholeRunFit=true drain=RETAINED rssDrain 208306176->207192064 min=207192064 drop=1114112 (0.6% of run growth) handles 11->11 threads 11->9 handleThreadSlackCalibration=UNCALIBRATED
 ```
 
-**Run 30279897083** — head `ed936680` (includes #293's corrected bound):
+The #293 postmortem later showed the old methodology's numbers measured the
+workload as much as the daemon, so this run is best read as corroborating
+context, not primary evidence.
+
+**Run 30279897083** — head `ed936680` (includes #293's corrected bound). This
+is the run the closure actually rests on: the ONLY pass under the corrected
+methodology, and its whole-run fit is inside the bound too — which no
+previous run achieved:
 
 ```
 2026-07-27T16:35:51Z | soak-cutoverBlocking | macos/aarch64 | PASS | cycles=25243 crashes=83 durationSecs=3723 rssDisposition=PASS rssSlopeWholeB/s=2072.3 rssSlopeTailB/s=873.7 warmupDominatedWholeRunFit=false drain=RETAINED rssDrain 51298304->51232768 min=51232768 drop=65536 (0.2% of run growth) handles 11->11 threads 11->9 handleThreadSlackCalibration=UNCALIBRATED workingSetBounded=true userFileGrowth=25 durableGrowthBytes=190202421
