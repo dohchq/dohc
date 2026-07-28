@@ -20,7 +20,12 @@ use dohc_engine_runtime::search::{
 use dohc_engine_storage::{
     EngineStore, FaultPoint, NoFaults, Preimage, TxnOutcome, hex_sha256, put_binary_blob,
 };
+use dohc_engine_sync::{
+    ApplyOutcome, ReplicationEnvelope, ShareBoundary, ShareSurface, apply_chat_envelope,
+    apply_shared_envelope,
+};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use serde_json::json;
 use std::path::Path;
 
 const WS: &str = "ws-1";
@@ -29,6 +34,22 @@ const NO_FAULTS: NoFaults = NoFaults;
 
 fn open(db: &Path, now: i64) -> EngineStore {
     EngineStore::open(db, now).expect("open")
+}
+
+fn replicated_envelope(
+    origin_id: &str,
+    origin_seq: i64,
+    op_kind: &str,
+    payload: serde_json::Value,
+) -> ReplicationEnvelope {
+    ReplicationEnvelope {
+        workspace_id: WS.to_owned(),
+        origin_id: origin_id.to_owned(),
+        origin_seq,
+        op_kind: op_kind.to_owned(),
+        payload,
+        recorded_at_ms: 1_000 + origin_seq,
+    }
 }
 
 /// Write a text file into the main version through the versioning domain.
@@ -841,5 +862,184 @@ fn binary_overwrite_of_indexed_text_is_no_longer_searchable() {
             .iter()
             .any(|r| r.surface == SearchSurface::File && r.path == "notes/plan.md"),
         "a binary-overwritten path must not be served by its stale former text: {after:?}"
+    );
+}
+
+// ------------------------------ 12. replicated chat writes feed the real reader
+
+#[test]
+fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let thread = replicated_envelope(
+        "search-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "replicated-thread",
+            "title": "Replicated roadmap",
+            "createdAtMs": 10,
+            "linkedObjectId": "replicated-object",
+            "linkedAtMs": 10
+        }),
+    );
+    let message = replicated_envelope(
+        "search-peer",
+        1,
+        "chat.message.append",
+        json!({
+            "messageId": "replicated-message",
+            "threadId": "replicated-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ice",
+            "body": "Synchronized quasar content",
+            "createdAtMs": 20
+        }),
+    );
+
+    assert!(matches!(
+        apply_chat_envelope(&mut store, &thread, &NO_FAULTS),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert!(matches!(
+        apply_chat_envelope(&mut store, &message, &NO_FAULTS),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert!(matches!(
+        apply_chat_envelope(&mut store, &message, &NO_FAULTS),
+        Ok(ApplyOutcome::Skipped)
+    ));
+
+    let title_hits = store
+        .read_with(|conn| query_chat_messages_granular(conn, WS, "roadmap", 100))
+        .expect("thread-title search");
+    assert_eq!(title_hits.len(), 1);
+    assert_eq!(title_hits[0].thread_id, "replicated-thread");
+    assert_eq!(title_hits[0].message_id, None);
+
+    let message_hits = store
+        .read_with(|conn| query_chat_messages_granular(conn, WS, "quasar", 100))
+        .expect("message search");
+    assert_eq!(
+        message_hits.len(),
+        1,
+        "duplicate delivery must not duplicate the FTS result"
+    );
+    assert_eq!(
+        message_hits[0].message_id.as_deref(),
+        Some("replicated-message")
+    );
+}
+
+#[test]
+fn parked_replicated_message_is_findable_after_thread_promotion() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let message = replicated_envelope(
+        "early-peer",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "parked-message",
+            "threadId": "late-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ice",
+            "body": "Parked comet content",
+            "createdAtMs": 20
+        }),
+    );
+    let thread = replicated_envelope(
+        "late-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late arrival",
+            "createdAtMs": 10,
+            "linkedObjectId": "late-object",
+            "linkedAtMs": 10
+        }),
+    );
+
+    apply_chat_envelope(&mut store, &message, &NO_FAULTS).expect("park message");
+    apply_chat_envelope(&mut store, &thread, &NO_FAULTS).expect("promote message");
+
+    let hits = store
+        .read_with(|conn| query_chat_messages_granular(conn, WS, "comet", 100))
+        .expect("promoted message search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message_id.as_deref(), Some("parked-message"));
+}
+
+#[test]
+fn shared_channel_replicated_chat_is_findable_through_the_real_search_reader() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let boundary = ShareBoundary {
+        share_id: "search-share".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("search-wire".to_owned()),
+        path_prefix: None,
+    };
+    let channel = replicated_envelope(
+        "shared-peer",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "shared-channel",
+            "name": "Search channel",
+            "slug": "search-channel",
+            "kind": "channel",
+            "createdAtMs": 1,
+            "wireId": "search-wire"
+        }),
+    );
+    let thread = replicated_envelope(
+        "shared-peer",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "shared-thread",
+            "title": "Shared constellation",
+            "createdAtMs": 2,
+            "channelWireId": "search-wire"
+        }),
+    );
+    let message = replicated_envelope(
+        "shared-peer",
+        2,
+        "chat.message.append",
+        json!({
+            "messageId": "shared-message",
+            "threadId": "shared-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ice",
+            "body": "Shared supernova content",
+            "createdAtMs": 3
+        }),
+    );
+
+    for operation in [&channel, &thread, &message] {
+        assert!(matches!(
+            apply_shared_envelope(&mut store, &boundary, operation, &NO_FAULTS),
+            Ok(ApplyOutcome::Applied(_))
+        ));
+    }
+
+    let title_hits = store
+        .read_with(|conn| query_chat_messages_granular(conn, WS, "constellation", 100))
+        .expect("shared title search");
+    assert_eq!(title_hits.len(), 1);
+    assert_eq!(title_hits[0].message_id, None);
+    let message_hits = store
+        .read_with(|conn| query_chat_messages_granular(conn, WS, "supernova", 100))
+        .expect("shared message search");
+    assert_eq!(message_hits.len(), 1);
+    assert_eq!(
+        message_hits[0].message_id.as_deref(),
+        Some("shared-message")
     );
 }
