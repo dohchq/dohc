@@ -35,7 +35,16 @@ type Refusal = {
 type KeyBehavior =
   | { kind: "accept"; envelopeJson?: string }
   | { kind: "refuseUpload"; refusal: Refusal }
-  | { kind: "missingDownload"; refusal: Refusal };
+  | { kind: "missingDownload"; refusal: Refusal }
+  | { kind: "scripted"; steps: KeyStep[] };
+
+type KeyStep =
+  | { method: "keys.upload"; result: "accept" | "conflict" }
+  | {
+      method: "keys.download";
+      result: "found" | "missing";
+      etag?: string;
+    };
 
 function snapshotError(error: unknown): Record<string, unknown> {
   if (!(error instanceof Error)) return { value: String(error) };
@@ -105,6 +114,17 @@ class BoundaryRecordingDaemon implements EngineDaemonClient {
     throw error;
   }
 
+  private nextStep(method: KeyStep["method"]): KeyStep | null {
+    if (this.behavior.kind !== "scripted") return null;
+    const step = this.behavior.steps.shift();
+    if (!step || step.method !== method) {
+      throw new Error(
+        `Expected scripted ${step?.method ?? "end of script"}, received ${method}.`,
+      );
+    }
+    return step;
+  }
+
   async sendRequest(request: Request): Promise<Response> {
     this.outboundFrames.push(structuredClone(request));
     switch (request.method) {
@@ -113,39 +133,83 @@ class BoundaryRecordingDaemon implements EngineDaemonClient {
       case "workspace.close":
         return this.response(request, { closed: true });
       case "keys.upload": {
+        const params = request.params as Record<
+          string,
+          JsonValue | undefined
+        >;
         this.emit({
           seq: this.emittedEvents.length + 1,
           sessionGeneration: 1,
           name: "relay.keyEnvelopeTransport",
-          payload: { method: "keys.upload", custody: "opaque" },
+          payload: {
+            method: "keys.upload",
+            custody: "opaque",
+            workspaceId: params.workspaceId ?? null,
+            envelopeJson: params.envelopeJson ?? null,
+            ifMatch: params.ifMatch ?? null,
+          },
         });
-        this.stderr.push("[daemon] keys.upload envelope transport");
+        this.stderr.push(
+          `[daemon] keys.upload ${JSON.stringify(request.params)}`,
+        );
         if (this.behavior.kind === "refuseUpload") {
           this.refuse(request, this.behavior.refusal);
         }
-        const params = request.params as Record<string, JsonValue | undefined>;
+        const step = this.nextStep("keys.upload");
+        if (step?.method === "keys.upload" && step.result === "conflict") {
+          this.refuse(request, {
+            code: "CONFLICT",
+            message: "relay key envelope conflict",
+            retry: "no",
+          });
+        }
         this.uploadedEnvelope = String(params.envelopeJson);
         return this.response(request, { etag: ETAG });
       }
       case "keys.download": {
-        this.emit({
-          seq: this.emittedEvents.length + 1,
-          sessionGeneration: 1,
-          name: "relay.keyEnvelopeTransport",
-          payload: { method: "keys.download", custody: "opaque" },
-        });
-        this.stderr.push("[daemon] keys.download envelope transport");
         if (this.behavior.kind === "missingDownload") {
           this.refuse(request, this.behavior.refusal);
+        }
+        const step = this.nextStep("keys.download");
+        if (step?.method === "keys.download" && step.result === "missing") {
+          this.refuse(request, {
+            code: "KEY_ENVELOPE_MISSING",
+            message: "relay key envelope missing",
+            retry: "no",
+          });
         }
         const envelopeJson =
           this.behavior.kind === "accept"
             ? (this.behavior.envelopeJson ?? this.uploadedEnvelope)
-            : this.uploadedEnvelope;
+            : (this.uploadedEnvelope ?? '{"wrapped":"current"}');
         if (envelopeJson === null) {
           throw new Error("Boundary mock has no envelope to download.");
         }
-        return this.response(request, { envelopeJson, etag: ETAG });
+        const result = {
+          envelopeJson,
+          etag:
+            step?.method === "keys.download" && step.result === "found"
+              ? (step.etag ?? ETAG)
+              : ETAG,
+        };
+        this.emit({
+          seq: this.emittedEvents.length + 1,
+          sessionGeneration: 1,
+          name: "relay.keyEnvelopeTransport",
+          payload: {
+            method: "keys.download",
+            custody: "opaque",
+            workspaceId: (
+              request.params as Record<string, JsonValue | undefined>
+            ).workspaceId,
+            envelopeJson: result.envelopeJson,
+            etag: result.etag,
+          },
+        });
+        this.stderr.push(
+          `[daemon] keys.download ${JSON.stringify({ request: request.params, result })}`,
+        );
+        return this.response(request, result);
       }
       default:
         throw new Error(`Unexpected boundary request: ${request.method}`);
@@ -255,7 +319,7 @@ function expectNoSentinel(
 }
 
 describe("workspace key-envelope daemon custody boundary", () => {
-  it("keeps the raw-key sentinel out of real request, response, event, stderr, and error paths", async () => {
+  it("keeps the raw-key sentinel out of live RPC/error captures and mock diagnostics", async () => {
     expect(SENTINEL).toHaveLength(32);
     const wrapped = await wrapWorkspaceDataKey({
       dataKey: SENTINEL,
@@ -304,22 +368,22 @@ describe("workspace key-envelope daemon custody boundary", () => {
       },
     });
     const uploadRefusalErrors: Record<string, unknown>[] = [];
-    await expect(
-      enrollWorkspaceKeyEnvelope({
-        workspaceId: WORKSPACE_ID,
-        dataKey: Buffer.from(SENTINEL),
-        passphrase: PASSPHRASE,
-        transport: recordingErrors(
-          uploadRefusal.client,
-          uploadRefusalErrors,
-        ),
-        installDataKey: async () => undefined,
-      }),
-    ).rejects.toMatchObject({
+    const uploadRefusalError = await enrollWorkspaceKeyEnvelope({
+      workspaceId: WORKSPACE_ID,
+      dataKey: Buffer.from(SENTINEL),
+      passphrase: PASSPHRASE,
+      transport: recordingErrors(
+        uploadRefusal.client,
+        uploadRefusalErrors,
+      ),
+      installDataKey: async () => undefined,
+    }).catch((error: unknown) => error);
+    expect(uploadRefusalError).toMatchObject({
       name: "DaemonRefusalError",
       wireCode: "FORBIDDEN",
       disposition: "terminal",
     });
+    const uploadRefusalEnrollmentErrors = [snapshotError(uploadRefusalError)];
     await uploadRefusal.sessions.closeAll();
 
     const missing = await harness({
@@ -353,7 +417,7 @@ describe("workspace key-envelope daemon custody boundary", () => {
       [
         "upload refusal boundary",
         uploadRefusal.daemon,
-        uploadRefusalErrors,
+        [...uploadRefusalErrors, ...uploadRefusalEnrollmentErrors],
       ],
       ["missing download boundary", missing.daemon, missingErrors],
     ] as const;
@@ -383,4 +447,95 @@ describe("workspace key-envelope daemon custody boundary", () => {
         ),
     ).toBe(true);
   }, 30_000);
+});
+
+describe("workspace key-envelope conflict retries", () => {
+  it("retries a create conflict with the downloaded etag as ifMatch", async () => {
+    const fetchedEtag = "f".repeat(64);
+    const context = await harness({
+      kind: "scripted",
+      steps: [
+        { method: "keys.upload", result: "conflict" },
+        { method: "keys.download", result: "found", etag: fetchedEtag },
+        { method: "keys.upload", result: "accept" },
+      ],
+    });
+
+    await enrollWorkspaceKeyEnvelope({
+      workspaceId: WORKSPACE_ID,
+      dataKey: Buffer.from(SENTINEL),
+      passphrase: PASSPHRASE,
+      transport: context.client,
+      installDataKey: async () => undefined,
+    });
+
+    const uploads = context.daemon.outboundFrames.filter(
+      (frame) => frame.method === "keys.upload",
+    );
+    expect(uploads).toHaveLength(2);
+    expect(uploads[0]?.params).not.toHaveProperty("ifMatch");
+    expect(uploads[1]?.params).toMatchObject({ ifMatch: fetchedEtag });
+    await context.sessions.closeAll();
+  });
+
+  it("retries create-only when the envelope vanishes during CAS", async () => {
+    const context = await harness({
+      kind: "scripted",
+      steps: [
+        { method: "keys.upload", result: "conflict" },
+        { method: "keys.download", result: "missing" },
+        { method: "keys.upload", result: "accept" },
+      ],
+    });
+
+    await enrollWorkspaceKeyEnvelope({
+      workspaceId: WORKSPACE_ID,
+      dataKey: Buffer.from(SENTINEL),
+      passphrase: PASSPHRASE,
+      transport: context.client,
+      installDataKey: async () => undefined,
+    });
+
+    const uploads = context.daemon.outboundFrames.filter(
+      (frame) => frame.method === "keys.upload",
+    );
+    expect(uploads).toHaveLength(2);
+    expect(uploads[0]?.params).not.toHaveProperty("ifMatch");
+    expect(uploads[1]?.params).not.toHaveProperty("ifMatch");
+    await context.sessions.closeAll();
+  });
+
+  it("stops after three conflicts with the kept-changing error", async () => {
+    const context = await harness({
+      kind: "scripted",
+      steps: [
+        { method: "keys.upload", result: "conflict" },
+        { method: "keys.download", result: "found" },
+        { method: "keys.upload", result: "conflict" },
+        { method: "keys.download", result: "found" },
+        { method: "keys.upload", result: "conflict" },
+        { method: "keys.download", result: "found" },
+      ],
+    });
+
+    await expect(
+      enrollWorkspaceKeyEnvelope({
+        workspaceId: WORKSPACE_ID,
+        dataKey: Buffer.from(SENTINEL),
+        passphrase: PASSPHRASE,
+        transport: context.client,
+        installDataKey: async () => undefined,
+      }),
+    ).rejects.toMatchObject({
+      name: "RelayConflictError",
+      message:
+        "Relay key envelope kept changing concurrently; upload did not complete.",
+    });
+    expect(
+      context.daemon.outboundFrames.filter(
+        (frame) => frame.method === "keys.upload",
+      ),
+    ).toHaveLength(3);
+    await context.sessions.closeAll();
+  });
 });

@@ -3682,7 +3682,7 @@ function registerIpcHandlers(
       });
       if (!daemonRelay) {
         throw new Error(
-          "Rust engine relay transport is required for key enrollment.",
+          "Rust engine relay transport is required to claim and enroll this workspace.",
         );
       }
       try {

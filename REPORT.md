@@ -200,10 +200,18 @@ The boundary recorder captures:
   all `keys.*` frames;
 - every inbound success `Response`;
 - every inbound error frame;
-- every daemon-emitted event and every event observed by the registered
-  transport listener;
-- the mock daemon stderr diagnostic channel;
-- raw transport error objects and translated desktop error objects.
+- every mock-daemon event and every event observed by the real registered
+  transport listener; the event payload is populated from the actual
+  `keys.*` request/response content, including the opaque envelope;
+- the mock-daemon stderr diagnostic channel, likewise populated from the
+  actual `keys.*` request/response content;
+- raw transport error objects, translated desktop error objects, and the
+  final error rejected by the enrollment unit.
+
+The RPC frames and error objects are live captures through the production
+desktop client stack. Events and stderr are deliberately mock-authored
+diagnostic surfaces carrying live boundary content; they are not captured
+output from a real Rust daemon process.
 
 Paths driven:
 
@@ -232,10 +240,10 @@ Only the randomized wrapped envelope crosses the boundary.
 Passing tail:
 
 ```text
-✓ workspace key-envelope daemon custody boundary
-  > keeps the raw-key sentinel out of real request, response, event, stderr, and error paths
+✓ workspaceKeyEnvelopeEnrollment.test.ts (4 tests)
+  > keeps the raw-key sentinel out of live RPC/error captures and mock diagnostics
 Test Files  1 passed (1)
-Tests       1 passed (1)
+Tests       4 passed (4)
 ```
 
 ## Mutation proofs
@@ -333,7 +341,8 @@ One rollout dependency remains outside this shard's allowed routing scope:
 the handlers require a daemon workspace handle, while
 `relayClientForWorkspace` returns `null` for a root that is still selected for
 TypeScript transport. Enrollment now fails closed before claiming the relay in
-that case, with `Rust engine relay transport is required for key enrollment.`,
+that case, with
+`Rust engine relay transport is required to claim and enroll this workspace.`,
 rather than mixing an identity-less envelope client with daemon sync or
 bypassing the transport-mode authority. The in-flight transport-selection
 shard must make production enrollment roots daemon-routed before the flip.
@@ -345,3 +354,119 @@ Because `packages/workspace-engine-client/src/ydoc/**` is explicitly owned by
 another shard, this change adds the current relay codes to the non-generated
 daemon decoder/type. Regenerating those bindings remains a protocol-generation
 follow-up; it is not a runtime blocker for this flow.
+
+## ROUND2 — conflict retry coverage and review follow-ups
+
+### Production-stack conflict coverage
+
+`workspaceKeyEnvelopeEnrollment.test.ts` now drives the private
+`uploadReplacingCurrentEnvelope` loop through the public
+`enrollWorkspaceKeyEnvelope` entry point and the production
+`EngineRelayClient` -> `EngineWorkspaceSessions` -> daemon-requester stack.
+The recording daemon scripts and verifies three nontrivial sequences:
+
+1. create upload -> `CONFLICT` -> `keys.download` returns a current etag ->
+   second upload succeeds with that exact etag in `ifMatch`;
+2. create upload -> `CONFLICT` -> `keys.download` returns
+   `KEY_ENVELOPE_MISSING` -> second create-only upload succeeds without
+   `ifMatch`;
+3. three upload conflicts (with the intervening current-envelope downloads)
+   -> terminal `RelayConflictError` with
+   `Relay key envelope kept changing concurrently; upload did not complete.`;
+   the recorder proves exactly three upload attempts.
+
+The fail-closed guard now says the Rust relay transport is required to
+`claim and enroll this workspace`, matching the fact that it gates both
+operations.
+
+### Mutation proof — retry loses `ifMatch`
+
+Temporary mutation: removed the conditional `ifMatch` property from the
+production retry upload:
+
+```ts
+await transport.uploadKeyEnvelope({
+  envelopeJson,
+});
+```
+
+Named behavioral failure:
+
+```text
+FAIL workspace key-envelope conflict retries
+  > retries a create conflict with the downloaded etag as ifMatch
+AssertionError: expected the second keys.upload params to match
+{ ifMatch: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+Received keys.upload params with only envelopeJson and workspaceId.
+Test Files  1 failed (1)
+Tests       1 failed | 3 skipped (4)
+```
+
+After restoring the conditional property:
+
+```text
+Test Files  1 passed (1)
+Tests       4 passed (4)
+```
+
+### Mutation proof — raw key leaks through the enrollment error
+
+Temporary mutation: on an upload error, appended both `envelopeJson` and
+`input.dataKey.toString("ascii")` to the propagated error message. The
+sentinel test now records the final enrollment rejection as well as the raw
+transport and translated errors.
+
+Named behavioral failure:
+
+```text
+FAIL workspace key-envelope daemon custody boundary
+  > keeps the raw-key sentinel out of live RPC/error captures and mock diagnostics
+AssertionError: MUTATION: raw workspace key sentinel leaked into upload
+refusal boundary as DOHC_RAW_KEY_SENTINEL_20260728!!
+Test Files  1 failed (1)
+Tests       1 failed | 3 skipped (4)
+```
+
+After restoring the error path:
+
+```text
+Test Files  1 passed (1)
+Tests       4 passed (4)
+```
+
+### ROUND2 validation
+
+No `cargo` command was run.
+
+`pnpm -r --if-present typecheck` passed across all 22 participating projects:
+
+```text
+packages/workspace-engine typecheck: Done
+services/agent-sandbox typecheck: Done
+packages/workspace-engine-client typecheck: Done
+services/sync-relay typecheck: Done
+apps/desktop typecheck: Done
+```
+
+`pnpm --filter @dohc/desktop test` final run:
+
+```text
+Test Files  181 passed | 1 skipped (182)
+Tests       2265 passed | 4 skipped (2269)
+Duration    40.58s
+```
+
+Two preceding full runs each hit one of the already-documented, unrelated
+timing flakes under full-suite load:
+
+- `FileInspector.test.tsx` remained on `Loading editor...` past the default
+  query timeout; the unchanged file then passed in isolation (53/53).
+- `engineDaemonLifecycle.test.ts` missed the third restart inside its
+  `vi.waitFor` window; the unchanged file then passed in isolation
+  (15 passed, 1 skipped).
+
+The third unchanged exact full-suite run passed as shown above.
+
+Protocol-generation follow-up: the hand-maintained `DaemonErrorCode` list
+duplicates the Rust enum. Regenerating the ts-rs `ErrorCode.ts` mirror is the
+right long-term fix and remains owned by the protocol-generation tooling.
