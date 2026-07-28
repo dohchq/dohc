@@ -2867,3 +2867,30 @@ without egress budget (lib.rs:2184); sync.commitCursor one-shot token order
 (engineRelayClient.ts:474); frozen cross-engine security-contract fixture with
 no drift guard (gen-fixtures.mjs); no Windows CI leg for cfg(windows) tests
 (pr-checks.yml — interacts with Ice's #318 dispatch-only decision).
+
+### Additional deferred items surfaced by the campaign's own reviews
+
+The layered reviews of the in-flight shards surfaced issues beyond their
+scope; recorded here beside the audit P2s so they ride the same triage:
+
+- **Rollback of a Blocked/pending settle moment orphans its ydoc-mat_ job and
+  voids the CRDT prune guard** (medium; the pending-job EXISTS joins moments,
+  rollback deletes the moment, and the rollback cancellation block never
+  covers ydoc-mat_ ids — exposure pre-existed via the transient-Err settle
+  arm). Rollback-domain surgery; intersects the AUDIT-BINROLLBACK family.
+- A blocked-then-recovered ydoc settle leaves one stale self-write
+  suppression entry (low; self-healing — equal-content ingest dedupes and the
+  next settle drains it). The settle test's recorder counts are deliberately
+  unpinned until this is resolved.
+- `JobOutcome::Blocked` reports as `Skipped` over the post-commit wire —
+  callers cannot distinguish "pending, retry after containment restored" from
+  "nothing to do" (low; protocol addition).
+- CLI read attachments have no reaper: a failed CLI-side close leaves the
+  attachment for the owner's lifetime, bounded by the 64-handle cap (low).
+- The symlink/junction test fixtures skip silently where alias creation is
+  unavailable (file symlinks need Developer Mode on Windows; dir aliases fall
+  back to junctions). The WSL leg of the gate covers them — the known
+  Windows blind-spot rule applies.
+- Pre-existing: `ensure_secret_target_symlink_free` is referenced only under
+  cfg(not(any(unix, windows))) and defined nowhere — exotic-platform builds
+  cannot compile; harmless today, worth a cleanup.
