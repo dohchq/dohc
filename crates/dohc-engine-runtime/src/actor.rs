@@ -5742,7 +5742,10 @@ fn replay_pending_materializations(
         if selected.is_some_and(|selected| !selected.contains(&job.job_id)) {
             continue;
         }
-        if job.workspace_id != scope.workspace_id {
+        // Empty is the migration sentinel for a pre-coordinate row. Those
+        // intents were globally replayable before workspace scoping existed,
+        // so preserve that behavior until one workspace drains them.
+        if !job.workspace_id.is_empty() && job.workspace_id != scope.workspace_id {
             continue;
         }
         summary.selected_seen += usize::from(selected.is_some());

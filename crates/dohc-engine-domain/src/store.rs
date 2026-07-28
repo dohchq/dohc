@@ -2443,7 +2443,7 @@ pub fn capture_manifest_seed(
                    AND NOT EXISTS ( \
                        SELECT 1 FROM materialization_jobs j \
                         WHERE j.status = 'pending' AND j.operation = 'write' \
-                          AND j.workspace_id = ?1 \
+                          AND (j.workspace_id = ?1 OR j.workspace_id = '') \
                           AND j.target_path = a.path \
                          AND j.content_sha256 = CASE COALESCE(s.content_kind, 'text') \
                              WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END \
@@ -2470,7 +2470,7 @@ pub fn capture_manifest_seed(
                  FROM materialization_jobs j \
                  JOIN binary_blobs bb ON bb.sha256 = j.content_sha256 \
                   WHERE j.status = 'pending' AND j.operation = 'delete' \
-                    AND j.workspace_id = ?1 \
+                    AND (j.workspace_id = ?1 OR j.workspace_id = '') \
                      AND (substr(j.job_id, 1, length(?3)) = ?3 \
                          OR substr(j.job_id, \
                                length('binary-rename-1-delete-mat_') + 1, \
@@ -2494,7 +2494,8 @@ pub fn capture_manifest_seed(
                                      substr(j.job_id, \
                                          length('binary-rename-1-delete-mat_') + 1) \
                                     AND restore.operation = 'write' \
-                                    AND restore.workspace_id = ?1 \
+                                    AND (restore.workspace_id = ?1 \
+                                         OR restore.workspace_id = '') \
                                     AND restore.content_sha256 = j.content_sha256 \
                                    AND CASE COALESCE(restore_snapshot.content_kind, 'text') \
                                        WHEN 'binary' THEN restore_snapshot.binary_sha256 \

@@ -1795,9 +1795,9 @@ pub(crate) const CHAT_PENDING_MESSAGE_THREAD_MIGRATION_ID: &str = "v1-chat-pendi
 /// Ordinal 24. Materialization generations are path-local within a workspace,
 /// not global across every workspace that happens to share an engine database.
 /// New writers always persist this coordinate. The backfill recovers it from
-/// durable moment identities where possible, then uses the documented
-/// one-workspace-per-database invariant for legacy rows that predate the
-/// coordinate.
+/// durable identities where possible. An unmatched row remains empty: consumers
+/// treat that sentinel with the pre-migration global replay/fence semantics so
+/// an opaque legacy intent can never be stranded.
 const V1_MATERIALIZATION_WORKSPACE_DDL: &str = "\
 ALTER TABLE materialization_jobs
     ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';

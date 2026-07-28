@@ -11,7 +11,7 @@ use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
     SelfWriteRecorder, WorkspaceSupervisor,
 };
-use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+use dohc_engine_storage::{EngineStore, FaultAction, FaultInjector, FaultPoint};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use std::sync::{
     Arc,
@@ -1944,5 +1944,119 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
             .iter()
             .any(|op| matches!(op, CaptureOp::Retire { path } if path == "captured.bin"))
     );
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migrated_opaque_jobs_replay_and_legacy_completed_jobs_keep_fencing() {
+    const WORKSPACE_A: &str = "legacy-workspace-a";
+    const WORKSPACE_B: &str = "legacy-workspace-b";
+    const OPAQUE_PENDING_JOB: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OPAQUE_COMPLETED_JOB: &str =
+        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    const LEGACY_PROJECTION: &[u8] = b"# migrated settle projection\n";
+
+    let database = ScratchDir::new().expect("database scratch");
+    let replay_root = ScratchDir::new().expect("replay root");
+    let db = database.engine_db_path().expect("db");
+
+    let store = EngineStore::open(&db, 1).expect("create current store");
+    let content_sha = store
+        .put_binary_blob(LEGACY_PROJECTION)
+        .expect("stage legacy projection");
+    drop(store);
+
+    // Rewind only ordinal 24's additive schema to construct the exact shipped
+    // pre-migration shape, then seed two workspaces and settle-shaped opaque
+    // job ids that none of the coordinate backfills can decode.
+    let connection = rusqlite::Connection::open(&db).expect("open legacy fixture");
+    connection
+        .execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+                 VALUES ('legacy-workspace-a', 'main'), ('legacy-workspace-b', 'main');
+             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms) \
+                 VALUES ('legacy-workspace-a', 'main', 'main', 'Main', 1),
+                        ('legacy-workspace-b', 'main', 'main', 'Main', 1);
+             DROP INDEX idx_materialization_jobs_workspace_path_status_generation;
+             DELETE FROM engine_migrations WHERE ordinal = 24;
+             ALTER TABLE materialization_jobs DROP COLUMN workspace_id;",
+        )
+        .expect("rewind workspace-coordinate migration");
+    connection
+        .execute(
+            "INSERT INTO materialization_jobs \
+             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+              target_generation, status, created_at_ms, completed_at_ms, operation) \
+             VALUES (?1, 'legacy-settle.md', ?2, 0, NULL, 7, 'pending', 10, NULL, 'write')",
+            rusqlite::params![OPAQUE_PENDING_JOB, content_sha],
+        )
+        .expect("pending opaque settle job");
+    connection
+        .execute(
+            "INSERT INTO materialization_jobs \
+             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+              target_generation, status, created_at_ms, completed_at_ms, operation) \
+             VALUES (?1, 'fenced.bin', ?2, 0, NULL, 41, 'complete', 11, 12, 'write')",
+            rusqlite::params![OPAQUE_COMPLETED_JOB, content_sha],
+        )
+        .expect("completed opaque fence job");
+    drop(connection);
+
+    let migrated = EngineStore::open(&db, 20).expect("upgrade legacy store");
+    for job_id in [OPAQUE_PENDING_JOB, OPAQUE_COMPLETED_JOB] {
+        let workspace_id: String = migrated
+            .read_with(|connection| {
+                connection.query_row(
+                    "SELECT workspace_id FROM materialization_jobs WHERE job_id = ?1",
+                    [job_id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("read migrated workspace sentinel");
+        assert_eq!(
+            workspace_id, "",
+            "opaque jobs must retain the legacy wildcard sentinel"
+        );
+    }
+    for workspace_id in [WORKSPACE_A, WORKSPACE_B] {
+        assert_eq!(
+            migrated
+                .max_completed_generation_for_path(workspace_id, "fenced.bin")
+                .expect("legacy completed fence"),
+            Some(41),
+            "a pre-coordinate completed job keeps its old global fence semantics"
+        );
+    }
+    drop(migrated);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 30).expect("open migrated actor").actor;
+    assert_eq!(
+        actor
+            .materialize_replay_pending(
+                replay_root.path().to_path_buf(),
+                WORKSPACE_B.to_owned(),
+                31,
+            )
+            .await
+            .expect("replay legacy opaque job"),
+        1
+    );
+    assert_eq!(
+        std::fs::read(replay_root.path().join("legacy-settle.md"))
+            .expect("materialized legacy settle projection"),
+        LEGACY_PROJECTION
+    );
+    let connection = rusqlite::Connection::open(&db).expect("read replay status");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            [OPAQUE_PENDING_JOB],
+            |row| row.get(0),
+        )
+        .expect("opaque replay status");
+    assert_eq!(status, "complete");
+    drop(connection);
     supervisor.close(&db).expect("close actor");
 }
