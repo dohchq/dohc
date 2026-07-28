@@ -5091,7 +5091,7 @@ async fn merge_conflict_returns_the_exact_created_conflict_id() {
     )
     .await;
     assert!(
-        conflicts
+        conflicts["conflicts"]
             .as_array()
             .expect("conflicts")
             .iter()

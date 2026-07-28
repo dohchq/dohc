@@ -488,10 +488,21 @@ export class VersionedLiveAdapter {
     status?: "open" | "resolved";
   }): Promise<ConflictRecord[]> {
     this.assertWorkspace(input.workspaceId);
-    const params: ConflictListParams = {
-      ...(input.status !== undefined ? { status: input.status } : {}),
-    };
-    return this.workspaceRequest(WORKSPACE_METHOD.conflictsList, params);
+    const conflicts: ConflictRecord[] = [];
+    let afterConflictId: string | undefined;
+    do {
+      const params: ConflictListParams = {
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+      };
+      const page = await this.workspaceRequest(
+        WORKSPACE_METHOD.conflictsList,
+        params,
+      );
+      conflicts.push(...page.conflicts);
+      afterConflictId = page.nextAfterConflictId ?? undefined;
+    } while (afterConflictId !== undefined);
+    return conflicts;
   }
 
   async openTextConflict(

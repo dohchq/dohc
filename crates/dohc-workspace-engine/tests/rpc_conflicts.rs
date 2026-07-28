@@ -1,0 +1,416 @@
+use dohc_engine_protocol::{
+    limits::WireLimits,
+    transport::{EngineTransport, InProcessTransport, RequestContext},
+    wire::{Envelope, Request, Response, WorkspaceHandle, encode_control},
+};
+use dohc_engine_testkit::ScratchDir;
+use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use serde_json::{Value, json};
+use std::sync::Arc;
+
+const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
+    Request {
+        id,
+        method: method.to_owned(),
+        workspace,
+        deadline_ms: None,
+        idempotency_key: None,
+        params,
+    }
+}
+
+async fn fixture(
+    name: &str,
+) -> (
+    ScratchDir,
+    InProcessTransport<EngineService>,
+    WorkspaceHandle,
+    String,
+) {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let workspace_id = format!("ws-conflicts-{name}");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "bootstrap.md",
+                    "text": "bootstrap",
+                    "origin": "api",
+                    "requestId": format!("{name}-bootstrap"),
+                }),
+            ),
+        )
+        .await
+        .expect("bootstrap versioned workspace");
+    (scratch, transport, handle, workspace_id)
+}
+
+fn conflict_payload(workspace_id: &str, index: usize, text: &str) -> Value {
+    let conflict_id = format!("conflict-{index:03}");
+    let path = format!("conflict-{index:03}.md");
+    let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+    let state = json!({
+        "path": path,
+        "contentKind": "text",
+        "snapshot": {
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "objectId": format!("object-{index:03}"),
+            "path": path,
+            "text": text,
+            "blobSha256": sha256,
+            "updatedAtMs": index as i64 + 1,
+            "latestMomentId": format!("moment-{index:03}"),
+            "metadataOrigin": "sync",
+        },
+        "metadataSummary": null,
+        "metadataCorrelationId": null,
+    });
+    json!({
+        "conflict": {
+            "id": conflict_id,
+            "workspaceId": workspace_id,
+            "path": path,
+            "targetVersionId": "main",
+            "sourceVersionId": "peer",
+            "createdAtMs": index as i64 + 1,
+            "updatedAtMs": index as i64 + 1,
+            "status": "open",
+            "chosenFrom": "current",
+            "resolution": null,
+            "metadata": {
+                "origin": "sync",
+                "summary": null,
+                "correlationId": null,
+            },
+            "base": state,
+            "current": state,
+            "incoming": state,
+        }
+    })
+}
+
+async fn seed_conflicts(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    workspace_id: &str,
+    count: usize,
+    text: &str,
+) {
+    for index in 0..count {
+        let opened = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    index as u64 + 2,
+                    "conflicts.open",
+                    Some(handle.clone()),
+                    conflict_payload(workspace_id, index, text),
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("seed conflict {index}: {error:?}"));
+        assert_eq!(opened.result["inserted"], true);
+    }
+}
+
+async fn open_conflict(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    workspace_id: &str,
+    index: usize,
+    text: &str,
+) {
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                index as u64 + 2,
+                "conflicts.open",
+                Some(handle.clone()),
+                conflict_payload(workspace_id, index, text),
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("seed conflict {index}: {error:?}"));
+    assert_eq!(opened.result["inserted"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_conflict_inventory_is_wire_safe_across_pages_and_session_survives() {
+    // Fourteen rows serialize beyond the 8 MiB frame as one legacy array,
+    // while each row remains under the hard single-row cap.
+    const CONFLICT_COUNT: usize = 14;
+    let (_scratch, transport, handle, workspace_id) = fixture("paged-inventory").await;
+    let text = "\0".repeat(35_000);
+    seed_conflicts(&transport, &handle, &workspace_id, CONFLICT_COUNT, &text).await;
+
+    let mut request_id = 100;
+    let mut after_conflict_id: Option<String> = None;
+    let mut pages = 0usize;
+    let mut all_rows = Vec::new();
+    loop {
+        let response = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    request_id,
+                    "conflicts.list",
+                    Some(handle.clone()),
+                    json!({
+                        "status": "open",
+                        "afterConflictId": after_conflict_id,
+                    }),
+                ),
+            )
+            .await
+            .expect("conflict page");
+        encode_control(
+            &Envelope::Response(response.clone()),
+            &WireLimits::default(),
+        )
+        .expect("every returned page must fit the negotiated wire limits");
+
+        let rows = response.result["conflicts"]
+            .as_array()
+            .expect("conflicts page");
+        assert!(!rows.is_empty(), "a continuation page must make progress");
+        all_rows.extend(rows.iter().cloned());
+        pages += 1;
+        after_conflict_id = response.result["nextAfterConflictId"]
+            .as_str()
+            .map(str::to_owned);
+        request_id += 1;
+        if after_conflict_id.is_none() {
+            break;
+        }
+    }
+
+    assert!(pages > 1, "the oversized inventory must be split");
+    assert_eq!(all_rows.len(), CONFLICT_COUNT);
+    let legacy = Envelope::Response(Response {
+        id: 999,
+        result: Value::Array(all_rows),
+    });
+    assert!(
+        encode_control(&legacy, &WireLimits::default()).is_err(),
+        "the same inventory as one legacy array must exceed the wire frame"
+    );
+
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(1_000, "watcher.status", Some(handle), json!({})),
+        )
+        .await
+        .expect("the daemon session remains usable after all pages");
+    assert!(status.result["running"].is_boolean());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conflict_page_cursor_round_trips_without_duplicates_or_gaps() {
+    // MUTATION: ignore afterConflictId (or resume before it) and page two
+    // repeats conflict-000 instead of returning conflict-001.
+    let (_scratch, transport, handle, workspace_id) = fixture("cursor").await;
+    let text = "\0".repeat(20_000);
+    seed_conflicts(&transport, &handle, &workspace_id, 3, &text).await;
+
+    let first = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "conflicts.list",
+                Some(handle.clone()),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("first page");
+    assert_eq!(first.result["conflicts"][0]["id"], "conflict-000");
+    assert_eq!(
+        first.result["nextAfterConflictId"],
+        first.result["conflicts"][0]["id"]
+    );
+
+    let second = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                11,
+                "conflicts.list",
+                Some(handle),
+                json!({
+                    "status": "open",
+                    "afterConflictId": first.result["nextAfterConflictId"],
+                }),
+            ),
+        )
+        .await
+        .expect("second page");
+    assert_eq!(second.result["conflicts"][0]["id"], "conflict-001");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cursor_continues_after_its_open_conflict_is_resolved() {
+    let (_scratch, transport, handle, workspace_id) = fixture("resolved-cursor").await;
+    let text = "\0".repeat(20_000);
+
+    let current = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "object-000",
+                    "path": "conflict-000.md",
+                    "text": text,
+                    "momentId": "moment-000",
+                    "origin": "api",
+                    "nowMs": 1,
+                    "requestId": "seed-resolvable-current",
+                }),
+            ),
+        )
+        .await
+        .expect("seed current head");
+    let mut first_payload = conflict_payload(&workspace_id, 0, &text);
+    let snapshot = &current.result["snapshot"];
+    first_payload["conflict"]["current"]["snapshot"] = json!({
+        "workspaceId": snapshot["workspaceId"],
+        "versionId": snapshot["versionId"],
+        "objectId": snapshot["objectId"],
+        "path": snapshot["path"],
+        "text": snapshot["text"],
+        "blobSha256": snapshot["blobSha256"],
+        "updatedAtMs": snapshot["updatedAtMs"],
+        "latestMomentId": snapshot["latestMomentId"],
+        "metadataOrigin": snapshot["metadataOrigin"],
+    });
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(11, "conflicts.open", Some(handle.clone()), first_payload),
+        )
+        .await
+        .expect("open resolvable cursor conflict");
+    open_conflict(&transport, &handle, &workspace_id, 1, &text).await;
+    open_conflict(&transport, &handle, &workspace_id, 2, &text).await;
+
+    let first = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                20,
+                "conflicts.list",
+                Some(handle.clone()),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("first page");
+    assert_eq!(first.result["conflicts"][0]["id"], "conflict-000");
+    assert_eq!(first.result["nextAfterConflictId"], "conflict-000");
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                21,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "keep-current",
+                    "objectId": "resolved-object",
+                    "writeMomentId": "resolved-write",
+                    "deleteMomentId": "resolved-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 100,
+                }}),
+            ),
+        )
+        .await
+        .expect("resolve continuation conflict between pages");
+
+    let second = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                22,
+                "conflicts.list",
+                Some(handle),
+                json!({
+                    "status": "open",
+                    "afterConflictId": "conflict-000",
+                }),
+            ),
+        )
+        .await
+        .expect("second page resumes from the unfiltered cursor key");
+    assert_eq!(second.result["conflicts"][0]["id"], "conflict-001");
+    assert!(
+        second.result["conflicts"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .all(|row| row["id"] != "conflict-000"),
+        "the filtered page must not restart or duplicate its resolved cursor"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escape_heavy_conflict_that_fits_the_control_frame_is_returned() {
+    let (_scratch, transport, handle, workspace_id) = fixture("single-row").await;
+    let text = "\0".repeat(40_000);
+    seed_conflicts(&transport, &handle, &workspace_id, 1, &text).await;
+
+    let response = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("the conflict-specific row cap must admit this response");
+    assert_eq!(response.result["conflicts"].as_array().unwrap().len(), 1);
+    let encoded = encode_control(&Envelope::Response(response), &WireLimits::default())
+        .expect("the escape-heavy conflict still fits the negotiated control frame");
+    assert!(
+        encoded.len() > 700 * 1024,
+        "the regression row must exceed the old shared 700 KiB cap"
+    );
+}

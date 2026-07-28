@@ -35,6 +35,7 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type ConflictListParams = WorkspaceJsonObject & {
   status?: "open" | "resolved";
+  afterConflictId?: string;
 };
 export type ConflictOpenParams = WorkspaceJsonObject & {
   conflict?: WorkspaceJsonObject;
@@ -114,6 +115,11 @@ export type ConflictRecord = WorkspaceJsonObject & {
   base: ConflictFileState;
   current: ConflictFileState;
   incoming: ConflictFileState;
+};
+
+export type ConflictListPage = WorkspaceJsonObject & {
+  conflicts: ConflictRecord[];
+  nextAfterConflictId: string | null;
 };
 
 export type PendingConflictResolve = WorkspaceJsonObject & {
@@ -215,7 +221,7 @@ export type WorkspaceMethodParamsMap = {
 export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.open]: WorkspaceOpenResult;
   [WORKSPACE_METHOD.close]: WorkspaceCloseResult;
-  [WORKSPACE_METHOD.conflictsList]: ConflictRecord[];
+  [WORKSPACE_METHOD.conflictsList]: ConflictListPage;
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
   [WORKSPACE_METHOD.searchQuery]: SearchResult[];
@@ -651,14 +657,28 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
       result = { closed: booleanValue(object, "closed", label) };
       break;
     }
-    case WORKSPACE_METHOD.conflictsList:
-      if (!Array.isArray(value)) {
-        throw new WorkspaceProtocolShapeError(`${label} must be an array.`);
+    case WORKSPACE_METHOD.conflictsList: {
+      const object = objectValue(value, label, [
+        "conflicts",
+        "nextAfterConflictId",
+      ]);
+      if (!Array.isArray(object.conflicts)) {
+        throw new WorkspaceProtocolShapeError(
+          `${label}.conflicts must be an array.`,
+        );
       }
-      result = value.map((entry, index) =>
-        decodeConflictRecord(entry, `${label}[${index}]`),
-      );
+      result = {
+        conflicts: object.conflicts.map((entry, index) =>
+          decodeConflictRecord(entry, `${label}.conflicts[${index}]`),
+        ),
+        nextAfterConflictId: nullableString(
+          object,
+          "nextAfterConflictId",
+          label,
+        ),
+      };
       break;
+    }
     case WORKSPACE_METHOD.conflictsOpen: {
       const object = recordValue(value, label);
       if (object.replicated === true) {
