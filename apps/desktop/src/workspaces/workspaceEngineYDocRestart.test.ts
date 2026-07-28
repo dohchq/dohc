@@ -17,7 +17,10 @@ import type {
 } from "../collab/ydocEngineProviderSessionRust";
 import type { EngineDaemonClient } from "./engineDaemonLifecycle";
 import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
-import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import {
+  createWorkspaceEngineCapture,
+  type WorkspaceEngineCapture,
+} from "./workspaceEngineCapture";
 import { nativeTmpdir } from "./testTemp";
 
 const roots: string[] = [];
@@ -26,6 +29,166 @@ afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
+});
+
+async function reconnectFailureCapture(prefix: string) {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), prefix));
+  roots.push(rootPath);
+  const workspaceId = prefix.replace(/-+$/, "");
+  const loopback = new VersionedLoopbackEngine();
+  const state = {
+    failBackgroundCapture: false,
+    generation: 0,
+    leaseActive: false,
+    releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
+  };
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: workspaceId } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      if (state.failBackgroundCapture) {
+        throw new Error("background capture unavailable");
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+  const openProvider = async (
+    options: EngineYdocProviderSessionRustOptions,
+  ): Promise<EngineYdocProviderSessionRust> => {
+    if (state.leaseActive) throw new Error("ydoc-session-busy");
+    state.leaseActive = true;
+    const openedGeneration = ++state.generation;
+    const doc = new Y.Doc();
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      async applyLocalUpdate() {
+        throw Object.assign(new Error("control frame encoding failed"), {
+          code: "transport-error",
+        });
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: `moment-${openedGeneration}`,
+          path: options.path,
+          markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close(closeOptions) {
+        state.releaseCalls.push({
+          generation: openedGeneration,
+          ...(closeOptions?.settle !== undefined
+            ? { settle: closeOptions.settle }
+            : {}),
+        });
+        state.leaseActive = false;
+      },
+    };
+  };
+  const outcomes: boolean[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId,
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    onError: () => undefined,
+  });
+  return { capture, outcomes, rootPath, state };
+}
+
+async function failRendererUpdate(
+  session: Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>,
+): Promise<void> {
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "renderer-only edit");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+}
+
+it("retains a reconnect-failed generation when replacement open is refused", async () => {
+  const { capture, state } = await reconnectFailureCapture(
+    "dohc-ydoc-reconnect-busy-",
+  );
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+
+  await failRendererUpdate(session);
+  expect(state.leaseActive).toBe(true);
+  expect(state.releaseCalls).toEqual([]);
+
+  await expect(session.close({ settle: false })).resolves.toBeUndefined();
+  expect(state.releaseCalls).toEqual([{ generation: 1, settle: false }]);
+  expect(state.leaseActive).toBe(false);
+
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  expect(state.generation).toBe(2);
+  await reopened.close({ settle: false });
+  await capture.stop();
+});
+
+it("publishes dead-session recovery without masking background capture health", async () => {
+  const { capture, outcomes, rootPath, state } =
+    await reconnectFailureCapture("dohc-ydoc-outcome-recovery-");
+
+  const healthyBackgroundSession = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await failRendererUpdate(healthyBackgroundSession);
+  expect(outcomes).toEqual([false]);
+  await healthyBackgroundSession.close({ settle: false });
+  expect(outcomes).toEqual([false, true]);
+
+  const failingBackgroundSession = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await failRendererUpdate(failingBackgroundSession);
+  expect(outcomes).toEqual([false, true, false]);
+
+  state.failBackgroundCapture = true;
+  await writeFile(join(rootPath, "background.md"), "capture me\n");
+  capture.captureBatch([{ path: "background.md", operation: "update" }]);
+  await capture.flush();
+  expect(outcomes).toEqual([false, true, false, false]);
+
+  state.failBackgroundCapture = false;
+  await failingBackgroundSession.close({ settle: false });
+  expect(outcomes).toEqual([false, true, false, false, false]);
+
+  capture.captureBatch([{ path: "background.md", operation: "update" }]);
+  await capture.flush();
+  expect(outcomes).toEqual([false, true, false, false, false, true]);
+  await capture.stop();
 });
 
 it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", async () => {
@@ -650,10 +813,12 @@ it("defers a version switch behind a dead generation until release converges", a
   });
   expect(closeAttempts).toEqual([false, true, false, true, false]);
   expect(leaseActive).toBe(false);
+  expect(outcomes).toEqual([false, false, true]);
+  expect(historyCaptureFailed).toBe(false);
   await writeFile(join(rootPath, "unrelated.md"), "captured safely again\n");
   capture.captureBatch([{ path: "unrelated.md", operation: "update" }]);
   await capture.flush();
-  expect(outcomes).toEqual([false, false, true]);
+  expect(outcomes).toEqual([false, false, true, true]);
   expect(historyCaptureFailed).toBe(false);
   const reopened = await capture.openYDocSession({
     path: "note.md",

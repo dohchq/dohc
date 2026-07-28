@@ -958,11 +958,24 @@ export function createWorkspaceEngineCapture(
   // A healthy watcher batch cannot clear the workspace notice while any dead
   // editor session is still rejecting the user's edits.
   const deadYDocSessions = new Set<object>();
+  // Dead-session failures are an independent penalty, so retain the latest
+  // watcher/health result when that penalty is added and later removed.
+  let backgroundCaptureHealthy = true;
+
+  const publishCaptureOutcome = (): void => {
+    options.onCaptureOutcome?.({
+      ok: backgroundCaptureHealthy && deadYDocSessions.size === 0,
+    });
+  };
 
   const emitCaptureOutcome = (ok: boolean): void => {
-    options.onCaptureOutcome?.({
-      ok: ok && deadYDocSessions.size === 0,
-    });
+    backgroundCaptureHealthy = ok;
+    publishCaptureOutcome();
+  };
+
+  const clearDeadYDocSession = (token: object): void => {
+    if (!deadYDocSessions.delete(token)) return;
+    if (deadYDocSessions.size === 0) publishCaptureOutcome();
   };
 
   // THE AUTHORITATIVE live-session registry (WS-G2-C-2 gate fix). One entry per
@@ -1044,7 +1057,7 @@ export function createWorkspaceEngineCapture(
       if (dead) return;
       dead = true;
       deadYDocSessions.add(deadSessionToken);
-      emitCaptureOutcome(false);
+      publishCaptureOutcome();
     };
 
     const releaseGeneration = async (
@@ -1134,7 +1147,7 @@ export function createWorkspaceEngineCapture(
       try {
         replacement = await openGeneration();
       } catch (error) {
-        markDead(null);
+        markDead(failed);
         throw error;
       }
       try {
@@ -1274,7 +1287,7 @@ export function createWorkspaceEngineCapture(
               releaseObligation = null;
             }
             closed = true;
-            deadYDocSessions.delete(deadSessionToken);
+            clearDeadYDocSession(deadSessionToken);
             return;
           }
           await executeWithReconnect(async (session) => {
@@ -1282,7 +1295,7 @@ export function createWorkspaceEngineCapture(
           });
           closed = true;
           current = null;
-          deadYDocSessions.delete(deadSessionToken);
+          clearDeadYDocSession(deadSessionToken);
         });
       },
     };
