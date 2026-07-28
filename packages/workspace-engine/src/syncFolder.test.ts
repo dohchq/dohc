@@ -976,7 +976,18 @@ describe("sync folder replication", () => {
     const b = await tempRoot("sync-secret-restore-b");
     const bundle = await tempRoot("sync-secret-restore-bundle");
     const versions = createVersionedTextStore(a, { createId: createIdFactory("text-") });
-    const secrets = createSecretFileStore(a, { createId: createIdFactory("secret-") });
+    // Imported tips rank same-millisecond moments by sealed content, not
+    // causality (remoteShouldUpdateTip), so write→write→restore on one path
+    // must not share a timestamp or the restore can lose to the ciphertext
+    // it restored away. Same injected-clock idiom as textStore/chatStore.
+    const now = { value: Date.now() };
+    const secrets = createSecretFileStore(a, {
+      createId: createIdFactory("secret-"),
+      nowMs: () => {
+        now.value += 10;
+        return now.value;
+      },
+    });
     try {
       await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
       await secrets.writeSecretFile({
