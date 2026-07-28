@@ -384,7 +384,7 @@ import {
 import {
   captureForFlaggedWorkspace,
   configureWorkspaceKernelRuntime,
-  workspaceEngineEnabled,
+  dispatchScanEligible,
 } from "./workspaces/engineCaptureGate";
 import {
   readWorkspaceEnginePolicy,
@@ -2055,8 +2055,9 @@ const chatDispatchService = createChatDispatchService({
   queueSync: syncWorkspaceForDispatch,
   // An opted-out workspace must record NOTHING: without this gate the
   // workspace-open scan reaches dispatchStoreFor/chatStoreFor, whose daemon
-  // workspace.open creates .dohc/engine/engine.db. Same rule as captureFor.
-  scanEligible: (workspace) => workspaceEngineEnabled(workspace.rootPath),
+  // workspace.open creates .dohc/engine/engine.db. Open sessions answer from
+  // their capture snapshot (the flag applies at the NEXT open).
+  scanEligible: (workspace) => dispatchScanEligible(workspace, activity),
   prepareRunWorkspace: async (workspace) => {
     const registered = findWorkspace(workspace.workspaceId);
     if (!registered) {

@@ -49,3 +49,21 @@ export async function workspaceEngineEnabled(
   const { settings } = await readWorkspaceSettingsFile(rootPath);
   return settings.experimental.workspaceEngineAlpha;
 }
+
+// Whether a chat dispatch scan may touch this workspace's engine stores. An
+// OPEN session keeps the capture decision made at open (the flag applies at
+// the NEXT open) — rereading the file here would strand a mid-session
+// opt-out's chats as forever-pending. An unopened workspace (tray-only pump
+// scan) has no snapshot; the file read IS its open-time read.
+export async function dispatchScanEligible(
+  workspace: { workspaceId: string; rootPath: string },
+  activity: {
+    listOpenWorkspaceIds(): string[];
+    engineCaptureFor(workspaceId: string): WorkspaceEngineCapture | null;
+  },
+): Promise<boolean> {
+  if (activity.listOpenWorkspaceIds().includes(workspace.workspaceId)) {
+    return activity.engineCaptureFor(workspace.workspaceId) !== null;
+  }
+  return workspaceEngineEnabled(workspace.rootPath);
+}
