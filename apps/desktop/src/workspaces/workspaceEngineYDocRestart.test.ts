@@ -2,7 +2,7 @@ import * as Y from "yjs";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import {
   VersionedLoopbackEngine,
   type EngineTransport,
@@ -179,5 +179,186 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   );
 
   await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("recovers a non-reconnect local refusal by releasing, rebinding, and replaying", async () => {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-refusal-"));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "ydoc-refusal" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+  const seed = new Y.Doc();
+  seed.getText("plainText").insert(0, "seed");
+  const seedUpdate = Y.encodeStateAsUpdate(seed);
+  const lifecycle: string[] = [];
+  let generation = 0;
+  const refusal = new Error("record-update-refused");
+
+  const openProvider = async (
+    options: EngineYdocProviderSessionRustOptions,
+  ): Promise<EngineYdocProviderSessionRust> => {
+    const openedGeneration = ++generation;
+    lifecycle.push(`open-${openedGeneration}`);
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, seedUpdate);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      async applyLocalUpdate(update) {
+        if (openedGeneration === 1) throw refusal;
+        Y.applyUpdate(doc, update);
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: `moment-${openedGeneration}`,
+          path: options.path,
+          markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        lifecycle.push(`close-${openedGeneration}`);
+      },
+    };
+  };
+  const onError = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-refusal",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(4, " survives");
+
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const settled = await session.settleNow();
+
+  expect(settled.markdown).toBe("seed survives");
+  expect(lifecycle.slice(0, 3)).toEqual(["open-1", "close-1", "open-2"]);
+  expect(onError).not.toHaveBeenCalled();
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("surfaces an unrecoverable local refusal and releases every opened lease", async () => {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-loud-"));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "ydoc-loud" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+  const seed = new Y.Doc();
+  seed.getText("plainText").insert(0, "seed");
+  const seedUpdate = Y.encodeStateAsUpdate(seed);
+  const closedGenerations: number[] = [];
+  let generation = 0;
+  let leaseActive = false;
+  const refusal = new Error("permanent-record-update-refusal");
+  const openProvider = async (
+    options: EngineYdocProviderSessionRustOptions,
+  ): Promise<EngineYdocProviderSessionRust> => {
+    if (leaseActive) throw new Error("ydoc-session-busy");
+    leaseActive = true;
+    const openedGeneration = ++generation;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, seedUpdate);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      async applyLocalUpdate() {
+        throw refusal;
+      },
+      async settleNow() {
+        throw new Error("settle must not run after failed recovery");
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        closedGenerations.push(openedGeneration);
+        leaseActive = false;
+      },
+    };
+  };
+  const onError = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-loud",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(4, " refused");
+
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect(onError).toHaveBeenCalledWith(
+    "Y.Doc local update of note.md",
+    refusal,
+  );
+  expect(closedGenerations).toEqual([1, 2]);
+  await expect(session.close({ settle: false })).resolves.toBeUndefined();
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  expect(generation).toBe(3);
+  await reopened.close({ settle: false });
   await capture.stop();
 });

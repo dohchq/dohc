@@ -418,7 +418,7 @@ interface LocalRecordCapture {
   readonly options: ApplyLocalUpdateOptions | undefined;
   readonly before: DocUtf16Snapshot;
   readonly beforeState: Uint8Array;
-  operation?: Promise<YdocRecordUpdateResult>;
+  operation?: Promise<YdocRecordUpdateResult | undefined>;
   rejection?: Error;
 }
 
@@ -526,6 +526,31 @@ export class YdocAdapterSession {
   private enqueueRecordUpdate(
     update: Uint8Array,
     options?: ApplyLocalUpdateOptions,
+  ): Promise<YdocRecordUpdateResult | undefined> {
+    const operation = this.recordChain.then(async () => {
+      this.assertOpen();
+      try {
+        return await this.requestRecordUpdate(update, options);
+      } catch {
+        return await this.recoverCanonicalState(update, options);
+      }
+    });
+    const guardedOperation = operation.catch((error: unknown) => {
+      this.quarantine(error);
+      this.surfaceSessionError(error);
+      throw error;
+    });
+    this.recordChain = guardedOperation.then(
+      () => undefined,
+      () => undefined,
+    );
+    void guardedOperation.catch(() => undefined);
+    return guardedOperation;
+  }
+
+  private async requestRecordUpdate(
+    update: Uint8Array,
+    options?: ApplyLocalUpdateOptions,
   ): Promise<YdocRecordUpdateResult> {
     const params: YdocRecordUpdateParams = {
       sessionId: this.sessionId,
@@ -535,25 +560,43 @@ export class YdocAdapterSession {
         : {}),
     };
     const idempotencyKey = `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
-    const operation = this.recordChain.then(async () =>
-      decodeYdocRecordUpdateResult(
-        await this.adapter.request(
-          this.workspace,
-          YDOC_METHOD.recordUpdate,
-          params,
-          { idempotencyKey },
-        ),
+    return decodeYdocRecordUpdateResult(
+      await this.adapter.request(
+        this.workspace,
+        YDOC_METHOD.recordUpdate,
+        params,
+        { idempotencyKey },
       ),
     );
-    const guardedOperation = operation.catch((error: unknown) => {
-      this.quarantine(error);
-      this.surfaceSessionError(error);
-      throw error;
-    });
-    this.recordChain = guardedOperation.then(() => undefined);
-    void this.recordChain.catch(() => undefined);
-    void guardedOperation.catch(() => undefined);
-    return guardedOperation;
+  }
+
+  private async recoverCanonicalState(
+    refusedUpdate: Uint8Array,
+    options?: ApplyLocalUpdateOptions,
+  ): Promise<
+    YdocRecordUpdateResult | undefined
+  > {
+    const durableUpdate = await this.requestResyncUpdate();
+    const durableDoc = new Y.Doc();
+    declareDohcRootSchema(durableDoc);
+    Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
+    const recoveryDoc = new Y.Doc();
+    declareDohcRootSchema(recoveryDoc);
+    Y.applyUpdate(recoveryDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
+    Y.applyUpdate(recoveryDoc, refusedUpdate, LOCAL_EDITOR_ORIGIN);
+
+    // Pull any durable daemon-side state first, then replay exactly the
+    // refused transaction it is missing, re-encoded against that durable
+    // state. Later queued editor updates remain ordered behind this recovery
+    // and retain their own actor provenance. If the original request committed
+    // but its response was lost, the resync contains it and no replay remains.
+    Y.applyUpdate(this.doc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
+    const replay = Y.encodeStateAsUpdate(
+      recoveryDoc,
+      Y.encodeStateVector(durableDoc),
+    );
+    if (replay.byteLength <= 2) return undefined;
+    return await this.requestRecordUpdate(replay, options);
   }
 
   async settle(options?: { summary?: string }): Promise<YdocSettleResult> {
@@ -684,24 +727,8 @@ export class YdocAdapterSession {
         "The Y.Doc adapter session is closed.",
       );
     }
-    await this.recordChain;
-    const raw = await this.adapter.request(this.workspace, YDOC_METHOD.resync, {
-      sessionId: this.sessionId,
-    });
-    if (raw === null || Array.isArray(raw) || typeof raw !== "object") {
-      throw new YdocAdapterError(
-        "response-mismatch",
-        "ydoc.resync result must be an object.",
-      );
-    }
-    const encoded = (raw as Record<string, unknown>).initialUpdateBase64;
-    if (typeof encoded !== "string") {
-      throw new YdocAdapterError(
-        "response-mismatch",
-        "ydoc.resync result.initialUpdateBase64 must be a string.",
-      );
-    }
-    const update = base64ToBytes(encoded);
+    await this.recordChain.catch(() => undefined);
+    const update = await this.requestResyncUpdate();
     Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
     // The event baseline is PRESERVED across resync: transport event seqs
     // stay monotone within a session generation, and clearing the position
@@ -723,9 +750,29 @@ export class YdocAdapterSession {
     return update;
   }
 
+  private async requestResyncUpdate(): Promise<Uint8Array> {
+    const raw = await this.adapter.request(this.workspace, YDOC_METHOD.resync, {
+      sessionId: this.sessionId,
+    });
+    if (raw === null || Array.isArray(raw) || typeof raw !== "object") {
+      throw new YdocAdapterError(
+        "response-mismatch",
+        "ydoc.resync result must be an object.",
+      );
+    }
+    const encoded = (raw as Record<string, unknown>).initialUpdateBase64;
+    if (typeof encoded !== "string") {
+      throw new YdocAdapterError(
+        "response-mismatch",
+        "ydoc.resync result.initialUpdateBase64 must be a string.",
+      );
+    }
+    return base64ToBytes(encoded);
+  }
+
   async close(options?: { settle?: boolean; summary?: string }): Promise<void> {
     if (this.closed) return;
-    await this.recordChain;
+    await this.recordChain.catch(() => undefined);
     const params: YdocCloseParams = {
       sessionId: this.sessionId,
       ...(options?.settle !== undefined ? { settle: options.settle } : {}),
