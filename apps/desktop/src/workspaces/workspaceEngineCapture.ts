@@ -1002,6 +1002,7 @@ export function createWorkspaceEngineCapture(
     versionId: string;
     path: string;
     contentKind?: YDocContentKind;
+    onDead: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
     onSettled: (result: {
       sha256: string;
@@ -1039,6 +1040,7 @@ export function createWorkspaceEngineCapture(
     ): void => {
       releaseObligation ??= unreleased;
       current = null;
+      input.onDead();
       if (dead) return;
       dead = true;
       deadYDocSessions.add(deadSessionToken);
@@ -2158,6 +2160,7 @@ export function createWorkspaceEngineCapture(
           onError(`ydoc settle disk write of ${input.path}`, error);
         }
       };
+      let entry: LiveYDocSession | null = null;
       const session = useRustEngine
         ? await openRestartSafeRustYDocSession({
             versionId,
@@ -2165,6 +2168,14 @@ export function createWorkspaceEngineCapture(
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
+            onDead: () => {
+              if (
+                entry !== null &&
+                liveYDocSessions.get(input.path) === entry
+              ) {
+                entry.status = "failing-close";
+              }
+            },
             onRemoteUpdate: input.onRemoteUpdate,
             onSettled,
           })
@@ -2207,7 +2218,7 @@ export function createWorkspaceEngineCapture(
           liveYDocSessions.delete(input.path);
         }
       };
-      const entry: LiveYDocSession = {
+      entry = {
         path: input.path,
         versionId,
         session,

@@ -517,7 +517,7 @@ it("releases a close-latched failed generation with settle true before the next 
   await capture.stop();
 });
 
-it("retains and retries a dead generation release before clearing its guard", async () => {
+it("defers a version switch behind a dead generation until release converges", async () => {
   const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-close-dead-"));
   roots.push(rootPath);
   const loopback = new VersionedLoopbackEngine();
@@ -594,6 +594,7 @@ it("retains and retries a dead generation release before clearing its guard", as
     },
     onError,
   });
+  await capture.createVersion("Draft");
   const session = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
@@ -627,10 +628,10 @@ it("retains and retries a dead generation release before clearing its guard", as
   expect(outcomes).toEqual([false, false]);
   expect(historyCaptureFailed).toBe(true);
 
-  // MUTATION: restore markDead's `current = null` early-success close without
-  // a retained release obligation. This first close resolves, the assertions
-  // below observe only the original two attempts, and the busy lease is hidden.
-  await expect(session.close({ settle: false })).rejects.toBe(
+  // MUTATION: omit markDead's failing-close transition. The switch enters the
+  // healthy-session settle branch and fails on the dead wrapper before it can
+  // exercise the retained release obligation.
+  await expect(capture.switchVersion("main")).rejects.toBe(
     settlingCloseFailure,
   );
   expect(closeAttempts).toEqual([false, true, false, true]);
@@ -644,7 +645,9 @@ it("retains and retries a dead generation release before clearing its guard", as
   ).rejects.toThrow("ydoc-session-busy");
   expect(generation).toBe(1);
 
-  await session.close({ settle: false });
+  await expect(capture.switchVersion("main")).resolves.toMatchObject({
+    activeVersionId: "main",
+  });
   expect(closeAttempts).toEqual([false, true, false, true, false]);
   expect(leaseActive).toBe(false);
   await writeFile(join(rootPath, "unrelated.md"), "captured safely again\n");

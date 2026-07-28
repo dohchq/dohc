@@ -223,7 +223,12 @@ export async function openEngineYdocProviderSession(
         } catch (error) {
           if (!isYdocSessionNotFoundRefusal(error)) {
             try {
-              await session.close({ settle: true });
+              // Richdoc settle is unsupported by the daemon, so retry the
+              // release-only close after a transient failure. Plaintext can
+              // still escalate to a settling close to preserve pending edits.
+              await session.close({
+                settle: session.contentKind === "richdoc" ? false : true,
+              });
             } catch (settlingCloseError) {
               if (!isYdocSessionNotFoundRefusal(settlingCloseError)) {
                 throw settlingCloseError;

@@ -665,6 +665,44 @@ describe("YdocLiveAdapter", () => {
     expect(engine.activeSessionIds()).toHaveLength(0);
   });
 
+  it("retries a transient richdoc release without requesting an unsupported settle", async () => {
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      markdown: "",
+      contentKind: "richdoc",
+    });
+    const transientClose = new Error("injected transient close failure");
+    const closes: Array<boolean | undefined> = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.close) {
+          const settle = (request.params as { settle?: boolean }).settle;
+          closes.push(settle);
+          if (closes.length === 1) throw transientClose;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "richdoc",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+
+    await expect(provider.close({ settle: false })).resolves.toBeUndefined();
+    expect(closes).toEqual([false, false]);
+    expect(closes).not.toContain(true);
+    expect(engine.activeSessionIds()).toHaveLength(0);
+  });
+
   it("rejects edits while a failed provider close is incomplete, then converges on retry", async () => {
     const engine = seedPlaintextEngine();
     const firstCloseFailure = new Error("injected plain close failure");
