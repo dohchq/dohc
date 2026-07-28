@@ -39,8 +39,7 @@ and copy.
 | model       | cost | intelligence | taste |
 | ----------- | ---- | ------------ | ----- |
 | gpt-5.6-sol | 9    | 8            | 6     |
-| sonnet-5    | 5    | 5            | 7     |
-| opus-4.8    | 4    | 7            | 8     |
+| opus-5      | 8    | 8            | 8     |
 | fable-5     | 2    | 9            | 9     |
 
 How to apply:
@@ -53,7 +52,7 @@ How to apply:
 - Bulk/mechanical work (clear-spec implementation, data analysis, migrations):
   gpt-5.6-sol - it's effectively free.
 - Anything user-facing (UI, copy, API design) needs taste >= 7.
-- Reviews of plans/implementations: fable-5 or opus-4.8, optionally gpt-5.6-sol as
+- Reviews of plans/implementations: fable-5 or opus-5, optionally gpt-5.6-sol as
   an extra independent perspective.
 - Never use Haiku.
 - Mechanics: gpt-5.6-sol is only reachable through the Codex CLI - `codex exec` /
@@ -61,13 +60,13 @@ How to apply:
   codex-implementation, codex-review, and codex-computer-use skills; for work
   they don't cover (investigation, data analysis), run
   `codex exec -s read-only` directly with a self-contained prompt.
-- Claude models (sonnet-5, opus-4.8, fable-5) run via the Agent/Workflow model
+- Claude models (opus-5, fable-5) run via the Agent/Workflow model
   parameter.
 
 Using gpt-5.6-sol inside workflows and subagents (the model parameter only takes
 Claude models, so use a wrapper):
 
-- Spawn a thin Claude wrapper agent with `model: 'sonnet', effort: 'low'` whose
+- Spawn a thin Claude wrapper agent with `model: 'opus', effort: 'low'` whose
   prompt instructs it to write a self-contained codex prompt, run `codex exec`
   via Bash, and return the report (use `schema` on the wrapper to get
   structured output back).
