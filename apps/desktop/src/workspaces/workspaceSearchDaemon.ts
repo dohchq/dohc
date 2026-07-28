@@ -16,20 +16,20 @@ export interface QueryWorkspaceSearchDaemonInput {
   isCurrent: () => boolean;
 }
 
-function utf8ByteOffsetToUtf16(text: string, byteOffset: number): number {
-  const bytes = Buffer.from(text, "utf8");
+function utf8ByteOffsetToUtf16(bytes: Buffer, byteOffset: number): number {
   return bytes.subarray(0, Math.min(Math.max(byteOffset, 0), bytes.length))
     .toString("utf8").length;
 }
 
 function rendererSearchResult(result: SearchResult): SearchResult {
+  const previewBytes = Buffer.from(result.preview, "utf8");
   return {
     ...result,
     // The Rust search runtime exposes byte-safe UTF-8 offsets. Electron's
     // renderer consumes JavaScript UTF-16 string indexes, which is what the
     // legacy TypeScript search contract returned.
-    matchStart: utf8ByteOffsetToUtf16(result.preview, result.matchStart),
-    matchEnd: utf8ByteOffsetToUtf16(result.preview, result.matchEnd),
+    matchStart: utf8ByteOffsetToUtf16(previewBytes, result.matchStart),
+    matchEnd: utf8ByteOffsetToUtf16(previewBytes, result.matchEnd),
   };
 }
 
@@ -75,7 +75,7 @@ export async function queryWorkspaceSearchDaemon(
       throw new Error("Daemon workspace search exceeded its requested result limit.");
     }
     if (page.nextCursor === null) return results;
-    if (page.results.length === 0 || seenCursors.has(page.nextCursor)) {
+    if (seenCursors.has(page.nextCursor)) {
       throw new Error("Daemon workspace search pagination did not advance.");
     }
     seenCursors.add(page.nextCursor);

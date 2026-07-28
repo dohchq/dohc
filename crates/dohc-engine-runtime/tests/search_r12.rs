@@ -13,7 +13,7 @@ use dohc_engine_domain::{
     VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
 use dohc_engine_runtime::search::{
-    CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET, FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
+    CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET, FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
     FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET, SearchCandidate, SearchPageDisposition, SearchSurface,
     ensure_search_index_for_version, query_chat_messages_granular,
     query_chat_messages_granular_bounded, query_search_index, query_search_index_keyset,
@@ -262,6 +262,133 @@ fn short_query_scan_caps_every_row_examined_even_without_matches() {
 }
 
 #[test]
+fn short_query_file_scan_spends_its_row_budget_only_on_the_requested_scope() {
+    // MUTATION: remove the workspace/version predicates from the SQL and the
+    // foreign row consumes this one-row scan before the target is reached.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    write_file(
+        &mut store,
+        "obj-scoped-target",
+        "notes/scoped-target.md",
+        "AI target",
+        10,
+    );
+    ensure_index(&mut store, &root, 20);
+
+    let outcome = store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute("DELETE FROM engine_search_files_fts", [])?;
+            tx.execute(
+                "INSERT INTO engine_search_files_fts \
+                 (workspace_id, version_id, object_id, path, text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "foreign-workspace",
+                    V,
+                    "foreign-object",
+                    "foreign.md",
+                    "ordinary"
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO engine_search_files_fts \
+                 (workspace_id, version_id, object_id, path, text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    WS,
+                    "foreign-version",
+                    "foreign-version-object",
+                    "foreign-version.md",
+                    "ordinary"
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO engine_search_files_fts \
+                 (workspace_id, version_id, object_id, path, text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    WS,
+                    V,
+                    "obj-scoped-target",
+                    "notes/scoped-target.md",
+                    "AI target"
+                ],
+            )?;
+            Ok::<(), dohc_engine_runtime::SearchError>(())
+        })
+        .expect("seed scoped FTS rows");
+    assert!(matches!(outcome, TxnOutcome::Committed(())));
+
+    let batch = store
+        .read_with(|conn| {
+            query_search_index_keyset(
+                conn,
+                &root,
+                WS,
+                V,
+                "AI",
+                10,
+                None,
+                FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET,
+                FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
+                1,
+            )
+        })
+        .expect("scoped short query")
+        .expect("candidate batch");
+    assert_eq!(batch.candidates.len(), 1);
+    assert!(matches!(
+        &batch.candidates[0],
+        SearchCandidate::File { path, .. } if path == "notes/scoped-target.md"
+    ));
+}
+
+#[test]
+fn first_file_candidate_may_exceed_the_page_budget_when_it_fits_the_row_budget() {
+    // MUTATION: restore the page-start Bounds error and this query fails instead
+    // of serving the sole viable candidate by itself.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let text = format!("needle {}", "x".repeat(128));
+    write_file(
+        &mut store,
+        "obj-first-over-page-budget",
+        "notes/first-over-page-budget.md",
+        &text,
+        10,
+    );
+    ensure_index(&mut store, &root, 20);
+
+    let batch = store
+        .read_with(|conn| {
+            query_search_index_keyset(
+                conn,
+                &root,
+                WS,
+                V,
+                "needle",
+                10,
+                None,
+                text.len(),
+                text.len().saturating_sub(1),
+                10,
+            )
+        })
+        .expect("first candidate should be served alone")
+        .expect("candidate batch");
+    assert_eq!(batch.candidates.len(), 1);
+    assert!(matches!(
+        &batch.candidates[0],
+        SearchCandidate::File { path, .. } if path == "notes/first-over-page-budget.md"
+    ));
+}
+
+#[test]
 fn regular_fts_file_page_bounds_source_before_materializing_all_hits() {
     // MUTATION: apply the file source-byte accounting only to TooShort queries
     // and all three matching bodies are owned by this regular FTS page.
@@ -440,7 +567,6 @@ fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
         "one page hydrated the whole oversized thread: {:?}",
         page.results
     );
-    assert_eq!(CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET, 256 * 1024);
 
     let compatibility_results = run_search(&store, &root, "needle");
     assert_eq!(
@@ -478,6 +604,58 @@ fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
     assert_eq!(
         paged_results, 10,
         "inclusive candidate anchors must not hide the following candidate"
+    );
+}
+
+#[test]
+fn oversized_legacy_chat_rows_are_skipped_without_failing_later_hits() {
+    // MUTATION: return Bounds for an oversized hydrated chat row and the first
+    // legacy thread prevents the later healthy thread from being searched.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    start_thread(
+        &mut store,
+        "channel-legacy-oversized",
+        "thread-legacy-oversized",
+        "needle legacy",
+        100,
+    );
+    start_thread(
+        &mut store,
+        "channel-after-legacy",
+        "thread-after-legacy",
+        "needle healthy",
+        200,
+    );
+    ensure_index(&mut store, &root, 300);
+
+    let oversized_body = format!(
+        "needle {}",
+        "x".repeat(CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET)
+    );
+    let outcome = store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE chat_messages SET body = ?1 \
+                 WHERE workspace_id = ?2 AND thread_id = ?3",
+                rusqlite::params![oversized_body, WS, "thread-legacy-oversized"],
+            )?;
+            Ok::<(), dohc_engine_runtime::SearchError>(())
+        })
+        .expect("inject imported legacy body");
+    assert!(matches!(outcome, TxnOutcome::Committed(())));
+
+    let results = run_search(&store, &root, "needle");
+    assert!(results.iter().any(|result| {
+        result.surface == SearchSurface::Chat
+            && result.thread_id.as_deref() == Some("thread-after-legacy")
+    }));
+    assert!(
+        !results
+            .iter()
+            .any(|result| { result.thread_id.as_deref() == Some("thread-legacy-oversized") })
     );
 }
 

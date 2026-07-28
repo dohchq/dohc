@@ -1,10 +1,12 @@
 //! Desktop workspace-search RPC: active-version scoping and bounded paging
 //! through the real in-process daemon transport.
 
+use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
+use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
@@ -87,6 +89,47 @@ async fn write(
         }),
     )
     .await;
+}
+
+fn seed_short_query_scan_rows(scratch: &ScratchDir, workspace_id: &str, nonmatching_rows: usize) {
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let faults = NoFaults;
+    let mut store = EngineStore::open(&db, 1).expect("seed store");
+    assert!(
+        store
+            .bind_shadow_clone_token(TOKEN)
+            .expect("bind shadow token")
+    );
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(workspace_id, "main", 1, &faults)
+        .expect("ensure main version");
+    let outcome = store
+        .write_with(&faults, |tx| {
+            for index in 0..=nonmatching_rows {
+                let is_target = index == nonmatching_rows;
+                tx.execute(
+                    "INSERT INTO engine_search_files_fts \
+                     (workspace_id, version_id, object_id, path, text) \
+                     VALUES (?1, 'main', ?2, ?3, ?4)",
+                    rusqlite::params![
+                        workspace_id,
+                        format!("object-{index:04}"),
+                        format!("notes/{index:04}.md"),
+                        if is_target { "AI target" } else { "ordinary" },
+                    ],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO engine_search_index_state \
+                 (workspace_id, version_id, indexed_at_ms, file_policy_degraded) \
+                 VALUES (?1, 'main', 2, 0)",
+                rusqlite::params![workspace_id],
+            )?;
+            Ok::<(), dohc_engine_runtime::SearchError>(())
+        })
+        .expect("seed search index");
+    assert!(matches!(outcome, TxnOutcome::Committed(())));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -367,6 +410,49 @@ async fn query_page_short_query_finds_seeded_content() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_page_resumes_an_empty_bounded_scan_page() {
+    // MUTATION: reject line-zero or consumed-zero cursors and the second page
+    // fails with invalid-cursor instead of reaching the row after the scan cap.
+    let scratch = ScratchDir::new().expect("scratch");
+    let workspace_id = "workspace-search-empty-page";
+    seed_short_query_scan_rows(&scratch, workspace_id, 1_024);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, workspace_id).await;
+
+    let first = call(
+        &transport,
+        &handle,
+        2,
+        "search.queryPage",
+        json!({ "query": "AI", "limit": 50 }),
+    )
+    .await;
+    assert!(
+        first["results"]
+            .as_array()
+            .expect("first results")
+            .is_empty(),
+        "the first 1,024 rows should contain no match"
+    );
+    let cursor = first["nextCursor"]
+        .as_str()
+        .expect("exclusive scan continuation")
+        .to_owned();
+
+    let second = call(
+        &transport,
+        &handle,
+        3,
+        "search.queryPage",
+        json!({ "query": "AI", "limit": 50, "cursor": cursor }),
+    )
+    .await;
+    assert_eq!(second["results"][0]["path"], "notes/1024.md");
+    assert!(second["nextCursor"].is_null());
+    assert_eq!(second["restartRequired"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_cursor_signals_restart_after_index_mutation() {
     // MUTATION: omit the generation comparison and the second request applies
     // its keyset to a different index generation without an explicit restart.
@@ -409,6 +495,73 @@ async fn query_page_cursor_signals_restart_after_index_mutation() {
         json!({ "query": "needle", "limit": 1_000, "cursor": cursor }),
     )
     .await;
+    assert_eq!(continuation["restartRequired"], true);
+    assert!(
+        continuation["results"]
+            .as_array()
+            .expect("results")
+            .is_empty()
+    );
+    assert!(continuation["nextCursor"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_page_cursor_signals_restart_after_active_version_switch() {
+    // MUTATION: bind cursor decoding to the newly active version and this valid
+    // continuation is rejected as invalid-cursor before restart can be returned.
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "workspace-search-version-restart";
+    let handle = open_workspace(&transport, &scratch, 1, workspace_id).await;
+    let text = std::iter::repeat_n("needle", 1_000)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let oversized_path = format!("{}.md", "version-restart-path-".repeat(12));
+    write(&transport, &handle, 2, "main", &oversized_path, &text).await;
+    let feature = call(
+        &transport,
+        &handle,
+        3,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_id,
+            "name": "feature",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    let feature_id = feature["id"].as_str().expect("feature id").to_owned();
+
+    let first = call(
+        &transport,
+        &handle,
+        4,
+        "search.queryPage",
+        json!({ "query": "needle", "limit": 1_000 }),
+    )
+    .await;
+    let cursor = first["nextCursor"]
+        .as_str()
+        .expect("byte-cut first page cursor")
+        .to_owned();
+    call(
+        &transport,
+        &handle,
+        5,
+        "versions.setActive",
+        json!({ "workspaceId": workspace_id, "versionId": feature_id }),
+    )
+    .await;
+
+    let continuation = call(
+        &transport,
+        &handle,
+        6,
+        "search.queryPage",
+        json!({ "query": "needle", "limit": 1_000, "cursor": cursor }),
+    )
+    .await;
+    assert_eq!(continuation["versionId"], feature_id);
     assert_eq!(continuation["restartRequired"], true);
     assert!(
         continuation["results"]

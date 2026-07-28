@@ -205,6 +205,7 @@ struct ChatKeysetCursor {
 struct SearchPageCursor {
     version: u8,
     binding: String,
+    active_version_id: String,
     consumed: usize,
     generation: u64,
     surface: String,
@@ -273,13 +274,12 @@ fn decode_search_cursor(
     let invalid = || wire(ErrorCode::InvalidParams, "invalid-cursor");
     let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
     let cursor: SearchPageCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    if cursor.version != 2
+    if cursor.version != 3
         || cursor.binding != expected_binding
-        || cursor.consumed == 0
+        || cursor.active_version_id.is_empty()
         || cursor.consumed >= limit
         || !matches!(cursor.surface.as_str(), "file" | "chat")
         || cursor.rowid <= 0
-        || cursor.line == 0
     {
         return Err(invalid());
     }
@@ -7343,9 +7343,20 @@ impl EngineService {
         let binding = chat_cursor_binding(
             "search.queryPage",
             &open.workspace_id,
-            &[&active_version_id, &params.query, &limit_binding],
+            &[&params.query, &limit_binding],
         );
         let cursor = decode_search_cursor(params.cursor.as_deref(), &binding, limit)?;
+        if cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.active_version_id != active_version_id)
+        {
+            return Ok(json!({
+                "results": [],
+                "nextCursor": null,
+                "versionId": active_version_id,
+                "restartRequired": true,
+            }));
+        }
         let consumed = cursor.as_ref().map_or(0, |cursor| cursor.consumed);
         let remaining = limit.saturating_sub(consumed);
         let expected_generation = cursor.as_ref().map(|cursor| cursor.generation);
@@ -7419,8 +7430,9 @@ impl EngineService {
             }
             .ok_or_else(|| wire(ErrorCode::Internal, "search-page-made-no-progress"))?;
             Some(encode_search_cursor(&SearchPageCursor {
-                version: 2,
+                version: 3,
                 binding,
+                active_version_id: active_version_id.clone(),
                 consumed: total_consumed,
                 generation: page.generation,
                 surface: match key.surface {

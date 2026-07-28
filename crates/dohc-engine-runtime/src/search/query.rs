@@ -214,8 +214,8 @@ pub fn query_search_index_keyset(
     query: &str,
     limit: i64,
     after: Option<SearchCandidateAnchor>,
-    file_row_byte_budget: usize,
-    file_page_byte_budget: usize,
+    row_byte_budget: usize,
+    page_byte_budget: usize,
     short_query_page_row_budget: usize,
 ) -> Result<Option<SearchCandidateBatch>, SearchError> {
     let policy = read_engine_search_policy(root_dir);
@@ -285,8 +285,8 @@ pub fn query_search_index_keyset(
                 "SELECT rowid, workspace_id, version_id, path, object_id, \
                         length(CAST(text AS BLOB)), text \
              FROM engine_search_files_fts \
-             WHERE rowid {comparison} ?1 \
-             ORDER BY rowid LIMIT ?2"
+             WHERE workspace_id = ?1 AND version_id = ?2 AND rowid {comparison} ?3 \
+             ORDER BY rowid LIMIT ?4"
             )
         } else {
             format!(
@@ -310,6 +310,8 @@ pub fn query_search_index_keyset(
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = if is_short {
             stmt.query(params![
+                workspace_id,
+                version_id,
                 file_after,
                 i64::try_from(raw_limit).unwrap_or(i64::MAX),
             ])?
@@ -373,17 +375,14 @@ pub fn query_search_index_keyset(
             }
             let text_bytes = usize::try_from(row.get::<_, i64>(length_column)?)
                 .map_err(|_| SearchError::Corrupt("negative search candidate length"))?;
-            if text_bytes > file_row_byte_budget {
+            if text_bytes > row_byte_budget {
                 return Err(SearchError::Bounds(
-                    "file search candidate exceeded per-result byte budget",
+                    "search candidate exceeded per-result byte budget",
                 ));
             }
-            if text_bytes > file_page_byte_budget.saturating_sub(source_text_bytes) {
-                if resume_after.is_none() {
-                    return Err(SearchError::Bounds(
-                        "file search page byte budget cannot fit one candidate",
-                    ));
-                }
+            if source_text_bytes > 0
+                && text_bytes > page_byte_budget.saturating_sub(source_text_bytes)
+            {
                 return Ok(Some(SearchCandidateBatch {
                     candidates,
                     has_more: true,
@@ -438,8 +437,8 @@ pub fn query_search_index_keyset(
                 "SELECT rowid, workspace_id, length(CAST(text AS BLOB)), text, \
                         thread_id, message_id \
              FROM engine_search_chat_messages_fts \
-             WHERE rowid {comparison} ?1 \
-             ORDER BY rowid LIMIT ?2"
+             WHERE workspace_id = ?1 AND rowid {comparison} ?2 \
+             ORDER BY rowid LIMIT ?3"
             )
         } else {
             format!(
@@ -470,6 +469,7 @@ pub fn query_search_index_keyset(
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = if is_short {
             stmt.query(params![
+                workspace_id,
                 chat_after,
                 i64::try_from(raw_limit).unwrap_or(i64::MAX),
             ])?
@@ -502,17 +502,14 @@ pub fn query_search_index_keyset(
                 }
                 let text_bytes = usize::try_from(row.get::<_, i64>(2)?)
                     .map_err(|_| SearchError::Corrupt("negative search candidate length"))?;
-                if text_bytes > file_row_byte_budget {
+                if text_bytes > row_byte_budget {
                     return Err(SearchError::Bounds(
-                        "short-query candidate exceeded per-result byte budget",
+                        "search candidate exceeded per-result byte budget",
                     ));
                 }
-                if text_bytes > file_page_byte_budget.saturating_sub(source_text_bytes) {
-                    if resume_after.is_none() {
-                        return Err(SearchError::Bounds(
-                            "short-query page byte budget cannot fit one candidate",
-                        ));
-                    }
+                if source_text_bytes > 0
+                    && text_bytes > page_byte_budget.saturating_sub(source_text_bytes)
+                {
                     return Ok(Some(SearchCandidateBatch {
                         candidates,
                         has_more: true,

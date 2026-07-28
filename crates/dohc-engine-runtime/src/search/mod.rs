@@ -46,6 +46,7 @@ pub use query::{
 
 use dohc_engine_domain::{MAX_MESSAGE_BODY_BYTES, is_js_trim_ws, linked_chat_projection_path};
 use rusqlite::{Connection, OptionalExtension};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The sentinel message id for a thread's header row, shared with domain writes.
@@ -86,6 +87,7 @@ pub const SHORT_QUERY_PAGE_ROW_BUDGET: usize = 1024;
 /// much chat source text before returning a keyset continuation.
 pub const CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET: usize = MAX_MESSAGE_BODY_BYTES + 8 * 1024;
 pub const CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET: usize = 256 * 1024;
+const UNPAGED_SEARCH_PAGE_CEILING: usize = MAX_RESULT_LIMIT + 1;
 
 /// Errors from the search index/query surface. Policy read failures are NOT
 /// errors — they fail closed and surface as diagnostics; only storage faults and
@@ -345,12 +347,8 @@ pub fn search_workspace(
     let Some(cap) = query::clamp_limit(requested, MAX_RESULT_LIMIT) else {
         return Ok(Vec::new());
     };
-    let mut results = Vec::with_capacity(cap);
-    let mut expected_generation = None;
-    let mut after = None;
-    loop {
-        let remaining = cap.saturating_sub(results.len());
-        let page = search_workspace_page(
+    collect_search_pages(cap, |remaining, expected_generation, after| {
+        search_workspace_page(
             conn,
             root_dir,
             workspace_id,
@@ -360,7 +358,31 @@ pub fn search_workspace(
             now_ms,
             expected_generation,
             after,
-        )?;
+        )
+    })
+}
+
+fn collect_search_pages(
+    cap: usize,
+    mut next_page: impl FnMut(
+        usize,
+        Option<u64>,
+        Option<SearchResultKey>,
+    ) -> Result<SearchPageBatch, SearchError>,
+) -> Result<Vec<SearchResult>, SearchError> {
+    let mut results = Vec::with_capacity(cap);
+    let mut expected_generation = None;
+    let mut after = None;
+    let mut iterations = 0usize;
+    loop {
+        iterations = iterations.saturating_add(1);
+        if iterations > UNPAGED_SEARCH_PAGE_CEILING {
+            return Err(SearchError::Bounds(
+                "search paging exceeded its page ceiling",
+            ));
+        }
+        let remaining = cap.saturating_sub(results.len());
+        let page = next_page(remaining, expected_generation, after)?;
         if page.disposition == SearchPageDisposition::Restart {
             return Err(SearchError::Corrupt(
                 "search generation changed during an unpaged read",
@@ -476,6 +498,8 @@ pub fn search_workspace_page(
     let batch_resume_after = candidate_batch.resume_after;
     let candidates = candidate_batch.candidates;
     let candidate_count = candidates.len();
+    let chat_projection_offsets =
+        chat_projection_offsets_for_candidates(conn, workspace_id, &candidates)?;
     let mut results: Vec<KeyedSearchResult> = Vec::new();
     let mut has_more = false;
     let mut continuation: Option<SearchResultKey> = None;
@@ -555,10 +579,14 @@ pub fn search_workspace_page(
                     workspace_id,
                     &thread_id,
                     &message_id,
+                    chat_projection_offsets
+                        .get(&thread_id)
+                        .and_then(|offsets| offsets.get(&message_id))
+                        .copied(),
                     remaining_source,
                 )? {
                     ChatHydration::Ready(fragment) => fragment,
-                    ChatHydration::Missing => {
+                    ChatHydration::Missing | ChatHydration::Oversized => {
                         processed_through = Some(SearchResultKey {
                             surface: SearchSurface::Chat,
                             rowid,
@@ -666,7 +694,62 @@ struct ChatSearchFragment {
 enum ChatHydration {
     Ready(ChatSearchFragment),
     Missing,
+    Oversized,
     PageFull,
+}
+
+fn chat_projection_targets(candidates: &[SearchCandidate]) -> HashMap<String, HashSet<String>> {
+    let mut targets: HashMap<String, HashSet<String>> = HashMap::new();
+    for candidate in candidates {
+        let SearchCandidate::Chat {
+            thread_id,
+            message_id,
+            ..
+        } = candidate
+        else {
+            continue;
+        };
+        if message_id != THREAD_HEADER_MESSAGE_ID {
+            targets
+                .entry(thread_id.clone())
+                .or_default()
+                .insert(message_id.clone());
+        }
+    }
+    targets
+}
+
+fn chat_projection_offsets_for_candidates(
+    conn: &Connection,
+    workspace_id: &str,
+    candidates: &[SearchCandidate],
+) -> Result<HashMap<String, HashMap<String, usize>>, SearchError> {
+    let targets = chat_projection_targets(candidates);
+    let mut offsets: HashMap<String, HashMap<String, usize>> =
+        HashMap::with_capacity(targets.len());
+    let mut statement = conn.prepare(
+        "SELECT message_id, \
+                4 + length(body) - length(replace(body, char(10), '')) \
+         FROM chat_messages \
+         WHERE workspace_id = ?1 AND thread_id = ?2 \
+         ORDER BY created_at_ms, message_id",
+    )?;
+    for (thread_id, target_messages) in targets {
+        let mut prior_projection_lines = 0usize;
+        let mut thread_offsets = HashMap::with_capacity(target_messages.len());
+        let mut rows = statement.query(rusqlite::params![workspace_id, thread_id])?;
+        while let Some(row) = rows.next()? {
+            let message_id: String = row.get(0)?;
+            if target_messages.contains(&message_id) {
+                thread_offsets.insert(message_id, prior_projection_lines);
+            }
+            let projection_lines = usize::try_from(row.get::<_, i64>(1)?)
+                .map_err(|_| SearchError::Corrupt("negative chat projection line count"))?;
+            prior_projection_lines = prior_projection_lines.saturating_add(projection_lines);
+        }
+        offsets.insert(thread_id, thread_offsets);
+    }
+    Ok(offsets)
 }
 
 fn hydrate_chat_search_fragment(
@@ -674,8 +757,12 @@ fn hydrate_chat_search_fragment(
     workspace_id: &str,
     thread_id: &str,
     message_id: &str,
+    prior_projection_lines: Option<usize>,
     remaining_page_bytes: usize,
 ) -> Result<ChatHydration, SearchError> {
+    if message_id != THREAD_HEADER_MESSAGE_ID && prior_projection_lines.is_none() {
+        return Ok(ChatHydration::Missing);
+    }
     let metadata = conn
         .query_row(
             "SELECT t.title, t.linked_object_id, \
@@ -716,9 +803,7 @@ fn hydrate_chat_search_fragment(
         };
         let source_bytes = metadata_bytes.saturating_add(text.len());
         if source_bytes > CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET {
-            return Err(SearchError::Bounds(
-                "chat search result exceeded hydration byte budget",
-            ));
+            return Ok(ChatHydration::Oversized);
         }
         if source_bytes > remaining_page_bytes {
             return Ok(ChatHydration::PageFull);
@@ -734,16 +819,7 @@ fn hydrate_chat_search_fragment(
 
     let mut statement = conn.prepare(
         "SELECT m.author_kind, m.author_display_name, \
-                length(CAST(m.body AS BLOB)), m.body, \
-                COALESCE(( \
-                  SELECT SUM(4 + length(prior.body) \
-                    - length(replace(prior.body, char(10), ''))) \
-                  FROM chat_messages prior \
-                  WHERE prior.workspace_id = m.workspace_id AND prior.thread_id = m.thread_id \
-                    AND (prior.created_at_ms < m.created_at_ms \
-                      OR (prior.created_at_ms = m.created_at_ms \
-                        AND prior.message_id < m.message_id)) \
-                ), 0) \
+                length(CAST(m.body AS BLOB)), m.body \
          FROM chat_messages m \
          WHERE m.workspace_id = ?1 AND m.thread_id = ?2 AND m.message_id = ?3",
     )?;
@@ -760,16 +836,12 @@ fn hydrate_chat_search_fragment(
         .saturating_add(author_display_name.len())
         .saturating_add(body_bytes);
     if source_bytes > CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET {
-        return Err(SearchError::Bounds(
-            "chat search result exceeded hydration byte budget",
-        ));
+        return Ok(ChatHydration::Oversized);
     }
     if source_bytes > remaining_page_bytes {
         return Ok(ChatHydration::PageFull);
     }
     let body: String = row.get(3)?;
-    let prior_projection_lines = usize::try_from(row.get::<_, i64>(4)?)
-        .map_err(|_| SearchError::Corrupt("negative chat projection line count"))?;
     let author = match author_kind.as_str() {
         "human" => author_display_name,
         "agent" => format!("{author_display_name} (agent)"),
@@ -779,7 +851,8 @@ fn hydrate_chat_search_fragment(
             ));
         }
     };
-    let line_offset = if linked_object_id.is_some() { 6 } else { 4 } + prior_projection_lines;
+    let line_offset =
+        if linked_object_id.is_some() { 6 } else { 4 } + prior_projection_lines.unwrap_or(0);
     Ok(ChatHydration::Ready(ChatSearchFragment {
         path,
         title,
@@ -886,5 +959,67 @@ mod tests {
                 .collect::<Vec<_>>(),
             "needle".encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn unpaged_search_rejects_runaway_alternating_continuations() {
+        // MUTATION: remove the iteration ceiling and this finite pathological
+        // pager eventually returns success after alternating beyond the bound.
+        let mut calls = 0usize;
+        let error = collect_search_pages(1, |_remaining, _generation, _after| {
+            calls = calls.saturating_add(1);
+            let has_more = calls <= UNPAGED_SEARCH_PAGE_CEILING.saturating_add(1);
+            Ok(SearchPageBatch {
+                disposition: SearchPageDisposition::Results,
+                generation: 7,
+                results: Vec::new(),
+                has_more,
+                continuation: has_more.then_some(SearchResultKey {
+                    surface: SearchSurface::File,
+                    rowid: if calls.is_multiple_of(2) { 2 } else { 1 },
+                    line: 0,
+                }),
+            })
+        })
+        .expect_err("runaway pager must hit the hard page ceiling");
+
+        assert!(matches!(
+            error,
+            SearchError::Bounds("search paging exceeded its page ceiling")
+        ));
+        assert_eq!(calls, UNPAGED_SEARCH_PAGE_CEILING);
+    }
+
+    #[test]
+    fn chat_projection_targets_group_messages_by_thread() {
+        let candidates = vec![
+            SearchCandidate::Chat {
+                rowid: 1,
+                thread_id: "thread-a".to_owned(),
+                message_id: "message-a1".to_owned(),
+            },
+            SearchCandidate::Chat {
+                rowid: 2,
+                thread_id: "thread-a".to_owned(),
+                message_id: "message-a2".to_owned(),
+            },
+            SearchCandidate::Chat {
+                rowid: 3,
+                thread_id: "thread-a".to_owned(),
+                message_id: THREAD_HEADER_MESSAGE_ID.to_owned(),
+            },
+            SearchCandidate::Chat {
+                rowid: 4,
+                thread_id: "thread-b".to_owned(),
+                message_id: "message-b1".to_owned(),
+            },
+        ];
+
+        let targets = chat_projection_targets(&candidates);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets["thread-a"].len(), 2);
+        assert!(targets["thread-a"].contains("message-a1"));
+        assert!(targets["thread-a"].contains("message-a2"));
+        assert_eq!(targets["thread-b"].len(), 1);
     }
 }

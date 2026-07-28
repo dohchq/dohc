@@ -78,7 +78,52 @@ describe("queryWorkspaceSearchDaemon", () => {
     ).rejects.toThrow("must be a JSON object");
   });
 
-  it("restarts from page one when the daemon reports an index generation change", async () => {
+  it("follows an empty page when its continuation cursor advances", async () => {
+    // MUTATION: treat an empty result page as zero progress and the second
+    // bounded scan page is never requested.
+    const queryPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        results: [],
+        nextCursor: "after-empty-scan",
+        versionId: "main",
+        restartRequired: false,
+      })
+      .mockResolvedValueOnce({
+        results: [
+          {
+            surface: "file",
+            path: "after-empty.md",
+            title: "after-empty.md",
+            line: 1,
+            preview: "AI target",
+            matchStart: 0,
+            matchEnd: 2,
+            threadId: null,
+            objectId: "after-empty",
+          },
+        ],
+        nextCursor: null,
+        versionId: "main",
+        restartRequired: false,
+      });
+
+    const results = await queryWorkspaceSearchDaemon({
+      daemon: { queryPage },
+      query: "AI",
+      limit: 50,
+      isCurrent: () => true,
+    });
+
+    expect(results?.map((result) => result.path)).toEqual(["after-empty.md"]);
+    expect(queryPage).toHaveBeenNthCalledWith(2, {
+      query: "AI",
+      limit: 50,
+      cursor: "after-empty-scan",
+    });
+  });
+
+  it("restarts from page one when the active version changes", async () => {
     // MUTATION: ignore restartRequired and the final array mixes old-generation
     // first.md with new-generation replacement.md.
     const queryPage = vi
@@ -104,7 +149,7 @@ describe("queryWorkspaceSearchDaemon", () => {
       .mockResolvedValueOnce({
         results: [],
         nextCursor: null,
-        versionId: "main",
+        versionId: "feature",
         restartRequired: true,
       })
       .mockResolvedValueOnce({
@@ -122,7 +167,7 @@ describe("queryWorkspaceSearchDaemon", () => {
           },
         ],
         nextCursor: null,
-        versionId: "main",
+        versionId: "feature",
         restartRequired: false,
       });
 
@@ -135,6 +180,43 @@ describe("queryWorkspaceSearchDaemon", () => {
 
     expect(results?.map((result) => result.path)).toEqual(["replacement.md"]);
     expect(queryPage).toHaveBeenNthCalledWith(3, { query: "needle", limit: 50 });
+  });
+
+  it("returns null when the workspace becomes stale after a page resolves", async () => {
+    // MUTATION: remove the post-page isCurrent guard and this completed page is
+    // surfaced after the renderer has switched workspaces.
+    const queryPage = vi.fn().mockResolvedValue({
+      results: [
+        {
+          surface: "file",
+          path: "stale.md",
+          title: "stale.md",
+          line: 1,
+          preview: "needle",
+          matchStart: 0,
+          matchEnd: 6,
+          threadId: null,
+          objectId: "stale",
+        },
+      ],
+      nextCursor: null,
+      versionId: "main",
+      restartRequired: false,
+    });
+    const isCurrent = vi
+      .fn<() => boolean>()
+      .mockReturnValueOnce(true)
+      .mockReturnValue(false);
+
+    const results = await queryWorkspaceSearchDaemon({
+      daemon: { queryPage },
+      query: "needle",
+      limit: 50,
+      isCurrent,
+    });
+
+    expect(results).toBeNull();
+    expect(queryPage).toHaveBeenCalledTimes(1);
   });
 
   it("converts astral preview byte offsets to in-bounds UTF-16 offsets", async () => {
@@ -189,6 +271,10 @@ describe("desktop workspace-search handler wiring", () => {
   const handler = mainSource.slice(handlerStart, handlerEnd);
 
   it("routes engine search only through the paged daemon read", () => {
+    expect(markerAt).toBeGreaterThanOrEqual(0);
+    expect(handlerStart).toBeGreaterThanOrEqual(0);
+    expect(handlerEnd).toBeGreaterThan(handlerStart + 100);
+    expect(handler.length).toBeGreaterThan(100);
     expect(handler).toContain("queryWorkspaceSearchDaemon({");
     expect(handler).toContain("rendererGeneration(sender.id) === generation");
     expect(handler).toContain(
