@@ -457,6 +457,21 @@ opened or validated by the engine, or that the replace API itself is
 handle-relative. The preimage-content race described above remains on every
 platform.
 
+**Ordinary-lane residual (AUDIT-SYMLINKMAT, 2026-07-28): the ancestor-swap
+window is closed for SECRET lanes only.** Ordinary (non-secret) writes,
+deletes, and conflict siblings now run a fail-closed per-component ancestor
+walk once per job before any disk operation — a symlinked/reparse-pointed
+ancestor is refused, the job returns `JobOutcome::Blocked` and stays PENDING
+(retrying once containment is restored) without stalling the rest of the
+batch. But the subsequent operations are fresh path-based OS calls: swapping
+a validated directory for a link between the preflight and the rename/unlink
+still redirects that one job's disk effect. The single-user rename-TOCTOU
+assumption is retained for ordinary lanes; only secret lanes hold ancestors
+via dirfds/handles across the whole pipeline. Also recorded: `materialize_one`
+now canonicalizes the workspace root and errors if the root itself is absent —
+the previous ordinary write lane silently recreated a missing root via
+`create_dir_all`.
+
 ### 8.3 DECISION: preserve-both `.conflict` artifacts are floor-excluded
 
 When materialization finds newer external content, it preserves both: the

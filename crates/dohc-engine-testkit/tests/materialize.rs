@@ -13,7 +13,10 @@ use dohc_engine_storage::{
     EngineStore, FaultPoint, JobStatus, MaterializationJobSpec, NoFaults, Preimage, StorageError,
     enqueue_delete_job, enqueue_job, hex_sha256,
 };
-use dohc_engine_testkit::ScriptedFaults;
+use dohc_engine_testkit::{
+    ScriptedFaults,
+    scratch::{try_make_dir_alias, try_make_file_symlink},
+};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -52,6 +55,15 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+fn remove_dir_alias(path: &Path) {
+    #[cfg(unix)]
+    std::fs::remove_file(path).expect("remove directory symlink");
+    #[cfg(windows)]
+    std::fs::remove_dir(path).expect("remove directory junction/symlink");
+    #[cfg(not(any(unix, windows)))]
+    let _ = path;
 }
 
 fn spec(
@@ -124,6 +136,314 @@ fn materializes_a_new_file_and_marks_complete() {
             .unwrap()
             .status,
         JobStatus::Complete
+    );
+}
+
+#[test]
+fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory() {
+    // MUTATION PROOF: remove the ordinary write's
+    // `prepare_target_parent_symlink_free` call and this writes outside; walk
+    // only the FIRST component below root and the depth-2 alias slips through.
+    let sc = Scratch::new("ordinary-write-ancestor");
+    let outside = Scratch::new("ordinary-write-outside");
+    std::fs::create_dir(sc.target("real")).expect("real parent");
+    let alias = sc.target("real/linked");
+    if !try_make_dir_alias(outside.workspace(), &alias).expect("create directory alias") {
+        eprintln!("skipping: directory alias creation is unavailable");
+        return;
+    }
+
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let content = b"must stay contained";
+    let job = spec(
+        "ordinary-write",
+        "real/linked/write.md",
+        &hex_sha256(content),
+        Preimage::Absent,
+        1,
+        10,
+    );
+    stage_job(&mut store, content, &job);
+    let unrelated = b"unrelated proceeds";
+    let sibling = spec(
+        "ordinary-write-sibling",
+        "notes/unrelated.md",
+        &hex_sha256(unrelated),
+        Preimage::Absent,
+        2,
+        11,
+    );
+    stage_job(&mut store, unrelated, &sibling);
+
+    // The blocked job stays pending WITHOUT stalling the batch: the unrelated
+    // job in the same run must still materialize.
+    let results = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        20,
+        &NoFaults,
+    )
+    .expect("a blocked ancestor must not fail the whole run");
+    let outcome_of = |id: &str| {
+        results
+            .iter()
+            .find(|result| result.job_id == id)
+            .expect("job result")
+            .outcome
+    };
+    assert_eq!(outcome_of("ordinary-write"), JobOutcome::Blocked);
+    assert_eq!(outcome_of("ordinary-write-sibling"), JobOutcome::Completed);
+    assert_eq!(
+        std::fs::read(sc.target("notes/unrelated.md")).unwrap(),
+        unrelated
+    );
+    assert!(!outside.target("write.md").exists());
+    assert_eq!(store.pending_materialization_count().expect("pending"), 1);
+
+    remove_dir_alias(&alias);
+    std::fs::create_dir(&alias).expect("replace alias with real directory");
+    let recovered = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        30,
+        &NoFaults,
+    )
+    .expect("pending write must recover after containment is restored");
+    assert_eq!(recovered[0].outcome, JobOutcome::Completed);
+    assert_eq!(
+        std::fs::read(sc.target("real/linked/write.md")).unwrap(),
+        content
+    );
+    assert!(!outside.target("write.md").exists());
+}
+
+#[test]
+fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
+    let sc = Scratch::new("ordinary-write-temp-symlink");
+    let outside = Scratch::new("ordinary-write-temp-outside");
+    std::fs::create_dir(sc.target("notes")).expect("target parent");
+    let outside_target = outside.target("outside.txt");
+    std::fs::write(&outside_target, b"outside must survive").expect("outside target");
+
+    let blocked_content = b"blocked temp content";
+    let blocked = spec(
+        "ordinary-temp-symlink",
+        "notes/blocked.md",
+        &hex_sha256(blocked_content),
+        Preimage::Absent,
+        1,
+        10,
+    );
+    let temp_alias = sc.target("notes/.dohc-write-ordinary-temp-symlink.tmp");
+    if !try_make_file_symlink(&outside_target, &temp_alias).expect("create temp symlink") {
+        eprintln!("skipping: file symlink creation is unavailable");
+        return;
+    }
+
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_job(&mut store, blocked_content, &blocked);
+    let unrelated_content = b"unrelated same-batch content";
+    let unrelated = spec(
+        "ordinary-temp-sibling",
+        "notes/unrelated.md",
+        &hex_sha256(unrelated_content),
+        Preimage::Absent,
+        2,
+        11,
+    );
+    stage_job(&mut store, unrelated_content, &unrelated);
+
+    let results = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        20,
+        &NoFaults,
+    )
+    .expect("a symlinked temp must not fail the batch");
+    let outcome_of = |id: &str| {
+        results
+            .iter()
+            .find(|result| result.job_id == id)
+            .expect("job result")
+            .outcome
+    };
+    assert_eq!(outcome_of("ordinary-temp-symlink"), JobOutcome::Blocked);
+    assert_eq!(outcome_of("ordinary-temp-sibling"), JobOutcome::Completed);
+    assert_eq!(
+        std::fs::read(sc.target("notes/unrelated.md")).expect("unrelated artifact"),
+        unrelated_content
+    );
+    assert_eq!(
+        std::fs::read(&outside_target).expect("outside remains"),
+        b"outside must survive"
+    );
+    assert_eq!(store.pending_materialization_count().expect("pending"), 1);
+
+    std::fs::remove_file(&temp_alias).expect("remove temp symlink");
+    let recovered = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        30,
+        &NoFaults,
+    )
+    .expect("blocked temp job must recover after alias removal");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].outcome, JobOutcome::Completed);
+    assert_eq!(
+        std::fs::read(sc.target("notes/blocked.md")).expect("recovered artifact"),
+        blocked_content
+    );
+    assert_eq!(
+        std::fs::read(&outside_target).expect("outside remains"),
+        b"outside must survive"
+    );
+    assert_eq!(store.pending_materialization_count().expect("pending"), 0);
+}
+
+#[test]
+fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory() {
+    // MUTATION PROOF: remove the ordinary delete's
+    // `ensure_target_symlink_free` call and this deletes outside.
+    let sc = Scratch::new("ordinary-delete-ancestor");
+    let outside = Scratch::new("ordinary-delete-outside");
+    let old = b"outside must survive";
+    std::fs::write(outside.target("delete.md"), old).expect("outside target");
+    let alias = sc.target("linked");
+    if !try_make_dir_alias(outside.workspace(), &alias).expect("create directory alias") {
+        eprintln!("skipping: directory alias creation is unavailable");
+        return;
+    }
+
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let job = spec(
+        "ordinary-delete",
+        "linked/delete.md",
+        &hex_sha256(old),
+        Preimage::Present(hex_sha256(old)),
+        1,
+        10,
+    );
+    store.put_binary_blob(old).expect("blob");
+    store
+        .write_with(&NoFaults, |tx| {
+            enqueue_delete_job(tx, &job)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enqueue delete");
+
+    let results = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        20,
+        &NoFaults,
+    )
+    .expect("a blocked delete ancestor must not fail the whole run");
+    assert_eq!(results[0].outcome, JobOutcome::Blocked);
+    assert_eq!(std::fs::read(outside.target("delete.md")).unwrap(), old);
+    assert_eq!(store.pending_materialization_count().expect("pending"), 1);
+
+    remove_dir_alias(&alias);
+    std::fs::create_dir(&alias).expect("replace alias with real directory");
+    std::fs::write(sc.target("linked/delete.md"), old).expect("contained target");
+    let recovered = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        30,
+        &NoFaults,
+    )
+    .expect("pending delete must recover after containment is restored");
+    assert_eq!(recovered[0].outcome, JobOutcome::Completed);
+    assert!(!sc.target("linked/delete.md").exists());
+    assert_eq!(std::fs::read(outside.target("delete.md")).unwrap(), old);
+}
+
+#[test]
+fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
+    let sc = Scratch::new("ordinary-conflict-ancestor");
+    let outside = Scratch::new("ordinary-conflict-outside");
+    let intended = b"intended content";
+    let known = b"known preimage";
+    let external = b"external edit";
+    std::fs::write(outside.target("conflicted.md"), external).expect("outside target");
+    let alias = sc.target("linked");
+    if !try_make_dir_alias(outside.workspace(), &alias).expect("create directory alias") {
+        eprintln!("skipping: directory alias creation is unavailable");
+        return;
+    }
+
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let job = spec(
+        "ordinary-conflict",
+        "linked/conflicted.md",
+        &hex_sha256(intended),
+        Preimage::Present(hex_sha256(known)),
+        1,
+        10,
+    );
+    stage_job(&mut store, intended, &job);
+
+    let results = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        20,
+        &NoFaults,
+    )
+    .expect("a blocked conflict ancestor must not fail the whole run");
+    assert_eq!(results[0].outcome, JobOutcome::Blocked);
+    assert!(
+        !outside
+            .target("conflicted.md.ordinary-conflict.conflict")
+            .exists()
+    );
+    assert_eq!(store.pending_materialization_count().expect("pending"), 1);
+
+    remove_dir_alias(&alias);
+    std::fs::create_dir(&alias).expect("replace alias with real directory");
+    std::fs::write(sc.target("linked/conflicted.md"), external).expect("contained external edit");
+    let recovered = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        30,
+        &NoFaults,
+    )
+    .expect("pending conflict must run after containment is restored");
+    assert_eq!(recovered[0].outcome, JobOutcome::Conflict);
+    assert_eq!(
+        std::fs::read(sc.target("linked/conflicted.md")).unwrap(),
+        external
+    );
+    assert_eq!(
+        std::fs::read(sc.target("linked/conflicted.md.ordinary-conflict.conflict")).unwrap(),
+        intended
+    );
+    assert!(
+        !outside
+            .target("conflicted.md.ordinary-conflict.conflict")
+            .exists()
     );
 }
 
