@@ -2894,3 +2894,30 @@ scope; recorded here beside the audit P2s so they ride the same triage:
 - Pre-existing: `ensure_secret_target_symlink_free` is referenced only under
   cfg(not(any(unix, windows))) and defined nowhere — exotic-platform builds
   cannot compile; harmless today, worth a cleanup.
+
+### Campaign completion addendum (2026-07-28 afternoon)
+
+The four in-flight PRs from the entry above are merged:
+
+- #319 FAULTGATE (4 rounds; the round-2 review caught the fix's own blind spot
+  — the independent evidence validator still accepted crash-tier-less PASS
+  lines; final delta docs-only).
+- #322 CLIMODE (3 rounds; the local adversarial review found the write-
+  isolation mode line had NO test killing its mutant — the repo had never
+  asserted the read-only gate's refusal at all; now mutation-pinned).
+- #320 SYMLINKMAT (3 rounds + two local adversarial reviews; round 2 replaced
+  the batch-aborting refusal with JobOutcome::Blocked after review showed one
+  user symlink stalled every other path's materialization; round 3 made
+  Blocked crash-consistent at the ydoc settle sites).
+- #316 BINROLLBACK — the campaign's deepest shard (10 rounds). Every round's
+  findings were real: generation watermarks poisoned by projection
+  timestamps, spoofable job identities, capture seeds crossing version
+  boundaries, workspace-unscoped fences and backfills, an inverted legacy
+  sentinel, ENAMETOOLONG from coordinate-bearing IDs, and finally the
+  inactive-rename reconcile gap. Merged on gate PASS + mutation proofs +
+  layered review of the final round.
+
+Codex's GitHub review bot degraded through the afternoon (tags served with
+40-120 min latency, then not at all); the compensating control was local
+fable-5 adversarial reviewers with falsification briefs, whose findings are
+dispositioned on the PRs and whose deferred items are recorded above.
