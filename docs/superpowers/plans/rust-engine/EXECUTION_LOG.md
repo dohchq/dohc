@@ -2798,3 +2798,126 @@ never-ack-without-progress semantics, and DECISIONS.md reconciled (hard-link
 relaxation executed-pending-ratification; relay sequencing resolved-by-events
 with the key-envelope residual moved to AUDIT-KEYENV; the member-share-log
 epoch question recorded as a sharing-milestone prerequisite).
+
+## 2026-07-28 — Audit fix campaign: eleven P1s closed across twelve PRs
+
+The full post-cutover audit (entry above) is discharged. Every confirmed P1
+now has a merged or in-flight fix, each landed the same way: implementation by
+gpt-5.6-sol (codex) or directly by the orchestrator, then an independent
+canonical-gate run on the exact tree, at least one orchestrator-run mutation
+proof (delete/invert the fix, watch the named test fail behaviorally,
+restore), and a codex re-review anchored to the final head. No shard merged on
+its implementer's word.
+
+Merged this campaign: #306 (CI refit; superseded by Ice's #318 — the PR gate
+is deliberately dispatch-only pre-launch, so the local canonical gate is the
+merge authority), #307 (integrator reconciliation), #309 (syncFolder deflake —
+the "flake" was a real design property: same-millisecond moments rank by
+ciphertext bytes), #310 FTSCHAT, #311 KEYENV, #312 MARKERRACE, #313 FTSFILES,
+#314 YDOCLOSS (six review rounds; the fifth found a silent-swallow latch worse
+than the original bug, the sixth a leaked daemon lease on refused replacement
+opens), #315 SEARCHRPC (four rounds; the last second-writer connection to
+engine.db is gone, search pages through generation-pinned keyset RPC), #317
+CONFLPAGE (paging bound moved into the domain SQL after round 1 left full-table
+hydration behind the serializer). In flight at this entry: #316 BINROLLBACK
+(review rounds keep finding real generation/namespace/scoping defects — the
+watermark, job-identity, and version-fence family), #319 FAULTGATE (the three
+crash/exactly-once tests were compiled out of every gate run; the gate now runs
+the collab crash tier and a skipped required step fails the verdict — including
+the independent evidence validator), #320 SYMLINKMAT (ordinary materialization
+now walks every below-root ancestor like the secret path), #322 CLIMODE (CLI
+reads join the live binding as non-owning attachments).
+
+### The two rules this campaign earned
+
+1. **`gh pr merge --delete-branch` deletes the remote branch even when the
+   merge fails.** GitHub then refuses to reopen the auto-closed PR (#308 died
+   this way and was reborn as #314). Merge first, read `state`, only then
+   delete the branch.
+2. **A check that reverses on identical code is evidence in neither
+   direction.** The CI flake that blocked three PRs was a deterministic design
+   property, not luck. Root-cause flakes; never retry them into submission.
+
+### Gate evidence (final heads)
+
+- #314: desktop typecheck clean; workspaceEngineYDocRestart 9/9; mutation —
+  markDead(failed)->markDead(null) fails 3 tests.
+- #315: 2026-07-28T11:09:18Z | run-rust-checks | win32/x64 | PASS (all rows) +
+  JS typecheck/test suites PASS; mutation — short-only source budget fails
+  regular_fts_file_page_bounds_source_before_materializing_all_hits.
+- #317: 2026-07-28T10:01:30Z | run-rust-checks | win32/x64 | PASS (all rows;
+  the first run caught a clippy failure codex's targeted tests missed);
+  mutation — dropping the SQL LIMIT hydrates the poisoned row.
+
+### The audit P2 backlog — held for Ice's call
+
+The audit's ~10 unverified P2s are deliberately NOT riding this campaign
+(P1s only). Recommendation: hold them for the dogfood window and open them as
+one triaged shard batch, re-verifying each against post-campaign main first —
+at least two (desktop search second connection @ main.ts, sharedView mixed
+connections) look partially or wholly discharged by #315 and need re-checking
+before any work is dispatched. The list, verbatim from the audit: foreign
+user_version=2 adoption (schema.rs:274); dispatch write paths accepting
+unvalidated now_ms (chats.rs:5438); local-only close CRDT prune window
+(durable.rs:979); refused-and-acked redelivery wedge (moment_apply.rs:315);
+malformed blob-sha wedging a pull pass (relay.rs:1411); concurrent same-path
+creation stalling the inbound lane (ydoc_apply.rs:667); writeBlob copy-by-sha
+without egress budget (lib.rs:2184); sync.commitCursor one-shot token order
+(lib.rs:1701); relay adapter retrying non-idempotent recoverOrigin
+(engineRelayClient.ts:474); frozen cross-engine security-contract fixture with
+no drift guard (gen-fixtures.mjs); no Windows CI leg for cfg(windows) tests
+(pr-checks.yml — interacts with Ice's #318 dispatch-only decision).
+
+### Additional deferred items surfaced by the campaign's own reviews
+
+The layered reviews of the in-flight shards surfaced issues beyond their
+scope; recorded here beside the audit P2s so they ride the same triage:
+
+- **Rollback of a Blocked/pending settle moment orphans its ydoc-mat_ job and
+  voids the CRDT prune guard** (medium; the pending-job EXISTS joins moments,
+  rollback deletes the moment, and the rollback cancellation block never
+  covers ydoc-mat_ ids — exposure pre-existed via the transient-Err settle
+  arm). Rollback-domain surgery; intersects the AUDIT-BINROLLBACK family.
+- A blocked-then-recovered ydoc settle leaves one stale self-write
+  suppression entry (low; self-healing — equal-content ingest dedupes and the
+  next settle drains it). The settle test's recorder counts are deliberately
+  unpinned until this is resolved.
+- `JobOutcome::Blocked` reports as `Skipped` over the post-commit wire —
+  callers cannot distinguish "pending, retry after containment restored" from
+  "nothing to do" (low; protocol addition).
+- CLI read attachments have no reaper: a failed CLI-side close leaves the
+  attachment for the owner's lifetime, bounded by the 64-handle cap (low).
+- The symlink/junction test fixtures skip silently where alias creation is
+  unavailable (file symlinks need Developer Mode on Windows; dir aliases fall
+  back to junctions). The WSL leg of the gate covers them — the known
+  Windows blind-spot rule applies.
+- Pre-existing: `ensure_secret_target_symlink_free` is referenced only under
+  cfg(not(any(unix, windows))) and defined nowhere — exotic-platform builds
+  cannot compile; harmless today, worth a cleanup.
+
+### Campaign completion addendum (2026-07-28 afternoon)
+
+The four in-flight PRs from the entry above are merged:
+
+- #319 FAULTGATE (4 rounds; the round-2 review caught the fix's own blind spot
+  — the independent evidence validator still accepted crash-tier-less PASS
+  lines; final delta docs-only).
+- #322 CLIMODE (3 rounds; the local adversarial review found the write-
+  isolation mode line had NO test killing its mutant — the repo had never
+  asserted the read-only gate's refusal at all; now mutation-pinned).
+- #320 SYMLINKMAT (3 rounds + two local adversarial reviews; round 2 replaced
+  the batch-aborting refusal with JobOutcome::Blocked after review showed one
+  user symlink stalled every other path's materialization; round 3 made
+  Blocked crash-consistent at the ydoc settle sites).
+- #316 BINROLLBACK — the campaign's deepest shard (10 rounds). Every round's
+  findings were real: generation watermarks poisoned by projection
+  timestamps, spoofable job identities, capture seeds crossing version
+  boundaries, workspace-unscoped fences and backfills, an inverted legacy
+  sentinel, ENAMETOOLONG from coordinate-bearing IDs, and finally the
+  inactive-rename reconcile gap. Merged on gate PASS + mutation proofs +
+  layered review of the final round.
+
+Codex's GitHub review bot degraded through the afternoon (tags served with
+40-120 min latency, then not at all); the compensating control was local
+fable-5 adversarial reviewers with falsification briefs, whose findings are
+dispositioned on the PRs and whose deferred items are recorded above.
