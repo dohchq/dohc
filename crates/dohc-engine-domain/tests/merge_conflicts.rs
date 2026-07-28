@@ -8,9 +8,10 @@ use dohc_engine_domain::{
     ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateNamedVersion,
     DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, SnapshotContent,
-    TextConflict, TextSnapshot, VersionFileChangeEntry, VersionFileChangeStatus,
-    VersionedTextStore, WriteBinaryFile, WriteText, insert_text_conflict_if_absent,
-    live_state_matches_conflict_current, store::text_blob_sha256, write_binary_file_in_tx,
+    TEXT_CONFLICT_QUERY_LIMIT, TextConflict, TextSnapshot, VersionFileChangeEntry,
+    VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile, WriteText,
+    insert_text_conflict_if_absent, live_state_matches_conflict_current, store::text_blob_sha256,
+    write_binary_file_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
 use dohc_engine_storage::{
@@ -947,6 +948,58 @@ fn conflict_primitives_filter_order_and_insert_if_absent() {
             .expect_err("bad filter")
             .code(),
         "invalid-input"
+    );
+}
+
+#[test]
+fn conflict_page_query_does_not_hydrate_rows_beyond_its_sql_limit() {
+    let (_scratch, mut store) = open();
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            for index in 0..=TEXT_CONFLICT_QUERY_LIMIT {
+                let path = format!("bounded-{index:02}.md");
+                let record = TextConflict {
+                    conflict_id: format!("bounded-{index:02}"),
+                    workspace_id: WS.to_owned(),
+                    path: path.clone(),
+                    target_version_id: "main".to_owned(),
+                    source_version_id: "feat".to_owned(),
+                    created_at_ms: index,
+                    updated_at_ms: index,
+                    status: ConflictStatus::Open,
+                    chosen_from: ConflictChoice::Current,
+                    resolution: None,
+                    metadata: ConflictMetadata::origin("sync"),
+                    base: ConflictFileState::text(&path, None),
+                    current: ConflictFileState::text(&path, None),
+                    incoming: ConflictFileState::text(&path, None),
+                };
+                assert!(insert_text_conflict_if_absent(tx, &record)?);
+            }
+            tx.execute(
+                "UPDATE conflicts SET chosen_from = 'poison' \
+                 WHERE workspace_id = ?1 AND conflict_id = ?2",
+                rusqlite::params![WS, format!("bounded-{:02}", TEXT_CONFLICT_QUERY_LIMIT)],
+            )
+            .expect("poison the first row beyond the bounded query");
+            Ok::<_, DomainError>(())
+        })
+        .expect("seed bounded inventory with a poisoned row beyond the first SQL page");
+
+    let vt = VersionedTextStore::new(&mut store);
+    let page = vt
+        .list_text_conflicts_page(WS, Some("open"), None)
+        .expect("the out-of-page corrupt row must not be hydrated");
+    assert_eq!(page.len() as i64, TEXT_CONFLICT_QUERY_LIMIT);
+    assert_eq!(page.first().expect("first").conflict_id, "bounded-00");
+    assert_eq!(
+        page.last().expect("lookahead").conflict_id,
+        format!("bounded-{:02}", TEXT_CONFLICT_QUERY_LIMIT - 1)
+    );
+    assert!(
+        vt.list_text_conflicts_page(WS, Some("open"), Some("bounded-00"))
+            .is_err(),
+        "advancing the keyset brings the poisoned row inside the SQL limit"
     );
 }
 

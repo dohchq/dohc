@@ -1179,6 +1179,7 @@ enum Command {
     ConflictList {
         workspace_id: String,
         status: Option<String>,
+        after_conflict_id: Option<String>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Vec<TextConflict>, RuntimeError>>,
     },
@@ -3366,6 +3367,7 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         status: Option<String>,
+        after_conflict_id: Option<String>,
         token: CancellationToken,
     ) -> Result<Vec<TextConflict>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
@@ -3373,6 +3375,7 @@ impl ActorHandle {
             .send(Command::ConflictList {
                 workspace_id,
                 status,
+                after_conflict_id,
                 token,
                 reply,
             })
@@ -6915,6 +6918,7 @@ fn worker_main(
             Command::ConflictList {
                 workspace_id,
                 status,
+                after_conflict_id,
                 token,
                 reply,
             } => {
@@ -6922,7 +6926,11 @@ fn worker_main(
                     Err(RuntimeError::Cancelled)
                 } else {
                     VersionedTextStore::new(&mut store)
-                        .list_text_conflicts(&workspace_id, status.as_deref())
+                        .list_text_conflicts_page(
+                            &workspace_id,
+                            status.as_deref(),
+                            after_conflict_id.as_deref(),
+                        )
                         .map_err(RuntimeError::from)
                 };
                 let _ = reply.send(outcome);

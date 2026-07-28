@@ -1,5 +1,4 @@
 use dohc_engine_protocol::{
-    ErrorCode,
     limits::WireLimits,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Envelope, Request, Response, WorkspaceHandle, encode_control},
@@ -141,6 +140,28 @@ async fn seed_conflicts(
     }
 }
 
+async fn open_conflict(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    workspace_id: &str,
+    index: usize,
+    text: &str,
+) {
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                index as u64 + 2,
+                "conflicts.open",
+                Some(handle.clone()),
+                conflict_payload(workspace_id, index, text),
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("seed conflict {index}: {error:?}"));
+    assert_eq!(opened.result["inserted"], true);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_conflict_inventory_is_wire_safe_across_pages_and_session_survives() {
     // Fourteen rows serialize beyond the 8 MiB frame as one legacy array,
@@ -257,12 +278,123 @@ async fn conflict_page_cursor_round_trips_without_duplicates_or_gaps() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_single_conflict_row_over_the_hard_cap_refuses_explicitly() {
+async fn cursor_continues_after_its_open_conflict_is_resolved() {
+    let (_scratch, transport, handle, workspace_id) = fixture("resolved-cursor").await;
+    let text = "\0".repeat(20_000);
+
+    let current = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "object-000",
+                    "path": "conflict-000.md",
+                    "text": text,
+                    "momentId": "moment-000",
+                    "origin": "api",
+                    "nowMs": 1,
+                    "requestId": "seed-resolvable-current",
+                }),
+            ),
+        )
+        .await
+        .expect("seed current head");
+    let mut first_payload = conflict_payload(&workspace_id, 0, &text);
+    let snapshot = &current.result["snapshot"];
+    first_payload["conflict"]["current"]["snapshot"] = json!({
+        "workspaceId": snapshot["workspaceId"],
+        "versionId": snapshot["versionId"],
+        "objectId": snapshot["objectId"],
+        "path": snapshot["path"],
+        "text": snapshot["text"],
+        "blobSha256": snapshot["blobSha256"],
+        "updatedAtMs": snapshot["updatedAtMs"],
+        "latestMomentId": snapshot["latestMomentId"],
+        "metadataOrigin": snapshot["metadataOrigin"],
+    });
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(11, "conflicts.open", Some(handle.clone()), first_payload),
+        )
+        .await
+        .expect("open resolvable cursor conflict");
+    open_conflict(&transport, &handle, &workspace_id, 1, &text).await;
+    open_conflict(&transport, &handle, &workspace_id, 2, &text).await;
+
+    let first = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                20,
+                "conflicts.list",
+                Some(handle.clone()),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("first page");
+    assert_eq!(first.result["conflicts"][0]["id"], "conflict-000");
+    assert_eq!(first.result["nextAfterConflictId"], "conflict-000");
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                21,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "keep-current",
+                    "objectId": "resolved-object",
+                    "writeMomentId": "resolved-write",
+                    "deleteMomentId": "resolved-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 100,
+                }}),
+            ),
+        )
+        .await
+        .expect("resolve continuation conflict between pages");
+
+    let second = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                22,
+                "conflicts.list",
+                Some(handle),
+                json!({
+                    "status": "open",
+                    "afterConflictId": "conflict-000",
+                }),
+            ),
+        )
+        .await
+        .expect("second page resumes from the unfiltered cursor key");
+    assert_eq!(second.result["conflicts"][0]["id"], "conflict-001");
+    assert!(
+        second.result["conflicts"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .all(|row| row["id"] != "conflict-000"),
+        "the filtered page must not restart or duplicate its resolved cursor"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escape_heavy_conflict_that_fits_the_control_frame_is_returned() {
     let (_scratch, transport, handle, workspace_id) = fixture("single-row").await;
     let text = "\0".repeat(40_000);
     seed_conflicts(&transport, &handle, &workspace_id, 1, &text).await;
 
-    let error = transport
+    let response = transport
         .call(
             RequestContext::unbounded(),
             request(
@@ -273,7 +405,12 @@ async fn a_single_conflict_row_over_the_hard_cap_refuses_explicitly() {
             ),
         )
         .await
-        .expect_err("an unshippable conflict row must refuse");
-    assert_eq!(error.code, ErrorCode::LimitExceeded);
-    assert_eq!(error.message, "conflict-row-exceeds-wire-limit");
+        .expect("the conflict-specific row cap must admit this response");
+    assert_eq!(response.result["conflicts"].as_array().unwrap().len(), 1);
+    let encoded = encode_control(&Envelope::Response(response), &WireLimits::default())
+        .expect("the escape-heavy conflict still fits the negotiated control frame");
+    assert!(
+        encoded.len() > 700 * 1024,
+        "the regression row must exceed the old shared 700 KiB cap"
+    );
 }

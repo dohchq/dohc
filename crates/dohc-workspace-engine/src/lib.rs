@@ -100,6 +100,14 @@ const MOMENTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 /// a control-character-heavy string up to 6x, and an estimate that ignores
 /// that can pass the budget while the encoded frame exceeds the limit.
 fn byte_budget_cut_serialized(rows: &[Value], budget: usize) -> usize {
+    byte_budget_cut_serialized_with_row_cap(rows, budget, SINGLE_ROW_HARD_CAP_BYTES)
+}
+
+fn byte_budget_cut_serialized_with_row_cap(
+    rows: &[Value],
+    budget: usize,
+    single_row_hard_cap_bytes: usize,
+) -> usize {
     let mut included = 0usize;
     let mut remaining = budget as i64;
     for row in rows {
@@ -108,7 +116,7 @@ fn byte_budget_cut_serialized(rows: &[Value], budget: usize) -> usize {
         // never the hard single-row bound — beyond that it cannot ship
         // in a frame at all, and the caller must surface the refusal
         // rather than emit an over-frame response.
-        if included == 0 && size > SINGLE_ROW_HARD_CAP_BYTES {
+        if included == 0 && size > single_row_hard_cap_bytes {
             break;
         }
         remaining -= size as i64;
@@ -163,6 +171,13 @@ const SINGLE_ROW_HARD_CAP_BYTES: usize = 700 * 1024;
 const CHAT_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 const GRANULAR_CHAT_RESPONSE_BYTE_BUDGET: usize = 256 * 1024;
 const CONFLICTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+const CONFLICTS_RESPONSE_ROW_LIMIT: usize =
+    dohc_engine_domain::TEXT_CONFLICT_QUERY_LIMIT as usize - 1;
+/// Conflict rows are the only hydration surface for the three full-text
+/// sides. Let any row that fits the negotiated 8 MiB control frame progress,
+/// retaining explicit envelope and continuation headroom.
+const CONFLICT_ROW_HARD_CAP_BYTES: usize =
+    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
 
 const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
 const CHAT_PAGE_LIMIT_MAX: i64 = 500;
@@ -7058,33 +7073,30 @@ impl EngineService {
         let cancellation = OperationCancellation::new(ctx);
         let conflicts = open
             .actor
-            .conflict_list(open.workspace_id, params.status, cancellation.token())
+            .conflict_list(
+                open.workspace_id,
+                params.status,
+                params.after_conflict_id,
+                cancellation.token(),
+            )
             .await
             .map_err(map_runtime)?;
-        // The conflict resolver renders the complete current/incoming bodies,
-        // and there is no conflicts.get hydration surface. Preserve that
-        // contract, but page the stable (created_at_ms, conflict_id) ordering
-        // exactly like versions.list: the last returned id is the next keyset.
-        let conflicts = if let Some(after) = params.after_conflict_id.as_deref() {
-            match conflicts
-                .iter()
-                .position(|conflict| conflict.conflict_id == after)
-            {
-                Some(position) => &conflicts[position + 1..],
-                None => conflicts.as_slice(),
-            }
-        } else {
-            conflicts.as_slice()
-        };
-        let rows: Vec<Value> = conflicts.iter().map(conflict_json).collect();
-        let included = byte_budget_cut_serialized(&rows, CONFLICTS_PAGE_BYTE_BUDGET);
-        if included == 0 && !rows.is_empty() {
+        // The domain query returns sixteen candidates plus one lookahead, with
+        // LIMIT applied before its blob joins hydrate the three text sides.
+        let candidates = conflicts.len().min(CONFLICTS_RESPONSE_ROW_LIMIT);
+        let rows: Vec<Value> = conflicts[..candidates].iter().map(conflict_json).collect();
+        let included = byte_budget_cut_serialized_with_row_cap(
+            &rows,
+            CONFLICTS_PAGE_BYTE_BUDGET,
+            CONFLICT_ROW_HARD_CAP_BYTES,
+        );
+        if included == 0 && !conflicts.is_empty() {
             return Err(wire(
                 ErrorCode::LimitExceeded,
                 "conflict-row-exceeds-wire-limit",
             ));
         }
-        let next_after_conflict_id = (included < rows.len())
+        let next_after_conflict_id = (included < conflicts.len())
             .then(|| {
                 conflicts[..included]
                     .last()

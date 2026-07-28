@@ -15,6 +15,10 @@ use dohc_engine_storage::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+/// SQL row bound for one conflict-list request: sixteen response candidates
+/// plus one lookahead row used to decide whether a continuation exists.
+pub const TEXT_CONFLICT_QUERY_LIMIT: i64 = 17;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictContentKind {
     Text,
@@ -543,7 +547,32 @@ impl VersionedTextStore<'_> {
             });
         }
         self.store
-            .read_with(|conn| list_conflicts(conn, workspace_id, status))
+            .read_with(|conn| list_conflicts(conn, workspace_id, status, None, None))
+    }
+
+    /// Return one bounded keyset page. The continuation id is resolved without
+    /// the status filter so a conflict resolved between `status = open` page
+    /// requests still advances from its original stable ordering key.
+    pub fn list_text_conflicts_page(
+        &self,
+        workspace_id: &str,
+        status: Option<&str>,
+        after_conflict_id: Option<&str>,
+    ) -> Result<Vec<TextConflict>, DomainError> {
+        if !matches!(status, None | Some("open") | Some("resolved")) {
+            return Err(DomainError::InvalidInput {
+                reason: "conflict status is invalid",
+            });
+        }
+        self.store.read_with(|conn| {
+            list_conflicts(
+                conn,
+                workspace_id,
+                status,
+                after_conflict_id,
+                Some(TEXT_CONFLICT_QUERY_LIMIT),
+            )
+        })
     }
 
     pub fn resolve_text_conflict(
@@ -1293,29 +1322,55 @@ fn list_conflicts(
     conn: &Connection,
     workspace_id: &str,
     status: Option<&str>,
+    after_conflict_id: Option<&str>,
+    limit: Option<i64>,
 ) -> Result<Vec<TextConflict>, DomainError> {
+    let after = after_conflict_id
+        .map(|conflict_id| {
+            conn.query_row(
+                "SELECT created_at_ms, conflict_id FROM conflicts \
+                 WHERE workspace_id = ?1 AND conflict_id = ?2",
+                params![workspace_id, conflict_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?
+            .ok_or(DomainError::InvalidInput {
+                reason: "conflict cursor is invalid",
+            })
+        })
+        .transpose()?;
+
     let mut sql = String::from(CONFLICT_SELECT);
     sql.push_str(" WHERE c.workspace_id = ?1");
+    let mut values = vec![rusqlite::types::Value::Text(workspace_id.to_owned())];
     if status.is_some() {
-        sql.push_str(" AND c.status = ?2");
+        values.push(rusqlite::types::Value::Text(
+            status.expect("checked status").to_owned(),
+        ));
+        sql.push_str(&format!(" AND c.status = ?{}", values.len()));
+    }
+    if let Some((created_at_ms, conflict_id)) = after {
+        values.push(rusqlite::types::Value::Integer(created_at_ms));
+        let created_parameter = values.len();
+        values.push(rusqlite::types::Value::Text(conflict_id));
+        let id_parameter = values.len();
+        sql.push_str(&format!(
+            " AND (c.created_at_ms, c.conflict_id) > (?{created_parameter}, ?{id_parameter})"
+        ));
     }
     sql.push_str(" ORDER BY c.created_at_ms, c.conflict_id");
+    if let Some(limit) = limit {
+        values.push(rusqlite::types::Value::Integer(limit));
+        sql.push_str(&format!(" LIMIT ?{}", values.len()));
+    }
     let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
     let mut out = Vec::new();
-    if let Some(status) = status {
-        let rows = stmt
-            .query_map(params![workspace_id, status], map_conflict_row)
-            .map_err(DomainError::sql_corrupt)?;
-        for row in rows {
-            out.push(row.map_err(DomainError::sql_corrupt)??);
-        }
-    } else {
-        let rows = stmt
-            .query_map(params![workspace_id], map_conflict_row)
-            .map_err(DomainError::sql_corrupt)?;
-        for row in rows {
-            out.push(row.map_err(DomainError::sql_corrupt)??);
-        }
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(values.iter()), map_conflict_row)
+        .map_err(DomainError::sql_corrupt)?;
+    for row in rows {
+        out.push(row.map_err(DomainError::sql_corrupt)??);
     }
     Ok(out)
 }
