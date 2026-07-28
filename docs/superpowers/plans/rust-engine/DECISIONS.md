@@ -445,14 +445,18 @@ deserves your eyes** — the implementation and both proof runs are cited in the
 GATE6 packet; if you disagree with option (a), say so before sharing/multi-
 device work begins, since the same clone logic backs future resets.
 
-### Relay epoch-identity rollout sequencing (line 177) — RESOLVED BY EVENTS, residual moved
+### Relay epoch-identity rollout sequencing (line 177) — STILL OPEN; closure rides two audit shards
 
-The single-device cutover moved the only *sync* client to Rust, so the "all
-relay users move together" constraint was satisfied trivially — with one
-exception the audit surfaced: the key-envelope flows still speak to the relay
-through the legacy identity-less TS client (upload/download envelope). That
-mixed-client residual is now owned by the AUDIT-KEYENV shard row and closes
-when those call sites move to the daemon's `keys.*` surface.
+First recorded here as "resolved by events" — codex review correctly rejected
+that: the AUDIT-MARKERRACE defect means a rooted workspace could still lose
+the first-open race and bind the identity-less TS sync client for a whole
+process lifetime, which is precisely the mixed-client 409 scenario the
+original decision describes. So the constraint was NOT satisfied trivially.
+The entry stays OPEN until both audit shards land: AUDIT-MARKERRACE (rooted
+transport is unconditionally the daemon — removes the racy TS sync path) and
+AUDIT-KEYENV (envelope call sites onto the daemon `keys.*` surface — removes
+the last deliberate TS relay caller). Record the closure here when both are
+merged.
 
 ### Member share-log across epoch reset (R15 row OBLIG) — STILL UNDECIDED, now visible
 

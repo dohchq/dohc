@@ -16,6 +16,14 @@ The historical packet text below is retained as assembled on 2026-07-24; where
 it says a criterion is open, the paragraph above and the SHARDS rows supersede
 it.
 
+CAVEAT carried on the closure (recorded 2026-07-28): the rehearsal evidence
+rests on the inside-tree hard-link relaxation the program executed under the
+finish-100% directive while on record that relaxing a fail-closed data-safety
+check "is not the program's call" — Ice's ratification is still pending
+(DECISIONS.md, 2026-07-28 reconciliation). If Ice rejects the relaxation, the
+rehearsal criterion reverts to unsatisfied and the clone logic must change
+before any future reset relies on it.
+
 The superseded 2026-07-26 run recorded both halves:
 
 - **Reset.** The rehearsal ran `not-started → complete` against a byte-clone of
