@@ -2300,6 +2300,9 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
     onError: (error) => {
       console.error("[desktop] CLI server:", error);
     },
+    onDebug: (message) => {
+      console.debug(`[desktop] CLI server: ${message}`);
+    },
   });
   return {
     socketPath: server.socketPath,
