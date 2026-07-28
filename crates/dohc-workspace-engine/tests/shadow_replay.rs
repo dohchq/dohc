@@ -138,7 +138,10 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
         )
         .await
         .expect("conflict list");
-    assert_eq!(conflicts.result, json!([]));
+    assert_eq!(
+        conflicts.result,
+        json!({ "conflicts": [], "nextAfterConflictId": null })
+    );
 
     let search = transport
         .call(

@@ -246,7 +246,10 @@ describe("createCaptureLiveStores", () => {
   it("translates capture origins and flattens daemon conflict side states", async () => {
     const client = clientFor(async (request) => {
       expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
-      return { id: request.id, result: [conflict()] };
+      return {
+        id: request.id,
+        result: { conflicts: [conflict()], nextAfterConflictId: null },
+      };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
@@ -286,15 +289,18 @@ describe("createCaptureLiveStores", () => {
     };
     const client = clientFor(async (request) => ({
       id: request.id,
-      result: [
-        {
-          ...conflict(),
-          path: "asset.bin",
-          base: binaryState,
-          current: binaryState,
-          incoming: binaryState,
-        },
-      ],
+      result: {
+        conflicts: [
+          {
+            ...conflict(),
+            path: "asset.bin",
+            base: binaryState,
+            current: binaryState,
+            incoming: binaryState,
+          },
+        ],
+        nextAfterConflictId: null,
+      },
     }));
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
@@ -320,7 +326,10 @@ describe("createCaptureLiveStores", () => {
     const client = clientFor(async (request) => {
       requests.push(request);
       if (request.method === WORKSPACE_METHOD.conflictsList) {
-        return { id: request.id, result: [conflict()] };
+        return {
+          id: request.id,
+          result: { conflicts: [conflict()], nextAfterConflictId: null },
+        };
       }
       if (request.method === WORKSPACE_METHOD.conflictsResolve) {
         return {
@@ -393,7 +402,10 @@ describe("createCaptureLiveStores", () => {
     const client = clientFor(async (request) => {
       requests.push(request);
       if (request.method === WORKSPACE_METHOD.conflictsList) {
-        return { id: request.id, result: [conflict()] };
+        return {
+          id: request.id,
+          result: { conflicts: [conflict()], nextAfterConflictId: null },
+        };
       }
       if (request.method === WORKSPACE_METHOD.conflictsResolve) {
         return {
@@ -516,7 +528,10 @@ describe("createCaptureLiveStores", () => {
         };
       }
       expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
-      return { id: request.id, result: [older, created] };
+      return {
+        id: request.id,
+        result: { conflicts: [older, created], nextAfterConflictId: null },
+      };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },

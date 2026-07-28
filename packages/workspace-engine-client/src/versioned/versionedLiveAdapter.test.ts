@@ -230,7 +230,10 @@ const WORKSPACE_DECODER_CASES: Array<{
 }> = [
   { method: WORKSPACE_METHOD.open, valid: { workspace: WORKSPACE } },
   { method: WORKSPACE_METHOD.close, valid: { closed: true } },
-  { method: WORKSPACE_METHOD.conflictsList, valid: [conflict] },
+  {
+    method: WORKSPACE_METHOD.conflictsList,
+    valid: { conflicts: [conflict], nextAfterConflictId: null },
+  },
   { method: WORKSPACE_METHOD.conflictsOpen, valid: { inserted: true } },
   {
     method: WORKSPACE_METHOD.conflictsResolve,
@@ -269,6 +272,47 @@ describe("VersionedLiveAdapter", () => {
       new VersionedLiveAdapter(captureClient(requests), WORKSPACE);
     }).toThrow(VersionedAdapterCapabilityError);
     expect(requests).toEqual([]);
+  });
+
+  it("drains every conflicts.list page behind the array store contract", async () => {
+    const requests: Request[] = [];
+    const second = { ...conflict, id: "conflict-2", createdAtMs: 2 };
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        const afterConflictId = (
+          request.params as { afterConflictId?: string }
+        ).afterConflictId;
+        return {
+          id: request.id,
+          result:
+            afterConflictId === undefined
+              ? {
+                  conflicts: [conflict],
+                  nextAfterConflictId: conflict.id,
+                }
+              : {
+                  conflicts: [second],
+                  nextAfterConflictId: null,
+                },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.listTextConflicts({
+        workspaceId: WORKSPACE,
+        status: "open",
+      }),
+    ).resolves.toEqual([conflict, second]);
+    expect(requests.map((request) => request.params)).toEqual([
+      { status: "open" },
+      { status: "open", afterConflictId: conflict.id },
+    ]);
   });
 
   it("consumes the matching out-of-band blob for an over-cap binary read", async () => {
