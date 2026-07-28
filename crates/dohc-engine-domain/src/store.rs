@@ -1900,6 +1900,13 @@ pub fn capture_ingest_in_tx(
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
+    // Frame extended with the summary/correlation provenance fields: the
+    // capture sink passes request_id: None, so no store holds recorded
+    // capture-ingest requests and no legacy-hash compatibility shim is owed
+    // (same reasoning as the capture-retire frame below).
+    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+    let (correlation_kind, correlation) =
+        hash_optional_text_fields(input.metadata_correlation_id.as_deref());
     let payload_hash = hash_fields(&[
         b"capture-ingest",
         input.workspace_id.as_bytes(),
@@ -1907,6 +1914,10 @@ pub fn capture_ingest_in_tx(
         input.path.as_bytes(),
         input.text.as_bytes(),
         input.metadata_origin.as_bytes(),
+        summary_kind,
+        summary,
+        correlation_kind,
+        correlation,
         author_kind,
         author_json,
         if input.claim_foreign_head {
@@ -1976,6 +1987,18 @@ pub fn capture_ingest_in_tx(
         return Ok(result);
     }
 
+    // TS `writeIfChanged` parity: an explicit pass summary (a reconcile)
+    // always wins; otherwise a binary-tracked path whose bytes round-trip as
+    // UTF-8 again gets the honest transition label, and a PLAIN live text
+    // update carries NO summary (the renderer's copy for null is
+    // "Edited <basename>").
+    let metadata_summary = match &input.metadata_summary {
+        Some(summary) => Some(summary.clone()),
+        None => before
+            .as_ref()
+            .is_some_and(|head| head.content_kind == "binary")
+            .then(|| "Became a text file".to_owned()),
+    };
     let next_order = match reserved_moment_order {
         Some(next_order) => next_order,
         None => next_moment_order(tx)?,
@@ -1989,8 +2012,8 @@ pub fn capture_ingest_in_tx(
         text: input.text.clone(),
         moment_id,
         metadata_origin: input.metadata_origin.clone(),
-        metadata_summary: None,
-        metadata_correlation_id: None,
+        metadata_summary,
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
         request_id: None,
@@ -2020,16 +2043,23 @@ pub fn capture_retire_in_tx(
     if !version_exists(tx, &input.workspace_id, &input.version_id)? {
         return Err(DomainError::VersionNotFound);
     }
-    // Frame extended (head-scope discriminator) pre-cutover while capture is
-    // DORMANT: no store outside tests has recorded capture-retire requests
-    // (the sink passes request_id: None), and R15 resets shadow data, so no
-    // legacy-hash compatibility shim is owed.
+    // Frame extended (head-scope discriminator, then the summary/correlation
+    // provenance fields): no store outside tests has recorded capture-retire
+    // requests (the sink passes request_id: None), so no legacy-hash
+    // compatibility shim is owed.
+    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+    let (correlation_kind, correlation) =
+        hash_optional_text_fields(input.metadata_correlation_id.as_deref());
     let payload_hash = hash_fields(&[
         b"capture-retire",
         input.workspace_id.as_bytes(),
         input.version_id.as_bytes(),
         input.path.as_bytes(),
         b"capture",
+        summary_kind,
+        summary,
+        correlation_kind,
+        correlation,
         b"none",
         b"",
         if input.only_if_text_head {
@@ -2131,8 +2161,8 @@ pub fn capture_retire_in_tx(
         moment_id,
         request_id: None,
         metadata_origin: "capture".to_owned(),
-        metadata_summary: None,
-        metadata_correlation_id: None,
+        metadata_summary: input.metadata_summary.clone(),
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: None,
         now_ms: input.now_ms,
     };
@@ -2200,6 +2230,10 @@ pub fn capture_ingest_binary_in_tx(
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
+    // Frame extended with summary/correlation; see `capture_ingest_in_tx`.
+    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+    let (correlation_kind, correlation) =
+        hash_optional_text_fields(input.metadata_correlation_id.as_deref());
     let payload_hash = hash_fields(&[
         b"capture-ingest-binary",
         input.workspace_id.as_bytes(),
@@ -2207,6 +2241,10 @@ pub fn capture_ingest_binary_in_tx(
         path.as_bytes(),
         binary_sha256.as_bytes(),
         input.metadata_origin.as_bytes(),
+        summary_kind,
+        summary,
+        correlation_kind,
+        correlation,
         author_kind,
         author_json,
         if input.claim_foreign_head {
@@ -2314,6 +2352,19 @@ pub fn capture_ingest_binary_in_tx(
     if moment_exists(tx, &input.workspace_id, &moment_id)? {
         return Err(DomainError::DuplicateMomentId);
     }
+    // TS `writeIfChanged` parity: pass summary wins; a text-tracked path
+    // whose bytes stop round-tripping as UTF-8 keeps its object identity and
+    // the moment says so honestly; a plain binary update is labeled per file.
+    let metadata_summary = input.metadata_summary.clone().unwrap_or_else(|| {
+        if before
+            .as_ref()
+            .is_some_and(|head| head.content_kind != "binary")
+        {
+            "Became a binary file".to_owned()
+        } else {
+            format!("Updated {}", path_basename(&path))
+        }
+    });
     let before_head = before.map(|before| {
         (
             before.content_kind,
@@ -2332,8 +2383,8 @@ pub fn capture_ingest_binary_in_tx(
             binary_sha256: &binary_sha256,
             moment_id: &moment_id,
             metadata_origin: &input.metadata_origin,
-            metadata_summary: None,
-            metadata_correlation_id: None,
+            metadata_summary: Some(metadata_summary.as_str()),
+            metadata_correlation_id: input.metadata_correlation_id.as_deref(),
             author_json: input.author_json.as_deref(),
             now_ms: input.now_ms,
         },
@@ -5255,6 +5306,12 @@ fn hash_author_fields(author_json: Option<&str>) -> (&'static [u8], &[u8]) {
         Some(author_json) => (b"some", author_json.as_bytes()),
         None => (b"none", b""),
     }
+}
+
+/// The path's final segment, for per-file capture summaries (TS
+/// `pathBasename` parity — paths are stored with `/` separators).
+fn path_basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn hash_optional_text_fields(value: Option<&str>) -> (&'static [u8], &[u8]) {

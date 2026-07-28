@@ -61,6 +61,73 @@ use std::{
 const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 
+/// Emitted once per settled capture batch / reconcile pass that settled any
+/// path — a REPAINT PING, not a moment ledger. Most emissions follow new
+/// moment rows (ingests, retires, policy/non-ownable/secret untracks), but
+/// content-equality dedupes and no-op retires fire it too: the renderer
+/// re-lists cheaply, and under-notifying is the staleness bug this event
+/// exists to prevent. In daemon mode no TS write path runs, so nothing else
+/// announces these writes.
+pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
+
+/// An engine-initiated notification for the transport host to deliver as a
+/// wire `Event` envelope. The service assigns only the NAME and PAYLOAD;
+/// the per-session `seq`/`sessionGeneration` belong to the transport.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineEventNotice {
+    pub name: String,
+    pub payload: Value,
+}
+
+/// How many undelivered notices the service-to-transport queue holds before
+/// new ones are DROPPED. Notices are repaint pings, so any queued backlog
+/// already guarantees the consumer will re-list on drain — dropping under a
+/// stalled transport loses nothing while keeping capture activity from
+/// growing the daemon without bound.
+const ENGINE_EVENT_QUEUE_CAPACITY: usize = 256;
+
+/// Cloneable emitter handle shared between the service and its background
+/// tasks (the capture driver). At most one subscriber (the stdio host); with
+/// no subscriber, notices are dropped — an embedded in-process host that
+/// never subscribes owes no drain.
+#[derive(Clone, Default)]
+pub struct EngineEvents {
+    subscriber: Arc<Mutex<Option<tokio::sync::mpsc::Sender<EngineEventNotice>>>>,
+}
+
+impl EngineEvents {
+    /// Route subsequent notices to the returned receiver, replacing any
+    /// previous subscriber. The channel is BOUNDED: a transport that stops
+    /// draining (blocked Electron main thread) sheds notices instead of
+    /// accumulating them, and the ones already queued make the eventual
+    /// drain repaint anyway.
+    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<EngineEventNotice> {
+        let (tx, rx) = tokio::sync::mpsc::channel(ENGINE_EVENT_QUEUE_CAPACITY);
+        *lock(&self.subscriber) = Some(tx);
+        rx
+    }
+
+    pub(crate) fn emit(&self, name: &str, payload: Value) {
+        let mut subscriber = lock(&self.subscriber);
+        let Some(tx) = subscriber.as_ref() else {
+            return;
+        };
+        match tx.try_send(EngineEventNotice {
+            name: name.to_owned(),
+            payload,
+        }) {
+            // A full queue sheds the notice (see `subscribe`); the emitter
+            // must never block a capture apply on a stalled transport.
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                // The receiver is gone; drop it so later emits stop cloning
+                // payloads into a dead channel.
+                *subscriber = None;
+            }
+        }
+    }
+}
+
 /// In-band CONTENT (binary bytes, secret plaintext) uses the capture contract's
 /// smaller request cap. Larger binary blobs use the full-range write endpoint
 /// or raw blob-chunk egress.
@@ -476,6 +543,7 @@ pub struct EngineService {
     /// lifetime's ledger rows (hash-mismatch refusals or false dedupes).
     session_epoch: String,
     self_writes: SelfWriteSuppression,
+    events: EngineEvents,
     #[cfg(feature = "harness")]
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
     /// PER-EngineService by design. Production runs exactly ONE EngineService per
@@ -629,6 +697,7 @@ impl EngineService {
                     std::sync::LazyLock::new(SelfWriteSuppression::default);
                 GLOBAL_SELF_WRITES.clone()
             },
+            events: EngineEvents::default(),
             #[cfg(feature = "harness")]
             capture_apply_probe: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
@@ -1229,6 +1298,12 @@ impl EngineService {
         }
     }
 
+    /// The service's event emitter. The transport host subscribes once and
+    /// forwards notices to the connected client as wire `Event` envelopes.
+    pub fn events(&self) -> EngineEvents {
+        self.events.clone()
+    }
+
     async fn workspace_open(
         &self,
         ctx: &RequestContext,
@@ -1463,6 +1538,7 @@ impl EngineService {
                 self.self_writes.scoped(&root),
                 Arc::clone(&capture_apply_gate),
                 capture_author_json.flatten(),
+                self.events.clone(),
                 #[cfg(feature = "harness")]
                 self.capture_apply_probe.clone(),
             );
@@ -2930,8 +3006,21 @@ impl EngineService {
         let handle = handle.clone();
         let sessions = Arc::clone(&self.sessions);
         let self_writes = self.self_writes.clone();
+        let events = self.events.clone();
         let detached_operation = operation.to_owned();
         let settle_summary = settle_summary.to_owned();
+        // The fence's forced reconcile is a capture PASS (TS parity:
+        // `version-switch-${id}` / `version-create-${id}`): its moments carry
+        // the fence's own summary and ONE correlation id so the pre-switch
+        // "nothing is ever lost" capture groups in history instead of
+        // rendering as unrelated per-file rows.
+        let reconcile_provenance = capture_sink::CaptureProvenance {
+            summary: Some(settle_summary.clone()),
+            correlation_id: Some(capture_driver::pass_correlation_id(match &intent {
+                VersionFenceIntent::Fork { .. } => "version-create",
+                VersionFenceIntent::Switch { .. } => "version-switch",
+            })),
+        };
         #[cfg(feature = "harness")]
         let probe = self.capture_apply_probe.clone();
         let mut fence = tokio::spawn(async move {
@@ -2986,6 +3075,8 @@ impl EngineService {
                 &capture_status,
                 &self_writes.scoped(&open.root),
                 capture_author_json,
+                reconcile_provenance,
+                events.clone(),
                 token.clone(),
             )
             .await;
@@ -10654,6 +10745,27 @@ mod tests {
     use std::time::Duration;
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[tokio::test]
+    async fn engine_events_shed_instead_of_growing_when_the_subscriber_stalls() {
+        // codex P2: an unbounded notice queue under a stalled transport
+        // grows the daemon without bound. The channel is bounded and emit
+        // NEVER blocks: overflow is shed (the queued backlog already
+        // guarantees a repaint on drain).
+        let events = EngineEvents::default();
+        let mut rx = events.subscribe();
+        for i in 0..(ENGINE_EVENT_QUEUE_CAPACITY + 10) {
+            events.emit(CAPTURE_MOMENT_RECORDED_EVENT, json!({ "i": i }));
+        }
+        let mut drained = 0usize;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(
+            drained, ENGINE_EVENT_QUEUE_CAPACITY,
+            "emit must shed past the bound, not queue unboundedly"
+        );
+    }
 
     #[test]
     fn recovered_origins_use_random_uuid_identity_coordinates() {

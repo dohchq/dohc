@@ -46,6 +46,13 @@ export interface EngineDaemonLifecycleOptions {
   healthyResetMs?: number;
   requestTimeoutMs?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
+  // Fires once per launched-and-healthy daemon generation (the first launch
+  // AND every restart). A capture event committed by a previous generation
+  // can die with its transport before delivery, and the replacement's
+  // baseline finds disk and manifest already agreeing — so no retry event is
+  // ever generated. Consumers use this to invalidate state that daemon
+  // events would otherwise keep fresh (e.g. the history timeline).
+  onLaunch?: () => void;
 }
 
 export interface EngineBinaryPathOptions {
@@ -144,6 +151,7 @@ export class EngineDaemonLifecycle {
   private readonly inFlightLaunches = new Set<InFlightLaunch>();
   private readonly launchingClients = new Set<EngineDaemonClient>();
   private readonly workspaceRequestTails = new Map<string, Promise<void>>();
+  private readonly eventHandlers = new Set<(event: Event) => void>();
 
   constructor(options: EngineDaemonLifecycleOptions) {
     this.options = options;
@@ -284,6 +292,16 @@ export class EngineDaemonLifecycle {
 
   currentClient(): EngineDaemonClient {
     return this.requireClient();
+  }
+
+  // Daemon-initiated events, surviving restarts: handlers registered here are
+  // fanned out from every client this lifecycle launches, so a consumer never
+  // has to know the daemon was replaced.
+  onEvent(handler: (event: Event) => void): () => void {
+    this.eventHandlers.add(handler);
+    return () => {
+      this.eventHandlers.delete(handler);
+    };
   }
 
   async stop(): Promise<void> {
@@ -453,6 +471,12 @@ export class EngineDaemonLifecycle {
       );
     }
     this.launchingClients.add(client);
+    // Attach the fan-out BEFORE the smoke: a capture event from a workspace
+    // reopened early in the daemon's life must not be lost to subscription
+    // ordering. The subscription dies with the client if this launch fails.
+    client.onEvent?.((event) => {
+      for (const handler of this.eventHandlers) handler(event);
+    });
     try {
       if (this.stopping || this.exitedGenerations.has(generation)) {
         await this.closeClient(client);
@@ -474,6 +498,11 @@ export class EngineDaemonLifecycle {
       this.client = client;
       this.running = true;
       this.scheduleHealthyReset(generation);
+      try {
+        this.options.onLaunch?.();
+      } catch {
+        // A launch observer must never fail the launch itself.
+      }
     } catch (error) {
       await this.closeClient(client);
       if (this.stopping) return;

@@ -9,7 +9,10 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::{
+    CAPTURE_MOMENT_RECORDED_EVENT, EngineEventNotice, EngineService,
+    shadow_fence::write_shadow_marker_for_harness,
+};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
@@ -214,6 +217,183 @@ async fn autonomous_capture_notices_external_disk_changes() {
         .expect("close");
 }
 
+/// Drain `capture.momentRecorded` events until one carries `path`, panicking
+/// past the shared WAIT deadline.
+async fn wait_for_moment_event(
+    events: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>,
+    path: &str,
+) -> EngineEventNotice {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let notice = tokio::time::timeout(remaining, events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for a capture event carrying {path}"))
+            .expect("event channel stays open");
+        assert_eq!(notice.name, CAPTURE_MOMENT_RECORDED_EVENT);
+        assert_eq!(notice.payload["workspaceId"], WORKSPACE_ID);
+        if notice.payload["paths"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|entry| entry == path))
+        {
+            return notice;
+        }
+    }
+}
+
+/// (metadataSummary, metadataCorrelationId) of the latest moment for `path`,
+/// read AFTER workspace close through a fresh store connection.
+fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
+    let store = EngineStore::open(db, 100).expect("reopen store");
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT metadata_summary, metadata_correlation_id FROM moments \
+                 WHERE workspace_id = ?1 AND path = ?2 ORDER BY moment_order DESC LIMIT 1",
+                [WORKSPACE_ID, path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("moment metadata")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() {
+    // The D1/D2 acceptance pair. MUTATION: reverting the sink provenance
+    // plumb-through leaves both summaries NULL; reverting start_layer's
+    // shared provenance splits the correlation ids; deleting the apply-path
+    // emit leaves the event wait to time out.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "offline-a.md", b"edited while closed a");
+    write_file(scratch.path(), "offline-b.md", b"edited while closed b");
+
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "offline-a.md",
+        Some("edited while closed a"),
+    )
+    .await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "offline-b.md",
+        Some("edited while closed b"),
+    )
+    .await;
+
+    // ONE batched event per settled reconcile pass covers both files.
+    let notice = wait_for_moment_event(&mut events, "offline-a.md").await;
+    let paths = notice.payload["paths"].as_array().expect("paths").clone();
+    if !paths.iter().any(|entry| entry == "offline-b.md") {
+        wait_for_moment_event(&mut events, "offline-b.md").await;
+    }
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_100, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary_a, correlation_a) = moment_metadata(&db_path, "offline-a.md");
+    let (summary_b, correlation_b) = moment_metadata(&db_path, "offline-b.md");
+    assert_eq!(summary_a.as_deref(), Some("Reconciled offline edits"));
+    assert_eq!(summary_b.as_deref(), Some("Reconciled offline edits"));
+    let correlation_a = correlation_a.expect("baseline moments carry a correlation id");
+    assert_eq!(
+        Some(correlation_a.as_str()),
+        correlation_b.as_deref(),
+        "one reconcile pass = ONE correlation id across its per-file moments"
+    );
+
+    // Second offline window: an EDIT and a DELETE reconcile in the same pass
+    // and must stay ONE contiguous history group — history groups only
+    // CONSECUTIVE same-correlation moments, so the delete carrying NULL
+    // provenance would split it.
+    write_file(scratch.path(), "offline-a.md", b"edited offline again");
+    std::fs::remove_file(scratch.path().join("offline-b.md")).expect("offline delete");
+    let handle = open_workspace(&transport, &scratch, 2_000).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "offline-a.md",
+        Some("edited offline again"),
+    )
+    .await;
+    wait_for_text(&transport, &handle, "offline-b.md", None).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_101, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("second close");
+
+    let (summary_a2, correlation_a2) = moment_metadata(&db_path, "offline-a.md");
+    let (summary_b2, correlation_b2) = moment_metadata(&db_path, "offline-b.md");
+    assert_eq!(summary_a2.as_deref(), Some("Reconciled offline edits"));
+    assert_eq!(
+        summary_b2.as_deref(),
+        Some("Reconciled offline edits"),
+        "the pass's DELETE moment carries the pass summary"
+    );
+    let correlation_a2 = correlation_a2.expect("second pass carries a correlation id");
+    assert_eq!(
+        Some(correlation_a2.as_str()),
+        correlation_b2.as_deref(),
+        "a delete recorded mid-pass shares the pass correlation id"
+    );
+    assert_ne!(correlation_a2, correlation_a, "each pass mints its own id");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_live_capture_emits_an_event_and_keeps_ts_live_labels() {
+    // D2 for the watcher path: with no TS write in the loop, this event is
+    // the ONLY signal that tells the renderer a moment landed. D1 (TS
+    // parity): a live TEXT capture carries NO summary — the renderer's copy
+    // for null is "Edited <basename>" — while a live BINARY capture carries
+    // "Updated <basename>". Neither mints a correlation id.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+
+    write_file(scratch.path(), "notes/live.md", b"external edit");
+    wait_for_text(&transport, &handle, "notes/live.md", Some("external edit")).await;
+    wait_for_moment_event(&mut events, "notes/live.md").await;
+    write_file(scratch.path(), "photo.png", &[0xff, 0x00, 0xfe]);
+    wait_for_moment_event(&mut events, "photo.png").await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_200, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    assert_eq!(
+        moment_metadata(&db_path, "notes/live.md"),
+        (None, None),
+        "a live text capture must not rewrite the renderer's Edited label"
+    );
+    let (summary, correlation) = moment_metadata(&db_path, "photo.png");
+    assert_eq!(summary.as_deref(), Some("Updated photo.png"));
+    assert_eq!(correlation, None, "live captures mint no correlation id");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn open_capture_author_stamps_the_startup_baseline() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -305,6 +485,126 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
         )
         .await
         .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_policy_retire_pass_emits_a_moment_event() {
+    // codex round-1 P2: a policy narrow retires an existing head through an
+    // ingest that settles NotOwned — the "Stopped tracking by policy" delete
+    // moment is real, but gating the event on applied_paths alone left the
+    // renderer permanently stale for exactly those moments. MUTATION:
+    // reverting the emit gate to applied_paths-only makes the event wait
+    // below time out.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "private/journal.md", b"personal");
+
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    // Drain the baseline capture's own event(s) so the assertion below can
+    // only be satisfied by the policy pass.
+    while events.try_recv().is_ok() {}
+
+    // Narrow WITHOUT touching the file: the policy rebuild re-offers the
+    // unchanged path and the sink retires it as NotOwned.
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    );
+    wait_for_text(&transport, &handle, "private/journal.md", None).await;
+    let notice = wait_for_moment_event(&mut events, "private/journal.md").await;
+    assert!(
+        notice.payload["notOwnedCount"].as_u64().unwrap_or(0) >= 1,
+        "the policy retire settles NotOwned and must be counted: {:?}",
+        notice.payload
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_300, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_over_cap_policy_retire_keeps_the_pass_provenance_and_emits() {
+    // codex re-review P2s: the retained-over-cap retire runs through its OWN
+    // sink and reports via not_owned_paths. With default provenance its
+    // delete moment carried a NULL correlation id (splitting the reconcile
+    // pass's history group), and gating the event on applied_paths
+    // suppressed the announce entirely. Narrow-while-closed makes the
+    // sequencing deterministic: the reopen BASELINE (which carries the
+    // reconcile pass provenance) is the first pass to see the narrow, and
+    // the over-cap path never emits a diff op, so the retained loop is the
+    // only route that can retire it. MUTATION: reverting the retained-loop
+    // sink to CaptureProvenance::default() fails the correlation assertion;
+    // reverting the event gate to applied_paths-only times out the event
+    // wait (the baseline's only work is this not-owned retire).
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "big.md", b"small enough to capture");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "big.md",
+        Some("small enough to capture"),
+    )
+    .await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_390, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close before offline window");
+
+    // Offline: the file grows PAST the 64 MiB scan cap AND the policy
+    // narrows it out of ownership.
+    write_file(scratch.path(), "big.md", &vec![0_u8; 65 * 1024 * 1024]);
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]
+path = \"big.md\"
+tracked = false
+",
+    );
+
+    let mut events = service.events().subscribe();
+    let handle = open_workspace(&transport, &scratch, 2).await;
+    wait_for_text(&transport, &handle, "big.md", None).await;
+    let notice = wait_for_moment_event(&mut events, "big.md").await;
+    assert!(
+        notice.payload["notOwnedCount"].as_u64().unwrap_or(0) >= 1,
+        "the over-cap retire reports via not_owned_paths and must be counted: {:?}",
+        notice.payload
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_400, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, correlation) = moment_metadata(&db_path, "big.md");
+    assert_eq!(summary.as_deref(), Some("Stopped tracking by policy"));
+    assert!(
+        correlation.is_some(),
+        "the over-cap retire must ride its reconcile pass's correlation id"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

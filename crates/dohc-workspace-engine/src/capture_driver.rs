@@ -22,7 +22,8 @@
 //! scanned path through the sink — narrowed-but-unchanged paths retire via
 //! the sink's NotOwned branch, and newly-widened paths re-ingest.
 
-use crate::capture_sink::{SelfWriteSuppression, StoreCaptureSink};
+use crate::capture_sink::{CaptureProvenance, SelfWriteSuppression, StoreCaptureSink};
+use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
 use dohc_engine_files::{
     CancellationToken, CaptureApplyResult, FilesActor, FilesError, FilesHandle, ManifestEntry,
     NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest,
@@ -1534,6 +1535,7 @@ impl CaptureDriver {
     /// called after `bind_shadow_clone` succeeded — the sink writes through
     /// the shadow-bound store actor, and an unmarked root must never spawn a
     /// watcher (the caller's shadow validation guarantees it).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
         root: PathBuf,
         actor: ActorHandle,
@@ -1541,6 +1543,7 @@ impl CaptureDriver {
         self_writes: SelfWriteSuppression,
         apply_gate: ApplyGate,
         initial_author_json: Option<String>,
+        events: EngineEvents,
         #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
     ) -> CaptureDriver {
         let cancel = CancellationToken::new();
@@ -1563,6 +1566,7 @@ impl CaptureDriver {
             flush_rx,
             apply_gate,
             Arc::clone(&refresh_epoch),
+            events,
             #[cfg(feature = "harness")]
             apply_probe,
         ));
@@ -2280,6 +2284,7 @@ struct RealEnv {
     self_writes: SelfWriteSuppression,
     apply_gate: ApplyGate,
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
+    events: EngineEvents,
     #[cfg(feature = "harness")]
     apply_probe: Option<CaptureApplyProbe>,
 }
@@ -2292,7 +2297,13 @@ impl RealEnv {
             .clone()
     }
 
+    /// Context for a LIVE watcher-batch apply: default provenance (per-file
+    /// "Updated <basename>" summaries, no correlation id).
     fn apply_context(&self) -> ApplyRunContext<'_> {
+        self.apply_context_with(CaptureProvenance::default())
+    }
+
+    fn apply_context_with(&self, provenance: CaptureProvenance) -> ApplyRunContext<'_> {
         ApplyRunContext {
             root: &self.root,
             actor: &self.actor,
@@ -2300,6 +2311,8 @@ impl RealEnv {
             status: &self.status,
             self_writes: &self.self_writes,
             author_json: self.capture_author(),
+            provenance,
+            events: self.events.clone(),
         }
     }
 }
@@ -2358,7 +2371,13 @@ impl DriverEnv for RealEnv {
         .await
         .map_err(|_| ())?;
 
-        let mut settled = apply_run(self.apply_context(), &fresh, initial).await;
+        // The startup baseline is the offline-reconcile pass (TS parity):
+        // ONE correlation id and the "Reconciled offline edits" summary tie
+        // its per-file moments together, retries included — they finish the
+        // same pass.
+        let provenance = reconcile_provenance();
+        let mut settled =
+            apply_run(self.apply_context_with(provenance.clone()), &fresh, initial).await;
         // The open barrier must not release on a FAILED baseline: a caller
         // whose first write lands before the retry could have it overwritten
         // by the retry's capture of stale closed-period disk bytes. Retry a
@@ -2378,7 +2397,9 @@ impl DriverEnv for RealEnv {
                 .reconcile_if_dirty(cancel.child_token())
                 .await
             {
-                Ok(run) => apply_run(self.apply_context(), &fresh, run).await,
+                Ok(run) => {
+                    apply_run(self.apply_context_with(provenance.clone()), &fresh, run).await
+                }
                 Err(_) => false,
             };
         }
@@ -2484,6 +2505,7 @@ async fn drive(
     flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
     apply_gate: ApplyGate,
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
+    events: EngineEvents,
     #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
 ) {
     let mut env = RealEnv {
@@ -2495,6 +2517,7 @@ async fn drive(
         self_writes,
         apply_gate,
         refresh_epoch,
+        events,
         #[cfg(feature = "harness")]
         apply_probe,
     };
@@ -2506,6 +2529,7 @@ async fn drive(
 /// version so deletions are visible, but no watcher is attached: the normal
 /// driver remains alive and simply waits at the gate. Degraded listings fail
 /// before any safe-subset apply, matching the TypeScript switch path.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reconcile_full_for_switch(
     root: &Path,
     actor: &ActorHandle,
@@ -2513,6 +2537,8 @@ pub(crate) async fn reconcile_full_for_switch(
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
     author_json: Option<String>,
+    provenance: CaptureProvenance,
+    events: EngineEvents,
     token: CancellationToken,
 ) -> Result<bool, SwitchReconcileError> {
     if token.is_cancelled() {
@@ -2559,6 +2585,8 @@ pub(crate) async fn reconcile_full_for_switch(
                 status,
                 self_writes,
                 author_json,
+                provenance,
+                events,
             };
             if apply_run_with_handle(context, &handle, run).await {
                 Ok(manifest_changed)
@@ -2625,6 +2653,53 @@ struct ApplyRunContext<'a> {
     status: &'a Arc<DriverStatus>,
     self_writes: &'a SelfWriteSuppression,
     author_json: Option<String>,
+    /// Moment provenance stamped on every capture write of this run.
+    provenance: CaptureProvenance,
+    events: EngineEvents,
+}
+
+/// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
+/// actor-neutral correlation id ties a reconcile pass's per-file moments
+/// together as a group without inventing an author.
+fn reconcile_provenance() -> CaptureProvenance {
+    CaptureProvenance {
+        summary: Some("Reconciled offline edits".to_owned()),
+        correlation_id: Some(pass_correlation_id("reconcile")),
+    }
+}
+
+/// One unique correlation id per capture pass (TS ``${prefix}-${createId()}``
+/// parity): pid + wall ms + a process counter — unique enough for grouping
+/// CONSECUTIVE moments, which is all history uses it for.
+pub(crate) fn pass_correlation_id(prefix: &str) -> String {
+    static PASS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let pass = PASS.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{prefix}-{:x}-{:x}-{pass:x}",
+        std::process::id(),
+        wall_now_ms(),
+    )
+}
+
+/// Bounded `capture.momentRecorded` payload: the renderer needs the ping and
+/// enough context to scope a refresh; a huge baseline pass must never blow
+/// the wire frame budget.
+fn moment_recorded_payload(
+    workspace_id: &str,
+    applied_paths: &[String],
+    not_owned_paths: &[String],
+) -> serde_json::Value {
+    const MAX_EVENT_PATHS: usize = 32;
+    serde_json::json!({
+        "workspaceId": workspace_id,
+        "appliedCount": applied_paths.len(),
+        "notOwnedCount": not_owned_paths.len(),
+        "paths": applied_paths
+            .iter()
+            .chain(not_owned_paths)
+            .take(MAX_EVENT_PATHS)
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// Apply one reconcile run through the capture sink and acknowledge it.
@@ -2651,6 +2726,8 @@ async fn apply_run_with_handle(
         status,
         self_writes,
         author_json,
+        provenance,
+        events,
     } = context;
     let plan = match run {
         ReconcileRun::Completed(plan) => plan,
@@ -2686,6 +2763,11 @@ async fn apply_run_with_handle(
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let apply_plan = plan.clone();
     let apply_author_json = author_json.clone();
+    // The retained-over-cap loop below retires through its OWN sink; it must
+    // carry the same pass provenance or its deletes split the reconcile/fence
+    // history group with NULL correlation ids.
+    let retire_provenance = provenance.clone();
+    let apply_provenance = provenance;
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
         .spawn(move || {
@@ -2700,6 +2782,7 @@ async fn apply_run_with_handle(
                 now_ms,
                 apply_author_json,
                 apply_self_writes,
+                apply_provenance,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
             let _ = done_tx.send((apply_plan, result, sink.policy_held()));
@@ -2757,19 +2840,34 @@ async fn apply_run_with_handle(
             let retire_root = root.to_path_buf();
             let retire_self_writes = self_writes.clone();
             let retire_author_json = author_json.clone();
-            let retired = tokio::task::spawn_blocking(move || {
-                let mut sink = StoreCaptureSink::new_with_self_writes(
-                    retire_actor,
-                    retire_workspace,
-                    retire_version,
-                    retire_root,
-                    now_ms,
-                    retire_author_json,
-                    retire_self_writes,
-                );
-                sink.retire_policy_excluded(&retire_path)
-            })
-            .await;
+            let retire_pass_provenance = retire_provenance.clone();
+            // A DEDICATED plain thread, same as the apply above: the sink's
+            // blocking actor calls assert they run OUTSIDE any tokio runtime
+            // context, and spawn_blocking threads carry the runtime handle.
+            let (retire_tx, retire_rx) = tokio::sync::oneshot::channel();
+            let retire_thread = std::thread::Builder::new()
+                .name("dohc-capture-overcap-retire".to_owned())
+                .spawn(move || {
+                    let mut sink = StoreCaptureSink::new_with_self_writes(
+                        retire_actor,
+                        retire_workspace,
+                        retire_version,
+                        retire_root,
+                        now_ms,
+                        retire_author_json,
+                        retire_self_writes,
+                        retire_pass_provenance,
+                    );
+                    let _ = retire_tx.send(sink.retire_policy_excluded(&retire_path));
+                });
+            let retired = match retire_thread {
+                Ok(joiner) => {
+                    let outcome = retire_rx.await.ok();
+                    let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
+                    outcome
+                }
+                Err(_) => None,
+            };
             // This loop is the ONLY path that can retire an over-cap narrowed
             // head (such a path never appears in the diff), so a swallowed
             // failure would strand it stale-but-authoritative with nothing to
@@ -2779,7 +2877,7 @@ async fn apply_run_with_handle(
                 // REPORT it in the receipt: the manifest must forget a path
                 // whose head this loop just deleted, or a later policy widen
                 // would diff clean and never re-ingest it.
-                Ok(Ok(())) => result.not_owned_paths.push(path.clone()),
+                Some(Ok(())) => result.not_owned_paths.push(path.clone()),
                 // A FAILED over-cap retire must fail the receipt too: this
                 // loop is the only thing that can retire such a head, so it
                 // must stay dirty and retry. Setting only the sticky status
@@ -2804,6 +2902,24 @@ async fn apply_run_with_handle(
         status.arm_policy_hold();
     }
     let clean = result.failed_applies.is_empty() && !result.degraded;
+    // ONE event per settled batch/reconcile pass that settled anything. The
+    // domain writes are already durable here (each ingest/retire committed in
+    // its own transaction), so the announce happens even if the files-layer
+    // ack below fails — the renderer must never stay stale over bookkeeping.
+    //
+    // NOT-OWNED settlements count: several of them APPEND retire/delete
+    // moments — a policy-narrowed head ("Stopped tracking by policy"),
+    // content that stops being engine-ownable ("Stopped tracking non-text
+    // content"), a secret that stops being trackable, and the over-cap
+    // retained loop above (which reports its retires via not_owned_paths).
+    // Gating on applied_paths alone left the renderer permanently stale for
+    // exactly those moments.
+    if !result.applied_paths.is_empty() || !result.not_owned_paths.is_empty() {
+        events.emit(
+            CAPTURE_MOMENT_RECORDED_EVENT,
+            moment_recorded_payload(workspace_id, &result.applied_paths, &result.not_owned_paths),
+        );
+    }
     if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();
         return false;

@@ -592,6 +592,8 @@ fn capture_text(path: &str, text: &str, now_ms: i64) -> CaptureIngest {
         path: path.to_owned(),
         text: text.to_owned(),
         metadata_origin: "capture".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms,
         request_id: None,
