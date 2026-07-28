@@ -190,7 +190,6 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
             .find(|result| result.job_id == id)
             .expect("job result")
             .outcome
-            .clone()
     };
     assert_eq!(outcome_of("ordinary-write"), JobOutcome::Blocked);
     assert_eq!(outcome_of("ordinary-write-sibling"), JobOutcome::Completed);
