@@ -29,8 +29,9 @@
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::{
-    GranularChatMessageSearchBatch, SearchResult, delete_file_search_index,
-    ensure_search_index_for_version, query_chat_messages_granular_bounded, search_workspace,
+    GranularChatMessageSearchBatch, SearchPageBatch, SearchResult, SearchResultKey,
+    delete_file_search_index, ensure_search_index_for_version,
+    query_chat_messages_granular_bounded, search_workspace, search_workspace_page,
     upsert_file_search_index,
 };
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
@@ -1211,6 +1212,18 @@ enum Command {
         now_ms: i64,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Vec<SearchResult>, RuntimeError>>,
+    },
+    SearchPage {
+        root_dir: PathBuf,
+        workspace_id: String,
+        version_id: String,
+        query: String,
+        limit: Option<i64>,
+        now_ms: i64,
+        expected_generation: Option<u64>,
+        after: Option<SearchResultKey>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<SearchPageBatch, RuntimeError>>,
     },
     SearchQueryChatMessagesGranular {
         workspace_id: String,
@@ -3488,6 +3501,38 @@ impl ActorHandle {
                 query,
                 limit,
                 now_ms,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_page(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        version_id: String,
+        query: String,
+        limit: Option<i64>,
+        now_ms: i64,
+        expected_generation: Option<u64>,
+        after: Option<SearchResultKey>,
+        token: CancellationToken,
+    ) -> Result<SearchPageBatch, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::SearchPage {
+                root_dir,
+                workspace_id,
+                version_id,
+                query,
+                limit,
+                now_ms,
+                expected_generation,
+                after,
                 token,
                 reply,
             })
@@ -7979,6 +8024,39 @@ fn worker_main(
                                 &query,
                                 limit,
                                 now_ms,
+                            )
+                        })
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::SearchPage {
+                root_dir,
+                workspace_id,
+                version_id,
+                query,
+                limit,
+                now_ms,
+                expected_generation,
+                after,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    store
+                        .read_with(|conn| {
+                            search_workspace_page(
+                                conn,
+                                &root_dir,
+                                &workspace_id,
+                                &version_id,
+                                &query,
+                                limit,
+                                now_ms,
+                                expected_generation,
+                                after,
                             )
                         })
                         .map_err(RuntimeError::from)

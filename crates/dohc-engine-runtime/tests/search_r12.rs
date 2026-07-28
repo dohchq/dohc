@@ -13,9 +13,11 @@ use dohc_engine_domain::{
     VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
 use dohc_engine_runtime::search::{
-    SearchCandidate, SearchSurface, ensure_search_index_for_version, query_chat_messages_granular,
-    query_chat_messages_granular_bounded, query_search_index, search_workspace,
-    upsert_file_search_index,
+    CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET, FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
+    FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET, SearchCandidate, SearchPageDisposition, SearchSurface,
+    ensure_search_index_for_version, query_chat_messages_granular,
+    query_chat_messages_granular_bounded, query_search_index, query_search_index_keyset,
+    search_workspace, search_workspace_page, upsert_file_search_index,
 };
 use dohc_engine_storage::{
     EngineStore, FaultPoint, NoFaults, Preimage, TxnOutcome, hex_sha256, put_binary_blob,
@@ -155,6 +157,594 @@ fn run_search(
     store
         .read_with(|conn| search_workspace(conn, root, WS, V, query, Some(100), 999))
         .expect("search")
+}
+
+#[test]
+fn short_query_falls_back_to_a_bounded_linear_scan() {
+    // MUTATION: convert query_search_index's short-query sentinel to an empty
+    // candidate batch and both seeded two-character hits disappear.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    write_file(&mut store, "obj-ai", "notes/ai.md", "AI operating plan", 10);
+    start_thread(
+        &mut store,
+        "channel-ai",
+        "thread-ai",
+        "Discuss the AI plan",
+        20,
+    );
+    ensure_index(&mut store, &root, 30);
+
+    let results = run_search(&store, &root, "AI");
+    assert!(
+        results
+            .iter()
+            .any(|result| result.surface == SearchSurface::File && result.path == "notes/ai.md"),
+        "short-query file fallback missing: {results:?}"
+    );
+    assert!(
+        results.iter().any(|result| {
+            result.surface == SearchSurface::Chat
+                && result.thread_id.as_deref() == Some("thread-ai")
+        }),
+        "short-query chat fallback missing: {results:?}"
+    );
+}
+
+#[test]
+fn short_query_scan_caps_every_row_examined_even_without_matches() {
+    // MUTATION: restore the SQL instr(lower(text), ...) filter or remove the raw
+    // row cap and this no-match page scans all three rows and reports no
+    // continuation.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    for index in 0..3 {
+        let text = if index == 2 {
+            "zz target beyond the first page"
+        } else {
+            "ordinary content"
+        };
+        write_file(
+            &mut store,
+            &format!("obj-row-budget-{index}"),
+            &format!("notes/row-budget-{index}.md"),
+            text,
+            10 + index,
+        );
+    }
+    ensure_index(&mut store, &root, 30);
+
+    let first = store
+        .read_with(|conn| {
+            query_search_index_keyset(
+                conn,
+                &root,
+                WS,
+                V,
+                "zz",
+                100,
+                None,
+                FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET,
+                FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
+                2,
+            )
+        })
+        .expect("bounded short scan")
+        .expect("candidate batch");
+    assert!(first.candidates.is_empty());
+    assert!(first.has_more, "the two-row scan must expose continuation");
+    let resume = first.resume_after.expect("exclusive scan cursor");
+    assert!(!resume.inclusive);
+
+    let second = store
+        .read_with(|conn| {
+            query_search_index_keyset(
+                conn,
+                &root,
+                WS,
+                V,
+                "zz",
+                100,
+                Some(resume),
+                FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET,
+                FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
+                2,
+            )
+        })
+        .expect("continued short scan")
+        .expect("candidate batch");
+    assert_eq!(second.candidates.len(), 1);
+    assert!(!second.has_more);
+}
+
+#[test]
+fn short_query_file_scan_spends_its_row_budget_only_on_the_requested_scope() {
+    // MUTATION: remove the workspace/version predicates from the SQL and the
+    // foreign row consumes this one-row scan before the target is reached.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    write_file(
+        &mut store,
+        "obj-scoped-target",
+        "notes/scoped-target.md",
+        "AI target",
+        10,
+    );
+    ensure_index(&mut store, &root, 20);
+
+    let outcome = store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute("DELETE FROM engine_search_files_fts", [])?;
+            tx.execute(
+                "INSERT INTO engine_search_files_fts \
+                 (workspace_id, version_id, object_id, path, text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "foreign-workspace",
+                    V,
+                    "foreign-object",
+                    "foreign.md",
+                    "ordinary"
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO engine_search_files_fts \
+                 (workspace_id, version_id, object_id, path, text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    WS,
+                    "foreign-version",
+                    "foreign-version-object",
+                    "foreign-version.md",
+                    "ordinary"
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO engine_search_files_fts \
+                 (workspace_id, version_id, object_id, path, text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    WS,
+                    V,
+                    "obj-scoped-target",
+                    "notes/scoped-target.md",
+                    "AI target"
+                ],
+            )?;
+            Ok::<(), dohc_engine_runtime::SearchError>(())
+        })
+        .expect("seed scoped FTS rows");
+    assert!(matches!(outcome, TxnOutcome::Committed(())));
+
+    let batch = store
+        .read_with(|conn| {
+            query_search_index_keyset(
+                conn,
+                &root,
+                WS,
+                V,
+                "AI",
+                10,
+                None,
+                FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET,
+                FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
+                1,
+            )
+        })
+        .expect("scoped short query")
+        .expect("candidate batch");
+    assert_eq!(batch.candidates.len(), 1);
+    assert!(matches!(
+        &batch.candidates[0],
+        SearchCandidate::File { path, .. } if path == "notes/scoped-target.md"
+    ));
+}
+
+#[test]
+fn first_file_candidate_may_exceed_the_page_budget_when_it_fits_the_row_budget() {
+    // MUTATION: restore the page-start Bounds error and this query fails instead
+    // of serving the sole viable candidate by itself.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let text = format!("needle {}", "x".repeat(128));
+    write_file(
+        &mut store,
+        "obj-first-over-page-budget",
+        "notes/first-over-page-budget.md",
+        &text,
+        10,
+    );
+    ensure_index(&mut store, &root, 20);
+
+    let batch = store
+        .read_with(|conn| {
+            query_search_index_keyset(
+                conn,
+                &root,
+                WS,
+                V,
+                "needle",
+                10,
+                None,
+                text.len(),
+                text.len().saturating_sub(1),
+                10,
+            )
+        })
+        .expect("first candidate should be served alone")
+        .expect("candidate batch");
+    assert_eq!(batch.candidates.len(), 1);
+    assert!(matches!(
+        &batch.candidates[0],
+        SearchCandidate::File { path, .. } if path == "notes/first-over-page-budget.md"
+    ));
+}
+
+#[test]
+fn regular_fts_file_page_bounds_source_before_materializing_all_hits() {
+    // MUTATION: apply the file source-byte accounting only to TooShort queries
+    // and all three matching bodies are owned by this regular FTS page.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let text = format!("needle {}", "x".repeat(64));
+    for index in 0..3 {
+        write_file(
+            &mut store,
+            &format!("obj-source-budget-{index}"),
+            &format!("notes/source-budget-{index}.md"),
+            &text,
+            10 + index,
+        );
+    }
+    ensure_index(&mut store, &root, 30);
+
+    let page_budget = text.len().saturating_mul(2).saturating_sub(1);
+    let batch = store
+        .read_with(|conn| {
+            query_search_index_keyset(
+                conn,
+                &root,
+                WS,
+                V,
+                "needle",
+                100,
+                None,
+                FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET,
+                page_budget,
+                100,
+            )
+        })
+        .expect("bounded regular FTS query")
+        .expect("candidate batch");
+    let owned_source_bytes: usize = batch
+        .candidates
+        .iter()
+        .filter_map(|candidate| match candidate {
+            SearchCandidate::File { text, .. } => Some(text.len()),
+            SearchCandidate::Chat { .. } => None,
+        })
+        .sum();
+    assert_eq!(batch.candidates.len(), 1);
+    assert!(batch.has_more);
+    assert!(owned_source_bytes <= page_budget);
+}
+
+#[test]
+fn short_query_fallback_preserves_unicode_case_matching() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    write_file(
+        &mut store,
+        "obj-unicode-short",
+        "notes/unicode-short.md",
+        "ÉA file plan",
+        10,
+    );
+    start_thread(
+        &mut store,
+        "channel-unicode-short",
+        "thread-unicode-short",
+        "topic\nÉA chat plan",
+        20,
+    );
+    ensure_index(&mut store, &root, 30);
+
+    let results = run_search(&store, &root, "éa");
+    assert!(results.iter().any(|result| {
+        result.surface == SearchSurface::File && result.path == "notes/unicode-short.md"
+    }));
+    assert!(results.iter().any(|result| {
+        result.surface == SearchSurface::Chat
+            && result.thread_id.as_deref() == Some("thread-unicode-short")
+    }));
+}
+
+#[test]
+fn inclusive_result_anchor_keeps_the_candidate_after_an_exhausted_row() {
+    // A wire page can cut an actor result after the first candidate and mint an
+    // inclusive line cursor even though that candidate has no later matching
+    // line. MUTATION: truncate the inclusive candidate probe to `limit` and the
+    // exhausted anchor consumes the only slot, hiding the second file.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    write_file(
+        &mut store,
+        "obj-inclusive-first",
+        "notes/inclusive-first.md",
+        "needle first",
+        10,
+    );
+    write_file(
+        &mut store,
+        "obj-inclusive-second",
+        "notes/inclusive-second.md",
+        "needle second",
+        20,
+    );
+    ensure_index(&mut store, &root, 30);
+
+    let first = store
+        .read_with(|conn| {
+            search_workspace_page(conn, &root, WS, V, "needle", Some(1), 999, None, None)
+        })
+        .expect("first bounded search page");
+    let inclusive_anchor = first.results.first().expect("first hit").key;
+    assert_eq!(inclusive_anchor.line, 1);
+
+    let second = store
+        .read_with(|conn| {
+            search_workspace_page(
+                conn,
+                &root,
+                WS,
+                V,
+                "needle",
+                Some(1),
+                999,
+                Some(first.generation),
+                Some(inclusive_anchor),
+            )
+        })
+        .expect("inclusive continuation page");
+    assert_eq!(second.results.len(), 1);
+    assert_eq!(second.results[0].result.path, "notes/inclusive-second.md");
+}
+
+#[test]
+fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
+    // MUTATION: remove CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET accounting and one
+    // actor turn owns every 64 KiB body in this thread.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let prefix = "topic\nneedle ";
+    let body = format!("{prefix}{}", "x".repeat(64 * 1024 - prefix.len()));
+    start_thread(
+        &mut store,
+        "channel-oversized",
+        "thread-oversized",
+        &body,
+        100,
+    );
+    for index in 1..10 {
+        send(
+            &mut store,
+            "thread-oversized",
+            &format!("oversized-message-{index}"),
+            &body,
+            100 + index,
+        );
+    }
+    ensure_index(&mut store, &root, 200);
+
+    let page = store
+        .read_with(|conn| {
+            search_workspace_page(conn, &root, WS, V, "needle", Some(100), 999, None, None)
+        })
+        .expect("bounded search page");
+    assert_eq!(page.disposition, SearchPageDisposition::Results);
+    assert!(
+        page.has_more,
+        "oversized thread must produce a continuation"
+    );
+    assert!(
+        page.results.len() < 10,
+        "one page hydrated the whole oversized thread: {:?}",
+        page.results
+    );
+
+    let compatibility_results = run_search(&store, &root, "needle");
+    assert_eq!(
+        compatibility_results.len(),
+        10,
+        "the unpaged wrapper must consume every bounded actor page"
+    );
+
+    let mut cursor = page.continuation;
+    let mut generation = Some(page.generation);
+    let mut paged_results = page.results.len();
+    while let Some(after) = cursor {
+        let next = store
+            .read_with(|conn| {
+                search_workspace_page(
+                    conn,
+                    &root,
+                    WS,
+                    V,
+                    "needle",
+                    Some(100 - i64::try_from(paged_results).unwrap_or(100)),
+                    999,
+                    generation,
+                    Some(after),
+                )
+            })
+            .expect("continued bounded search page");
+        paged_results = paged_results.saturating_add(next.results.len());
+        generation = Some(next.generation);
+        cursor = next.continuation;
+        if !next.has_more {
+            break;
+        }
+    }
+    assert_eq!(
+        paged_results, 10,
+        "inclusive candidate anchors must not hide the following candidate"
+    );
+}
+
+#[test]
+fn oversized_legacy_chat_rows_are_skipped_without_failing_later_hits() {
+    // MUTATION: return Bounds for an oversized hydrated chat row and the first
+    // legacy thread prevents the later healthy thread from being searched.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    start_thread(
+        &mut store,
+        "channel-legacy-oversized",
+        "thread-legacy-oversized",
+        "needle legacy",
+        100,
+    );
+    start_thread(
+        &mut store,
+        "channel-after-legacy",
+        "thread-after-legacy",
+        "needle healthy",
+        200,
+    );
+    ensure_index(&mut store, &root, 300);
+
+    let oversized_body = format!(
+        "needle {}",
+        "x".repeat(CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET)
+    );
+    let outcome = store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE chat_messages SET body = ?1 \
+                 WHERE workspace_id = ?2 AND thread_id = ?3",
+                rusqlite::params![oversized_body, WS, "thread-legacy-oversized"],
+            )?;
+            Ok::<(), dohc_engine_runtime::SearchError>(())
+        })
+        .expect("inject imported legacy body");
+    assert!(matches!(outcome, TxnOutcome::Committed(())));
+
+    let results = run_search(&store, &root, "needle");
+    assert!(results.iter().any(|result| {
+        result.surface == SearchSurface::Chat
+            && result.thread_id.as_deref() == Some("thread-after-legacy")
+    }));
+    assert!(
+        !results
+            .iter()
+            .any(|result| { result.thread_id.as_deref() == Some("thread-legacy-oversized") })
+    );
+}
+
+#[test]
+fn chat_projection_lines_follow_canonical_replication_order() {
+    // A replicated message can receive a later local message_order while
+    // carrying an earlier source timestamp. MUTATION: order projection context
+    // by message_order and the replicated hit moves from line 11 to line 15.
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    start_thread(
+        &mut store,
+        "channel-order",
+        "thread-order",
+        "opening message",
+        100,
+    );
+    send(
+        &mut store,
+        "thread-order",
+        "message-local-newer",
+        "local newer body",
+        200,
+    );
+    send(
+        &mut store,
+        "thread-order",
+        "message-replicated-older",
+        "replicated needle",
+        150,
+    );
+    ensure_index(&mut store, &root, 300);
+
+    let results = run_search(&store, &root, "replicated needle");
+    let hit = results
+        .iter()
+        .find(|result| result.thread_id.as_deref() == Some("thread-order"))
+        .expect("replicated message hit");
+    assert_eq!(hit.line, 11);
+}
+
+#[test]
+fn chat_projection_lines_include_prior_multiline_message_bodies() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    start_thread(
+        &mut store,
+        "channel-multiline",
+        "thread-multiline",
+        "opening line\nsecond line\nthird line",
+        100,
+    );
+    send(
+        &mut store,
+        "thread-multiline",
+        "message-after-multiline",
+        "multiline offset needle",
+        200,
+    );
+    ensure_index(&mut store, &root, 300);
+
+    let results = run_search(&store, &root, "multiline offset needle");
+    let hit = results
+        .iter()
+        .find(|result| result.thread_id.as_deref() == Some("thread-multiline") && result.line > 1)
+        .expect("message hit");
+    assert_eq!(hit.line, 13);
+}
+
+#[test]
+fn untitled_chat_search_uses_the_complete_first_line_for_its_title() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let body = format!("{}Actual topic\nsearchable detail", " ".repeat(160));
+    start_thread(&mut store, "channel-title", "thread-title", &body, 100);
+    ensure_index(&mut store, &root, 200);
+
+    let results = run_search(&store, &root, "Actual topic");
+    assert!(!results.is_empty());
+    assert!(
+        results.iter().all(|result| result.title == "Actual topic"),
+        "search hydration diverged from the canonical thread title: {results:?}"
+    );
 }
 
 #[test]
@@ -520,8 +1110,13 @@ fn bounds_query_length_and_limit() {
     write_file(&mut store, "obj-ok", "a.md", "needle needle needle", 10);
     ensure_index(&mut store, &root, 20);
 
-    // A too-short query returns nothing from the index-backed search.
-    assert!(run_search(&store, &root, "ne").is_empty());
+    // The orchestration consumes the primitive's fallback sentinel with a
+    // bounded linear scan.
+    assert!(
+        run_search(&store, &root, "ne")
+            .iter()
+            .any(|result| result.path == "a.md")
+    );
 
     // A pathologically long query is bounded (no results, no FTS blow-up).
     let long = "n".repeat(50_000);

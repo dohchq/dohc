@@ -8,6 +8,7 @@ import {
   CHATS_METHOD,
   VersionedLiveAdapter,
   WORKSPACE_METHOD,
+  WorkspaceDaemonRequester,
   decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
 } from "@dohc/workspace-engine-client";
@@ -336,13 +337,11 @@ import {
   removeMountFolder,
 } from "./workspaces/shareMounts";
 import {
-  createVersionedTextStore,
   installWorkspaceDataKey,
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
-  searchWorkspaceEngine,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   GENERAL_CHANNEL_WIRE_ID,
@@ -356,7 +355,6 @@ import {
   type ChatThread,
   type SyncRelayConnection,
   type VersionedTextMomentSummary,
-  type VersionedTextStore,
 } from "@dohc/workspace-engine";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
 import {
@@ -391,6 +389,7 @@ import {
   readWorkspaceEnginePolicy,
   resolveEngineSearchPolicy,
 } from "./workspaces/workspaceEnginePolicyFile";
+import { queryWorkspaceSearchDaemon } from "./workspaces/workspaceSearchDaemon";
 import { createAgentIntegration } from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
@@ -1710,36 +1709,14 @@ function agentDispatchStoreHandleFor(workspace: {
   return handle;
 }
 
-// Engine search (WS-D): per-workspace versioned-text-store connection for the
-// indexed search path, the same lazy-singleton idiom as linkedChatStores —
-// search-as-you-type must not pay a fresh SQLite open (and its quick_check)
-// per keystroke. Closed beside the chat stores at quit.
-const engineSearchStores = new Map<string, VersionedTextStore>();
-// R16: the LAST remaining consumer of the legacy TypeScript versioned-text
-// store in main.ts. It survives only because searchWorkspaceEngine takes the
-// store itself; that call swaps to the daemon's search.query RPC in its own
-// step, and this helper dies with it. Every other reader below now goes
-// through engineSearchIndexFor.
-function engineSearchStoreFor(workspace: {
-  workspaceId: string;
-  rootPath: string;
-}): VersionedTextStore {
-  const existing = engineSearchStores.get(workspace.workspaceId);
-  if (existing) return existing;
-  const store = createVersionedTextStore(workspace.rootPath);
-  engineSearchStores.set(workspace.workspaceId, store);
-  return store;
-}
-
 // The object-id <-> path index the search surfaces need, read through the
 // DAEMON rather than a second sqlite connection.
 //
-// This used to call createVersionedTextStore(rootPath), which opened another
-// node:sqlite connection to the engine.db the daemon owns -- exactly what
-// workspaceEngineCapture.ts warns about ("a second createVersionedTextStore on
-// the same engine.db would be a second write connection and node:sqlite
-// deadlocks"). It also hydrated every file's CONTENT via listTextFiles just to
-// read two string fields off each row.
+// This used to call the legacy TypeScript store factory, which opened another
+// node:sqlite connection to the engine.db the daemon owns -- exactly the second
+// writable connection workspaceEngineCapture.ts warns can deadlock. It also
+// hydrated every file's CONTENT via listTextFiles just to read two string
+// fields off each row.
 //
 // listTextFileMetadata is the right call: it pages (limit 500 + afterPath) so
 // a workspace past one page is no longer silently truncated, and it never
@@ -2621,11 +2598,6 @@ app.on("will-quit", (event) => {
     );
     agentDispatchStoreHandles.clear();
   });
-  // Engine search stores hold the same kind of lazy SQLite handle; close them
-  // with the chat stores so WAL locks never outlive the app.
-  const searchStoreStop = Promise.all(
-    [...engineSearchStores.values()].map((store) => store.close().catch(() => undefined)),
-  );
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
@@ -2650,7 +2622,6 @@ app.on("will-quit", (event) => {
       captureStop,
       chatStoreStop,
       dispatchStoreStop,
-      searchStoreStop,
       rustEngineStop,
     ]).then(() => undefined),
     new Promise<void>((resolve) => setTimeout(resolve, 3000)),
@@ -6871,11 +6842,7 @@ function registerIpcHandlers(
       // Read-your-writes: the batch whose capture triggered this search must
       // already be in the index the query runs against.
       await capture.flush();
-      const versions = engineSearchStoreFor(workspace);
       {
-        const active = await versions.getActiveVersion({
-          workspaceId: workspace.workspaceId,
-        });
         const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
         const decision = resolveEngineSearchPolicy(policy);
         if (decision.kind === "blocked") {
@@ -6906,17 +6873,31 @@ function registerIpcHandlers(
           }
           return;
         }
-        const results = await searchWorkspaceEngine({
-          workspaceId: workspace.workspaceId,
-          versionId: active?.id ?? "main",
-          query: input.query,
-          versions,
-          chats: linkedChatStoreFor(workspace),
-          limit: SEARCH_EVENT_MAX_ENTRIES,
-          policy: {
-            fileVisibility: decision.fileVisibility,
+        const sessions = rustEngineWorkspaceSessions;
+        if (!sessions) {
+          throw new Error("Rust engine workspace sessions are unavailable.");
+        }
+        const results = await sessions.run(
+          workspace,
+          async (binding) => {
+            const requester = new WorkspaceDaemonRequester(binding.client);
+            return await queryWorkspaceSearchDaemon({
+              daemon: {
+                queryPage: async (params) =>
+                  await requester.request(
+                    WORKSPACE_METHOD.searchQueryPage,
+                    params,
+                    { workspace: binding.workspace },
+                  ),
+              },
+              query: input.query,
+              limit: SEARCH_EVENT_MAX_ENTRIES,
+              isCurrent: isCurrentSearch,
+            });
           },
-        });
+          { retryTransportErrors: true },
+        );
+        if (results === null) return;
         // The engine index deliberately excludes shared-with-me (host
         // capture ignores mounts), so mounted content searches through the
         // rg path, streamed AFTER the engine results under the SAME

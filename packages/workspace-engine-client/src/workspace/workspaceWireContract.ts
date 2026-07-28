@@ -7,6 +7,7 @@ export const WORKSPACE_METHOD = {
   conflictsOpen: "conflicts.open",
   conflictsResolve: "conflicts.resolve",
   searchQuery: "search.query",
+  searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
   captureFlush: "capture.flush",
@@ -49,6 +50,12 @@ export type SearchQueryParams = WorkspaceJsonObject & {
   versionId: string;
   query: string;
   limit?: number;
+  nowMs?: number;
+};
+export type SearchQueryPageParams = WorkspaceJsonObject & {
+  query: string;
+  limit?: number;
+  cursor?: string;
   nowMs?: number;
 };
 export type SearchQueryChatMessagesGranularParams = WorkspaceJsonObject & {
@@ -171,6 +178,12 @@ export type SearchResult = WorkspaceJsonObject & {
   threadId: string | null;
   objectId: string | null;
 };
+export type SearchQueryPageResult = WorkspaceJsonObject & {
+  results: SearchResult[];
+  nextCursor: string | null;
+  versionId: string;
+  restartRequired: boolean;
+};
 export type GranularChatMessageSearchResult = WorkspaceJsonObject & {
   threadId: string;
   messageId: string | null;
@@ -212,6 +225,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenParams;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveParams;
   [WORKSPACE_METHOD.searchQuery]: SearchQueryParams;
+  [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
@@ -225,6 +239,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
   [WORKSPACE_METHOD.searchQuery]: SearchResult[];
+  [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResult;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResponse;
   [WORKSPACE_METHOD.watcherStatus]: WatcherStatusResult;
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResult;
@@ -598,6 +613,33 @@ function decodeSearchResult(value: JsonValue, label: string): SearchResult {
   };
 }
 
+export function decodeSearchQueryPageResult(
+  value: JsonValue,
+  label = `${WORKSPACE_METHOD.searchQueryPage} result`,
+): SearchQueryPageResult {
+  const object = objectValue(value, label, [
+    "results",
+    "nextCursor",
+    "versionId",
+    "restartRequired",
+  ]);
+  if (!Array.isArray(object.results)) {
+    throw new WorkspaceProtocolShapeError(`${label}.results must be an array.`);
+  }
+  const nextCursor = nullableString(object, "nextCursor", label);
+  if (nextCursor === "") {
+    throw new WorkspaceProtocolShapeError(`${label}.nextCursor must not be empty.`);
+  }
+  return {
+    results: object.results.map((entry, index) =>
+      decodeSearchResult(entry, `${label}.results[${index}]`),
+    ),
+    nextCursor,
+    versionId: nonEmptyStringValue(object, "versionId", label),
+    restartRequired: booleanValue(object, "restartRequired", label),
+  };
+}
+
 function decodeGranularChatMessageSearchResults(
   value: JsonValue,
   label: string,
@@ -719,6 +761,9 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
       result = value.map((entry, index) =>
         decodeSearchResult(entry, `${label}[${index}]`),
       );
+      break;
+    case WORKSPACE_METHOD.searchQueryPage:
+      result = decodeSearchQueryPageResult(value, label);
       break;
     case WORKSPACE_METHOD.searchQueryChatMessagesGranular:
       result = decodeGranularChatMessageSearchResponse(value, label);
