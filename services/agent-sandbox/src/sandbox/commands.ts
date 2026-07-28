@@ -198,9 +198,9 @@ async function runSqliteFallback(
 }
 
 async function executableExists(command: string) {
-  const names = process.platform === "win32"
-    ? [`${command}.exe`, `${command}.cmd`, `${command}.bat`, command]
-    : [command];
+  // Only extensions spawn(shell: false) can actually launch — node rejects
+  // .cmd/.bat there, so probing them would claim executables we cannot run.
+  const names = process.platform === "win32" ? [`${command}.exe`, command] : [command];
   for (const dir of safePath().split(delimiter)) {
     for (const name of names) {
       try {
