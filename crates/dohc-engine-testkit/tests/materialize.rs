@@ -6,8 +6,8 @@
 //! replaying — durability is never trusted from the in-process outcome flag.
 
 use dohc_engine_files::{
-    AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeError, NoBackoff, ReplaceBackoff,
-    StdReplacer, backoff_delay, materialize_secret_one, run_pending_jobs,
+    AtomicReplacer, DurabilityPolicy, JobOutcome, NoBackoff, ReplaceBackoff, StdReplacer,
+    backoff_delay, materialize_secret_one, run_pending_jobs,
 };
 use dohc_engine_storage::{
     EngineStore, FaultPoint, JobStatus, MaterializationJobSpec, NoFaults, Preimage, StorageError,
@@ -139,10 +139,12 @@ fn materializes_a_new_file_and_marks_complete() {
 #[test]
 fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory() {
     // MUTATION PROOF: remove the ordinary write's
-    // `prepare_target_parent_symlink_free` call and this writes outside.
+    // `prepare_target_parent_symlink_free` call and this writes outside; walk
+    // only the FIRST component below root and the depth-2 alias slips through.
     let sc = Scratch::new("ordinary-write-ancestor");
     let outside = Scratch::new("ordinary-write-outside");
-    let alias = sc.target("linked");
+    std::fs::create_dir(sc.target("real")).expect("real parent");
+    let alias = sc.target("real/linked");
     if !try_make_dir_alias(outside.workspace(), &alias).expect("create directory alias") {
         eprintln!("skipping: directory alias creation is unavailable");
         return;
@@ -152,15 +154,27 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
     let content = b"must stay contained";
     let job = spec(
         "ordinary-write",
-        "linked/write.md",
+        "real/linked/write.md",
         &hex_sha256(content),
         Preimage::Absent,
         1,
         10,
     );
     stage_job(&mut store, content, &job);
+    let unrelated = b"unrelated proceeds";
+    let sibling = spec(
+        "ordinary-write-sibling",
+        "notes/unrelated.md",
+        &hex_sha256(unrelated),
+        Preimage::Absent,
+        2,
+        11,
+    );
+    stage_job(&mut store, unrelated, &sibling);
 
-    let err = run_pending_jobs(
+    // The blocked job stays pending WITHOUT stalling the batch: the unrelated
+    // job in the same run must still materialize.
+    let results = run_pending_jobs(
         &store,
         sc.workspace(),
         DurabilityPolicy::none(),
@@ -169,8 +183,21 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
         20,
         &NoFaults,
     )
-    .expect_err("symlinked write ancestor must fail closed");
-    assert!(matches!(err, MaterializeError::SymlinkTarget));
+    .expect("a blocked ancestor must not fail the whole run");
+    let outcome_of = |id: &str| {
+        results
+            .iter()
+            .find(|result| result.job_id == id)
+            .expect("job result")
+            .outcome
+            .clone()
+    };
+    assert_eq!(outcome_of("ordinary-write"), JobOutcome::Blocked);
+    assert_eq!(outcome_of("ordinary-write-sibling"), JobOutcome::Completed);
+    assert_eq!(
+        std::fs::read(sc.target("notes/unrelated.md")).unwrap(),
+        unrelated
+    );
     assert!(!outside.target("write.md").exists());
     assert_eq!(store.pending_materialization_count().expect("pending"), 1);
 
@@ -188,7 +215,7 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
     .expect("pending write must recover after containment is restored");
     assert_eq!(recovered[0].outcome, JobOutcome::Completed);
     assert_eq!(
-        std::fs::read(sc.target("linked/write.md")).unwrap(),
+        std::fs::read(sc.target("real/linked/write.md")).unwrap(),
         content
     );
     assert!(!outside.target("write.md").exists());
@@ -225,7 +252,7 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
         })
         .expect("enqueue delete");
 
-    let err = run_pending_jobs(
+    let results = run_pending_jobs(
         &store,
         sc.workspace(),
         DurabilityPolicy::none(),
@@ -234,8 +261,8 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
         20,
         &NoFaults,
     )
-    .expect_err("symlinked delete ancestor must fail closed");
-    assert!(matches!(err, MaterializeError::SymlinkTarget));
+    .expect("a blocked delete ancestor must not fail the whole run");
+    assert_eq!(results[0].outcome, JobOutcome::Blocked);
     assert_eq!(std::fs::read(outside.target("delete.md")).unwrap(), old);
     assert_eq!(store.pending_materialization_count().expect("pending"), 1);
 
@@ -282,7 +309,7 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
     );
     stage_job(&mut store, intended, &job);
 
-    let err = run_pending_jobs(
+    let results = run_pending_jobs(
         &store,
         sc.workspace(),
         DurabilityPolicy::none(),
@@ -291,8 +318,8 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
         20,
         &NoFaults,
     )
-    .expect_err("symlinked conflict ancestor must fail before sibling creation");
-    assert!(matches!(err, MaterializeError::SymlinkTarget));
+    .expect("a blocked conflict ancestor must not fail the whole run");
+    assert_eq!(results[0].outcome, JobOutcome::Blocked);
     assert!(
         !outside
             .target("conflicted.md.ordinary-conflict.conflict")

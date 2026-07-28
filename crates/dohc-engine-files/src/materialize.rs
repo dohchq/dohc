@@ -219,6 +219,11 @@ pub enum JobOutcome {
     /// Newer external content was found at revalidation; preserved-both, marked
     /// conflict, target NOT overwritten.
     Conflict,
+    /// An ordinary target's ancestry contains a symlink/reparse point. The job
+    /// stays PENDING (no DB mark) so it retries once containment is restored,
+    /// and the batch continues — one aliased directory must not stall every
+    /// other path's materialization.
+    Blocked,
     /// A crash fault fired at this named point; the job is left as-is for
     /// startup replay. Durability is proven by reopening.
     Crashed(FaultPoint),
@@ -798,7 +803,13 @@ fn materialize_write_content(
         // conflict/target rename, cleanup, unlink-adjacent sync, and directory
         // open below. Missing parents are created one component at a time;
         // create_dir_all would silently traverse an aliased intermediate.
-        prepare_target_parent_symlink_free(root, target)?;
+        // A refusal leaves the job pending and the batch running: fail closed
+        // on this path, not on every other path's materialization.
+        match prepare_target_parent_symlink_free(root, target) {
+            Ok(()) => {}
+            Err(MaterializeError::SymlinkTarget) => return Ok(JobOutcome::Blocked),
+            Err(err) => return Err(err),
+        }
     }
     // Step 1 (idempotent replay): the target already equals the desired content.
     let current = read_current_no_follow(target)?;
@@ -961,8 +972,13 @@ fn materialize_delete(
     faults: &dyn FaultInjector,
 ) -> Result<JobOutcome, MaterializeError> {
     // One fail-closed component walk gates both no-follow reads, the unlink,
-    // and the parent-directory durability open for this ordinary delete.
-    ensure_target_symlink_free(root, target)?;
+    // and the parent-directory durability open for this ordinary delete. A
+    // refusal leaves the job pending and the batch running.
+    match ensure_target_symlink_free(root, target) {
+        Ok(()) => {}
+        Err(MaterializeError::SymlinkTarget) => return Ok(JobOutcome::Blocked),
+        Err(err) => return Err(err),
+    }
     let current = read_current_no_follow(target)?;
     if matches!(current, CurrentTarget::Absent) {
         store.mark_materialization_complete(&job.job_id, now_ms)?;

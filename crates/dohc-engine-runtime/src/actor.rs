@@ -5618,7 +5618,12 @@ fn replay_pending_materializations(
                     Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                         summary.completed += 1;
                     }
-                    Ok(JobOutcome::Conflict | JobOutcome::Superseded | JobOutcome::Crashed(_))
+                    Ok(
+                        JobOutcome::Conflict
+                        | JobOutcome::Superseded
+                        | JobOutcome::Blocked
+                        | JobOutcome::Crashed(_),
+                    )
                     | Err(_) => summary.failed += 1,
                 }
                 continue;
@@ -5664,7 +5669,12 @@ fn replay_pending_materializations(
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                     summary.completed += 1;
                 }
-                Ok(JobOutcome::Conflict | JobOutcome::Superseded | JobOutcome::Crashed(_))
+                Ok(
+                    JobOutcome::Conflict
+                    | JobOutcome::Superseded
+                    | JobOutcome::Blocked
+                    | JobOutcome::Crashed(_),
+                )
                 | Err(_) => {
                     if let Some((workspace_id, self_writes)) = switch_suppression {
                         self_writes.retract(workspace_id, &job.target_path, &plaintext_sha);
@@ -5735,6 +5745,7 @@ fn replay_pending_materializations(
             Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                 summary.completed += 1;
             }
+            Ok(JobOutcome::Blocked) => summary.failed += 1,
             Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
                 summary.failed += 1;
                 if let Some(moment_id) = job.job_id.strip_prefix("ydoc-mat_") {
@@ -8669,7 +8680,7 @@ fn ydoc_settle_on_store(
             };
             match replay_outcome {
                 JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
-                JobOutcome::Conflict | JobOutcome::Superseded => {
+                JobOutcome::Conflict | JobOutcome::Superseded | JobOutcome::Blocked => {
                     self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
                     // The disk moved past the prior settle before its job
                     // replayed: last_settled_sha no longer describes a
@@ -8891,7 +8902,7 @@ fn ydoc_settle_on_store(
     };
     match job_outcome {
         JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
-        JobOutcome::Conflict | JobOutcome::Superseded => {
+        JobOutcome::Conflict | JobOutcome::Superseded | JobOutcome::Blocked => {
             // The target changed on disk and the job left it untouched: this
             // settle FAILED, so the marker committed above must not stand —
             // it would let close(settle:false) pass the settled check and
@@ -9168,6 +9179,7 @@ fn materialize_pending_job(
         Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
             (true, PostCommitMaterializeOutcome::Applied)
         }
+        Ok(JobOutcome::Blocked) => (false, PostCommitMaterializeOutcome::Skipped),
         Ok(JobOutcome::Conflict) => (false, PostCommitMaterializeOutcome::Conflict),
         Ok(JobOutcome::Superseded) => (false, PostCommitMaterializeOutcome::Superseded),
         Ok(JobOutcome::Crashed(_)) => (false, PostCommitMaterializeOutcome::Error),
