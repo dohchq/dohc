@@ -353,9 +353,11 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // imported moment metadata provenance (ordinal 18), the imported moment
     // rollback preimage (ordinal 19), shared-channel dense push position
     // (ordinal 20), the file-object-rooted Y.Doc deferred-update queue (ordinal 21),
-    // pending replication refusals (ordinal 22), and the parked
-    // chat-message-before-thread coordinates (ordinal 23).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 25);
+    // pending replication refusals (ordinal 22), the parked
+    // chat-message-before-thread coordinates (ordinal 23), the
+    // materialization-workspace migration (ordinal 24), and the bootstrap
+    // main-version name backfill (ordinal 25, #325).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 26);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(
