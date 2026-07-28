@@ -1344,10 +1344,8 @@ fn list_conflicts(
     let mut sql = String::from(CONFLICT_SELECT);
     sql.push_str(" WHERE c.workspace_id = ?1");
     let mut values = vec![rusqlite::types::Value::Text(workspace_id.to_owned())];
-    if status.is_some() {
-        values.push(rusqlite::types::Value::Text(
-            status.expect("checked status").to_owned(),
-        ));
+    if let Some(status) = status {
+        values.push(rusqlite::types::Value::Text(status.to_owned()));
         sql.push_str(&format!(" AND c.status = ?{}", values.len()));
     }
     if let Some((created_at_ms, conflict_id)) = after {
