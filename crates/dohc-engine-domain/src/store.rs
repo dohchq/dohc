@@ -95,7 +95,7 @@ impl<'a> VersionedTextStore<'a> {
             tx.execute(
                 "INSERT INTO versions \
                  (workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id) \
-                 VALUES (?1, ?2, 'main', 'main', ?3, NULL, NULL)",
+                 VALUES (?1, ?2, 'main', 'Main', ?3, NULL, NULL)",
                 params![ws, ver, now_ms],
             )
             .map_err(DomainError::sql_persist)?;
@@ -103,7 +103,7 @@ impl<'a> VersionedTextStore<'a> {
                 workspace_id: ws.clone(),
                 version_id: ver.clone(),
                 kind: VersionKind::Main,
-                name: "main".to_owned(),
+                name: "Main".to_owned(),
                 created_at_ms: now_ms,
                 fork_version_id: None,
                 fork_moment_id: None,

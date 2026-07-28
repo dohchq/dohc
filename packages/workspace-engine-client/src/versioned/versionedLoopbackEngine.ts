@@ -1592,7 +1592,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       id: "main",
       workspaceId: workspace,
       kind: "main",
-      name: "main",
+      name: "Main",
       createdAtMs: this.clock++,
       files: new Map(),
       textForkBase: new Map(),

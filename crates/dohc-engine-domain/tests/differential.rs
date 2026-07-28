@@ -179,7 +179,7 @@ fn golden() -> String {
     let world = text_blob_sha256("world");
     format!(
         "active=main\n\
-         version id=main kind=main name=main created=1 fork_from=- fork_moment=-\n\
+         version id=main kind=main name=Main created=1 fork_from=- fork_moment=-\n\
          version id=feat kind=named name=feature created=20 fork_from=main fork_moment=m1\n\
          version id=feat2 kind=named name=feature2 created=25 fork_from=main fork_moment=m1\n\
          snapshot version=feat2 path=a.md object=o1 content=text:{hello} origin=user\n\
