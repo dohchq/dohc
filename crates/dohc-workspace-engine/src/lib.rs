@@ -79,37 +79,51 @@ pub struct EngineEventNotice {
     pub payload: Value,
 }
 
+/// How many undelivered notices the service-to-transport queue holds before
+/// new ones are DROPPED. Notices are repaint pings, so any queued backlog
+/// already guarantees the consumer will re-list on drain — dropping under a
+/// stalled transport loses nothing while keeping capture activity from
+/// growing the daemon without bound.
+const ENGINE_EVENT_QUEUE_CAPACITY: usize = 256;
+
 /// Cloneable emitter handle shared between the service and its background
 /// tasks (the capture driver). At most one subscriber (the stdio host); with
 /// no subscriber, notices are dropped — an embedded in-process host that
 /// never subscribes owes no drain.
 #[derive(Clone, Default)]
 pub struct EngineEvents {
-    subscriber: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<EngineEventNotice>>>>,
+    subscriber: Arc<Mutex<Option<tokio::sync::mpsc::Sender<EngineEventNotice>>>>,
 }
 
 impl EngineEvents {
     /// Route subsequent notices to the returned receiver, replacing any
-    /// previous subscriber.
-    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<EngineEventNotice> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    /// previous subscriber. The channel is BOUNDED: a transport that stops
+    /// draining (blocked Electron main thread) sheds notices instead of
+    /// accumulating them, and the ones already queued make the eventual
+    /// drain repaint anyway.
+    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<EngineEventNotice> {
+        let (tx, rx) = tokio::sync::mpsc::channel(ENGINE_EVENT_QUEUE_CAPACITY);
         *lock(&self.subscriber) = Some(tx);
         rx
     }
 
     pub(crate) fn emit(&self, name: &str, payload: Value) {
         let mut subscriber = lock(&self.subscriber);
-        if let Some(tx) = subscriber.as_ref()
-            && tx
-                .send(EngineEventNotice {
-                    name: name.to_owned(),
-                    payload,
-                })
-                .is_err()
-        {
-            // The receiver is gone; drop it so later emits stop cloning
-            // payloads into a dead channel.
-            *subscriber = None;
+        let Some(tx) = subscriber.as_ref() else {
+            return;
+        };
+        match tx.try_send(EngineEventNotice {
+            name: name.to_owned(),
+            payload,
+        }) {
+            // A full queue sheds the notice (see `subscribe`); the emitter
+            // must never block a capture apply on a stalled transport.
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                // The receiver is gone; drop it so later emits stop cloning
+                // payloads into a dead channel.
+                *subscriber = None;
+            }
         }
     }
 }
@@ -10731,6 +10745,27 @@ mod tests {
     use std::time::Duration;
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[tokio::test]
+    async fn engine_events_shed_instead_of_growing_when_the_subscriber_stalls() {
+        // codex P2: an unbounded notice queue under a stalled transport
+        // grows the daemon without bound. The channel is bounded and emit
+        // NEVER blocks: overflow is shed (the queued backlog already
+        // guarantees a repaint on drain).
+        let events = EngineEvents::default();
+        let mut rx = events.subscribe();
+        for i in 0..(ENGINE_EVENT_QUEUE_CAPACITY + 10) {
+            events.emit(CAPTURE_MOMENT_RECORDED_EVENT, json!({ "i": i }));
+        }
+        let mut drained = 0usize;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(
+            drained, ENGINE_EVENT_QUEUE_CAPACITY,
+            "emit must shed past the bound, not queue unboundedly"
+        );
+    }
 
     #[test]
     fn recovered_origins_use_random_uuid_identity_coordinates() {

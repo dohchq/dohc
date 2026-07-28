@@ -220,7 +220,7 @@ async fn autonomous_capture_notices_external_disk_changes() {
 /// Drain `capture.momentRecorded` events until one carries `path`, panicking
 /// past the shared WAIT deadline.
 async fn wait_for_moment_event(
-    events: &mut tokio::sync::mpsc::UnboundedReceiver<EngineEventNotice>,
+    events: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>,
     path: &str,
 ) -> EngineEventNotice {
     let deadline = tokio::time::Instant::now() + WAIT;
@@ -530,6 +530,81 @@ async fn a_policy_retire_pass_emits_a_moment_event() {
         )
         .await
         .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_over_cap_policy_retire_keeps_the_pass_provenance_and_emits() {
+    // codex re-review P2s: the retained-over-cap retire runs through its OWN
+    // sink and reports via not_owned_paths. With default provenance its
+    // delete moment carried a NULL correlation id (splitting the reconcile
+    // pass's history group), and gating the event on applied_paths
+    // suppressed the announce entirely. Narrow-while-closed makes the
+    // sequencing deterministic: the reopen BASELINE (which carries the
+    // reconcile pass provenance) is the first pass to see the narrow, and
+    // the over-cap path never emits a diff op, so the retained loop is the
+    // only route that can retire it. MUTATION: reverting the retained-loop
+    // sink to CaptureProvenance::default() fails the correlation assertion;
+    // reverting the event gate to applied_paths-only times out the event
+    // wait (the baseline's only work is this not-owned retire).
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "big.md", b"small enough to capture");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "big.md",
+        Some("small enough to capture"),
+    )
+    .await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_390, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close before offline window");
+
+    // Offline: the file grows PAST the 64 MiB scan cap AND the policy
+    // narrows it out of ownership.
+    write_file(scratch.path(), "big.md", &vec![0_u8; 65 * 1024 * 1024]);
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]
+path = \"big.md\"
+tracked = false
+",
+    );
+
+    let mut events = service.events().subscribe();
+    let handle = open_workspace(&transport, &scratch, 2).await;
+    wait_for_text(&transport, &handle, "big.md", None).await;
+    let notice = wait_for_moment_event(&mut events, "big.md").await;
+    assert!(
+        notice.payload["notOwnedCount"].as_u64().unwrap_or(0) >= 1,
+        "the over-cap retire reports via not_owned_paths and must be counted: {:?}",
+        notice.payload
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_400, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, correlation) = moment_metadata(&db_path, "big.md");
+    assert_eq!(summary.as_deref(), Some("Stopped tracking by policy"));
+    assert!(
+        correlation.is_some(),
+        "the over-cap retire must ride its reconcile pass's correlation id"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

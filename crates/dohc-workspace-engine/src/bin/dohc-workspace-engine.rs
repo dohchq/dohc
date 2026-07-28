@@ -84,7 +84,7 @@ async fn run_transport<R, W, S, C>(
     mut input: R,
     output: W,
     supervisor: Arc<Supervisor<S>>,
-    mut events_rx: tokio::sync::mpsc::UnboundedReceiver<EngineEventNotice>,
+    mut events_rx: tokio::sync::mpsc::Receiver<EngineEventNotice>,
     close_workspaces: C,
 ) -> Result<(), io::Error>
 where
@@ -710,8 +710,8 @@ mod tests {
 
     /// A pre-closed events channel for transports whose test does not
     /// exercise event delivery.
-    fn no_events() -> tokio::sync::mpsc::UnboundedReceiver<EngineEventNotice> {
-        tokio::sync::mpsc::unbounded_channel().1
+    fn no_events() -> tokio::sync::mpsc::Receiver<EngineEventNotice> {
+        tokio::sync::mpsc::channel(1).1
     }
 
     fn encode_envelope(envelope: &Envelope) -> Vec<u8> {
@@ -1269,11 +1269,11 @@ mod tests {
             calls: Arc::new(AtomicUsize::new(0)),
         });
         let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
-        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(8);
         // Queued BEFORE the handshake: must be dropped, never delivered ahead
         // of the helloAck.
         events_tx
-            .send(EngineEventNotice {
+            .try_send(EngineEventNotice {
                 name: "capture.momentRecorded".to_owned(),
                 payload: serde_json::json!({ "marker": "pre-handshake" }),
             })
@@ -1323,7 +1323,7 @@ mod tests {
         };
 
         events_tx
-            .send(EngineEventNotice {
+            .try_send(EngineEventNotice {
                 name: "capture.momentRecorded".to_owned(),
                 payload: serde_json::json!({ "marker": "post-handshake" }),
             })

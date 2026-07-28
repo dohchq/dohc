@@ -28,13 +28,30 @@ test("flagged workspace shows engine moments and restores a file end-to-end", as
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
+    // History lives in the left History view (the right panel is Chats now).
+    // Open it BEFORE the first edit and wait for the workspace's startup
+    // capture to surface: the first-run seed files render as engine moments —
+    // grouped under "Reconciled offline edits" when the startup reconcile
+    // recorded them, standalone when the live watcher won that race. Waiting
+    // here pins the ordering: the daemon's baseline is done and its watcher
+    // is live, so the write below is deterministically a LIVE capture (calm
+    // "Edited plan.md" copy, no reconcile group), and its row can only appear
+    // through the daemon's capture.momentRecorded -> workspace-activity
+    // refresh chain — the exact seam this spec exists to prove in daemon
+    // mode.
+    await page.getByTestId("activity-history").click();
+    await expect(
+      page
+        .locator(
+          '[data-testid="engine-moment-group"], [data-testid="engine-moment-open"]',
+        )
+        .first(),
+    ).toBeVisible();
+
     await writeWorkspaceFiles(temp, [
       { path: "notes/plan.md", contents: "first draft\n" },
     ]);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
-    // History lives in the left History view (the right panel is Chats now):
-    // open it, then the first edit shows as an engine moment with calm copy.
-    await page.getByTestId("activity-history").click();
     const momentRow = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]',
     );

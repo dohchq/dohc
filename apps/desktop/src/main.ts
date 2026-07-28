@@ -7267,6 +7267,11 @@ async function startRustEngineDaemon(): Promise<boolean> {
         );
       }
     },
+    // A capture event can die with the previous daemon's transport after its
+    // moment committed; the replacement never re-emits it (its baseline finds
+    // disk and manifest agreeing). One repaint per healthy launch closes that
+    // staleness window.
+    onLaunch: () => notifyRenderer(),
   });
   try {
     await rustEngineDaemon.start();

@@ -170,6 +170,35 @@ describe("Rust engine daemon lifecycle", () => {
     }
   });
 
+  it("fires onLaunch for the first launch and again after a restart", async () => {
+    // MUTATION: dropping the onLaunch call in launchOnce leaves `launches`
+    // at 0 — a capture event that died with a previous daemon's transport
+    // would then never be compensated by a relaunch repaint.
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    let launches = 0;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new FakeClient();
+      },
+      onLaunch: () => {
+        launches += 1;
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      expect(launches).toBe(1);
+      exits[0]?.(1, null);
+      await vi.waitFor(() => expect(launches).toBe(2));
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
   it("fails loudly before launch when the configured binary is missing", async () => {
     const launch = vi.fn(async () => new FakeClient());
     const lifecycle = new EngineDaemonLifecycle({

@@ -2763,6 +2763,10 @@ async fn apply_run_with_handle(
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let apply_plan = plan.clone();
     let apply_author_json = author_json.clone();
+    // The retained-over-cap loop below retires through its OWN sink; it must
+    // carry the same pass provenance or its deletes split the reconcile/fence
+    // history group with NULL correlation ids.
+    let retire_provenance = provenance.clone();
     let apply_provenance = provenance;
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
@@ -2836,20 +2840,34 @@ async fn apply_run_with_handle(
             let retire_root = root.to_path_buf();
             let retire_self_writes = self_writes.clone();
             let retire_author_json = author_json.clone();
-            let retired = tokio::task::spawn_blocking(move || {
-                let mut sink = StoreCaptureSink::new_with_self_writes(
-                    retire_actor,
-                    retire_workspace,
-                    retire_version,
-                    retire_root,
-                    now_ms,
-                    retire_author_json,
-                    retire_self_writes,
-                    CaptureProvenance::default(),
-                );
-                sink.retire_policy_excluded(&retire_path)
-            })
-            .await;
+            let retire_pass_provenance = retire_provenance.clone();
+            // A DEDICATED plain thread, same as the apply above: the sink's
+            // blocking actor calls assert they run OUTSIDE any tokio runtime
+            // context, and spawn_blocking threads carry the runtime handle.
+            let (retire_tx, retire_rx) = tokio::sync::oneshot::channel();
+            let retire_thread = std::thread::Builder::new()
+                .name("dohc-capture-overcap-retire".to_owned())
+                .spawn(move || {
+                    let mut sink = StoreCaptureSink::new_with_self_writes(
+                        retire_actor,
+                        retire_workspace,
+                        retire_version,
+                        retire_root,
+                        now_ms,
+                        retire_author_json,
+                        retire_self_writes,
+                        retire_pass_provenance,
+                    );
+                    let _ = retire_tx.send(sink.retire_policy_excluded(&retire_path));
+                });
+            let retired = match retire_thread {
+                Ok(joiner) => {
+                    let outcome = retire_rx.await.ok();
+                    let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
+                    outcome
+                }
+                Err(_) => None,
+            };
             // This loop is the ONLY path that can retire an over-cap narrowed
             // head (such a path never appears in the diff), so a swallowed
             // failure would strand it stale-but-authoritative with nothing to
@@ -2859,7 +2877,7 @@ async fn apply_run_with_handle(
                 // REPORT it in the receipt: the manifest must forget a path
                 // whose head this loop just deleted, or a later policy widen
                 // would diff clean and never re-ingest it.
-                Ok(Ok(())) => result.not_owned_paths.push(path.clone()),
+                Some(Ok(())) => result.not_owned_paths.push(path.clone()),
                 // A FAILED over-cap retire must fail the receipt too: this
                 // loop is the only thing that can retire such a head, so it
                 // must stay dirty and retry. Setting only the sticky status

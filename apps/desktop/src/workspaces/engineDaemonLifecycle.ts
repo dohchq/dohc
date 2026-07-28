@@ -46,6 +46,13 @@ export interface EngineDaemonLifecycleOptions {
   healthyResetMs?: number;
   requestTimeoutMs?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
+  // Fires once per launched-and-healthy daemon generation (the first launch
+  // AND every restart). A capture event committed by a previous generation
+  // can die with its transport before delivery, and the replacement's
+  // baseline finds disk and manifest already agreeing — so no retry event is
+  // ever generated. Consumers use this to invalidate state that daemon
+  // events would otherwise keep fresh (e.g. the history timeline).
+  onLaunch?: () => void;
 }
 
 export interface EngineBinaryPathOptions {
@@ -491,6 +498,11 @@ export class EngineDaemonLifecycle {
       this.client = client;
       this.running = true;
       this.scheduleHealthyReset(generation);
+      try {
+        this.options.onLaunch?.();
+      } catch {
+        // A launch observer must never fail the launch itself.
+      }
     } catch (error) {
       await this.closeClient(client);
       if (this.stopping) return;
