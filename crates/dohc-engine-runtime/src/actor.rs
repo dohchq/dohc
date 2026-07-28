@@ -75,9 +75,9 @@ use dohc_engine_files::{
     materialize_secret_one, probe_projection_target,
 };
 use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
-    MaterializationJobSpec, MaterializationOperation, NoFaults, Preimage, StorageError, TxnOutcome,
-    WriteOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
+    CompoundWrite, Document, EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus,
+    MaterializationJob, MaterializationJobSpec, MaterializationOperation, NoFaults, Preimage,
+    StorageError, TxnOutcome, WriteOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use dohc_engine_sync::{
     ApplyOutcome, BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
@@ -5551,6 +5551,16 @@ struct MaterializationReplaySummary {
 
 const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_";
 
+fn is_rollback_restore_job(job_id: &str) -> bool {
+    job_id.starts_with(ROLLBACK_RESTORE_PREFIX)
+        || job_id
+            .strip_prefix("binary-rename-0-write-mat_")
+            .is_some_and(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
+        || job_id
+            .strip_prefix("binary-rename-1-delete-mat_")
+            .is_some_and(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
+}
+
 fn rollback_write_matches_active_snapshot(
     store: &EngineStore,
     write_job: &MaterializationJob,
@@ -5633,12 +5643,7 @@ fn rollback_job_matches_active(
         };
         return rollback_write_matches_active_snapshot(store, &write_job, Some(&job.target_path));
     }
-    if job.job_id.starts_with(ROLLBACK_RESTORE_PREFIX)
-        || job
-            .job_id
-            .strip_prefix("binary-rename-0-write-mat_")
-            .is_some_and(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
-    {
+    if is_rollback_restore_job(&job.job_id) {
         return match job.operation {
             MaterializationOperation::Write => {
                 rollback_write_matches_active_snapshot(store, job, None)
@@ -5970,6 +5975,34 @@ fn switch_active_version_on_store(
     let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
     if failed_jobs > 0 {
         return Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs });
+    }
+
+    // Rollbacks against inactive versions intentionally leave their inverse
+    // disk intents pending. Once that version becomes active, drain every
+    // restore whose desired state now matches the active snapshots. Run this
+    // after switch projections: a projection may already establish the same
+    // bytes, in which case the restore completes idempotently instead of
+    // conflicting with the projection's disk preimage.
+    let mut rollback_restores = HashSet::new();
+    for job in store.list_pending_materialization_jobs()? {
+        if is_rollback_restore_job(&job.job_id) && rollback_job_matches_active(store, &job)? {
+            rollback_restores.insert(job.job_id);
+        }
+    }
+    if !rollback_restores.is_empty() {
+        let replay = replay_pending_materializations(
+            store,
+            root_dir,
+            now_ms,
+            faults,
+            Some(&rollback_restores),
+            Some((workspace_id, self_writes)),
+        )?;
+        let failed_jobs =
+            replay.failed + rollback_restores.len().saturating_sub(replay.selected_seen);
+        if failed_jobs > 0 {
+            return Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs });
+        }
     }
     Ok(target)
 }
@@ -9534,10 +9567,31 @@ fn versioned_text_rollback_on_store(
         });
     }
 
-    let target_is_active = VersionedTextStore::new(store)
-        .get_active_version(&input.workspace_id)?
-        .version_id
-        == input.version_id;
+    let active_version =
+        if faults.poll(FaultPoint::RollbackBeforeActiveVersionLookup) == FaultAction::Crash {
+            Err(RuntimeError::from(StorageError::corrupt_public(
+                rusqlite::Error::InvalidQuery,
+            )))
+        } else {
+            VersionedTextStore::new(store)
+                .get_active_version(&input.workspace_id)
+                .map_err(RuntimeError::from)
+        };
+    let target_is_active = match active_version {
+        Ok(active_version) => active_version.version_id == input.version_id,
+        Err(error) => {
+            eprintln!(
+                "engine: rollback committed but active-version lookup failed; \
+                 restore remains pending for normal replay: {error}"
+            );
+            return Ok(RollbackExecutionResult {
+                deduped,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+    };
     if !target_is_active {
         return Ok(RollbackExecutionResult {
             deduped,

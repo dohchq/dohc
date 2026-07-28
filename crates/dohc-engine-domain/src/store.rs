@@ -532,6 +532,13 @@ impl<'a> VersionedTextStore<'a> {
         })?;
 
         let outcome = self.store.write_with(faults, |tx| {
+            // A rollback restore is a new disk intent even though history
+            // surgery removes (rather than appends) a moment. Reserve the same
+            // store-global now-generation a fresh mutation would receive while
+            // the rolled-back moment is still present. Reusing that moment's
+            // historical generation lets any later completed job for the same
+            // path supersede the compensator before it can restore disk.
+            let restore_generation = next_moment_order(tx)?;
             tx.execute(
                 "DELETE FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
                 params![ws, input.mutation_moment_id],
@@ -626,7 +633,7 @@ impl<'a> VersionedTextStore<'a> {
                     tx,
                     input,
                     before,
-                    prep.moment.moment_order,
+                    restore_generation,
                     prep.moment.recorded_at_ms,
                 )?;
             }
@@ -641,7 +648,7 @@ impl<'a> VersionedTextStore<'a> {
                     input,
                     before,
                     &prep.moment.path,
-                    prep.moment.moment_order,
+                    restore_generation,
                     prep.moment.recorded_at_ms,
                 )?;
             }
@@ -693,7 +700,7 @@ impl<'a> VersionedTextStore<'a> {
                                 tx,
                                 input,
                                 &prep.before,
-                                generation,
+                                restore_generation,
                                 &written_sha256,
                                 prep.moment.recorded_at_ms,
                             )?;
@@ -720,7 +727,7 @@ impl<'a> VersionedTextStore<'a> {
                             tx,
                             input,
                             &prep.before,
-                            prep.moment.moment_order,
+                            restore_generation,
                             written_moment_sha,
                             prep.moment.recorded_at_ms,
                         )?;
@@ -3865,9 +3872,9 @@ fn get_snapshot(
 /// rolled-back-to state after a binary write whose original job already reached
 /// disk (COMPLETE) or was preserved-both (CONFLICT). Mirrors the text write/
 /// resolve path (`enqueue_write`/`enqueue_delete`): content bytes live in
-/// `binary_blobs` (what the materializer reads) and the job carries the write's
-/// own generation so the newest-wins gate treats it as a peer of the completed
-/// write, not a superseded older generation.
+/// `binary_blobs` (what the materializer reads) and the job carries the current
+/// store-global mutation generation so the newest-wins gate cannot discard an
+/// active restore behind a later completed job from another lineage.
 ///
 /// The preimage is the WRITTEN bytes (`written_sha256`): the compensator only
 /// acts if disk still holds exactly what the rolled-back write put there, so an
