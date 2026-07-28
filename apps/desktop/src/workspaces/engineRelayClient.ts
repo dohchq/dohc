@@ -66,6 +66,31 @@ function normalizedRelayUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/u, "");
 }
 
+export const INSECURE_LOOPBACK_RELAY_TEST_ENV =
+  "DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY";
+
+const LOOPBACK_RELAY_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Single owner of the e2e escape hatch for the daemon's HTTPS-only relay
+ * transport: true only when the explicit test env flag is "1" AND the relay
+ * URL is plain http to a loopback host. Everything else (flag unset, https,
+ * non-loopback host, unparseable URL) keeps the secure default.
+ */
+export function allowInsecureLoopbackRelayForTests(
+  relayBaseUrl: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  if (env[INSECURE_LOOPBACK_RELAY_TEST_ENV] !== "1") return false;
+  let url: URL;
+  try {
+    url = new URL(relayBaseUrl);
+  } catch {
+    return false;
+  }
+  return url.protocol === "http:" && LOOPBACK_RELAY_HOSTNAMES.has(url.hostname);
+}
+
 /**
  * Process-lifetime authority for the relay implementation used by a logical
  * workspace + relay origin. A live route can refresh its bearer token, but it
@@ -489,7 +514,9 @@ export class EngineRelayClient {
     this.routes.bind({
       ...input,
       mode: "daemon",
-      allowInsecureLoopbackForTests: this.allowInsecureLoopbackForTests,
+      allowInsecureLoopbackForTests:
+        this.allowInsecureLoopbackForTests ||
+        allowInsecureLoopbackRelayForTests(input.relay.baseUrl),
     });
     const workspace = {
       workspaceId: input.workspaceId,
