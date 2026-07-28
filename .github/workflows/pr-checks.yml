@@ -161,7 +161,6 @@ jobs:
       - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
         with:
           shared-key: js-daemon
-          cache-workspace-crates: "true"
 
       # crates/workspace-kernel is deliberately EXCLUDED from the cargo
       # workspace (Cargo.toml documents why: build-workspace-kernel.mjs copies
@@ -229,7 +228,6 @@ jobs:
       - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
         with:
           shared-key: engine-gate
-          cache-workspace-crates: "true"
 
       # Prebuilt binaries, pinned to the same versions the macOS evidence
       # workflow uses so "cargo-deny=PASS" means the same thing in both places.
