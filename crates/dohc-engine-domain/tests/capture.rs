@@ -1,6 +1,7 @@
 use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError, ListMomentsQuery, NoFaults,
-    RenameTextFile, VersionedTextStore, derive_capture_moment_id, derive_capture_object_id,
+    RenameTextFile, VersionedTextStore, binary_rollback_job_identity, derive_capture_moment_id,
+    derive_capture_object_id,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -625,12 +626,13 @@ fn rollback_of_a_capture_binary_moment_still_restores_disk() {
     // never enqueued a job — otherwise disk keeps the newer bytes while the
     // reconcile manifest records them as captured, and the DB head silently
     // diverges forever.
+    let restore_job_id = binary_rollback_job_identity(WS, VERSION, &flipped.moment_id);
     let restore_jobs: i64 = store
         .read_with(|conn| {
             conn.query_row(
                 "SELECT COUNT(*) FROM materialization_jobs \
                  WHERE job_id = ?1 AND status = 'pending'",
-                [format!("rollback-restore_{}", flipped.moment_id)],
+                [restore_job_id],
                 |row| row.get(0),
             )
         })
@@ -717,7 +719,7 @@ fn capture_supersedes_an_older_pending_materialization_job() {
 }
 
 #[test]
-fn recapture_after_rollback_reclaims_the_marker_row() {
+fn recapture_after_rollback_advances_past_the_durable_restore() {
     use dohc_engine_domain::RollbackTextFileMutation;
 
     let (_scratch, mut store) = open_store();
@@ -741,16 +743,21 @@ fn recapture_after_rollback_reclaims_the_marker_row() {
         )
         .expect("rollback the capture");
 
-    // The rollback deletes the moment (freeing its order) but the COMPLETED
-    // marker row survives. Recapturing the path derives the SAME moment/job id
-    // and must reclaim the row instead of failing on the primary key — a
-    // recapture that cannot restore the head would wedge the path forever.
+    // The rollback deletes the moment, but its durable restore generation is
+    // now the ordering high-water mark. Recapture must advance beyond it and
+    // record a distinct completed marker for the newly observed bytes.
     let second = VersionedTextStore::new(&mut store)
         .capture_ingest_binary(&ingest_binary("doc.bin", &[0x03, 0x04], 20), &NO_FAULTS)
-        .expect("recapture after rollback must not collide with the stale marker");
+        .expect("recapture after rollback");
     assert!(!second.deduped);
-    assert_eq!(second.moment_order, first.moment_order, "order was reused");
-    assert_eq!(second.moment_id, first.moment_id, "derived id was reused");
+    assert!(
+        second.moment_order > first.moment_order,
+        "history surgery must not move the durable generation backward"
+    );
+    assert_ne!(
+        second.moment_id, first.moment_id,
+        "the advanced order derives a distinct capture marker"
+    );
 
     let marker: (String, i64) = store
         .read_with(|conn| {

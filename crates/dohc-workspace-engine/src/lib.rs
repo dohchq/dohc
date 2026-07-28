@@ -1450,7 +1450,7 @@ impl EngineService {
             // land on disk while nothing is watching (no suppression window),
             // and the baseline reconcile below then scans the POST-replay disk.
             actor
-                .materialize_replay_pending(root.clone(), now_ms)
+                .materialize_replay_pending(root.clone(), params.workspace_id.clone(), now_ms)
                 .await
                 .map_err(map_runtime)?;
             // The files layer spawns ONLY here — after the shadow binding

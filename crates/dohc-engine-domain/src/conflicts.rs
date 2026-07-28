@@ -6,8 +6,8 @@ use crate::records::{
 };
 use crate::store::{
     VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
-    next_moment_order, record_request, validate_delete_input, validate_path, validate_write_input,
-    version_is_active, write_text_in_tx,
+    next_moment_order, record_request, validate_delete_input, validate_moment_id, validate_path,
+    validate_write_input, version_is_active, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -801,6 +801,7 @@ pub fn enqueue_write(
         tx,
         &MaterializationJobSpec {
             job_id: format!("{prefix}-mat_{}", result.moment.moment_id),
+            workspace_id: result.snapshot.workspace_id.clone(),
             target_path: result.snapshot.path.clone(),
             content_sha256: sha,
             preimage,
@@ -825,6 +826,7 @@ pub fn enqueue_delete(
         tx,
         &MaterializationJobSpec {
             job_id: format!("{prefix}-mat_{}", result.moment.moment_id),
+            workspace_id: result.before.workspace_id.clone(),
             target_path: result.before.path.clone(),
             content_sha256: sha,
             preimage: Preimage::Present(result.before.blob_sha256.clone()),
@@ -871,6 +873,7 @@ pub fn enqueue_binary_rename(
         tx,
         &MaterializationJobSpec {
             job_id: binary_rename_write_job_id(&result.moment.moment_id),
+            workspace_id: result.after.workspace_id.clone(),
             target_path: result.after.path.clone(),
             content_sha256: sha.to_owned(),
             preimage: Preimage::Absent,
@@ -882,6 +885,7 @@ pub fn enqueue_binary_rename(
         tx,
         &MaterializationJobSpec {
             job_id: binary_rename_delete_job_id(&result.moment.moment_id),
+            workspace_id: result.before.workspace_id.clone(),
             target_path: result.before.path.clone(),
             content_sha256: sha.to_owned(),
             preimage: Preimage::Present(sha.to_owned()),
@@ -915,6 +919,7 @@ pub fn enqueue_binary_delete(
         tx,
         &MaterializationJobSpec {
             job_id: binary_delete_job_id(&result.moment.moment_id),
+            workspace_id: result.before.workspace_id.clone(),
             target_path: result.before.path.clone(),
             content_sha256: sha.to_owned(),
             preimage: Preimage::Present(sha.to_owned()),
@@ -947,7 +952,7 @@ pub fn write_binary_file_in_tx(
     validate_path_like_id(&input.workspace_id, "workspace id must not be empty")?;
     validate_path_like_id(&input.version_id, "version id must not be empty")?;
     validate_path_like_id(&input.object_id, "object id must not be empty")?;
-    validate_path_like_id(&input.moment_id, "moment id must not be empty")?;
+    validate_moment_id(&input.moment_id)?;
     if !has_binary_blob(tx, &input.binary_sha256)? {
         return Err(DomainError::InvalidInput {
             reason: "binary file write references a missing binary blob",
@@ -1081,6 +1086,7 @@ pub fn write_binary_file_in_tx(
             tx,
             &MaterializationJobSpec {
                 job_id: input.moment_id.clone(),
+                workspace_id: input.workspace_id.clone(),
                 target_path: input.path.clone(),
                 content_sha256: input.binary_sha256.clone(),
                 preimage: preimage.clone(),

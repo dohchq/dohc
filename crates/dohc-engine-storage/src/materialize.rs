@@ -88,6 +88,7 @@ impl JobStatus {
 #[derive(Debug, Clone)]
 pub struct MaterializationJobSpec {
     pub job_id: String,
+    pub workspace_id: String,
     pub target_path: String,
     pub content_sha256: String,
     pub preimage: Preimage,
@@ -99,6 +100,7 @@ pub struct MaterializationJobSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializationJob {
     pub job_id: String,
+    pub workspace_id: String,
     pub target_path: String,
     pub content_sha256: String,
     pub operation: MaterializationOperation,
@@ -144,10 +146,11 @@ pub fn upsert_projection_job(
     };
     tx.execute(
         "INSERT INTO materialization_jobs \
-         (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+         (job_id, workspace_id, target_path, content_sha256, preimage_present, preimage_sha256, \
           target_generation, status, created_at_ms, completed_at_ms, operation) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, NULL, ?8) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, NULL, ?9) \
          ON CONFLICT(job_id) DO UPDATE SET \
+             workspace_id = excluded.workspace_id, \
              target_path = excluded.target_path, \
              content_sha256 = excluded.content_sha256, \
              preimage_present = excluded.preimage_present, \
@@ -159,6 +162,7 @@ pub fn upsert_projection_job(
              operation = excluded.operation",
         rusqlite::params![
             spec.job_id,
+            spec.workspace_id,
             spec.target_path,
             spec.content_sha256,
             present,
@@ -199,10 +203,11 @@ pub fn record_completed_job(
     };
     tx.execute(
         "INSERT INTO materialization_jobs \
-         (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+         (job_id, workspace_id, target_path, content_sha256, preimage_present, preimage_sha256, \
           target_generation, status, created_at_ms, completed_at_ms, operation) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'complete', ?7, ?7, 'write') \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'complete', ?8, ?8, 'write') \
          ON CONFLICT(job_id) DO UPDATE SET \
+             workspace_id = excluded.workspace_id, \
              target_path = excluded.target_path, \
              content_sha256 = excluded.content_sha256, \
              preimage_present = excluded.preimage_present, \
@@ -213,6 +218,7 @@ pub fn record_completed_job(
              operation = 'write'",
         rusqlite::params![
             spec.job_id,
+            spec.workspace_id,
             spec.target_path,
             spec.content_sha256,
             present,
@@ -263,11 +269,12 @@ fn enqueue_operation(
     };
     tx.execute(
         "INSERT INTO materialization_jobs \
-         (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+         (job_id, workspace_id, target_path, content_sha256, preimage_present, preimage_sha256, \
           target_generation, status, created_at_ms, completed_at_ms, operation) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, NULL, ?8)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, NULL, ?9)",
         rusqlite::params![
             spec.job_id,
+            spec.workspace_id,
             spec.target_path,
             spec.content_sha256,
             present,
@@ -282,19 +289,19 @@ fn enqueue_operation(
 }
 
 fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterializationJob> {
-    let present: i64 = row.get(3)?;
-    let preimage_sha: Option<String> = row.get(4)?;
+    let present: i64 = row.get(4)?;
+    let preimage_sha: Option<String> = row.get(5)?;
     let preimage = if present != 0 {
         Preimage::Present(preimage_sha.unwrap_or_default())
     } else {
         Preimage::Absent
     };
-    let status_raw: String = row.get(6)?;
+    let status_raw: String = row.get(7)?;
     let status = JobStatus::parse(&status_raw).unwrap_or(JobStatus::Conflict);
-    let operation_raw: String = row.get(8)?;
+    let operation_raw: String = row.get(9)?;
     let operation = MaterializationOperation::parse(&operation_raw).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
-            8,
+            9,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -304,17 +311,18 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterializationJob> {
     })?;
     Ok(MaterializationJob {
         job_id: row.get(0)?,
-        target_path: row.get(1)?,
-        content_sha256: row.get(2)?,
+        workspace_id: row.get(1)?,
+        target_path: row.get(2)?,
+        content_sha256: row.get(3)?,
         operation,
         preimage,
-        target_generation: row.get(5)?,
+        target_generation: row.get(6)?,
         status,
-        created_at_ms: row.get(7)?,
+        created_at_ms: row.get(8)?,
     })
 }
 
-const JOB_COLUMNS: &str = "job_id, target_path, content_sha256, preimage_present, \
+const JOB_COLUMNS: &str = "job_id, workspace_id, target_path, content_sha256, preimage_present, \
      preimage_sha256, target_generation, status, created_at_ms, operation";
 
 /// Every pending job, oldest first (then by id for determinism). The set the
@@ -391,7 +399,10 @@ pub fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
 }
 
 /// The highest ordinary moment-order `target_generation` among COMPLETE jobs
-/// for `path`, or `None` if nothing has been materialized there yet. Active
+/// for `path` in `workspace_id`, including legacy rows whose workspace
+/// coordinate predates the column, or `None` if nothing has been materialized
+/// there yet. An empty caller coordinate is itself a legacy global job, so its
+/// fence spans every workspace. Active
 /// version projections use snapshot timestamps, which are a different
 /// namespace and therefore cannot participate in this ordering fence. The
 /// materialization pipeline uses this to skip a pending ordinary job whose
@@ -399,14 +410,16 @@ pub fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
 /// the same path (concurrent/out-of-order jobs must never regress a path).
 pub fn max_completed_generation_for_path(
     conn: &Connection,
+    workspace_id: &str,
     path: &str,
 ) -> Result<Option<i64>, StorageError> {
     // MAX over an empty set yields a single NULL row → `None`.
     conn.query_row(
         "SELECT MAX(target_generation) FROM materialization_jobs \
-         WHERE target_path = ?1 AND status = 'complete' \
+         WHERE (?1 = '' OR workspace_id = ?1 OR workspace_id = '') \
+           AND target_path = ?2 AND status = 'complete' \
            AND job_id NOT LIKE 'version-switch-%'",
-        [path],
+        [workspace_id, path],
         |r| r.get::<_, Option<i64>>(0),
     )
     .map_err(StorageError::corrupt)

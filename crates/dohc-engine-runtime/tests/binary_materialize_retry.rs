@@ -247,7 +247,11 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
     let reopened = supervisor.open(&db, 20).expect("reopen actor").actor;
     assert_eq!(
         reopened
-            .materialize_replay_pending(scratch.path().to_path_buf(), 21)
+            .materialize_replay_pending(
+                scratch.path().to_path_buf(),
+                "ws-binary-materialize-retry".to_owned(),
+                21,
+            )
             .await
             .expect("open-time replay"),
         0,

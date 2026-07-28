@@ -68,6 +68,14 @@ pub enum FaultPoint {
     /// write, no duplicate). `materialize.after-rename-before-complete`.
     MaterializeAfterRenameBeforeComplete,
 
+    // ---- rollback post-commit response -----------------------------------
+    /// The rollback transaction is durable, immediately before the runtime
+    /// reads the active version to decide whether to materialize its restore
+    /// job inline. A simulated failure here must degrade to a committed
+    /// response; it must never turn the successful rollback into an RPC error.
+    /// `rollback.before-active-version-lookup`.
+    RollbackBeforeActiveVersionLookup,
+
     // ---- capture apply/ack (TEST_ORACLE §3.8 point 36) -------------------
     // This position lives on the filesystem/capture side
     // (`dohc-engine-files`) but the registry is shared here so the engine and
@@ -125,6 +133,9 @@ impl FaultPoint {
             }
             FaultPoint::MaterializeAfterRenameBeforeComplete => {
                 "materialize.after-rename-before-complete"
+            }
+            FaultPoint::RollbackBeforeActiveVersionLookup => {
+                "rollback.before-active-version-lookup"
             }
             FaultPoint::CaptureAfterOpApplyBeforeAck => "capture.after-op-apply-before-ack",
             FaultPoint::SearchIndexMidRebuild => "search.mid-rebuild",

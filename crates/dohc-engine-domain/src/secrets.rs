@@ -355,6 +355,7 @@ impl<'a> SecretFileStore<'a> {
             let ciphertext_sha = put_binary_blob(tx, sealed.ciphertext())?;
             let spec = MaterializationJobSpec {
                 job_id: format!("secret-mat_{}", input.moment_id),
+                workspace_id: input.workspace_id.clone(),
                 target_path: path.clone(),
                 content_sha256: ciphertext_sha,
                 // The secret-aware executor decrypts the tip and writes
@@ -528,6 +529,7 @@ impl<'a> SecretFileStore<'a> {
                 tx,
                 &MaterializationJobSpec {
                     job_id: format!("secret-mat_{latest_moment_id}"),
+                    workspace_id: owner_ws.clone(),
                     target_path: target_path.clone(),
                     content_sha256: ciphertext_sha.clone(),
                     preimage: Preimage::Absent,
@@ -1134,6 +1136,7 @@ pub fn apply_secret_file_from_version(
                 tx,
                 &MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
+                    workspace_id: workspace_id.to_owned(),
                     target_path: path.clone(),
                     content_sha256: ciphertext_sha,
                     preimage: Preimage::Absent,
@@ -1154,6 +1157,7 @@ pub fn apply_secret_file_from_version(
                 tx,
                 &MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
+                    workspace_id: workspace_id.to_owned(),
                     target_path: path.clone(),
                     content_sha256: ciphertext_sha,
                     preimage: Preimage::Present(dohc_engine_storage::hex_sha256(
@@ -1312,6 +1316,7 @@ pub fn restore_secret_file_verbatim_with_metadata(
                 tx,
                 &MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
+                    workspace_id: workspace_id.to_owned(),
                     target_path: record.path.clone(),
                     content_sha256: ciphertext_sha,
                     preimage: Preimage::Absent,
@@ -1329,6 +1334,7 @@ pub fn restore_secret_file_verbatim_with_metadata(
                 tx,
                 &MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
+                    workspace_id: workspace_id.to_owned(),
                     target_path: record.path.clone(),
                     content_sha256,
                     preimage: Preimage::Absent,
@@ -1433,6 +1439,7 @@ fn delete_secret_file_inner(
             if let Some(content_sha256) = tip_sha {
                 let spec = MaterializationJobSpec {
                     job_id: format!("secret-mat_{}", input.moment_id),
+                    workspace_id: input.workspace_id.clone(),
                     target_path: path.clone(),
                     content_sha256,
                     // The keyless RPC delete cannot derive a plaintext hash.
