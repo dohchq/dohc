@@ -70,9 +70,9 @@ use dohc_engine_domain::{
     write_projected_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, ProjectionTargetKind, ProjectionTargetState, StdBackoff,
-    StdReplacer, materialize_one, materialize_secret_delete_one, materialize_secret_one,
-    probe_projection_target,
+    DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
+    StdBackoff, StdReplacer, materialize_one, materialize_secret_delete_one,
+    materialize_secret_one, probe_projection_target,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
@@ -8680,7 +8680,15 @@ fn ydoc_settle_on_store(
             };
             match replay_outcome {
                 JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
-                JobOutcome::Conflict | JobOutcome::Superseded | JobOutcome::Blocked => {
+                JobOutcome::Blocked => {
+                    // Disk did not move and the committed marker still
+                    // describes the durable pending job. Preserve it so the
+                    // next settle can retry this replay after containment is
+                    // restored.
+                    self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
+                    return Err(MaterializeError::SymlinkTarget.into());
+                }
+                JobOutcome::Conflict | JobOutcome::Superseded => {
                     self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
                     // The disk moved past the prior settle before its job
                     // replayed: last_settled_sha no longer describes a
@@ -8902,7 +8910,13 @@ fn ydoc_settle_on_store(
     };
     match job_outcome {
         JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
-        JobOutcome::Conflict | JobOutcome::Superseded | JobOutcome::Blocked => {
+        JobOutcome::Blocked => {
+            // This is the same crash-consistent state as dying after the
+            // marker/job commit: the write is durably pending and will land
+            // once containment is restored. Keep both the advanced marker and
+            // the self-write registration, and report the committed settle.
+        }
+        JobOutcome::Conflict | JobOutcome::Superseded => {
             // The target changed on disk and the job left it untouched: this
             // settle FAILED, so the marker committed above must not stand —
             // it would let close(settle:false) pass the settled check and

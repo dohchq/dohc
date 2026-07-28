@@ -11,14 +11,40 @@ use dohc_engine_runtime::{
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::{LeaseProbe, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, try_make_dir_alias};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct NoRecorder;
 
 impl SelfWriteRecorder for NoRecorder {
     fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
     fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+}
+
+#[derive(Default)]
+struct CountingRecorder {
+    records: AtomicUsize,
+    retracts: AtomicUsize,
+}
+
+impl SelfWriteRecorder for CountingRecorder {
+    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {
+        self.records.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {
+        self.retracts.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn remove_dir_alias(path: &std::path::Path) {
+    #[cfg(unix)]
+    std::fs::remove_file(path).expect("remove directory symlink");
+    #[cfg(windows)]
+    std::fs::remove_dir(path).expect("remove directory junction/symlink");
+    #[cfg(not(any(unix, windows)))]
+    let _ = path;
 }
 
 struct AlwaysLive;
@@ -734,4 +760,164 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
         "v2 v1"
     );
     supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
+    const WS: &str = "ws-blocked-settle";
+    const PATH: &str = "notes/linked/blocked.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let outside = ScratchDir::new().expect("outside scratch");
+    let db = scratch.engine_db_path().expect("db");
+    std::fs::create_dir(scratch.path().join("notes")).expect("notes parent");
+    let alias = scratch.path().join("notes/linked");
+    if !try_make_dir_alias(outside.path(), &alias).expect("create directory alias") {
+        eprintln!("skipping: directory alias creation is unavailable");
+        return;
+    }
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let state = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            10,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open");
+    let key = state.key.clone();
+    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "durable blocked body");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            true,
+            None,
+            20,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record update");
+
+    let recorder = Arc::new(CountingRecorder::default());
+    let blocked = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            state.head_blob_sha256.clone(),
+            "session-blocked".to_owned(),
+            recorder.clone(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("a freshly blocked settle is durably accepted");
+    assert_eq!(blocked.markdown, "durable blocked body");
+    assert_eq!(recorder.records.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        recorder.retracts.load(Ordering::Relaxed),
+        0,
+        "the durable pending write keeps its self-write registration"
+    );
+    assert!(
+        !outside.path().join("blocked.md").exists(),
+        "the blocked write must remain contained"
+    );
+
+    let prune_refused = handle
+        .ydoc_close_session(
+            key.clone(),
+            40,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a pending blocked settle must preserve the local-only CRDT");
+    assert!(
+        matches!(
+            prune_refused,
+            RuntimeError::Collab(dohc_engine_collab::CollabError::UnsettledClose)
+        ),
+        "expected UnsettledClose, got {prune_refused:?}"
+    );
+
+    let still_blocked = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            state.head_blob_sha256.clone(),
+            "session-blocked".to_owned(),
+            recorder.clone(),
+            50,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("replaying through the alias remains retryable");
+    assert!(
+        matches!(
+            still_blocked,
+            RuntimeError::Materialize(dohc_engine_files::MaterializeError::SymlinkTarget)
+        ),
+        "expected retryable SymlinkTarget, got {still_blocked:?}"
+    );
+
+    remove_dir_alias(&alias);
+    std::fs::create_dir(&alias).expect("replace alias with a real directory");
+    let recovered = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            state.head_blob_sha256.clone(),
+            "session-blocked".to_owned(),
+            recorder,
+            60,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the next settle replays after containment is restored");
+    assert_eq!(recovered.moment_id, blocked.moment_id);
+    assert_eq!(recovered.sha256, blocked.sha256);
+    assert_eq!(recovered.markdown, "durable blocked body");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("recovered artifact"),
+        "durable blocked body"
+    );
+    assert!(!outside.path().join("blocked.md").exists());
+    supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 70).expect("inspect store");
+    assert_eq!(
+        dohc_engine_collab::read_last_settled_sha(&store, &key).expect("marker"),
+        Some(blocked.sha256.clone()),
+        "the durable marker remains advanced through blocked replay"
+    );
+    assert_eq!(store.pending_materialization_count().expect("pending"), 0);
+    assert_eq!(
+        store
+            .load_materialization_job(&format!("ydoc-mat_{}", blocked.moment_id))
+            .expect("load settle job")
+            .expect("settle job")
+            .status,
+        dohc_engine_storage::JobStatus::Complete
+    );
 }

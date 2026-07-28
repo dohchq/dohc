@@ -219,10 +219,11 @@ pub enum JobOutcome {
     /// Newer external content was found at revalidation; preserved-both, marked
     /// conflict, target NOT overwritten.
     Conflict,
-    /// An ordinary target's ancestry contains a symlink/reparse point. The job
-    /// stays PENDING (no DB mark) so it retries once containment is restored,
-    /// and the batch continues — one aliased directory must not stall every
-    /// other path's materialization.
+    /// An ordinary target operation encountered a symlink/reparse point,
+    /// including in target ancestry or a predictable sibling. The job stays
+    /// PENDING (no DB mark) so it retries once containment is restored, and the
+    /// batch continues — one blocked path must not stall every other path's
+    /// materialization.
     Blocked,
     /// A crash fault fired at this named point; the job is left as-is for
     /// startup replay. Durability is proven by reopening.
@@ -455,6 +456,26 @@ pub fn run_pending_jobs(
     reason = "each seam is injected for testability"
 )]
 pub fn materialize_one(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    policy: DurabilityPolicy,
+    replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<JobOutcome, MaterializeError> {
+    match materialize_one_ordinary(store, root, job, policy, replacer, backoff, now_ms, faults) {
+        Err(MaterializeError::SymlinkTarget) => Ok(JobOutcome::Blocked),
+        outcome => outcome,
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam is injected for testability"
+)]
+fn materialize_one_ordinary(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
@@ -803,13 +824,9 @@ fn materialize_write_content(
         // conflict/target rename, cleanup, unlink-adjacent sync, and directory
         // open below. Missing parents are created one component at a time;
         // create_dir_all would silently traverse an aliased intermediate.
-        // A refusal leaves the job pending and the batch running: fail closed
-        // on this path, not on every other path's materialization.
-        match prepare_target_parent_symlink_free(root, target) {
-            Ok(()) => {}
-            Err(MaterializeError::SymlinkTarget) => return Ok(JobOutcome::Blocked),
-            Err(err) => return Err(err),
-        }
+        // The ordinary entry boundary converts any symlink refusal from this
+        // pipeline into a pending Blocked outcome, keeping the batch running.
+        prepare_target_parent_symlink_free(root, target)?;
     }
     // Step 1 (idempotent replay): the target already equals the desired content.
     let current = read_current_no_follow(target)?;
@@ -973,12 +990,8 @@ fn materialize_delete(
 ) -> Result<JobOutcome, MaterializeError> {
     // One fail-closed component walk gates both no-follow reads, the unlink,
     // and the parent-directory durability open for this ordinary delete. A
-    // refusal leaves the job pending and the batch running.
-    match ensure_target_symlink_free(root, target) {
-        Ok(()) => {}
-        Err(MaterializeError::SymlinkTarget) => return Ok(JobOutcome::Blocked),
-        Err(err) => return Err(err),
-    }
+    // refusal is converted to Blocked by the ordinary entry boundary.
+    ensure_target_symlink_free(root, target)?;
     let current = read_current_no_follow(target)?;
     if matches!(current, CurrentTarget::Absent) {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
