@@ -458,6 +458,15 @@ AUDIT-KEYENV (envelope call sites onto the daemon `keys.*` surface — removes
 the last deliberate TS relay caller). Record the closure here when both are
 merged.
 
+**CLOSED 2026-07-28.** Both shards are merged: AUDIT-MARKERRACE (#312) makes
+the rooted relay transport unconditionally the daemon — no marker sniffing, no
+first-open race, no process-lifetime fallback to the TS sync client — and
+AUDIT-KEYENV (#311) moves every key-envelope call site onto the daemon
+`keys.*` surface with the ruling-mandated raw-key sentinel boundary test. No
+identity-less TS client can reach the relay from a rooted workspace, so the
+mixed-client 409 scenario the original decision guarded against is now
+structurally unreachable, not merely unobserved.
+
 ### Member share-log across epoch reset (R15 row OBLIG) — STILL UNDECIDED, now visible
 
 The R15 shard row carried `OBLIG:member-share-log-across-epoch-reset-semantics

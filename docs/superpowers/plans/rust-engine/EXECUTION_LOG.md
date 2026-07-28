@@ -2798,3 +2798,53 @@ never-ack-without-progress semantics, and DECISIONS.md reconciled (hard-link
 relaxation executed-pending-ratification; relay sequencing resolved-by-events
 with the key-envelope residual moved to AUDIT-KEYENV; the member-share-log
 epoch question recorded as a sharing-milestone prerequisite).
+
+## 2026-07-28 — Audit fix campaign: eleven P1s closed across twelve PRs
+
+The full post-cutover audit (entry above) is discharged. Every confirmed P1
+now has a merged or in-flight fix, each landed the same way: implementation by
+gpt-5.6-sol (codex) or directly by the orchestrator, then an independent
+canonical-gate run on the exact tree, at least one orchestrator-run mutation
+proof (delete/invert the fix, watch the named test fail behaviorally,
+restore), and a codex re-review anchored to the final head. No shard merged on
+its implementer's word.
+
+Merged this campaign: #306 (CI refit; superseded by Ice's #318 — the PR gate
+is deliberately dispatch-only pre-launch, so the local canonical gate is the
+merge authority), #307 (integrator reconciliation), #309 (syncFolder deflake —
+the "flake" was a real design property: same-millisecond moments rank by
+ciphertext bytes), #310 FTSCHAT, #311 KEYENV, #312 MARKERRACE, #313 FTSFILES,
+#314 YDOCLOSS (six review rounds; the fifth found a silent-swallow latch worse
+than the original bug, the sixth a leaked daemon lease on refused replacement
+opens), #315 SEARCHRPC (four rounds; the last second-writer connection to
+engine.db is gone, search pages through generation-pinned keyset RPC), #317
+CONFLPAGE (paging bound moved into the domain SQL after round 1 left full-table
+hydration behind the serializer). In flight at this entry: #316 BINROLLBACK
+(review rounds keep finding real generation/namespace/scoping defects — the
+watermark, job-identity, and version-fence family), #319 FAULTGATE (the three
+crash/exactly-once tests were compiled out of every gate run; the gate now runs
+the collab crash tier and a skipped required step fails the verdict — including
+the independent evidence validator), #320 SYMLINKMAT (ordinary materialization
+now walks every below-root ancestor like the secret path), #322 CLIMODE (CLI
+reads join the live binding as non-owning attachments).
+
+### The two rules this campaign earned
+
+1. **`gh pr merge --delete-branch` deletes the remote branch even when the
+   merge fails.** GitHub then refuses to reopen the auto-closed PR (#308 died
+   this way and was reborn as #314). Merge first, read `state`, only then
+   delete the branch.
+2. **A check that reverses on identical code is evidence in neither
+   direction.** The CI flake that blocked three PRs was a deterministic design
+   property, not luck. Root-cause flakes; never retry them into submission.
+
+### Gate evidence (final heads)
+
+- #314: desktop typecheck clean; workspaceEngineYDocRestart 9/9; mutation —
+  markDead(failed)->markDead(null) fails 3 tests.
+- #315: 2026-07-28T11:09:18Z | run-rust-checks | win32/x64 | PASS (all rows) +
+  JS typecheck/test suites PASS; mutation — short-only source budget fails
+  regular_fts_file_page_bounds_source_before_materializing_all_hits.
+- #317: 2026-07-28T10:01:30Z | run-rust-checks | win32/x64 | PASS (all rows;
+  the first run caught a clippy failure codex's targeted tests missed);
+  mutation — dropping the SQL LIMIT hydrates the poisoned row.
