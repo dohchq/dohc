@@ -1880,6 +1880,17 @@ CREATE INDEX idx_materialization_jobs_workspace_path_status_generation
 
 pub(crate) const MATERIALIZATION_WORKSPACE_MIGRATION_ID: &str = "v1-materialization-workspace";
 
+/// #325: the local bootstrap wrote the main version's display name as 'main'
+/// while the TS engine and the replication applier write 'Main'. New stores
+/// are fixed in `dohc-engine-domain`; this renames rows bootstrapped by older
+/// builds. Scoped to `kind = 'main'` so user-named versions — even one
+/// literally named 'main' — are untouched.
+const V1_MAIN_VERSION_NAME_DDL: &str = "\
+UPDATE versions SET name = 'Main' WHERE kind = 'main' AND name = 'main';
+";
+
+pub(crate) const MAIN_VERSION_NAME_MIGRATION_ID: &str = "v1-main-version-name";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -2060,6 +2071,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MATERIALIZATION_WORKSPACE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MATERIALIZATION_WORKSPACE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 25,
+        id: MAIN_VERSION_NAME_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_MAIN_VERSION_NAME_DDL,
         sets_user_version: None,
     },
 ];
@@ -2425,6 +2443,55 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM engine_ownership", [], |r| r.get(0))
             .expect("own");
         assert_eq!(owns, 1);
+    }
+
+    #[test]
+    fn main_version_name_migration_renames_only_bootstrap_main_rows() {
+        let dir = tempdir();
+        let path = dir.join("main-version-name.db");
+        let ctx = MigrationContext::current(1_400);
+        let mut conn = open_bare(&path);
+        // Everything BEFORE the rename, so these rows model a store
+        // bootstrapped by a pre-#325 build.
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|m| m.id == MAIN_VERSION_NAME_MIGRATION_ID)
+            .expect("main-version-name migration is registered");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("pre-rename migrations");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main'), ('ws-new', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES
+                 ('ws', 'main', 'main', 'main', 1),
+                 ('ws', 'v-user', 'main', 'named', 2),
+                 ('ws-new', 'main', 'Main', 'main', 3);",
+        )
+        .expect("legacy version rows");
+
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("rename and remaining migrations");
+
+        let name = |workspace_id: &str, version_id: &str| -> String {
+            conn.query_row(
+                "SELECT name FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+                [workspace_id, version_id],
+                |row| row.get(0),
+            )
+            .expect("version name")
+        };
+        // The old-build bootstrap row is renamed to match TS + replication.
+        assert_eq!(name("ws", "main"), "Main");
+        // A USER version literally named 'main' (kind 'named') is untouched.
+        assert_eq!(name("ws", "v-user"), "main");
+        // An already-correct main row is left as-is.
+        assert_eq!(name("ws-new", "main"), "Main");
     }
 
     #[test]
