@@ -1587,6 +1587,49 @@ pub fn upsert_chat_search_index_row(
     Ok(())
 }
 
+/// Maintain the message row and an untitled thread's derived header for a
+/// replicated message that was inserted in the current transaction.
+pub fn index_replicated_chat_message_search_rows(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    author_display_name: &str,
+    is_agent: bool,
+    body: &str,
+) -> Result<(), DomainError> {
+    let (stored_title, first_message_id): (String, Option<String>) = conn
+        .query_row(
+            "SELECT title, (SELECT message_id FROM chat_messages \
+               WHERE workspace_id=?1 AND thread_id=?2 \
+               ORDER BY created_at_ms,message_id LIMIT 1) \
+             FROM chat_threads WHERE workspace_id=?1 AND thread_id=?2",
+            params![workspace_id, thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if stored_title.is_empty() && first_message_id.as_deref() == Some(message_id) {
+        let display_title = chat_thread_display_title("", Some(body));
+        upsert_chat_search_index_row(
+            conn,
+            workspace_id,
+            thread_id,
+            CHAT_THREAD_HEADER_MESSAGE_ID,
+            &display_title,
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    let message_search_text = chat_message_search_text(author_display_name, is_agent, body);
+    upsert_chat_search_index_row(
+        conn,
+        workspace_id,
+        thread_id,
+        message_id,
+        &message_search_text,
+    )
+    .map_err(DomainError::sql_persist)
+}
+
 /// `normalizeChannelName`: NFC then trim, 1..=80 chars, no control chars.
 /// NFC-normalize and validate a channel display name.
 pub fn normalize_channel_name(name: &str) -> Result<String, DomainError> {
@@ -7510,6 +7553,15 @@ fn apply_pending_message(
     )
     .map_err(DomainError::sql_persist)?;
     mark_live_bookmarks_pending(tx, workspace_id, &payload.thread_id, payload.created_at_ms)?;
+    index_replicated_chat_message_search_rows(
+        tx,
+        workspace_id,
+        &payload.thread_id,
+        &payload.message_id,
+        &author_display_name,
+        payload.author_kind == "agent",
+        &body,
+    )?;
     Ok(())
 }
 

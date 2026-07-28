@@ -3,6 +3,10 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
+use dohc_engine_domain::chats::{
+    chat_thread_display_title, index_replicated_chat_message_search_rows,
+    upsert_chat_search_index_row,
+};
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, DomainError,
     FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID,
@@ -958,6 +962,14 @@ fn apply_thread(
         params![op.workspace_id, payload.thread_id, payload.title, payload.created_at_ms, payload.linked_object_id, payload.linked_path_hint, payload.linked_at_ms, channel_id],
     )
     .map_err(SyncError::persist)?;
+    upsert_chat_search_index_row(
+        tx,
+        &op.workspace_id,
+        &payload.thread_id,
+        CHAT_THREAD_HEADER_MESSAGE_ID,
+        &chat_thread_display_title(&payload.title, None),
+    )
+    .map_err(SyncError::persist)?;
     Ok(())
 }
 
@@ -1258,6 +1270,16 @@ fn apply_message(
         &payload.thread_id,
         payload.created_at_ms,
     )?;
+    index_replicated_chat_message_search_rows(
+        tx,
+        &op.workspace_id,
+        &payload.thread_id,
+        &payload.message_id,
+        &author_display_name,
+        payload.author_kind == "agent",
+        &body,
+    )
+    .map_err(|error| map_chat_rule(error, "replicated chat search index maintenance failed"))?;
     Ok(())
 }
 

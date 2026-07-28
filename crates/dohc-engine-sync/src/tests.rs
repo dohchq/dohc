@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use dohc_engine_domain::chats::{CHAT_THREAD_HEADER_MESSAGE_ID, upsert_chat_search_index_row};
+use dohc_engine_domain::chats::{
+    CHAT_THREAD_HEADER_MESSAGE_ID, chat_thread_display_title, upsert_chat_search_index_row,
+};
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
     ChatChannelKind, ChatReactionState, CreateFileThread, FollowState, FollowTargetKind,
@@ -15,6 +17,7 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::apply::apply_chat_tx;
 use crate::*;
 
 macro_rules! assert_invalid_refusal {
@@ -1113,11 +1116,18 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
     );
     apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
 
-    let replayed: (String, i64) = engine
+    let replayed: (String, String, i64) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
                 conn.query_row(
                     "SELECT body FROM chat_messages \
+                     WHERE workspace_id='ws' AND thread_id='late-thread' \
+                       AND message_id='early-message'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT text FROM engine_search_chat_messages_fts \
                      WHERE workspace_id='ws' AND thread_id='late-thread' \
                        AND message_id='early-message'",
                     [],
@@ -1131,7 +1141,11 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
         .expect("replayed message state");
     assert_eq!(
         replayed,
-        ("arrived first".to_owned(), 0),
+        (
+            "arrived first".to_owned(),
+            "Ice\narrived first".to_owned(),
+            0
+        ),
         "MUTATION: missing-thread refusal loses the message instead of replaying it"
     );
 }
@@ -3048,6 +3062,196 @@ fn imported_thread_header_message_id_cannot_replace_the_search_header() {
 }
 
 #[test]
+fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotently() {
+    let (_scratch, _path, mut engine) = store();
+    let thread = envelope(
+        "search-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "search-thread",
+            "title": "Replicated roadmap",
+            "createdAtMs": 10,
+            "linkedObjectId": "search-object",
+            "linkedAtMs": 10
+        }),
+    );
+    let message = envelope(
+        "search-peer",
+        1,
+        "chat.message.append",
+        json!({
+            "messageId": "search-message",
+            "threadId": "search-thread",
+            "authorKind": "agent",
+            "authorDisplayName": "Planner",
+            "body": "The synchronized quasar is visible",
+            "createdAtMs": 20
+        }),
+    );
+
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &thread, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &message, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &message, &NoFaults),
+        Ok(ApplyOutcome::Skipped)
+    ));
+
+    let rows: Vec<(String, String)> = engine
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT message_id,text FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id='ws' AND thread_id='search-thread' ORDER BY message_id",
+            )?;
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("replicated chat search rows");
+    assert_eq!(
+        rows,
+        vec![
+            (
+                CHAT_THREAD_HEADER_MESSAGE_ID.to_owned(),
+                "Replicated roadmap".to_owned()
+            ),
+            (
+                "search-message".to_owned(),
+                "Planner\nPlanner (agent)\nThe synchronized quasar is visible".to_owned()
+            )
+        ],
+        "replicated writers and duplicate delivery must leave exactly one row per indexed entity"
+    );
+}
+
+#[test]
+fn replicated_untitled_thread_without_messages_matches_rebuild_fallback() {
+    let (_scratch, _path, mut engine) = store();
+    let thread = envelope(
+        "fallback-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "fallback-thread",
+            "title": "",
+            "createdAtMs": 10,
+            "channelSlug": "fallback"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+
+    let header: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT text FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id='ws' AND thread_id='fallback-thread' AND message_id='__thread__'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("fallback thread search header");
+    let rebuild_fallback = chat_thread_display_title("", None);
+    assert_eq!(
+        header.as_bytes(),
+        rebuild_fallback.as_bytes(),
+        "write-time and rebuild headers must be byte-identical"
+    );
+}
+
+#[test]
+fn replicated_untitled_thread_indexes_its_first_message_snippet() {
+    let (_scratch, _path, mut engine) = store();
+    let thread = envelope(
+        "snippet-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "snippet-thread",
+            "title": "",
+            "createdAtMs": 10,
+            "linkedObjectId": "snippet-object",
+            "linkedAtMs": 10
+        }),
+    );
+    let message = envelope(
+        "snippet-peer",
+        1,
+        "chat.message.append",
+        json!({
+            "messageId": "snippet-message",
+            "threadId": "snippet-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ice",
+            "body": "First replicated snippet\nwith more detail",
+            "createdAtMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("message");
+
+    let header: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT text FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id='ws' AND thread_id='snippet-thread' AND message_id='__thread__'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("derived thread search header");
+    assert_eq!(header, "First replicated snippet");
+}
+
+#[test]
+fn refused_chat_mutation_rolls_back_all_fts_rows() {
+    let (_scratch, _path, mut engine) = store();
+    let thread = envelope(
+        "refused-search-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "refused-search-thread",
+            "title": "Must roll back",
+            "createdAtMs": 10,
+            "linkedObjectId": "refused-search-object",
+            "linkedAtMs": 10
+        }),
+    );
+    let outcome = apply_envelope_with(&mut engine, &thread, &NoFaults, |tx, op| {
+        apply_chat_tx(tx, op)?;
+        Err::<(), SyncError>(SyncError::InvalidInput {
+            reason: "test refusal after chat index maintenance",
+        })
+    });
+    assert_invalid_refusal!(outcome);
+
+    let (thread_rows, fts_rows): (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM chat_threads", [], |row| row.get(0))?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM engine_search_chat_messages_fts",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("refusal residue counts");
+    assert_eq!(thread_rows, 0, "the refused canonical write must roll back");
+    assert_eq!(fts_rows, 0, "the refused FTS write must roll back");
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "refused-search-peer").expect("ack"),
+        0
+    );
+}
+
+#[test]
 fn imported_channel_create_reuses_the_local_channel_id_rule() {
     for (origin, channel_id) in [
         ("long-channel-id", "x".repeat(257)),
@@ -4091,6 +4295,27 @@ fn shared_channel_correctly_scoped_ops_apply() {
         apply_shared_envelope(&mut engine, &boundary, &message, &NoFaults),
         Ok(ApplyOutcome::Applied(_))
     ));
+    let rows: Vec<(String, String)> = engine
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT message_id,text FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id='ws' AND thread_id='t-allow' ORDER BY message_id",
+            )?;
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("shared-channel search rows");
+    assert_eq!(
+        rows,
+        vec![
+            (
+                CHAT_THREAD_HEADER_MESSAGE_ID.to_owned(),
+                "Allowed thread".to_owned()
+            ),
+            ("m-allow".to_owned(), "User\nInside the grant".to_owned())
+        ]
+    );
 }
 
 #[test]
