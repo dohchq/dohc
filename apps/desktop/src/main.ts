@@ -7062,6 +7062,13 @@ function registerIpcHandlers(
       try {
         session = await capture.openYDocSession({
           path: input.path,
+          // Explicit, because the daemon defaults an unspecified session to
+          // PLAINTEXT (actor.rs requested_content_kind.unwrap_or(Plaintext)).
+          // The gate above admits only rich markdown paths, and a plaintext
+          // session seeds/projects the plainText root while the editor binds
+          // the body fragment — the doc opens empty and every typed edit
+          // settles back to the pre-edit file while the UI shows "Saved".
+          contentKind: "richdoc",
           onRemoteUpdate: (update) => {
             // Forward a co-editor's delta only to the renderer generation that
             // opened this session. A crash reload reuses the WebContents id.
