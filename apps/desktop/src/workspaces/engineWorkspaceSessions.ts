@@ -1,5 +1,6 @@
 import {
   DaemonRefusalError,
+  isDaemonReconnectError,
   WORKSPACE_METHOD,
   WorkspaceDaemonRequester,
   decodeWorkspaceResult,
@@ -102,7 +103,7 @@ function isTransportError(error: unknown): boolean {
 }
 
 export function isEngineSessionReconnectError(error: unknown): boolean {
-  return requiresReconnect(error) || isTransportError(error);
+  return isDaemonReconnectError(error);
 }
 
 function daemonMayBeRelaunching(error: unknown): boolean {

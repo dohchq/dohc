@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
+import { DaemonRefusalError } from "../live/daemonLiveAdapter";
 import {
   IllFormedUtf16EditError,
   RemoteYdocApplyError,
@@ -513,6 +514,81 @@ describe("YdocLiveAdapter", () => {
         insert: "closed",
       }),
     ).toThrowError(/closed/i);
+    adapter.dispose();
+  });
+
+  it("preserves reconnect classification when record recovery also loses transport", async () => {
+    const engine = seedPlaintextEngine();
+    const recordFailure = Object.assign(new Error("record transport restarted"), {
+      code: "transport-error",
+    });
+    const resyncFailure = Object.assign(new Error("resync transport restarted"), {
+      code: "transport-error",
+    });
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
+        if (request.method === YDOC_METHOD.resync) throw resyncFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await expect(
+      session.applyLocalUpdate(
+        plaintextUpdate(session.initialUpdate, (text) => {
+          text.insert(0, "survives restart");
+        }),
+      ),
+    ).rejects.toBe(resyncFailure);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("preserves an original reconnect refusal when recovery fails generically", async () => {
+    const engine = seedPlaintextEngine();
+    const recordFailure = new DaemonRefusalError(
+      {
+        code: "INTERNAL",
+        message: "workspace binding expired",
+        retry: "afterReconnect",
+      },
+      new Error("daemon response"),
+    );
+    const resyncFailure = new Error("resync refusal");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
+        if (request.method === YDOC_METHOD.resync) throw resyncFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await expect(
+      session.applyLocalUpdate(
+        plaintextUpdate(session.initialUpdate, (text) => {
+          text.insert(0, "survives reconnect");
+        }),
+      ),
+    ).rejects.toBe(recordFailure);
+
+    await session.close({ settle: false });
     adapter.dispose();
   });
 

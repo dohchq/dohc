@@ -1,6 +1,9 @@
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import { isYdocSessionNotFoundRefusal } from "../live/daemonLiveAdapter";
+import {
+  isDaemonReconnectError,
+  isYdocSessionNotFoundRefusal,
+} from "../live/daemonLiveAdapter";
 import type { Event } from "./generated/Event";
 import type { Request } from "./generated/Request";
 import type { Response } from "./generated/Response";
@@ -536,6 +539,12 @@ export class YdocAdapterSession {
         try {
           return await this.recoverCanonicalState(update, options);
         } catch (recoveryFailure) {
+          // The desktop rebind boundary classifies the thrown value itself.
+          // Do not hide a daemon restart inside the diagnostic cause wrapper:
+          // either reconnect-class failure is sufficient to require a fresh
+          // workspace/session binding.
+          if (isDaemonReconnectError(recoveryFailure)) throw recoveryFailure;
+          if (isDaemonReconnectError(refusal)) throw refusal;
           const refusalMessage =
             refusal instanceof Error ? refusal.message : String(refusal);
           const recoveryMessage =

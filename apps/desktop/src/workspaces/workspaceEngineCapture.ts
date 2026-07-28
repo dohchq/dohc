@@ -1015,6 +1015,7 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath };
     let canonicalDoc: Y.Doc | null = null;
     let current: EngineYdocProviderSessionRust | null = null;
+    let releaseObligation: EngineYdocProviderSessionRust | null = null;
     let closed = false;
     let dead = false;
     const deadSessionToken = {};
@@ -1033,7 +1034,10 @@ export function createWorkspaceEngineCapture(
       return pending;
     };
 
-    const markDead = (): void => {
+    const markDead = (
+      unreleased: EngineYdocProviderSessionRust | null,
+    ): void => {
+      releaseObligation ??= unreleased;
       current = null;
       if (dead) return;
       dead = true;
@@ -1118,7 +1122,7 @@ export function createWorkspaceEngineCapture(
         try {
           await releaseGeneration(failed);
         } catch (error) {
-          markDead();
+          markDead(failed);
           throw error;
         }
         if (current !== failed || closed) return;
@@ -1128,7 +1132,7 @@ export function createWorkspaceEngineCapture(
       try {
         replacement = await openGeneration();
       } catch (error) {
-        markDead();
+        markDead(null);
         throw error;
       }
       try {
@@ -1166,13 +1170,18 @@ export function createWorkspaceEngineCapture(
         }
       } catch (error) {
         openingRemoteUpdates.delete(replacement);
-        await releaseGeneration(replacement).catch(() => undefined);
-        markDead();
+        try {
+          await releaseGeneration(replacement);
+          markDead(null);
+        } catch {
+          markDead(replacement);
+        }
         throw error;
       }
-      if (!options?.releaseBeforeOpen) {
-        await releaseGeneration(failed).catch(() => undefined);
-      }
+      // A reconnect-class failure means the prior daemon/workspace binding is
+      // gone. Opening the replacement first is the release boundary; sending a
+      // close through the broken transport can only fail and must not turn a
+      // recoverable daemon restart into a dead session.
     };
 
     const executeWithReconnect = async <T>(
@@ -1258,6 +1267,10 @@ export function createWorkspaceEngineCapture(
         return append(async () => {
           if (closed) return;
           if (current === null) {
+            if (releaseObligation !== null) {
+              await releaseGeneration(releaseObligation);
+              releaseObligation = null;
+            }
             closed = true;
             deadYDocSessions.delete(deadSessionToken);
             return;
@@ -3424,6 +3437,10 @@ export function createWorkspaceEngineCapture(
           await store.flushCapture?.();
         }
       } finally {
+        // App quit may abandon a dead generation's retained release obligation:
+        // the daemon process exits immediately afterward and releases every
+        // workspace/session lease. Interactive lifecycle operations never use
+        // this force-drop path; they must converge through closeEntry first.
         // Release the SQLite handles for the stores THIS capture created, so
         // repeated workspace switches never accumulate handles/WAL locks. An
         // injected store belongs to its creator and is left open. A degraded

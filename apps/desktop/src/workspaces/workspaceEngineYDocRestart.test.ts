@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   DaemonRefusalError,
   VersionedLoopbackEngine,
+  YdocLoopbackEngine,
   type EngineTransport,
   type Request,
   type Response,
@@ -179,6 +180,120 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
     "seed survives twice remote",
   );
 
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("opens first when record recovery loses the restarted daemon transport", async () => {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-chain-restart-"));
+  roots.push(rootPath);
+  const workspaceHandle = "ydoc-chain-restart";
+  const versioned = new VersionedLoopbackEngine();
+  versioned.seedTextFile({
+    workspace: workspaceHandle,
+    path: "note.md",
+    text: "",
+  });
+  const firstYdoc = new YdocLoopbackEngine();
+  const secondYdoc = new YdocLoopbackEngine();
+  for (const engine of [firstYdoc, secondYdoc]) {
+    engine.seedFile({
+      workspace: workspaceHandle,
+      versionId: "main",
+      path: "note.md",
+      markdown: "",
+      contentKind: "plaintext",
+    });
+  }
+  const lifecycle: string[] = [];
+  let broken = false;
+  let currentClient: EngineDaemonClient & EngineTransport;
+  const transportError = (stage: string) =>
+    Object.assign(new Error(`${stage}: daemon restarted`), {
+      code: "transport-error",
+    });
+  const routeWorkspace = async (request: Request): Promise<Response | null> => {
+    if (request.method === "workspace.open") {
+      return { id: request.id, result: { workspace: workspaceHandle } };
+    }
+    if (request.method === "workspace.close") {
+      return { id: request.id, result: { closed: true } };
+    }
+    if (!request.method.startsWith("ydoc.")) {
+      return await versioned.sendRequest(request);
+    }
+    return null;
+  };
+  const secondClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: (handler) => secondYdoc.onEvent(handler),
+    async sendRequest(request) {
+      const workspaceResponse = await routeWorkspace(request);
+      if (workspaceResponse) return workspaceResponse;
+      lifecycle.push(`${request.method}:second`);
+      return await secondYdoc.sendRequest(request);
+    },
+  };
+  const firstClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: (handler) => firstYdoc.onEvent(handler),
+    async sendRequest(request) {
+      const workspaceResponse = await routeWorkspace(request);
+      if (workspaceResponse) return workspaceResponse;
+      lifecycle.push(`${request.method}:first`);
+      if (request.method === "ydoc.recordUpdate") {
+        broken = true;
+        currentClient = secondClient;
+        throw transportError("record");
+      }
+      if (request.method === "ydoc.resync") throw transportError("resync");
+      if (broken) throw transportError(request.method);
+      return await firstYdoc.sendRequest(request);
+    },
+  };
+  currentClient = firstClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const outcomes: boolean[] = [];
+  const onError = vi.fn();
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: workspaceHandle,
+    rootPath,
+    rustEngineSessions: sessions,
+    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    onError,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    contentKind: "plaintext",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "survives");
+
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  await expect(session.settleNow()).resolves.toMatchObject({
+    markdown: "survives",
+  });
+
+  // MUTATION: remove either reconnect-class rethrow in ydocLiveAdapter. The
+  // generic recovery wrapper selects release-first here, sends ydoc.close
+  // through `firstClient`, and the session dies instead of settling.
+  expect(lifecycle).toEqual([
+    "ydoc.open:first",
+    "ydoc.recordUpdate:first",
+    "ydoc.resync:first",
+    "ydoc.open:second",
+    "ydoc.recordUpdate:second",
+    "ydoc.settle:second",
+  ]);
+  expect(lifecycle).not.toContain("ydoc.close:first");
+  expect(outcomes).not.toContain(false);
+  expect(onError).not.toHaveBeenCalled();
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -402,7 +517,7 @@ it("releases a close-latched failed generation with settle true before the next 
   await capture.stop();
 });
 
-it("keeps the capture notice failed after unrelated success until the dead session closes", async () => {
+it("retains and retries a dead generation release before clearing its guard", async () => {
   const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-close-dead-"));
   roots.push(rootPath);
   const loopback = new VersionedLoopbackEngine();
@@ -429,10 +544,15 @@ it("keeps the capture notice failed after unrelated success until the dead sessi
   const refusal = new Error("record-update-refused");
   const settlingCloseFailure = new Error("settling close also refused");
   let applyCount = 0;
+  let leaseActive = false;
+  let generation = 0;
 
   const openProvider = async (
     options: EngineYdocProviderSessionRustOptions,
   ): Promise<EngineYdocProviderSessionRust> => {
+    if (leaseActive) throw new Error("ydoc-session-busy");
+    leaseActive = true;
+    generation += 1;
     const doc = new Y.Doc();
     Y.applyUpdate(doc, seedUpdate);
     return {
@@ -452,8 +572,11 @@ it("keeps the capture notice failed after unrelated success until the dead sessi
       },
       async close(closeOptions) {
         closeAttempts.push(closeOptions?.settle);
-        if (closeOptions?.settle === true) throw settlingCloseFailure;
-        throw new Error("plain close refused");
+        if (closeAttempts.length < 5) {
+          if (closeOptions?.settle === true) throw settlingCloseFailure;
+          throw new Error("plain close refused");
+        }
+        leaseActive = false;
       },
     };
   };
@@ -504,12 +627,37 @@ it("keeps the capture notice failed after unrelated success until the dead sessi
   expect(outcomes).toEqual([false, false]);
   expect(historyCaptureFailed).toBe(true);
 
+  // MUTATION: restore markDead's `current = null` early-success close without
+  // a retained release obligation. This first close resolves, the assertions
+  // below observe only the original two attempts, and the busy lease is hidden.
+  await expect(session.close({ settle: false })).rejects.toBe(
+    settlingCloseFailure,
+  );
+  expect(closeAttempts).toEqual([false, true, false, true]);
+  expect(leaseActive).toBe(true);
+  expect(historyCaptureFailed).toBe(true);
+  await expect(
+    capture.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+    }),
+  ).rejects.toThrow("ydoc-session-busy");
+  expect(generation).toBe(1);
+
   await session.close({ settle: false });
+  expect(closeAttempts).toEqual([false, true, false, true, false]);
+  expect(leaseActive).toBe(false);
   await writeFile(join(rootPath, "unrelated.md"), "captured safely again\n");
   capture.captureBatch([{ path: "unrelated.md", operation: "update" }]);
   await capture.flush();
   expect(outcomes).toEqual([false, false, true]);
   expect(historyCaptureFailed).toBe(false);
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  expect(generation).toBe(2);
+  await reopened.close({ settle: false });
   await capture.stop();
 });
 
