@@ -195,6 +195,8 @@ const snapshot = {
   updatedAtMs: 1,
   latestMomentId: "moment",
   metadataOrigin: "api",
+  metadataSummary: "Updated a.md",
+  metadataCorrelationId: "capture-1",
 } as const;
 const conflictState = {
   path: "a.md",
@@ -943,6 +945,16 @@ describe("VersionedLiveAdapter", () => {
       ).toThrow(WorkspaceProtocolShapeError);
     },
   );
+
+  it("keeps the daemon's provenance fields on decoded conflict snapshots", () => {
+    const decoded = decodeWorkspaceResult(WORKSPACE_METHOD.conflictsList, {
+      conflicts: [conflict],
+      nextAfterConflictId: null,
+    }) as { conflicts: ConflictRecord[] };
+    const base = decoded.conflicts[0]?.base.snapshot;
+    expect(base?.metadataSummary).toBe("Updated a.md");
+    expect(base?.metadataCorrelationId).toBe("capture-1");
+  });
 
   it("strictly decodes the newly dispatched versioned list, compare, and empty acknowledgements", () => {
     expect(

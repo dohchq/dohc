@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createLinkedChatStore } from "@dohc/workspace-engine";
+import { seedThroughDaemon } from "./helpers/daemonSeed";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -80,8 +80,35 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     await expect(page.getByTestId("chats-panel")).toHaveCount(0);
     await expect(page.getByTestId("chats-view")).toHaveCount(0);
 
-    // Relaunch: channel chats are durable engine state.
+    // Relaunch: channel chats are durable engine state. Between sessions an
+    // AGENT starts a second chat through the engine daemon over RPC — the
+    // external write path post-cutover (the retired TS in-process store is
+    // refused by daemon-owned workspaces). It must arrive UNREAD.
+    //
+    // TRACKED GAP (#333): this used to happen while the app was RUNNING,
+    // proving live cross-process unread invalidation. Single-daemon ownership
+    // makes that impossible here (a second daemon cannot attach to the app's
+    // store, and the CLI socket — the real concurrent path into the RUNNING
+    // app's daemon — is Unix-only). A replacement live-unread test is filed
+    // as https://github.com/dohc-ai/dohc/issues/333.
     await desktop.close();
+    await seedThroughDaemon(
+      { workspaceId, rootPath: temp.rootPath },
+      async ({ chats }) => {
+        const general = await chats.findChannelBySlug({
+          workspaceId,
+          slug: "general",
+        });
+        expect(general).not.toBeNull();
+        if (!general) throw new Error("general channel missing");
+        await chats.startChannelThread({
+          workspaceId,
+          channelId: general.id,
+          author: { kind: "agent", displayName: "Ice" },
+          body: "The zeppelin-cadence report is ready.",
+        });
+      },
+    );
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     page = desktop.page;
@@ -94,25 +121,13 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     }
     await expect(page.getByTestId("chats-channel-name")).toHaveText("general");
     await page.getByTestId("chats-channel").click();
-    await page.getByTestId("chats-thread").click();
+    // Two threads exist now (the agent seeded one between sessions), so pick
+    // the composer-created one by its snippet title.
+    await page
+      .getByTestId("chats-thread")
+      .filter({ hasText: "Let's plan the launch this week." })
+      .click();
     await expect(page.getByTestId("chats-message-body")).toHaveCount(2);
-
-    // An agent starts a second chat while the app runs (the MCP write path:
-    // same engine.db over a separate WAL connection). It arrives UNREAD.
-    const externalStore = createLinkedChatStore(temp.rootPath);
-    const general = await externalStore.findChannelBySlug({
-      workspaceId,
-      slug: "general",
-    });
-    expect(general).not.toBeNull();
-    if (!general) throw new Error("general channel missing");
-    await externalStore.startChannelThread({
-      workspaceId,
-      channelId: general.id,
-      author: { kind: "agent", displayName: "Ice" },
-      body: "The zeppelin-cadence report is ready.",
-    });
-    await externalStore.close();
 
     // Back to the channel: the agent thread carries an unread badge.
     await page.getByTestId("chats-thread-back").click();
@@ -308,34 +323,42 @@ test("performance: channel-list first paint and composer send latency", async ()
     await seedWorkspaceSettings(temp, {
       experimental: { workspaceEngineAlpha: true },
     });
-    // 50 channels x 10 threads = 500 threads (each with one message).
-    const store = createLinkedChatStore(temp.rootPath);
-    await store.ensureGeneralChannel({ workspaceId });
-    for (let channelIndex = 1; channelIndex < 50; channelIndex += 1) {
-      const channel = await store.createChannel({
-        workspaceId,
-        name: `channel-${String(channelIndex).padStart(2, "0")}`,
-      });
-      for (let threadIndex = 0; threadIndex < 10; threadIndex += 1) {
-        await store.startChannelThread({
+    // 50 channels x 10 threads = 500 threads (each with one message), seeded
+    // through the engine daemon over RPC (post-cutover the retired TS
+    // in-process store cannot create a daemon-acceptable store).
+    await seedThroughDaemon(
+      { workspaceId, rootPath: temp.rootPath },
+      async ({ chats }) => {
+        await chats.ensureGeneralChannel({ workspaceId });
+        for (let channelIndex = 1; channelIndex < 50; channelIndex += 1) {
+          const channel = await chats.createChannel({
+            workspaceId,
+            name: `channel-${String(channelIndex).padStart(2, "0")}`,
+          });
+          for (let threadIndex = 0; threadIndex < 10; threadIndex += 1) {
+            await chats.startChannelThread({
+              workspaceId,
+              channelId: channel.id,
+              author: { kind: "human", displayName: "You" },
+              body: `Seed thread ${threadIndex} in ${channel.name}: budget check.`,
+            });
+          }
+        }
+        const general = await chats.findChannelBySlug({
           workspaceId,
-          channelId: channel.id,
-          author: { kind: "human", displayName: "You" },
-          body: `Seed thread ${threadIndex} in ${channel.name}: budget check.`,
+          slug: "general",
         });
-      }
-    }
-    const general = await store.findChannelBySlug({ workspaceId, slug: "general" });
-    if (!general) throw new Error("general channel missing");
-    for (let threadIndex = 0; threadIndex < 10; threadIndex += 1) {
-      await store.startChannelThread({
-        workspaceId,
-        channelId: general.id,
-        author: { kind: "human", displayName: "You" },
-        body: `Seed thread ${threadIndex} in general: budget check.`,
-      });
-    }
-    await store.close();
+        if (!general) throw new Error("general channel missing");
+        for (let threadIndex = 0; threadIndex < 10; threadIndex += 1) {
+          await chats.startChannelThread({
+            workspaceId,
+            channelId: general.id,
+            author: { kind: "human", displayName: "You" },
+            body: `Seed thread ${threadIndex} in general: budget check.`,
+          });
+        }
+      },
+    );
 
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);

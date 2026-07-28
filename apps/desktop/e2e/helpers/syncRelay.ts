@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { desktopRoot } from "./desktopApp";
 
@@ -93,4 +94,70 @@ export async function spawnSyncRelay(input: {
         child.kill("SIGTERM");
       }),
   };
+}
+
+export interface RelayWorkspaceIdentity {
+  replicationEpoch: string;
+  streamIdentity: string;
+}
+
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (
+    path: string,
+    options?: { readOnly?: boolean },
+  ) => {
+    prepare(sql: string): { get(...params: unknown[]): Record<string, unknown> | undefined };
+    close(): void;
+  };
+};
+
+// R10b: the relay adopts the FIRST replication identity a pusher presents
+// (the desktop daemon's, minted in its store) and never returns it over the
+// wire — identity-less /log calls 409 once adoption happens. A headless
+// "other machine" harness therefore learns the adopted coordinate the only
+// way a harness can: from the relay's own SQLite row.
+// Only "the db file does not exist yet" reads as "not adopted yet" to a
+// poll; anything else — including schema drift ("no such table") and the
+// malformed-row throw below (whose message embeds raw values that could
+// contain arbitrary text) — must fail loud. Classify by error CODE, and only
+// for the open failure, never by matching message text.
+function isRelayDbNotReady(error: unknown, dbOpened: boolean): boolean {
+  if (dbOpened) return false;
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "SQLITE_CANTOPEN";
+}
+
+export function relayAdoptedIdentity(
+  dbPath: string,
+  workspaceId: string,
+): RelayWorkspaceIdentity | null {
+  let db: InstanceType<typeof DatabaseSync> | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db
+      .prepare(
+        `SELECT replication_epoch AS replicationEpoch, stream_identity AS streamIdentity
+         FROM sync_relay_workspaces WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    if (row === undefined) return null;
+    const epoch = row.replicationEpoch ?? null;
+    const stream = row.streamIdentity ?? null;
+    if (epoch === null && stream === null) return null;
+    // The relay's own storage layer treats a partial identity pair as
+    // corruption — surface it, never "not adopted yet".
+    if (typeof epoch !== "string" || typeof stream !== "string") {
+      throw new Error(
+        `sync relay identity row is malformed for ${workspaceId}: ` +
+          `replication_epoch=${JSON.stringify(epoch)} stream_identity=${JSON.stringify(stream)}`,
+      );
+    }
+    return { replicationEpoch: epoch, streamIdentity: stream };
+  } catch (error) {
+    if (isRelayDbNotReady(error, db !== null)) return null;
+    throw error;
+  } finally {
+    db?.close();
+  }
 }

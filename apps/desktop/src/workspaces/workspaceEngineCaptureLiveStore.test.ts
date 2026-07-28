@@ -68,6 +68,8 @@ const snapshot = {
   updatedAtMs: 2,
   latestMomentId: "moment",
   metadataOrigin: "capture",
+  metadataSummary: null,
+  metadataCorrelationId: null,
 } as const;
 
 const moment = {

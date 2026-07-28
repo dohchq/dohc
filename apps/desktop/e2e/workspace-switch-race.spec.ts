@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createLinkedChatStore, createVersionedTextStore } from "@dohc/workspace-engine";
+import { seedThroughDaemon } from "./helpers/daemonSeed";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -52,65 +52,74 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     await seedWorkspaceSettings(temp, {
       experimental: { workspaceEngineAlpha: true },
     });
-    const storeA = createVersionedTextStore(temp.rootPath);
-    await storeA.ensureMainVersion({ workspaceId: WORKSPACE_A_ID });
+    // Seeded through the engine daemon over RPC — post-cutover the retired
+    // TS in-process store produces stores the daemon refuses.
     const diskWrites: Array<{ path: string; contents: string }> = [];
-    let chatFileObjectId: string | null = null;
-    for (let file = 0; file < MOMENT_FILES; file += 1) {
-      const path = `files/doc-${String(file).padStart(3, "0")}.md`;
-      let latestText = "";
-      let objectId: string | null = null;
-      for (let edit = 0; edit < EDITS_PER_FILE; edit += 1) {
-        latestText = `# Doc ${file}\n\nrevision ${edit}\n`;
-        const written = await storeA.writeTextFile({
+    await seedThroughDaemon(
+      { workspaceId: WORKSPACE_A_ID, rootPath: temp.rootPath },
+      async ({ chats, files }) => {
+        await files.ensureMainVersion({ workspaceId: WORKSPACE_A_ID });
+        let chatFileObjectId: string | null = null;
+        for (let file = 0; file < MOMENT_FILES; file += 1) {
+          const path = `files/doc-${String(file).padStart(3, "0")}.md`;
+          let latestText = "";
+          let objectId: string | null = null;
+          for (let edit = 0; edit < EDITS_PER_FILE; edit += 1) {
+            latestText = `# Doc ${file}\n\nrevision ${edit}\n`;
+            const written = await files.writeTextFile({
+              workspaceId: WORKSPACE_A_ID,
+              versionId: "main",
+              path,
+              text: latestText,
+              metadata: { origin: "local-file" },
+            });
+            objectId = written.object.id;
+          }
+          // Disk mirrors the engine tip so startup reconciliation is a no-op.
+          diskWrites.push({ path, contents: latestText });
+          if (file === 0) chatFileObjectId = objectId;
+        }
+        const thread = await chats.createThread({
           workspaceId: WORKSPACE_A_ID,
-          versionId: "main",
-          path,
-          text: latestText,
-          metadata: { origin: "local-file" },
+          title: "Doc zero deep dive",
+          linkedFile: {
+            objectId: chatFileObjectId ?? "",
+            pathHint: "files/doc-000.md",
+          },
         });
-        objectId = written.object.id;
-      }
-      // Disk mirrors the engine tip so startup reconciliation is a no-op.
-      diskWrites.push({ path, contents: latestText });
-      if (file === 0) chatFileObjectId = objectId;
-    }
-    await writeWorkspaceFiles(temp, diskWrites);
-    const chatStoreA = createLinkedChatStore(temp.rootPath);
-    const thread = await chatStoreA.createThread({
-      workspaceId: WORKSPACE_A_ID,
-      title: "Doc zero deep dive",
-      linkedFile: {
-        objectId: chatFileObjectId ?? "",
-        pathHint: "files/doc-000.md",
+        for (let index = 0; index < CHAT_MESSAGES; index += 1) {
+          await chats.sendMessage({
+            workspaceId: WORKSPACE_A_ID,
+            threadId: thread.id,
+            author:
+              index % 2 === 0
+                ? { kind: "human", displayName: "Ice de Vera" }
+                : { kind: "agent", displayName: "Ice de Vera" },
+            body: `Message ${index} about doc zero.`,
+          });
+        }
       },
-    });
-    for (let index = 0; index < CHAT_MESSAGES; index += 1) {
-      await chatStoreA.sendMessage({
-        workspaceId: WORKSPACE_A_ID,
-        threadId: thread.id,
-        author:
-          index % 2 === 0
-            ? { kind: "human", displayName: "Ice de Vera" }
-            : { kind: "agent", displayName: "Ice de Vera" },
-        body: `Message ${index} about doc zero.`,
-      });
-    }
+    );
+    await writeWorkspaceFiles(temp, diskWrites);
 
     // --- Seed workspace B: one file, one moment ---
     await seedWorkspaceManifest(workspaceB, WORKSPACE_B_ID);
     await seedWorkspaceSettings(workspaceB, {
       experimental: { workspaceEngineAlpha: true },
     });
-    const storeB = createVersionedTextStore(workspaceB.rootPath);
-    await storeB.ensureMainVersion({ workspaceId: WORKSPACE_B_ID });
-    await storeB.writeTextFile({
-      workspaceId: WORKSPACE_B_ID,
-      versionId: "main",
-      path: "b-note.md",
-      text: "workspace b only\n",
-      metadata: { origin: "local-file" },
-    });
+    await seedThroughDaemon(
+      { workspaceId: WORKSPACE_B_ID, rootPath: workspaceB.rootPath },
+      async ({ files }) => {
+        await files.ensureMainVersion({ workspaceId: WORKSPACE_B_ID });
+        await files.writeTextFile({
+          workspaceId: WORKSPACE_B_ID,
+          versionId: "main",
+          path: "b-note.md",
+          text: "workspace b only\n",
+          metadata: { origin: "local-file" },
+        });
+      },
+    );
     await writeWorkspaceFiles(workspaceB, [
       { path: "b-note.md", contents: "workspace b only\n" },
     ]);
