@@ -331,6 +331,8 @@ import {
   assertMountableSelector,
   createMountDirectory,
   mountLabelFor,
+  mountStoreWorkspaceIdFor,
+  relayTargetForShareMount,
   refreshShareMountOnce,
   removeMountFolder,
 } from "./workspaces/shareMounts";
@@ -338,7 +340,6 @@ import {
   createVersionedTextStore,
   downloadKeyEnvelope,
   installWorkspaceDataKey,
-  probeRelayWorkspace,
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
   RelayKeyEnvelopeMissingError,
@@ -378,6 +379,7 @@ import {
 } from "./workspaces/engineDaemonLifecycle";
 import {
   EngineRelayClient,
+  probeWorkspaceRelay,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
@@ -1487,22 +1489,6 @@ function relayClientForWorkspace(input: {
     throw new Error("Rust engine relay client is unavailable.");
   }
   return rustEngineRelayClient.bind(input);
-}
-
-async function probeWorkspaceRelay(input: {
-  workspaceId: string;
-  relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
-}): ReturnType<typeof probeRelayWorkspace> {
-  relayTransportRoutes.bind({
-    ...input,
-    rootPath: `relay-probe:${input.workspaceId}`,
-    mode: "typescript",
-  });
-  try {
-    return await probeRelayWorkspace(input);
-  } finally {
-    relayTransportRoutes.releaseWorkspace(input.workspaceId, "typescript");
-  }
 }
 
 function engineForWorkspace(
@@ -3825,7 +3811,7 @@ function registerIpcHandlers(
     // Pre-flight against the relay BEFORE creating anything locally.
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
     try {
-      const probe = await probeWorkspaceRelay({
+      const probe = await probeWorkspaceRelay(relayTransportRoutes, {
         workspaceId: parsed.workspaceId,
         relay,
       });
@@ -4421,6 +4407,7 @@ function registerIpcHandlers(
       recipientEmail: credentials.email ?? null,
     };
     await createMountDirectory(workspace.rootPath, mount.label);
+    const mountRelayTarget = relayTargetForShareMount(workspace.rootPath, mount);
     try {
       // Inside the rollback scope: a failed registry write (ENOSPC, perms)
       // must also remove the just-created folder — the app deliberately
@@ -4430,10 +4417,18 @@ function registerIpcHandlers(
         ...(findWorkspace(workspace.workspaceId)?.shareMounts ?? []),
         mount,
       ]);
+      const daemonRelay = relayClientForWorkspace({
+        ...mountRelayTarget,
+        relay,
+      });
       const outcome = await refreshShareMountOnce({
         hostRoot: workspace.rootPath,
         mount,
         relay,
+        pull: async (input) =>
+          await daemonRelay.pullShareView({
+            shareId: input.shareId,
+          }),
       });
       if (outcome.status === "ended") throw new ShareUnavailableError();
       refreshNativeWorkspaceSurfaces();
@@ -4458,6 +4453,9 @@ function registerIpcHandlers(
           current.filter((m) => m.shareId !== mount.shareId),
         );
       } catch {}
+      await closeRelayTransportWorkspace(mountRelayTarget.workspaceId).catch(
+        () => undefined,
+      );
       await removeMountFolder(workspace.rootPath, mount.label).catch(() => undefined);
       notifyRenderer();
       if (error instanceof ShareUnavailableError) {
@@ -4512,12 +4510,31 @@ function registerIpcHandlers(
         continue;
       }
       try {
+        const relay = {
+          baseUrl: credentials.relayUrl,
+          token: credentials.token,
+        };
+        const mountRelayTarget = relayTargetForShareMount(
+          workspace.rootPath,
+          mount,
+        );
+        const daemonRelay = relayClientForWorkspace({
+          ...mountRelayTarget,
+          relay,
+        });
         const outcome = await refreshShareMountOnce({
           hostRoot: workspace.rootPath,
           mount,
-          relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+          relay,
+          pull: async (input) =>
+            await daemonRelay.pullShareView({
+              shareId: input.shareId,
+            }),
         });
         if (outcome.status === "ended") {
+          await closeRelayTransportWorkspace(mountRelayTarget.workspaceId).catch(
+            () => undefined,
+          );
           const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
           setWorkspaceShareMounts(
             workspace.workspaceId,
@@ -4564,6 +4581,9 @@ function registerIpcHandlers(
     // ended — never an orphaned folder that looks like local files. The
     // record removal filters the CURRENT set (the lock serializes mount
     // operations, so no writer can interleave here anyway).
+    await closeRelayTransportWorkspace(
+      mountStoreWorkspaceIdFor(mount.shareId),
+    );
     await removeMountFolder(workspace.rootPath, mount.label);
     const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
     setWorkspaceShareMounts(

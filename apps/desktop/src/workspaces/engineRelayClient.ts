@@ -4,6 +4,7 @@ import {
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  probeRelayWorkspace,
   type PendingConflictResolve,
   type ProbeRelayWorkspaceResult,
   type PullSharedChannelResult,
@@ -136,6 +137,27 @@ export class RelayTransportRouteGuard {
     const route = this.routes.get(workspaceId);
     if (!route || route.mode !== "daemon") return null;
     return route.locations.get(rootPath) ?? null;
+  }
+}
+
+export async function probeWorkspaceRelay(
+  routes: RelayTransportRouteGuard,
+  input: {
+    workspaceId: string;
+    relay: SyncRelayConnection;
+  },
+): Promise<ProbeRelayWorkspaceResult> {
+  routes.bind({
+    ...input,
+    rootPath: `relay-probe:${input.workspaceId}`,
+    mode: "typescript",
+  });
+  try {
+    return await probeRelayWorkspace(input);
+  } finally {
+    // Mode-conditional cleanup cannot tear down a daemon route that replaced
+    // the transient probe route while its HTTP request was in flight.
+    routes.releaseWorkspace(input.workspaceId, "typescript");
   }
 }
 
@@ -359,6 +381,9 @@ function pendingCursor(
 function translateRelayError(method: string, error: unknown): never {
   if (!(error instanceof DaemonRefusalError)) throw error;
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
+  if (error.wireCode === "SHARE_UNAVAILABLE") {
+    throw new ShareUnavailableError();
+  }
   if (error.wireCode === "WORKSPACE_UNAVAILABLE") {
     if (method.startsWith("share.")) throw new ShareUnavailableError();
     throw new RelayWorkspaceUnavailableError();

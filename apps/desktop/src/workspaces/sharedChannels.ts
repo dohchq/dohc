@@ -1,8 +1,8 @@
 import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
-  pullSharedChannel,
-  pushSharedChannel,
+  type pullSharedChannel,
+  type pushSharedChannel,
   type SyncRelayConnection,
 } from "@dohc/workspace-engine";
 import type { JoinedSharedChannel } from "./registryStore";
@@ -139,12 +139,12 @@ export async function syncJoinedSharedChannels(input: {
   workspaceId: string;
   relay: SyncRelayConnection;
   channels: readonly JoinedSharedChannel[];
-  // Injection seams for tests; default to the real engine client.
-  pull?: typeof pullSharedChannel;
-  push?: typeof pushSharedChannel;
+  // Required factory-selected operations prevent a rooted sync pass from
+  // silently falling back to the legacy TypeScript relay client.
+  pull: typeof pullSharedChannel;
+  push: typeof pushSharedChannel;
 }): Promise<SyncJoinedSharedChannelsResult> {
-  const pull = input.pull ?? pullSharedChannel;
-  const push = input.push ?? pushSharedChannel;
+  const { pull, push } = input;
   const endedShareIds: string[] = [];
   const readOnlyShareIds: string[] = [];
   let changed = false;

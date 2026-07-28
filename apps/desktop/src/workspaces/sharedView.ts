@@ -5,7 +5,7 @@ import { existingAncestor } from "./workspaceFiles";
 import {
   ShareUnavailableError,
   createVersionedTextStore,
-  pullShareView,
+  type pullShareView,
   type ShareViewChangedPath,
   type SyncRelayConnection,
 } from "@dohc/workspace-engine";
@@ -207,14 +207,14 @@ export async function refreshSharedViewOnce(input: {
   workspaceId: string;
   relay: SyncRelayConnection;
   shareId: string;
-  // Factory-selected relay implementation. Omitted keeps the existing
-  // TypeScript path unchanged; the Rust adapter injects its daemon pull and
-  // opaque cursor commit as one inseparable operation pair.
-  pull?: typeof pullShareView;
+  // Required at the factory boundary: every rooted caller must explicitly
+  // select its relay implementation, so no call can drift back to the legacy
+  // TypeScript SQLite path.
+  pull: typeof pullShareView;
 }): Promise<RefreshSharedViewOutcome> {
   let pull;
   try {
-    pull = await (input.pull ?? pullShareView)({
+    pull = await input.pull({
       rootDir: input.rootDir,
       workspaceId: input.workspaceId,
       relay: input.relay,

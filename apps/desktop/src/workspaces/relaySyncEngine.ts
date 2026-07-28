@@ -1,10 +1,10 @@
 import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
-  pullWorkspaceFromRelay,
-  pushWorkspaceToRelay,
-  recoverRelayOrigin,
   type PendingConflictResolve,
+  type pullWorkspaceFromRelay,
+  type pushWorkspaceToRelay,
+  type recoverRelayOrigin,
   type SyncRelayConnection,
 } from "@dohc/workspace-engine";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -19,11 +19,10 @@ export interface CloudSyncEngineOptions {
   rootDir: string;
   remoteWorkspaceId: string;
   relay: SyncRelayConnection;
-  // Selected once at the factory boundary. When absent, the existing
-  // TypeScript relay path below is byte-for-byte the authority. The Rust
-  // adapter supplies one bound object for the entire engine lifetime, so an
-  // individual pass can never fall back across relay identity protocols.
-  operations?: RelaySyncOperations;
+  // Selected once at the factory boundary and required for every rooted
+  // engine. One bound daemon object serves the entire lifetime, so an
+  // individual pass cannot fall back across relay identity protocols.
+  operations: RelaySyncOperations;
   capture: WorkspaceEngineCapture;
   onChange: () => void;
   // The number of conflicts currently OPEN in the engine store. When
@@ -177,45 +176,18 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       // a fresh join must never append ops before it has the remote state.
       if (!bootstrapPass) {
         try {
-          if (operations) {
-            await operations.push();
-          } else {
-            await pushWorkspaceToRelay({
-              rootDir: options.rootDir,
-              workspaceId: options.remoteWorkspaceId,
-              relay: options.relay,
-            });
-          }
+          await operations.push();
         } catch (error) {
           if (!(error instanceof RelayOriginDivergedError)) throw error;
           // The local engine.db was restored-from-older or cloned, so its
           // origin diverged from the relay's authoritative record. Re-baseline
           // onto a fresh origin — preserving local-only work as conflicts where
           // it clashes, never dropping it — then push under the fresh origin.
-          if (operations) {
-            await operations.recoverOrigin();
-            await operations.push();
-          } else {
-            await recoverRelayOrigin({
-              rootDir: options.rootDir,
-              workspaceId: options.remoteWorkspaceId,
-              relay: options.relay,
-            });
-            await pushWorkspaceToRelay({
-              rootDir: options.rootDir,
-              workspaceId: options.remoteWorkspaceId,
-              relay: options.relay,
-            });
-          }
+          await operations.recoverOrigin();
+          await operations.push();
         }
       }
-      return operations
-        ? operations.pull()
-        : pullWorkspaceFromRelay({
-            rootDir: options.rootDir,
-            workspaceId: options.remoteWorkspaceId,
-            relay: options.relay,
-          });
+      return operations.pull();
     });
     // Only a FULLY successful pull (materialized + cursor committed inside
     // runRelaySync) completes the bootstrap; a throw above leaves the next

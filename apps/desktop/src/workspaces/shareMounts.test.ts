@@ -4,12 +4,13 @@ import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { pullShareView } from "@dohc/workspace-engine";
 import {
   assertMountableSelector,
   createMountDirectory,
   mountLabelFor,
   mountRootFor,
-  refreshShareMountOnce,
+  refreshShareMountOnce as refreshShareMountOnceWithPull,
   removeMountFolder,
   validMountLabel,
 } from "./shareMounts";
@@ -32,6 +33,15 @@ async function tempHostRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "dohc-share-mounts-"));
   roots.push(root);
   return root;
+}
+
+function refreshShareMountOnce(
+  input: Omit<
+    Parameters<typeof refreshShareMountOnceWithPull>[0],
+    "pull"
+  >,
+) {
+  return refreshShareMountOnceWithPull({ ...input, pull: pullShareView });
 }
 
 function sha256(content: string): string {

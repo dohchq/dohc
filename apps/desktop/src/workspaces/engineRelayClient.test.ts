@@ -9,6 +9,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import {
   RelayOriginDivergedError,
+  ShareUnavailableError,
   SharedChannelReadOnlyError,
 } from "@dohc/workspace-engine";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,10 +17,18 @@ import type { EngineDaemonClient } from "./engineDaemonLifecycle";
 import {
   EngineRelayClient,
   MixedRelayTransportError,
+  probeWorkspaceRelay,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import { EngineRequestError } from "./engineClient";
+import {
+  createMountDirectory,
+  refreshShareMountOnce,
+  relayTargetForShareMount,
+} from "./shareMounts";
+import { syncJoinedSharedChannels } from "./sharedChannels";
 import { refreshSharedViewOnce } from "./sharedView";
 
 class MockDaemon implements EngineDaemonClient {
@@ -343,6 +352,106 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("opens a share mount's nested store and pulls it through the daemon", async () => {
+    const { rootPath, daemon, routes, sessions, live, relay } = await harness();
+    const mount = { shareId: "share-mounted", label: "alex" };
+    await createMountDirectory(rootPath, mount.label);
+    const target = relayTargetForShareMount(rootPath, mount);
+    const mountRelay = live.bind({ ...target, relay });
+
+    await expect(
+      refreshShareMountOnce({
+        hostRoot: rootPath,
+        mount,
+        relay,
+        pull: async (input) =>
+          await mountRelay.pullShareView({ shareId: input.shareId }),
+      }),
+    ).resolves.toEqual({ status: "unchanged", changedPaths: 0 });
+
+    expect(routes.modeFor(target.workspaceId)).toBe("daemon");
+    expect(
+      daemon.requests.find(
+        (request) =>
+          request.method === "workspace.open" &&
+          request.params &&
+          typeof request.params === "object" &&
+          !Array.isArray(request.params) &&
+          request.params.workspaceId === target.workspaceId,
+      )?.params,
+    ).toMatchObject({
+      rootDir: target.rootPath,
+      workspaceId: target.workspaceId,
+    });
+    expect(
+      daemon.requests.find(
+        (request) => request.method === "share.view.pull",
+      )?.params,
+    ).toMatchObject({
+      workspaceId: target.workspaceId,
+      shareId: mount.shareId,
+    });
+    await sessions.closeAll();
+  });
+
+  it("translates a revoked daemon share and lets the shared-view consumer report ended", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (
+        request.method === "share.view.pull" ||
+        request.method === "share.channel.pull"
+      ) {
+        throw new EngineRequestError(request.id, {
+          code: "SHARE_UNAVAILABLE",
+          message: "workspace operation failed",
+          retry: "no",
+        });
+      }
+      return undefined;
+    });
+    const { rootPath, client, relay, sessions } = await harness(daemon);
+
+    await expect(
+      client.pullShareView({ shareId: "share-revoked" }),
+    ).rejects.toBeInstanceOf(ShareUnavailableError);
+    await expect(
+      refreshSharedViewOnce({
+        rootDir: rootPath,
+        workspaceId: "workspace-a",
+        relay,
+        shareId: "share-revoked",
+        pull: async (input) =>
+          await client.pullShareView({ shareId: input.shareId }),
+      }),
+    ).resolves.toEqual({ status: "ended", changedPaths: 0 });
+    await expect(
+      syncJoinedSharedChannels({
+        rootDir: rootPath,
+        workspaceId: "workspace-a",
+        relay,
+        channels: [
+          {
+            shareId: "channel-revoked",
+            channelWireId: "wire-revoked",
+            access: "read-only",
+            granterEmail: "owner@example.com",
+            relayUrl: relay.baseUrl,
+          },
+        ],
+        pull: async (input) =>
+          await client.pullSharedChannel({
+            shareId: input.shareId,
+            channelWireId: input.channelWireId,
+          }),
+        push: async (input) =>
+          await client.pushSharedChannel({
+            shareId: input.shareId,
+            channelWireId: input.channelWireId,
+          }),
+      }),
+    ).resolves.toMatchObject({ endedShareIds: ["channel-revoked"] });
+    await sessions.closeAll();
+  });
+
   it("binds a marker-less rooted workspace to the daemon before session preparation", async () => {
     const { daemon, routes, sessions } = await harness();
 
@@ -361,16 +470,22 @@ describe("EngineRelayClient", () => {
     const rootPath = await mkdtemp(join(tmpdir(), "dohc-relay-probe-route-"));
     roots.push(rootPath);
     const routes = new RelayTransportRouteGuard();
-    const relay = { baseUrl: "https://relay.test", token: "secret-token" };
-    routes.bind({
+    let finishProbe!: (response: globalThis.Response) => void;
+    const pendingProbe = new Promise<globalThis.Response>((resolve) => {
+      finishProbe = resolve;
+    });
+    const relay = {
+      baseUrl: "https://relay.test",
+      token: "secret-token",
+      fetch: async () => await pendingProbe,
+    };
+    const probe = probeWorkspaceRelay(routes, {
       workspaceId: "workspace-probed",
-      rootPath: "relay-probe:workspace-probed",
       relay,
-      mode: "typescript",
     });
 
     expect(routes.modeFor("workspace-probed")).toBe("typescript");
-    routes.releaseWorkspace("workspace-probed");
+    routes.releaseWorkspace("workspace-probed", "typescript");
 
     const daemon = new MockDaemon();
     const sessions = new EngineWorkspaceSessions(
@@ -387,7 +502,14 @@ describe("EngineRelayClient", () => {
       relay,
     });
     expect(routes.modeFor("workspace-probed")).toBe("daemon");
-    routes.releaseWorkspace("workspace-probed", "typescript");
+    finishProbe(
+      globalThis.Response.json({
+        ops: [{}],
+        nextCursor: 1,
+        hasMore: false,
+      }),
+    );
+    await expect(probe).resolves.toEqual({ hasContent: true });
     expect(
       routes.modeFor("workspace-probed"),
       "a late probe cleanup must not release a newer daemon route",
