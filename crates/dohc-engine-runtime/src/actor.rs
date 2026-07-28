@@ -5980,6 +5980,71 @@ fn replay_pending_materializations(
 
 #[allow(
     clippy::too_many_arguments,
+    reason = "projection coordinates, disk suppression, faults, and cancellation are independent"
+)]
+fn reconcile_active_plaintext_projection_on_store(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    active_version_id: &str,
+    inactive_version_id: &str,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<(), RuntimeError> {
+    let projections = plan_plaintext_switch(
+        store,
+        workspace_id,
+        active_version_id,
+        inactive_version_id,
+        root_dir,
+        now_ms,
+        token,
+    )?;
+    if projections.is_empty() {
+        return Ok(());
+    }
+    let outcome = store.write_with(faults, |tx| {
+        for projection in &projections {
+            if let Some(content) = projection.inline_content.as_deref() {
+                let stored_sha = put_binary_blob(tx, content)?;
+                if stored_sha != projection.spec.content_sha256 {
+                    return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
+                }
+            }
+            upsert_projection_job(tx, &projection.spec, projection.operation)?;
+        }
+        Ok::<_, StorageError>(())
+    })?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    let selected: HashSet<String> = projections
+        .iter()
+        .map(|projection| projection.spec.job_id.clone())
+        .collect();
+    let replay = replay_pending_materializations(
+        store,
+        root_dir,
+        MaterializationReplayScope {
+            workspace_id,
+            self_writes: Some(self_writes),
+        },
+        now_ms,
+        faults,
+        Some(&selected),
+        false,
+    )?;
+    let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
+    if failed_jobs > 0 {
+        return Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs });
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
     reason = "switch ordering, disk root, suppression, faults, and cancellation are independent"
 )]
 fn switch_active_version_on_store(
@@ -9723,8 +9788,8 @@ fn versioned_text_rollback_on_store(
                 .get_active_version(&input.workspace_id)
                 .map_err(RuntimeError::from)
         };
-    let target_is_active = match active_version {
-        Ok(active_version) => active_version.version_id == input.version_id,
+    let active_version = match active_version {
+        Ok(active_version) => active_version,
         Err(error) => {
             eprintln!(
                 "engine: rollback committed but active-version lookup failed; \
@@ -9738,7 +9803,33 @@ fn versioned_text_rollback_on_store(
             });
         }
     };
+    let target_is_active = active_version.version_id == input.version_id;
     if !target_is_active {
+        if let Err(error) = reconcile_active_plaintext_projection_on_store(
+            store,
+            &input.workspace_id,
+            &active_version.version_id,
+            &input.version_id,
+            root_dir,
+            self_writes,
+            job.as_ref()
+                .or(rename_write_job.as_ref())
+                .or(rename_delete_job.as_ref())
+                .map_or(0, |job| job.created_at_ms),
+            faults,
+            token,
+        ) {
+            eprintln!(
+                "engine: rollback committed but reconciling the active disk projection failed: \
+                 {error}"
+            );
+            return Ok(RollbackExecutionResult {
+                deduped,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
         return Ok(RollbackExecutionResult {
             deduped,
             materialize_enqueued: true,

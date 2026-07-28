@@ -2138,3 +2138,395 @@ async fn migration_backfill_binds_ambiguous_moment_ids_by_generation() {
         "the backfill must bind by matching generation, not by newest moment"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_global_pending_job_is_fenced_by_newer_scoped_completion() {
+    const LEGACY_JOB: &str = "opaque-global-pending";
+    const SCOPED_JOB: &str = "newer-scoped-complete";
+    const PATH: &str = "global-fence.bin";
+
+    let database = ScratchDir::new().expect("database scratch");
+    let root = ScratchDir::new().expect("workspace root");
+    let db = database.engine_db_path().expect("db");
+    let store = EngineStore::open(&db, 1).expect("open store");
+    let old_sha = store.put_binary_blob(BYTES).expect("stage old bytes");
+    let new_sha = store
+        .put_binary_blob(UPDATED_BYTES)
+        .expect("stage current bytes");
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&db).expect("open job ledger");
+    connection
+        .execute(
+            "INSERT INTO materialization_jobs \
+             (job_id, workspace_id, target_path, content_sha256, preimage_present, \
+              preimage_sha256, target_generation, status, created_at_ms, \
+              completed_at_ms, operation) \
+             VALUES (?1, '', ?2, ?3, 1, ?4, 7, 'pending', 10, NULL, 'write')",
+            rusqlite::params![LEGACY_JOB, PATH, old_sha, new_sha],
+        )
+        .expect("legacy global pending job");
+    connection
+        .execute(
+            "INSERT INTO materialization_jobs \
+             (job_id, workspace_id, target_path, content_sha256, preimage_present, \
+              preimage_sha256, target_generation, status, created_at_ms, \
+              completed_at_ms, operation) \
+             VALUES (?1, ?2, ?3, ?4, 0, NULL, 8, 'complete', 11, 12, 'write')",
+            rusqlite::params![SCOPED_JOB, WORKSPACE, PATH, new_sha],
+        )
+        .expect("newer scoped completion");
+    drop(connection);
+    std::fs::write(root.path().join(PATH), UPDATED_BYTES).expect("newer disk projection");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 20).expect("open actor").actor;
+    actor
+        .materialize_replay_pending(root.path().to_path_buf(), WORKSPACE.to_owned(), 21)
+        .await
+        .expect("replay global job");
+    assert_eq!(
+        std::fs::read(root.path().join(PATH)).expect("read fenced projection"),
+        UPDATED_BYTES,
+        "the older global job must not replay over a newer scoped completion"
+    );
+    let connection = rusqlite::Connection::open(&db).expect("read terminal status");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            [LEGACY_JOB],
+            |row| row.get(0),
+        )
+        .expect("legacy job status");
+    assert_eq!(status, "complete", "the global job must be superseded");
+    drop(connection);
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_backfill_keeps_secret_job_with_colliding_secret_moment() {
+    const ORDINARY_WORKSPACE: &str = "ordinary-collision-workspace";
+    const SECRET_WORKSPACE: &str = "secret-collision-workspace";
+    const SHARED_MOMENT: &str = "shared-secret-id";
+
+    let database = ScratchDir::new().expect("database scratch");
+    let db = database.engine_db_path().expect("db");
+    let store = EngineStore::open(&db, 1).expect("create current store");
+    let content_sha = store
+        .put_binary_blob(b"ciphertext placeholder")
+        .expect("stage materialization content");
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&db).expect("open legacy fixture");
+    connection
+        .execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+                 VALUES ('ordinary-collision-workspace', 'main'), \
+                        ('secret-collision-workspace', 'main');
+             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms) \
+                 VALUES ('ordinary-collision-workspace', 'main', 'main', 'Main', 1), \
+                        ('secret-collision-workspace', 'main', 'main', 'Main', 1);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ordinary-collision-workspace', 'ordinary-object', 1);
+             INSERT INTO blobs (sha256, byte_length, text) \
+                 VALUES ('ordinary-text-sha', 4, 'text');
+             DROP INDEX idx_materialization_jobs_workspace_path_status_generation;
+             DELETE FROM engine_migrations WHERE ordinal = 24;
+             ALTER TABLE materialization_jobs DROP COLUMN workspace_id;",
+        )
+        .expect("rewind workspace-coordinate migration");
+    connection
+        .execute(
+            "INSERT INTO moments \
+             (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+              recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin) \
+             VALUES (?1, 7, ?2, 'main', 'ordinary-object', 'ordinary.md', 2, \
+                     'write', 'ordinary-text-sha', 0, 'api')",
+            rusqlite::params![ORDINARY_WORKSPACE, SHARED_MOMENT],
+        )
+        .expect("ordinary collision moment");
+    connection
+        .execute(
+            "INSERT INTO secret_moments \
+             (workspace_id, moment_order, moment_id, version_id, path, recorded_at_ms, \
+              operation, metadata_origin, after_present) \
+             VALUES (?1, 7, ?2, 'main', '.env', 2, 'write', 'api', 1)",
+            rusqlite::params![SECRET_WORKSPACE, SHARED_MOMENT],
+        )
+        .expect("secret collision moment");
+    connection
+        .execute(
+            "INSERT INTO materialization_jobs \
+             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+              target_generation, status, created_at_ms, completed_at_ms, operation) \
+             VALUES (?1, '.env', ?2, 0, NULL, 7, 'pending', 10, NULL, 'write')",
+            rusqlite::params![format!("secret-mat_{SHARED_MOMENT}"), content_sha],
+        )
+        .expect("legacy secret job");
+    drop(connection);
+
+    let migrated = EngineStore::open(&db, 20).expect("upgrade legacy store");
+    let workspace_id: String = migrated
+        .read_with(|connection| {
+            connection.query_row(
+                "SELECT workspace_id FROM materialization_jobs WHERE job_id = ?1",
+                [format!("secret-mat_{SHARED_MOMENT}")],
+                |row| row.get(0),
+            )
+        })
+        .expect("backfilled secret workspace");
+    assert_eq!(
+        workspace_id, SECRET_WORKSPACE,
+        "a secret job must not be captured by the ordinary suffix backfill"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_delete_rollback_reprojects_the_still_active_version() {
+    const BRANCH: &str = "inactive-delete-branch";
+    const PATH: &str = "inactive-shared.bin";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .versioned_binary_write(
+            binary_write_for("main", PATH, "active-seed", BYTES),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("active seed");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: BRANCH.to_owned(),
+                name: "Inactive delete branch".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 11,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: BRANCH.to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 12,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("activate branch");
+    actor
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: BRANCH.to_owned(),
+                path: PATH.to_owned(),
+                moment_id: "inactive-delete-mutation".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch delete");
+    assert!(
+        !scratch.path().join(PATH).exists(),
+        "the branch mutation must reach the shared disk projection"
+    );
+    let switch_faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 21,
+            },
+            switch_faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("switch projection is interrupted after the active row commits");
+    assert!(switch_faults.fired());
+
+    let rolled_back = actor
+        .versioned_text_rollback(
+            rollback(BRANCH, PATH, "inactive-delete-mutation"),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("inactive rollback");
+    assert!(rolled_back.materialize_enqueued);
+    assert_eq!(
+        rolled_back.materialize_outcome,
+        PostCommitMaterializeOutcome::Skipped
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join(PATH)).expect("reprojected active file"),
+        BYTES,
+        "rollback must restore the active version's bytes without activating the branch"
+    );
+    let connection = rusqlite::Connection::open(&db).expect("read active version");
+    let active_version_id: String = connection
+        .query_row(
+            "SELECT version_id FROM active_versions WHERE workspace_id = ?1",
+            [WORKSPACE],
+            |row| row.get(0),
+        )
+        .expect("active version");
+    assert_eq!(active_version_id, "main");
+    drop(connection);
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
+    let workspace_id = format!("workspace-{}", "w".repeat(120));
+    let version_id = format!("version-{}", "v".repeat(120));
+    let path = "long-identity.bin";
+    let mutation_moment_id = "long-identity-mutation";
+
+    let rollback_job_id =
+        binary_rollback_job_identity(&workspace_id, &version_id, mutation_moment_id);
+    assert!(
+        format!(".dohc-write-{rollback_job_id}.tmp").len() > 255,
+        "the pre-fix temp component must exceed common filesystem limits"
+    );
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    actor
+        .ensure_main_version(
+            workspace_id.clone(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: workspace_id.clone(),
+                new_version_id: version_id.clone(),
+                name: "Long identity".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("long version");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: workspace_id.clone(),
+                version_id: version_id.clone(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 3,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("activate long version");
+    let write = |moment_id: &str, bytes: &[u8], now_ms: i64| WriteBinary {
+        workspace_id: workspace_id.clone(),
+        version_id: version_id.clone(),
+        object_id: "long-identity-object".to_owned(),
+        path: path.to_owned(),
+        bytes: bytes.to_vec(),
+        moment_id: moment_id.to_owned(),
+        metadata_origin: "api".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms,
+        request_id: None,
+    };
+    actor
+        .versioned_binary_write(
+            write("long-identity-seed", BYTES, 10),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("seed");
+    actor
+        .versioned_binary_write(
+            write(mutation_moment_id, UPDATED_BYTES, 20),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("mutation");
+
+    let rolled_back = actor
+        .versioned_text_rollback(
+            RollbackTextFileMutation {
+                workspace_id: workspace_id.clone(),
+                version_id: version_id.clone(),
+                path: path.to_owned(),
+                mutation_moment_id: mutation_moment_id.to_owned(),
+                request_id: None,
+                legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rollback with long identity");
+    assert!(rolled_back.materialized);
+    assert_eq!(
+        std::fs::read(scratch.path().join(path)).expect("restored bytes"),
+        BYTES
+    );
+    supervisor.close(&db).expect("close actor");
+}

@@ -401,7 +401,8 @@ pub fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
 /// The highest ordinary moment-order `target_generation` among COMPLETE jobs
 /// for `path` in `workspace_id`, including legacy rows whose workspace
 /// coordinate predates the column, or `None` if nothing has been materialized
-/// there yet. Active
+/// there yet. An empty caller coordinate is itself a legacy global job, so its
+/// fence spans every workspace. Active
 /// version projections use snapshot timestamps, which are a different
 /// namespace and therefore cannot participate in this ordering fence. The
 /// materialization pipeline uses this to skip a pending ordinary job whose
@@ -415,7 +416,7 @@ pub fn max_completed_generation_for_path(
     // MAX over an empty set yields a single NULL row → `None`.
     conn.query_row(
         "SELECT MAX(target_generation) FROM materialization_jobs \
-         WHERE (workspace_id = ?1 OR workspace_id = '') \
+         WHERE (?1 = '' OR workspace_id = ?1 OR workspace_id = '') \
            AND target_path = ?2 AND status = 'complete' \
            AND job_id NOT LIKE 'version-switch-%'",
         [workspace_id, path],

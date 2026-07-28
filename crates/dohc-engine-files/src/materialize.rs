@@ -1828,7 +1828,10 @@ fn write_secret_temp_at_unix(
 }
 
 fn temp_sibling(target: &Path, job_id: &str) -> PathBuf {
-    sibling_with_name(target, &format!(".dohc-write-{}.tmp", sanitize(job_id)))
+    sibling_with_name(
+        target,
+        &format!(".dohc-write-{}.tmp", filesystem_job_component(job_id)),
+    )
 }
 
 fn conflict_sibling(target: &Path, job_id: &str) -> PathBuf {
@@ -1836,7 +1839,10 @@ fn conflict_sibling(target: &Path, job_id: &str) -> PathBuf {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("target");
-    sibling_with_name(target, &format!("{base}.{}.conflict", sanitize(job_id)))
+    sibling_with_name(
+        target,
+        &format!("{base}.{}.conflict", filesystem_job_component(job_id)),
+    )
 }
 
 fn sibling_with_name(target: &Path, name: &str) -> PathBuf {
@@ -1852,6 +1858,17 @@ fn sanitize(id: &str) -> String {
     id.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
+}
+
+fn filesystem_job_component(id: &str) -> String {
+    const MAX_INLINE_LEN: usize = 96;
+
+    let sanitized = sanitize(id);
+    if sanitized.len() <= MAX_INLINE_LEN {
+        sanitized
+    } else {
+        format!("sha256-{}", hex_sha256(id.as_bytes()))
+    }
 }
 
 fn write_temp(tmp: &Path, content: &[u8]) -> Result<std::fs::File, MaterializeError> {
