@@ -10,7 +10,7 @@ local evidence pipeline.
 
 | Script | What it does |
 | --- | --- |
-| `run-rust-checks.mjs` | Rust policy gate: `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). Prints a pass/fail summary and a pasteable evidence line. |
+| `run-rust-checks.mjs` | Rust policy gate: fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
 | `run-native-suite.mjs` | TS-NATIVE-CI local equivalent: runs the reference `@dohc/workspace-engine` `typecheck` + `test` suites natively, asserts host arch, prints an evidence line. This is the native evidence GATE0/TS-NATIVE-CI depends on. |
 | `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 

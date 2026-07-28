@@ -10,8 +10,14 @@
 // PowerShell and Git Bash (spawns through the platform shell).
 //
 // Steps: fixture drift, cargo fmt --check, cargo clippy -D warnings, cargo
-// build --workspace, cargo test --workspace, then cargo-deny / cargo-audit IF
-// installed (skip-with-warning when absent, never fail on a missing tool).
+// build --workspace, cargo test --workspace, the collab crash tier (which only
+// compiles under `--features fault-injection`, so the plain workspace run
+// never sees it), then cargo-deny / cargo-audit IF installed
+// (skip-with-warning when absent, never fail on a missing tool).
+//
+// A REQUIRED step that SKIPs fails the verdict: a gate that silently drops a
+// row is how the fault-injection tests went unrun for a month. Optional tools
+// may still skip.
 //
 // Usage:
 //   node tools/rust-engine-program/run-rust-checks.mjs
@@ -57,6 +63,14 @@ const required = [
   },
   { name: "build --workspace", cmd: "cargo build --workspace" },
   { name: "test --workspace", cmd: "cargo test --workspace" },
+  {
+    // The crash-recovery / exactly-once tests in dohc-engine-collab are behind
+    // its `fault-injection` feature, which nothing in the workspace graph
+    // enables — `cargo test --workspace` compiles them out. The workspace root
+    // is virtual, so the feature must be enabled through an explicit `-p` run.
+    name: "test collab crash tier",
+    cmd: "cargo test -p dohc-engine-collab --features fault-injection",
+  },
 ];
 
 // Optional supply-chain checks: run only when the tool is installed.
@@ -76,11 +90,16 @@ for (const step of required) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
   if (r.code === step.skipCode) {
-    console.warn(`  ${step.name} — SKIPPED (${step.skipReason}).`);
+    // A skipped required step is a FAIL: stamping PASS with a row missing is
+    // exactly the blind spot this gate exists to prevent.
+    console.error(
+      `  ${step.name} — SKIPPED (${step.skipReason}) — required steps may not skip; install the missing dependency (e.g. \`bun install\`) and rerun.`,
+    );
+    failed = true;
     results.push({
       name: step.name,
       status: "SKIP",
-      reason: step.skipReason,
+      reason: `${step.skipReason}; required step skipped → verdict FAIL`,
     });
     continue;
   }
