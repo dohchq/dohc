@@ -32,17 +32,29 @@
 # Windows and macOS legs stay out of PR CI for the same budget reason: macOS
 # burns 20x, Windows 2x on slower runs. The canonical Windows gate runs
 # locally; macOS evidence stays workflow_dispatch.
+# ------------------------------------------------------------------------
+# DISABLED ON PURPOSE (2026-07-28) -- dispatch-only, this is NOT an accident.
+#
+# Ice's call: pre-launch, the automated PR gate is not worth its run volume
+# yet. The jobs below are kept intact and working -- run them any time via
+# workflow_dispatch, or locally via the same scripts they call. Re-enable
+# when it makes more sense (approaching launch / first users) by restoring:
+#
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#     merge_group:
+#     workflow_dispatch:
+#
+# and reverting the "deliberately disabled" test in
+# scripts/pr-checks-workflow.test.mjs to its trigger-coverage version
+# (see the comment there). Until then: agents run the canonical gate and
+# the JS typecheck/tests locally before merging.
+# ------------------------------------------------------------------------
 name: PR checks
 
 on:
-  pull_request:
-  # Squash-merge commits never match a PR branch, so PR-branch caches help
-  # nobody else. A push run on main is what seeds the caches every PR branch
-  # is allowed to read -- and with no merge queue available on this plan, it
-  # is also the only post-merge verification that main is actually green.
-  push:
-    branches: [main]
-  merge_group:
   workflow_dispatch:
 
 concurrency:
