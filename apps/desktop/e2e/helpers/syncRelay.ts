@@ -139,9 +139,19 @@ export function relayAdoptedIdentity(
          FROM sync_relay_workspaces WHERE workspace_id = ?`,
       )
       .get(workspaceId);
-    return typeof row?.replicationEpoch === "string" && typeof row.streamIdentity === "string"
-      ? { replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity }
-      : null;
+    if (row === undefined) return null;
+    const epoch = row.replicationEpoch ?? null;
+    const stream = row.streamIdentity ?? null;
+    if (epoch === null && stream === null) return null;
+    // The relay's own storage layer treats a partial identity pair as
+    // corruption — surface it, never "not adopted yet".
+    if (typeof epoch !== "string" || typeof stream !== "string") {
+      throw new Error(
+        `sync relay identity row is malformed for ${workspaceId}: ` +
+          `replication_epoch=${JSON.stringify(epoch)} stream_identity=${JSON.stringify(stream)}`,
+      );
+    }
+    return { replicationEpoch: epoch, streamIdentity: stream };
   } catch (error) {
     if (isRelayDbNotReady(error)) return null;
     throw error;

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { EngineDaemonLifecycle } from "../../src/workspaces/engineDaemonLifecycle";
 import { EngineWorkspaceSessions } from "../../src/workspaces/engineWorkspaceSessions";
@@ -16,14 +17,30 @@ import { desktopRoot } from "./desktopApp";
 // REAL engine daemon (the same debug binary the app under test spawns).
 // Seed BEFORE launching the app — the daemon is stopped afterwards so the
 // app's own daemon owns the store exclusively.
-const engineBinary =
-  process.env.DOHC_TEST_ENGINE_BINARY ??
-  join(
-    desktopRoot,
-    "target",
-    "debug",
-    `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`,
+//
+// Resolution order mirrors how the binary actually lands on disk:
+// 1. DOHC_TEST_ENGINE_BINARY — explicit override, used verbatim.
+// 2. apps/desktop/target/debug — what the app under test resolves in e2e
+//    (defaultEngineBinaryPath from appPath dist/main -> ../..), and where
+//    staged-binary harnesses copy it.
+// 3. <repo>/target/debug — where a repo-root `cargo build` places it.
+function resolveEngineBinary(): string {
+  const override = process.env.DOHC_TEST_ENGINE_BINARY;
+  if (override) return override;
+  const name = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
+  const candidates = [
+    join(desktopRoot, "target", "debug", name),
+    join(desktopRoot, "..", "..", "target", "debug", name),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    "dohc-workspace-engine debug binary not found. Tried:\n" +
+      candidates.map((candidate) => `  ${candidate}`).join("\n") +
+      "\nBuild it (cargo build -p dohc-workspace-engine) or set DOHC_TEST_ENGINE_BINARY.",
   );
+}
 
 export interface DaemonSeedStores {
   chats: DesktopLinkedChatStore;
@@ -34,7 +51,7 @@ export async function seedThroughDaemon<T>(
   workspace: { workspaceId: string; rootPath: string },
   seed: (stores: DaemonSeedStores) => Promise<T>,
 ): Promise<T> {
-  const lifecycle = new EngineDaemonLifecycle({ command: engineBinary });
+  const lifecycle = new EngineDaemonLifecycle({ command: resolveEngineBinary() });
   let sessions: EngineWorkspaceSessions | null = null;
   try {
     await lifecycle.start();
