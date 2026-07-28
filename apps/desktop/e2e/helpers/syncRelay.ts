@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { desktopRoot } from "./desktopApp";
 
@@ -93,4 +94,49 @@ export async function spawnSyncRelay(input: {
         child.kill("SIGTERM");
       }),
   };
+}
+
+export interface RelayWorkspaceIdentity {
+  replicationEpoch: string;
+  streamIdentity: string;
+}
+
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (
+    path: string,
+    options?: { readOnly?: boolean },
+  ) => {
+    prepare(sql: string): { get(...params: unknown[]): Record<string, unknown> | undefined };
+    close(): void;
+  };
+};
+
+// R10b: the relay adopts the FIRST replication identity a pusher presents
+// (the desktop daemon's, minted in its store) and never returns it over the
+// wire — identity-less /log calls 409 once adoption happens. A headless
+// "other machine" harness therefore learns the adopted coordinate the only
+// way a harness can: from the relay's own SQLite row.
+export function relayAdoptedIdentity(
+  dbPath: string,
+  workspaceId: string,
+): RelayWorkspaceIdentity | null {
+  let db: InstanceType<typeof DatabaseSync> | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db
+      .prepare(
+        `SELECT replication_epoch AS replicationEpoch, stream_identity AS streamIdentity
+         FROM sync_relay_workspaces WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    return typeof row?.replicationEpoch === "string" && typeof row.streamIdentity === "string"
+      ? { replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity }
+      : null;
+  } catch {
+    // The db (or its schema) may not exist yet — "not adopted yet" to a poll.
+    return null;
+  } finally {
+    db?.close();
+  }
 }

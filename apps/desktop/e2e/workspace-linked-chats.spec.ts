@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createLinkedChatStore, createVersionedTextStore } from "@dohc/workspace-engine";
+import { seedThroughDaemon } from "./helpers/daemonSeed";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -161,39 +161,43 @@ test("agent-authored messages render as \"<User Name>'s agent\"", async () => {
     await seedWorkspaceSettings(temp, {
       experimental: { workspaceEngineAlpha: true },
     });
-    // Seed BEFORE launch: the file exists in the engine (and identically on
-    // disk so startup reconciliation is a no-op), with a linked chat that
-    // already carries one human and one agent message.
+    // Seed BEFORE launch, through the engine daemon (post-cutover the
+    // retired TS in-process store is refused): the file exists in the engine
+    // (and identically on disk so startup reconciliation is a no-op), with a
+    // linked chat that already carries one human and one agent message.
     await writeWorkspaceFiles(temp, [
       { path: "notes/agenda.md", contents: "# Agenda\n" },
     ]);
-    const engineStore = createVersionedTextStore(temp.rootPath);
-    await engineStore.ensureMainVersion({ workspaceId });
-    const seeded = await engineStore.writeTextFile({
-      workspaceId,
-      versionId: "main",
-      path: "notes/agenda.md",
-      text: "# Agenda\n",
-      metadata: { origin: "local-file" },
-    });
-    const chatStore = createLinkedChatStore(temp.rootPath);
-    const thread = await chatStore.createThread({
-      workspaceId,
-      title: "Agenda review",
-      linkedFile: { objectId: seeded.object.id, pathHint: "notes/agenda.md" },
-    });
-    await chatStore.sendMessage({
-      workspaceId,
-      threadId: thread.id,
-      author: { kind: "human", displayName: "Ice de Vera" },
-      body: "Can you tighten the agenda?",
-    });
-    await chatStore.sendMessage({
-      workspaceId,
-      threadId: thread.id,
-      author: { kind: "agent", displayName: "Ice de Vera" },
-      body: "Done — trimmed it to three items.",
-    });
+    await seedThroughDaemon(
+      { workspaceId, rootPath: temp.rootPath },
+      async ({ chats, files }) => {
+        await files.ensureMainVersion({ workspaceId });
+        const seeded = await files.writeTextFile({
+          workspaceId,
+          versionId: "main",
+          path: "notes/agenda.md",
+          text: "# Agenda\n",
+          metadata: { origin: "local-file" },
+        });
+        const thread = await chats.createThread({
+          workspaceId,
+          title: "Agenda review",
+          linkedFile: { objectId: seeded.object.id, pathHint: "notes/agenda.md" },
+        });
+        await chats.sendMessage({
+          workspaceId,
+          threadId: thread.id,
+          author: { kind: "human", displayName: "Ice de Vera" },
+          body: "Can you tighten the agenda?",
+        });
+        await chats.sendMessage({
+          workspaceId,
+          threadId: thread.id,
+          author: { kind: "agent", displayName: "Ice de Vera" },
+          body: "Done — trimmed it to three items.",
+        });
+      },
+    );
 
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);

@@ -85,6 +85,8 @@ export type ConflictSnapshot = WorkspaceJsonObject & {
   updatedAtMs: number;
   latestMomentId: string;
   metadataOrigin: string;
+  metadataSummary: string | null;
+  metadataCorrelationId: string | null;
 };
 
 export type ConflictFileState = WorkspaceJsonObject & {
@@ -386,6 +388,8 @@ function decodeSnapshot(value: JsonValue, label: string): ConflictSnapshot {
     "updatedAtMs",
     "latestMomentId",
     "metadataOrigin",
+    "metadataSummary",
+    "metadataCorrelationId",
   ]);
   if (object.contentKind !== "text") {
     throw new WorkspaceProtocolShapeError(
@@ -405,6 +409,12 @@ function decodeSnapshot(value: JsonValue, label: string): ConflictSnapshot {
     updatedAtMs: integerValue(object, "updatedAtMs", label),
     latestMomentId: stringValue(object, "latestMomentId", label),
     metadataOrigin: stringValue(object, "metadataOrigin", label),
+    metadataSummary: nullableString(object, "metadataSummary", label),
+    metadataCorrelationId: nullableString(
+      object,
+      "metadataCorrelationId",
+      label,
+    ),
   };
 }
 
