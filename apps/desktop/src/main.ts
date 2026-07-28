@@ -7068,6 +7068,13 @@ function registerIpcHandlers(
       try {
         session = await capture.openYDocSession({
           path: input.path,
+          // Explicit, because the daemon defaults an unspecified session to
+          // PLAINTEXT (actor.rs requested_content_kind.unwrap_or(Plaintext)).
+          // The gate above admits only rich markdown paths, and a plaintext
+          // session seeds/projects the plainText root while the editor binds
+          // the body fragment — the doc opens empty and every typed edit
+          // settles back to the pre-edit file while the UI shows "Saved".
+          contentKind: "richdoc",
           onRemoteUpdate: (update) => {
             // Forward a co-editor's delta only to the renderer generation that
             // opened this session. A crash reload reuses the WebContents id.
@@ -7088,8 +7095,15 @@ function registerIpcHandlers(
             }
           },
         });
-      } catch {
-        // Secret path, missing file, or already-live: fall back gracefully.
+      } catch (error) {
+        // Secret path, missing file, or already-live: fall back gracefully —
+        // but never silently. A refusal here downgrades the doc to the plain
+        // editor, and an unlogged permanent refusal is indistinguishable from
+        // intended fallback (it hid a dead engine editor for weeks).
+        console.error(
+          `[desktop] engine Y.Doc open refused for ${input.path}:`,
+          error,
+        );
         return OpenEngineYDocSessionResult.parse({ available: false });
       }
       // The renderer can die or reload DURING the await above. Close the stale
@@ -7099,6 +7113,19 @@ function registerIpcHandlers(
         sender.isDestroyed() ||
         rendererGeneration(sender.id) !== generation
       ) {
+        await session.close().catch(() => undefined);
+        return OpenEngineYDocSessionResult.parse({ available: false });
+      }
+      // The daemon honors the requested kind only for state-free markers; a
+      // lineage with durable state keeps its own. Binding the rich editor's
+      // body fragment onto a plaintext session is silent data loss (empty doc
+      // over a non-empty file, typed edits pruned at close) — refuse and fall
+      // back to the plain editor, loudly.
+      if (session.contentKind !== "richdoc") {
+        console.error(
+          `[desktop] engine Y.Doc open for ${input.path} came back ${session.contentKind}; ` +
+            "falling back to the plain editor (kind-mismatched lineage).",
+        );
         await session.close().catch(() => undefined);
         return OpenEngineYDocSessionResult.parse({ available: false });
       }

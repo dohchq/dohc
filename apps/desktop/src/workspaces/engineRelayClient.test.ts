@@ -803,6 +803,62 @@ describe("EngineRelayClient", () => {
   });
 });
 
+describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
+  it("preserves the inner client's optional capabilities through the wrap", () => {
+    const seen: string[] = [];
+    const unsubscribe = () => undefined;
+    const inner: EngineDaemonClient = {
+      sendRequest: () => Promise.reject(new Error("unused")),
+      close: () => undefined,
+      cancelRequest: async (requestId) => {
+        seen.push(`cancel:${requestId}`);
+      },
+      onBlob: () => {
+        seen.push("onBlob");
+        return unsubscribe;
+      },
+      onEvent: () => {
+        seen.push("onEvent");
+        return unsubscribe;
+      },
+      waitForExit: async () => {
+        seen.push("waitForExit");
+      },
+    };
+    const source = new RelayConfiguredDaemonClientSource(
+      { currentClient: () => inner },
+      new RelayTransportRouteGuard(),
+    );
+    const wrapped = source.currentClient();
+    expect(wrapped).not.toBe(inner);
+    // The engine Y.Doc open path gates on `typeof client.onEvent === "function"`;
+    // a wrapper that drops it silently downgrades every rich doc to the plain
+    // editor.
+    expect(typeof wrapped.onEvent).toBe("function");
+    expect(wrapped.onEvent?.(() => undefined)).toBe(unsubscribe);
+    expect(wrapped.onBlob?.(() => undefined)).toBe(unsubscribe);
+    void wrapped.cancelRequest?.(7);
+    void wrapped.waitForExit?.();
+    expect(seen).toEqual(["onEvent", "onBlob", "cancel:7", "waitForExit"]);
+  });
+
+  it("does not invent capabilities the inner client lacks", () => {
+    const inner: EngineDaemonClient = {
+      sendRequest: () => Promise.reject(new Error("unused")),
+      close: () => undefined,
+    };
+    const source = new RelayConfiguredDaemonClientSource(
+      { currentClient: () => inner },
+      new RelayTransportRouteGuard(),
+    );
+    const wrapped = source.currentClient();
+    expect(wrapped.onEvent).toBeUndefined();
+    expect(wrapped.onBlob).toBeUndefined();
+    expect(wrapped.cancelRequest).toBeUndefined();
+    expect(wrapped.waitForExit).toBeUndefined();
+  });
+});
+
 describe("allowInsecureLoopbackRelayForTests", () => {
   const enabled = { [INSECURE_LOOPBACK_RELAY_TEST_ENV]: "1" };
 

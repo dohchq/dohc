@@ -15,6 +15,20 @@ import type {
 
 const DEFAULT_SETTLE_DEBOUNCE_MS = 800;
 
+// A close whose pre-close settle failed but whose daemon release SUCCEEDED.
+// Callers must distinguish this from a failed release: the session and its
+// lease are gone, so keeping a "still reserved" guard on the path would defer
+// its capture forever while nothing holds the reservation.
+export class YdocReleasedWithSettleFailureError extends Error {
+  constructor(path: string, cause: unknown) {
+    super(
+      `Y.Doc session for ${path} released, but its pre-close settle failed.`,
+      { cause },
+    );
+    this.name = "YdocReleasedWithSettleFailureError";
+  }
+}
+
 export interface EngineYdocProviderSessionOptions {
   transport: EngineTransport;
   // Share ONE adapter across every doc on a given transport so request ids stay
@@ -202,13 +216,8 @@ export async function openEngineYdocProviderSession(
       await journalChain.catch(() => undefined);
       await settleChain.catch(() => undefined);
       let preCloseError: unknown;
-      // Richdoc settle is a C1 daemon refusal (richdoc-settle-unsupported):
-      // the provider's pre-close settle would error before the close RPC ran,
-      // stranding the session and its lease. The daemon's default close
-      // persists the closed richdoc CRDT instead — nothing is lost.
       if (
         closeOptions?.settle !== false &&
-        session.contentKind !== "richdoc" &&
         localEditError === null
       ) {
         try {
@@ -223,12 +232,9 @@ export async function openEngineYdocProviderSession(
         } catch (error) {
           if (!isYdocSessionNotFoundRefusal(error)) {
             try {
-              // Richdoc settle is unsupported by the daemon, so retry the
-              // release-only close after a transient failure. Plaintext can
-              // still escalate to a settling close to preserve pending edits.
-              await session.close({
-                settle: session.contentKind === "richdoc" ? false : true,
-              });
+              // Escalate to a settling close after a transient failure so
+              // pending edits are preserved.
+              await session.close({ settle: true });
             } catch (settlingCloseError) {
               if (!isYdocSessionNotFoundRefusal(settlingCloseError)) {
                 throw settlingCloseError;
@@ -243,7 +249,9 @@ export async function openEngineYdocProviderSession(
         closeError = error;
         throw error;
       }
-      if (preCloseError !== undefined) throw preCloseError;
+      if (preCloseError !== undefined) {
+        throw new YdocReleasedWithSettleFailureError(options.path, preCloseError);
+      }
     },
   };
 }

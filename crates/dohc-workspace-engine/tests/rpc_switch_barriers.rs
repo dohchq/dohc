@@ -1736,9 +1736,11 @@ async fn queued_create_named_revalidates_before_sweeping_sessions() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn create_named_fails_closed_before_touching_a_live_richdoc_session() {
-    // MUTATION: remove the live-richdoc refusal -> createNamed succeeds with a
-    // fork whose materialized snapshot omits the live CRDT edit.
+async fn create_named_fences_a_live_richdoc_session_into_the_fork() {
+    // Richdoc settles since the full-fidelity projection (R15-3): the fence
+    // sweeps a live richdoc session with a settling close, so the fork carries
+    // the live edit instead of refusing. MUTATION: skip the fence's settling
+    // sweep -> the fork's notes.md omits "live richdoc edit" below.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) = fixture("richdoc-fork", service).await;
@@ -1767,44 +1769,50 @@ async fn create_named_fails_closed_before_touching_a_live_richdoc_session() {
         json!({ "sessionId": session_id, "updateBase64": first }),
     )
     .await;
-    let scans_before = probe.version_scan_count();
-
-    let refused = call_error(
+    let created = call(
         &transport,
         &handle,
         4,
         "versions.createNamed",
         json!({
             "workspaceId": workspace_id,
-            "name": "must not be stale",
+            "name": "richdoc fenced fork",
             "fromVersionId": "main",
         }),
     )
     .await;
-    assert_eq!(refused.message, "richdoc-settle-unsupported");
-    assert_eq!(
-        probe.version_scan_count(),
-        scans_before,
-        "the richdoc refusal must happen before the full scan"
-    );
+    let fork = created["id"].as_str().expect("fork id");
+    for version in ["main", fork] {
+        let content = read_path(&transport, &handle, version, "notes.md", 5).await;
+        assert!(
+            content
+                .as_deref()
+                .is_some_and(|text| text.contains("live richdoc edit")),
+            "{version} must contain the swept richdoc edit, got {content:?}"
+        );
+    }
 
+    // The fence settled AND closed the source session — a follow-up update
+    // must refuse instead of journaling into a released lease.
     let second = base64::engine::general_purpose::STANDARD
         .encode(doc.richdoc_append_paragraph("session remains live"));
-    call(
+    let closed = call_error(
         &transport,
         &handle,
-        5,
+        6,
         "ydoc.recordUpdate",
         json!({ "sessionId": session_id, "updateBase64": second }),
     )
     .await;
+    assert_eq!(closed.message, "ydoc-session-not-found");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn create_named_fails_closed_for_a_normally_closed_unsettled_richdoc() {
-    // MUTATION: remove the durable richdoc preflight (or consult only the live
-    // session map) -> normal close removes the session and this stale fork
-    // succeeds even though its snapshot omits the persisted CRDT edit.
+async fn create_named_succeeds_after_a_normally_closed_richdoc_settled() {
+    // A default (settle-unless-refused) close settles richdoc now, so the
+    // persisted lineage's projection matches its materialized snapshot and the
+    // durable preflight passes. MUTATION: make the default close skip the
+    // richdoc settle -> the preflight sees a stale snapshot and refuses.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) = fixture("closed-richdoc-fork", service).await;
@@ -1840,26 +1848,28 @@ async fn create_named_fails_closed_for_a_normally_closed_unsettled_richdoc() {
         json!({ "sessionId": session_id }),
     )
     .await;
-    let scans_before = probe.version_scan_count();
-
-    let refused = call_error(
+    let created = call(
         &transport,
         &handle,
         5,
         "versions.createNamed",
         json!({
             "workspaceId": workspace_id,
-            "name": "closed richdoc must not fork stale",
+            "name": "closed richdoc forks settled",
             "fromVersionId": "main",
         }),
     )
     .await;
-    assert_eq!(refused.message, "richdoc-settle-unsupported");
-    assert_eq!(
-        probe.version_scan_count(),
-        scans_before,
-        "the persisted richdoc refusal must happen before the full scan"
-    );
+    let fork = created["id"].as_str().expect("fork id");
+    for version in ["main", fork] {
+        let content = read_path(&transport, &handle, version, "notes.md", 6).await;
+        assert!(
+            content
+                .as_deref()
+                .is_some_and(|text| text.contains("persisted but not materialized")),
+            "{version} must carry the close-settled richdoc content, got {content:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

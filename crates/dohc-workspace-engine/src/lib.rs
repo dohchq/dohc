@@ -2893,9 +2893,6 @@ impl EngineService {
             .iter()
             .map(|(session_id, _, _)| session_id.clone())
             .collect();
-        let has_live_richdoc = session_views
-            .iter()
-            .any(|(_, _, content_kind)| *content_kind == ContentKind::Richdoc);
 
         if let Some(source_version_id) = fork_source_version_id.as_ref()
             && let Some(content_kind) = Self::read_under_ctx(
@@ -2918,15 +2915,6 @@ impl EngineService {
             .await?
         {
             return Err(unsettled_fork_error(content_kind));
-        }
-
-        if matches!(intent, VersionFenceIntent::Fork { .. }) && has_live_richdoc {
-            // The lower projection layer is full-fidelity, but the daemon RPC
-            // still exposes richdoc-settle-unsupported. A fork does not clone
-            // version-keyed CRDT rows (including normally-closed persisted
-            // lineages), so forking would silently snapshot stale markdown.
-            // Refuse before touching any session or scanning the filesystem.
-            return Err(wire(ErrorCode::InvalidParams, "richdoc-settle-unsupported"));
         }
 
         let (capture_status, capture_author_json) = lock(&open.capture)
@@ -6933,9 +6921,6 @@ impl EngineService {
         _summary: Option<&str>,
     ) -> Result<Value, WireError> {
         let (open, session) = self.ydoc_session(handle, session_id)?;
-        if session.content_kind == ContentKind::Richdoc {
-            return Err(wire(ErrorCode::InvalidParams, "richdoc-settle-unsupported"));
-        }
         let settled = open
             .actor
             .ydoc_settle(
@@ -7046,15 +7031,10 @@ impl EngineService {
         // close compact while the markdown projection is stale.
         let default_settle = {
             let (_open, session) = self.ydoc_session(handle, &params.session_id)?;
-            // Richdoc settle is a C1 refusal on the EXPLICIT ydoc.settle RPC;
-            // a default close must not inherit that error — it skips the
-            // markdown settle and the close below persists the closed CRDT
-            // state instead (nothing is lost, nothing is projected). An
-            // untouched absent-lineage session (opened, never seeded) has
-            // nothing to settle either: defaulting to settle there would
-            // refuse NoMarker and strand the session/lease.
-            session.content_kind != ContentKind::Richdoc
-                && !(session.lineage_absent && session.first_update_pending)
+            // An untouched absent-lineage session (opened, never seeded) has
+            // nothing to settle: defaulting to settle there would refuse
+            // NoMarker and strand the session/lease.
+            !(session.lineage_absent && session.first_update_pending)
         };
         if params.settle.unwrap_or(default_settle) {
             let settled = self
@@ -7654,8 +7634,9 @@ async fn close_ydoc_session_for_version_fence(
     token: &CancellationToken,
 ) -> Result<(), WireError> {
     let session = version_fence_session_view(sessions, handle, session_id)?;
-    let settle = session.content_kind != ContentKind::Richdoc
-        && !(session.lineage_absent && session.first_update_pending);
+    // Mirrors ydoc.close's default-settle rule: only an untouched
+    // absent-lineage session (nothing to settle) skips the settling sweep.
+    let settle = !(session.lineage_absent && session.first_update_pending);
     if settle {
         let first = settle_ydoc_session_for_version_fence(
             sessions,
@@ -7770,12 +7751,10 @@ async fn settle_ydoc_session_for_version_fence(
     Ok(())
 }
 
-fn unsettled_fork_error(content_kind: ContentKind) -> WireError {
-    let message = match content_kind {
-        ContentKind::Plaintext => "ydoc-unsettled-close",
-        ContentKind::Richdoc => "richdoc-settle-unsupported",
-    };
-    wire(ErrorCode::InvalidParams, message)
+fn unsettled_fork_error(_content_kind: ContentKind) -> WireError {
+    // Both kinds settle now (richdoc projection is full-fidelity since
+    // R15-3), so an unsettled lineage refuses with one message.
+    wire(ErrorCode::InvalidParams, "ydoc-unsettled-close")
 }
 
 fn settle_preimage(

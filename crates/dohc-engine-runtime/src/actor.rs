@@ -8755,20 +8755,42 @@ fn ydoc_open_state_on_store(
         .as_ref()
         .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
     let (content_kind, regime, initial_update) = match persisted {
-        Some(persisted) => (
-            persisted.marker.content_kind,
-            persisted.marker.regime,
-            persisted.doc.encode_full_state(),
-        ),
+        Some(persisted) => {
+            let marker = &persisted.marker;
+            let mut kind = marker.content_kind;
+            // A BARE local marker is a remembered default, not a lineage:
+            // honor an explicit caller kind and rewrite the row (re-proved
+            // bare inside the write transaction). Without this, a stale
+            // default — e.g. the plaintext markers the dead editor path
+            // minted for rich .md files — permanently overrides every later
+            // richdoc open: empty doc over a non-empty file, typed edits
+            // discarded at the pruning close.
+            if let Some(requested) = requested_content_kind
+                && requested != marker.content_kind
+                && !lineage_existing
+                && marker.regime == Regime::LocalOnly
+                && !marker.base_claimed
+            {
+                match dohc_engine_collab::rewrite_bare_marker_content_kind(
+                    store, &key, requested, &NoFaults, now_ms,
+                )? {
+                    TxnOutcome::Committed(true) => kind = requested,
+                    // A raced update/seed made the marker non-bare between
+                    // the read and the write: the lineage owns its kind.
+                    TxnOutcome::Committed(false) => {}
+                    TxnOutcome::Crashed { .. } => {
+                        return Err(RuntimeError::OperationCrashed);
+                    }
+                }
+            }
+            (kind, marker.regime, persisted.doc.encode_full_state())
+        }
         None => {
             let doc = Ydoc::wire();
             (
-                // PLAINTEXT default: the desktop's markdown live path opens
-                // without a contentKind, and a richdoc default would wedge
-                // it — richdoc settle is a C1 refusal and the client skips
-                // its close-time settle, so first-time markdown edits would
-                // persist only as closed CRDT cache while the .md file and
-                // history stay stale. Richdoc callers pass the kind
+                // PLAINTEXT default when the caller does not specify: the
+                // plaintext surfaces open without a contentKind; richdoc
+                // callers (the desktop's rich-doc IPC path) pass the kind
                 // explicitly.
                 requested_content_kind.unwrap_or(ContentKind::Plaintext),
                 Regime::LocalOnly,
@@ -9330,10 +9352,12 @@ fn ydoc_close_session_on_store(
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(None);
     };
-    // Richdoc lineages persist their closed CRDT state: C1 has no richdoc
-    // markdown settle, so the local-only prune's markdown-is-the-artifact
-    // premise doesn't hold — pruning would discard the only copy.
-    let persist_closed_state = marker.content_kind == ContentKind::Richdoc;
+    // Richdoc settles like plaintext now, so the local-only close follows the
+    // same markdown-is-the-artifact prune (close_session refuses a DIRTY local
+    // prune either way, and persists every replicated lineage internally).
+    // Keeping the closed CRDT authoritative here would shadow external .md
+    // edits on reopen: existing lineage, no seedMarkdown, stale document.
+    let persist_closed_state = false;
     let outcome = match dohc_engine_collab::close_session(
         store,
         key,

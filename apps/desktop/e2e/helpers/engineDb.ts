@@ -31,16 +31,19 @@ export interface EngineMoment {
   text: string;
 }
 
-// The engine.db may not exist yet while the app is still opening — that (and
-// only that) is the expected "not ready, poll again" case, so it returns null.
-// ANY other error (a typo'd column/table, a schema mismatch, a syntax error) is
-// a genuine query bug: rethrow it so a real regression fails fast with a useful
-// message instead of masquerading as "still polling" until the 20s timeout.
+// The engine.db may not exist yet while the app is still opening, and right
+// after creation its schema materializes through a migration chain a readonly
+// poll can observe mid-flight (moments existed before payload_after_* landed —
+// a real race caught on Windows). Both are "not ready, poll again" cases.
+// The cost: a genuinely typo'd column/table now times the poll out instead of
+// failing fast — every other error still rethrows with its real message.
 function isDbNotReady(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   if (code === "ENOENT" || code === "SQLITE_CANTOPEN") return true;
   const message = error instanceof Error ? error.message : String(error);
-  return /unable to open database|cannot open|no such file/i.test(message);
+  return /unable to open database|cannot open|no such file|no such table|no such column/i.test(
+    message,
+  );
 }
 
 export function withEngineDb<T>(rootPath: string, fn: (db: EngineDb) => T): T | null {
@@ -49,9 +52,9 @@ export function withEngineDb<T>(rootPath: string, fn: (db: EngineDb) => T): T | 
     db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), { readOnly: true });
     return fn(db);
   } catch (error) {
-    // Only the "engine.db isn't present yet" case is a poll-again null; real
-    // query bugs surface.
-    if (db === null && isDbNotReady(error)) return null;
+    // "Not present yet" and "schema still materializing" both poll again —
+    // the latter throws from the query itself, so the db handle may be open.
+    if (isDbNotReady(error)) return null;
     throw error;
   } finally {
     db?.close();

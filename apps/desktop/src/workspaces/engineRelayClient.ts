@@ -193,10 +193,24 @@ export async function probeWorkspaceRelay(
 }
 
 class RelayConfiguredDaemonClient implements EngineDaemonClient {
+  // Only workspace.open needs decorating; every other capability of the inner
+  // client must survive the wrap. These are optional on EngineDaemonClient, so
+  // forward conditionally — a wrapper that swallows onEvent reads as "no event
+  // delivery" and permanently pins the renderer to the non-engine editor.
+  readonly cancelRequest?: EngineDaemonClient["cancelRequest"];
+  readonly onBlob?: EngineDaemonClient["onBlob"];
+  readonly onEvent?: EngineDaemonClient["onEvent"];
+  readonly waitForExit?: EngineDaemonClient["waitForExit"];
+
   constructor(
     private readonly client: EngineDaemonClient,
     private readonly routes: RelayTransportRouteGuard,
-  ) {}
+  ) {
+    if (client.cancelRequest) this.cancelRequest = client.cancelRequest.bind(client);
+    if (client.onBlob) this.onBlob = client.onBlob.bind(client);
+    if (client.onEvent) this.onEvent = client.onEvent.bind(client);
+    if (client.waitForExit) this.waitForExit = client.waitForExit.bind(client);
+  }
 
   async sendRequest(request: Request): Promise<Response> {
     if (request.method !== "workspace.open") {

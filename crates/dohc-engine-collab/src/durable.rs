@@ -253,6 +253,42 @@ pub fn ensure_marker(
     })
 }
 
+/// Rewrite a BARE local marker's content kind to the caller's explicit
+/// request. A marker with durable doc state (or a claimed base) never changes
+/// kind — the lineage owns it. A pruned, state-free local marker is only a
+/// remembered default, and keeping it authoritative would permanently
+/// mis-bind the doc: the 2026-07 desktop editor outage minted plaintext
+/// markers for rich .md paths, and every later richdoc open would silently
+/// come back plaintext (empty doc over a non-empty file; typed edits
+/// discarded at close). The WHERE clause re-proves bareness inside the
+/// transaction so a raced update/seed can never have its kind flipped.
+pub fn rewrite_bare_marker_content_kind(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<bool>, CollabError> {
+    store.write_with(faults, |tx| {
+        let updated = tx
+            .execute(
+                "UPDATE ydoc_docs SET content_kind = ?4, updated_at_ms = ?5 \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+                   AND regime = 'local-only' AND head_update_seq = 0 \
+                   AND head_snapshot_seq = 0 AND base_claimed = 0",
+                rusqlite::params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    content_kind.as_str(),
+                    now_ms,
+                ],
+            )
+            .map_err(map_sql)?;
+        Ok(updated == 1)
+    })
+}
+
 /// Append a locally-produced update to the durable log (advancing the head).
 /// Validates the bytes BEFORE any blob put / journal (constraint 5: never
 /// journal bytes that fail validation); content-addresses them; and dedups on

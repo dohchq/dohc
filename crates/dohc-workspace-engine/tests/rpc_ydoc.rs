@@ -326,25 +326,150 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     let rich_session = rich["sessionId"].as_str().expect("rich session");
-    let rich_refusal = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                16,
-                "ydoc.settle",
-                Some(handle.clone()),
-                json!({ "sessionId": rich_session }),
-            ),
-        )
-        .await
-        .expect_err("richdoc settle is gated in C1");
-    assert_eq!(rich_refusal.message, "richdoc-settle-unsupported");
-    call(
+    // Richdoc settles since the full-fidelity projection landed (R15-3): the
+    // body fragment projects to markdown, and the settle materializes the .md
+    // like plaintext does. (The C1-era refusal was a stale guard — the desktop
+    // editor could journal rich edits that never reached the file.)
+    let rich_update = {
+        let doc = Ydoc::wire();
+        base64::engine::general_purpose::STANDARD
+            .encode(doc.richdoc_append_paragraph("Rich settled body."))
+    };
+    let recorded = call(
+        &transport,
+        &handle,
+        16,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": rich_session, "updateBase64": rich_update }),
+    )
+    .await;
+    assert_eq!(recorded["seq"], json!(1));
+    let rich_settled = call(
         &transport,
         &handle,
         17,
+        "ydoc.settle",
+        json!({ "sessionId": rich_session }),
+    )
+    .await;
+    let rich_markdown = rich_settled["markdown"].as_str().expect("rich markdown");
+    assert!(
+        rich_markdown.contains("Rich settled body."),
+        "richdoc settle must project the body fragment, got {rich_markdown:?}"
+    );
+    let rich_on_disk = std::fs::read_to_string(scratch.path().join("notes/rich.md"))
+        .expect("richdoc settle materializes notes/rich.md");
+    assert!(
+        rich_on_disk.contains("Rich settled body."),
+        "materialized .md must carry the settled body, got {rich_on_disk:?}"
+    );
+    call(
+        &transport,
+        &handle,
+        19,
         "ydoc.close",
         json!({ "sessionId": rich_session }),
+    )
+    .await;
+    // The default close SETTLED the richdoc, so the local-only lineage prunes
+    // exactly like plaintext (markdown-is-the-artifact): a reopen must reseed
+    // from the settled markdown, not resume a persisted CRDT — a persisted
+    // closed CRDT would shadow any external .md edit made while closed.
+    let rich_reopened = call(
+        &transport,
+        &handle,
+        20,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/rich.md",
+            "contentKind": "richdoc"
+        }),
+    )
+    .await;
+    assert_eq!(rich_reopened["lineage"], json!("absent"));
+    let reseed = rich_reopened["seedMarkdown"].as_str().expect("rich reseed");
+    assert!(
+        reseed.contains("Rich settled body."),
+        "reopen must reseed from the settled artifact, got {reseed:?}"
+    );
+    call(
+        &transport,
+        &handle,
+        21,
+        "ydoc.close",
+        json!({ "sessionId": rich_reopened["sessionId"].as_str().expect("reopened session") }),
+    )
+    .await;
+
+    // A BARE local marker does not own its content kind: a kindless open
+    // (plaintext default) whose session settled and pruned leaves only a
+    // remembered default behind — the 2026-07 desktop outage minted exactly
+    // these for rich .md paths. An explicit richdoc reopen must win and
+    // rewrite the marker, or the poisoned default silently rebinds the doc
+    // to plaintext forever (empty editor over a non-empty file).
+    let poisoned = call(
+        &transport,
+        &handle,
+        22,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "notes/poisoned.md" }),
+    )
+    .await;
+    assert_eq!(poisoned["contentKind"], json!("plaintext"));
+    let poisoned_session = poisoned["sessionId"].as_str().expect("poisoned session");
+    call(
+        &transport,
+        &handle,
+        23,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": poisoned_session,
+            "updateBase64": plaintext_update("poisoned default body")
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        24,
+        "ydoc.settle",
+        json!({ "sessionId": poisoned_session }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        25,
+        "ydoc.close",
+        json!({ "sessionId": poisoned_session }),
+    )
+    .await;
+    let recovered = call(
+        &transport,
+        &handle,
+        26,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/poisoned.md",
+            "contentKind": "richdoc"
+        }),
+    )
+    .await;
+    assert_eq!(
+        recovered["contentKind"],
+        json!("richdoc"),
+        "an explicit kind must override a bare marker's remembered default"
+    );
+    assert_eq!(recovered["lineage"], json!("absent"));
+    assert_eq!(recovered["seedMarkdown"], json!("poisoned default body"));
+    call(
+        &transport,
+        &handle,
+        27,
+        "ydoc.close",
+        json!({ "sessionId": recovered["sessionId"].as_str().expect("recovered session") }),
     )
     .await;
 
