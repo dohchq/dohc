@@ -425,6 +425,74 @@ async fn set_active_forced_scan_captures_edit_while_live_driver_is_gated() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_active_forced_scan_stamps_fence_provenance() {
+    // The fence's forced reconcile is a capture PASS: its moments must carry
+    // the fence's own summary and a version-switch correlation id (TS
+    // parity), or the "nothing is ever lost" pre-switch capture renders as
+    // ungrouped "Updated notes.md" rows. MUTATION: reverting the fence's
+    // provenance to CaptureProvenance::default() fails both assertions.
+    let probe = CaptureApplyProbe::default();
+    let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+    let (scratch, transport, handle, workspace_id) = fixture("fence-provenance", service).await;
+    let feature = create_feature(&transport, &handle, &workspace_id, 2).await;
+
+    // Gate the live driver so ONLY the fence's forced scan can capture the
+    // edit (same seam as set_active_forced_scan_captures_edit_...).
+    probe.pause_next_version_fence();
+    let switch_transport = Arc::clone(&transport);
+    let switch_handle = handle.clone();
+    let switch_workspace = workspace_id.clone();
+    let switch_feature = feature.clone();
+    let switching = tokio::spawn(async move {
+        switch_to(
+            &switch_transport,
+            &switch_handle,
+            &switch_workspace,
+            &switch_feature,
+            3,
+        )
+        .await
+    });
+    bounded(
+        "setActive pre-scan probe",
+        probe.wait_until_version_fence_paused(),
+    )
+    .await;
+    std::fs::write(scratch.path().join("notes.md"), "pre-switch edit").expect("external edit");
+    probe.release_version_fence();
+    bounded("setActive task", switching)
+        .await
+        .expect("switch task")
+        .expect("switch");
+
+    let listed = call(
+        &transport,
+        &handle,
+        4,
+        "moments.list",
+        json!({ "versionId": "main" }),
+    )
+    .await;
+    let moment = listed["moments"]
+        .as_array()
+        .expect("moments page")
+        .iter()
+        .find(|moment| moment["path"] == "notes.md" && moment["afterText"] == "pre-switch edit")
+        .expect("the fence-captured moment exists");
+    assert_eq!(
+        moment["metadataSummary"], "Saved latest edits before switching versions",
+        "the fence reconcile stamps its own summary"
+    );
+    let correlation = moment["metadataCorrelationId"]
+        .as_str()
+        .expect("fence moments carry a correlation id");
+    assert!(
+        correlation.starts_with("version-switch-"),
+        "fence correlation ids are intent-prefixed, got {correlation}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_active_fails_closed_when_the_forced_scan_is_degraded() {

@@ -31,6 +31,8 @@ fn retire(path: &str, now_ms: i64) -> CaptureRetire {
         workspace_id: WS.to_owned(),
         version_id: VERSION.to_owned(),
         path: path.to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         now_ms,
         request_id: None,
         only_if_text_head: false,
@@ -1101,5 +1103,84 @@ fn capture_ingest_persists_the_supplied_summary_and_correlation() {
     assert_eq!(
         moment.metadata_correlation_id.as_deref(),
         Some("reconcile-1")
+    );
+
+    // The RETIRE path too: a delete recorded mid-pass must carry the pass
+    // provenance or it splits the history group.
+    let mut retire_input = retire("notes/a.md", 30);
+    retire_input.metadata_summary = Some("Reconciled offline edits".to_owned());
+    retire_input.metadata_correlation_id = Some("reconcile-1".to_owned());
+    let retired = VersionedTextStore::new(&mut store)
+        .capture_retire(&retire_input, &NO_FAULTS)
+        .expect("retire")
+        .retired
+        .expect("head existed");
+    assert_eq!(
+        retired.moment.metadata_summary.as_deref(),
+        Some("Reconciled offline edits")
+    );
+    assert_eq!(
+        retired.moment.metadata_correlation_id.as_deref(),
+        Some("reconcile-1")
+    );
+}
+
+#[test]
+fn live_capture_labels_default_at_the_primitive() {
+    // TS `writeIfChanged` parity, enforced at the capture primitive: a plain
+    // live TEXT capture carries NO summary, a live BINARY capture carries
+    // "Updated <basename>", and content-kind flips get the honest
+    // transition labels.
+    let (_scratch, mut store) = open_store();
+    let plain = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("notes/plain.md", "text", 10), &NO_FAULTS)
+        .expect("plain text capture");
+    assert_eq!(plain.moment.metadata_summary, None);
+
+    let binary = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("photo.png", &[0xaa, 0xbb], 20), &NO_FAULTS)
+        .expect("binary capture");
+    let listed = VersionedTextStore::new(&mut store)
+        .list_moments(&ListMomentsQuery {
+            workspace_id: WS.to_owned(),
+            version_id: Some(VERSION.to_owned()),
+            object_id: Some(binary.object_id.clone()),
+            limit: 10,
+            before_moment_order: None,
+        })
+        .expect("list binary moments");
+    assert_eq!(
+        listed.moments[0].metadata_summary.as_deref(),
+        Some("Updated photo.png")
+    );
+
+    // text -> binary flip on the same object.
+    let flipped = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(
+            &ingest_binary("notes/plain.md", &[0xff, 0x00], 30),
+            &NO_FAULTS,
+        )
+        .expect("flip to binary");
+    let listed = VersionedTextStore::new(&mut store)
+        .list_moments(&ListMomentsQuery {
+            workspace_id: WS.to_owned(),
+            version_id: Some(VERSION.to_owned()),
+            object_id: Some(flipped.object_id.clone()),
+            limit: 10,
+            before_moment_order: None,
+        })
+        .expect("list flip moments");
+    assert_eq!(
+        listed.moments[0].metadata_summary.as_deref(),
+        Some("Became a binary file")
+    );
+
+    // ...and back to text.
+    let back = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("notes/plain.md", "text again", 40), &NO_FAULTS)
+        .expect("flip back to text");
+    assert_eq!(
+        back.moment.metadata_summary.as_deref(),
+        Some("Became a text file")
     );
 }

@@ -2991,6 +2991,18 @@ impl EngineService {
         let events = self.events.clone();
         let detached_operation = operation.to_owned();
         let settle_summary = settle_summary.to_owned();
+        // The fence's forced reconcile is a capture PASS (TS parity:
+        // `version-switch-${id}` / `version-create-${id}`): its moments carry
+        // the fence's own summary and ONE correlation id so the pre-switch
+        // "nothing is ever lost" capture groups in history instead of
+        // rendering as unrelated per-file rows.
+        let reconcile_provenance = capture_sink::CaptureProvenance {
+            summary: Some(settle_summary.clone()),
+            correlation_id: Some(capture_driver::pass_correlation_id(match &intent {
+                VersionFenceIntent::Fork { .. } => "version-create",
+                VersionFenceIntent::Switch { .. } => "version-switch",
+            })),
+        };
         #[cfg(feature = "harness")]
         let probe = self.capture_apply_probe.clone();
         let mut fence = tokio::spawn(async move {
@@ -3045,6 +3057,7 @@ impl EngineService {
                 &capture_status,
                 &self_writes.scoped(&open.root),
                 capture_author_json,
+                reconcile_provenance,
                 events.clone(),
                 token.clone(),
             )

@@ -1311,6 +1311,8 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
                         workspace_id: WORKSPACE.to_owned(),
                         version_id: "main".to_owned(),
                         path: entry.path,
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
                         now_ms: 41,
                         request_id: None,
                         only_if_text_head: false,

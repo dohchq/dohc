@@ -313,13 +313,54 @@ async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() 
         correlation_b.as_deref(),
         "one reconcile pass = ONE correlation id across its per-file moments"
     );
+
+    // Second offline window: an EDIT and a DELETE reconcile in the same pass
+    // and must stay ONE contiguous history group — history groups only
+    // CONSECUTIVE same-correlation moments, so the delete carrying NULL
+    // provenance would split it.
+    write_file(scratch.path(), "offline-a.md", b"edited offline again");
+    std::fs::remove_file(scratch.path().join("offline-b.md")).expect("offline delete");
+    let handle = open_workspace(&transport, &scratch, 2_000).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "offline-a.md",
+        Some("edited offline again"),
+    )
+    .await;
+    wait_for_text(&transport, &handle, "offline-b.md", None).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_101, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("second close");
+
+    let (summary_a2, correlation_a2) = moment_metadata(&db_path, "offline-a.md");
+    let (summary_b2, correlation_b2) = moment_metadata(&db_path, "offline-b.md");
+    assert_eq!(summary_a2.as_deref(), Some("Reconciled offline edits"));
+    assert_eq!(
+        summary_b2.as_deref(),
+        Some("Reconciled offline edits"),
+        "the pass's DELETE moment carries the pass summary"
+    );
+    let correlation_a2 = correlation_a2.expect("second pass carries a correlation id");
+    assert_eq!(
+        Some(correlation_a2.as_str()),
+        correlation_b2.as_deref(),
+        "a delete recorded mid-pass shares the pass correlation id"
+    );
+    assert_ne!(correlation_a2, correlation_a, "each pass mints its own id");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_live_capture_emits_an_event_and_stamps_an_updated_summary() {
+async fn a_live_capture_emits_an_event_and_keeps_ts_live_labels() {
     // D2 for the watcher path: with no TS write in the loop, this event is
-    // the ONLY signal that tells the renderer a moment landed. D1: live
-    // moments keep the TS per-file label and mint no correlation id.
+    // the ONLY signal that tells the renderer a moment landed. D1 (TS
+    // parity): a live TEXT capture carries NO summary — the renderer's copy
+    // for null is "Edited <basename>" — while a live BINARY capture carries
+    // "Updated <basename>". Neither mints a correlation id.
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
 
@@ -331,6 +372,8 @@ async fn a_live_capture_emits_an_event_and_stamps_an_updated_summary() {
     write_file(scratch.path(), "notes/live.md", b"external edit");
     wait_for_text(&transport, &handle, "notes/live.md", Some("external edit")).await;
     wait_for_moment_event(&mut events, "notes/live.md").await;
+    write_file(scratch.path(), "photo.png", &[0xff, 0x00, 0xfe]);
+    wait_for_moment_event(&mut events, "photo.png").await;
 
     transport
         .call(
@@ -341,8 +384,13 @@ async fn a_live_capture_emits_an_event_and_stamps_an_updated_summary() {
         .expect("close");
 
     let db_path = scratch.path().join(".dohc/engine/engine.db");
-    let (summary, correlation) = moment_metadata(&db_path, "notes/live.md");
-    assert_eq!(summary.as_deref(), Some("Updated live.md"));
+    assert_eq!(
+        moment_metadata(&db_path, "notes/live.md"),
+        (None, None),
+        "a live text capture must not rewrite the renderer's Edited label"
+    );
+    let (summary, correlation) = moment_metadata(&db_path, "photo.png");
+    assert_eq!(summary.as_deref(), Some("Updated photo.png"));
     assert_eq!(correlation, None, "live captures mint no correlation id");
 }
 

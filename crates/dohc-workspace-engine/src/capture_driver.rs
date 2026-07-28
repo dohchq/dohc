@@ -2537,6 +2537,7 @@ pub(crate) async fn reconcile_full_for_switch(
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
     author_json: Option<String>,
+    provenance: CaptureProvenance,
     events: EngineEvents,
     token: CancellationToken,
 ) -> Result<bool, SwitchReconcileError> {
@@ -2584,7 +2585,7 @@ pub(crate) async fn reconcile_full_for_switch(
                 status,
                 self_writes,
                 author_json,
-                provenance: CaptureProvenance::default(),
+                provenance,
                 events,
             };
             if apply_run_with_handle(context, &handle, run).await {
@@ -2661,16 +2662,23 @@ struct ApplyRunContext<'a> {
 /// actor-neutral correlation id ties a reconcile pass's per-file moments
 /// together as a group without inventing an author.
 fn reconcile_provenance() -> CaptureProvenance {
-    static PASS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let pass = PASS.fetch_add(1, Ordering::Relaxed);
     CaptureProvenance {
         summary: Some("Reconciled offline edits".to_owned()),
-        correlation_id: Some(format!(
-            "reconcile-{:x}-{:x}-{pass:x}",
-            std::process::id(),
-            wall_now_ms(),
-        )),
+        correlation_id: Some(pass_correlation_id("reconcile")),
     }
+}
+
+/// One unique correlation id per capture pass (TS ``${prefix}-${createId()}``
+/// parity): pid + wall ms + a process counter — unique enough for grouping
+/// CONSECUTIVE moments, which is all history uses it for.
+pub(crate) fn pass_correlation_id(prefix: &str) -> String {
+    static PASS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let pass = PASS.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{prefix}-{:x}-{:x}-{pass:x}",
+        std::process::id(),
+        wall_now_ms(),
+    )
 }
 
 /// Bounded `capture.momentRecorded` payload: the renderer needs the ping and

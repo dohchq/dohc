@@ -306,15 +306,6 @@ impl StoreCaptureSink {
         }
     }
 
-    /// The summary for one recorded moment: the pass-level provenance when
-    /// set (a reconcile), otherwise the TS live-batch convention.
-    fn moment_summary(&self, path: &str) -> Option<String> {
-        Some(match &self.provenance.summary {
-            Some(summary) => summary.clone(),
-            None => format!("Updated {}", path.rsplit('/').next().unwrap_or(path)),
-        })
-    }
-
     fn ensure_secret_key(&mut self) -> Result<&SecretDataKey, CaptureError> {
         if self.secret_key.is_none() {
             let key = match load_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)? {
@@ -382,7 +373,7 @@ impl StoreCaptureSink {
         let absolute = self.shadow_root.join(path);
         match contained_parent(&self.shadow_root, path) {
             Containment::Contained => {}
-            Containment::Absent => return Ok(CurrentContent::Untracked),
+            Containment::Absent => return Ok(CurrentContent::Absent),
             Containment::Escaped => return Err(ESCAPES_ROOT),
         }
         // Advisory lstat mirror of the TS refusal (symlink leaf and non-file
@@ -390,21 +381,22 @@ impl StoreCaptureSink {
         // actually closes the check-then-open race.
         match std::fs::symlink_metadata(&absolute) {
             Ok(metadata) if !metadata.file_type().is_file() => {
-                return Ok(CurrentContent::Untracked);
+                return Ok(CurrentContent::NonOwnable);
             }
             Ok(_) => {}
-            Err(err) if absent_error(&err) => return Ok(CurrentContent::Untracked),
+            Err(err) if absent_error(&err) => return Ok(CurrentContent::Absent),
             Err(_) => return Err(READ_FAILED),
         }
         let file = match open_no_follow(&absolute) {
             NoFollowOpen::Opened(file) => file,
-            NoFollowOpen::Refused | NoFollowOpen::Absent => return Ok(CurrentContent::Untracked),
+            NoFollowOpen::Refused => return Ok(CurrentContent::NonOwnable),
+            NoFollowOpen::Absent => return Ok(CurrentContent::Absent),
             NoFollowOpen::Failed => return Err(READ_FAILED),
         };
         verify_opened_containment(&self.shadow_root, path, &file)?;
         let metadata = file.metadata().map_err(|_| READ_FAILED)?;
         if !metadata.file_type().is_file() {
-            return Ok(CurrentContent::Untracked);
+            return Ok(CurrentContent::NonOwnable);
         }
         // Between the capture cap and the SCAN cap (64 MiB) the scanner still
         // lists the file, so a grow-past-capture-cap lands here and retires.
@@ -413,7 +405,7 @@ impl StoreCaptureSink {
         // delta (BEHAVIOR_DELTA.md §7.1) keeps last-known-good rather than
         // false-deleting live user data behind an operational scan bound.
         if metadata.len() > MAX_CAPTURE_BINARY_BYTES {
-            return Ok(CurrentContent::Untracked);
+            return Ok(CurrentContent::NonOwnable);
         }
         let text_media = is_text_media_type(media_type, path);
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
@@ -421,7 +413,7 @@ impl StoreCaptureSink {
             .read_to_end(&mut bytes)
             .map_err(|_| READ_FAILED)?;
         if bytes.len() as u64 > MAX_CAPTURE_BINARY_BYTES {
-            return Ok(CurrentContent::Untracked);
+            return Ok(CurrentContent::NonOwnable);
         }
         if !text_media {
             // Non-text media is engine-ownable BINARY content: the TS oracle
@@ -434,7 +426,7 @@ impl StoreCaptureSink {
                 // Genuine text over the text cap stays untracked (established
                 // TS behavior), even though binary of the same size would be
                 // ownable.
-                Ok(CurrentContent::Untracked)
+                Ok(CurrentContent::NonOwnable)
             }
             Ok(text) => Ok(CurrentContent::Text(text)),
             // A text-suffixed path can be binary in disguise (invalid UTF-8);
@@ -459,7 +451,7 @@ impl StoreCaptureSink {
                 path: path.to_owned(),
                 text,
                 metadata_origin: CAPTURE_METADATA_ORIGIN.to_owned(),
-                metadata_summary: self.moment_summary(path),
+                metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
                 author_json: self.author_json.clone(),
                 now_ms: self.now_ms,
@@ -500,7 +492,7 @@ impl StoreCaptureSink {
                 path: path.to_owned(),
                 bytes,
                 metadata_origin: CAPTURE_METADATA_ORIGIN.to_owned(),
-                metadata_summary: self.moment_summary(path),
+                metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
                 author_json: self.author_json.clone(),
                 now_ms: self.now_ms,
@@ -552,6 +544,7 @@ impl StoreCaptureSink {
                         path: path.to_owned(),
                         text,
                         metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
+                        metadata_correlation_id: self.provenance.correlation_id.clone(),
                         now_ms: self.now_ms,
                         claim_foreign_head,
                     },
@@ -634,6 +627,7 @@ impl StoreCaptureSink {
                 version_id: self.version_id.clone(),
                 path: path.to_owned(),
                 metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
+                metadata_correlation_id: self.provenance.correlation_id.clone(),
                 now_ms: self.now_ms,
                 only_if_own_origin: true,
             },
@@ -648,12 +642,23 @@ impl StoreCaptureSink {
     /// Retire a head this sink OWNS. `only_if_capture_origin` is always set:
     /// a head written by RPC or replication may legitimately have no disk
     /// counterpart, so a disk-driven retire must never destroy it.
-    fn retire_head(&self, path: &str, only_if_text_head: bool) -> Result<(), CaptureError> {
+    /// `summary` is the delete moment's honest label (the pass summary for a
+    /// reconcile delete, an ownership reason for policy/non-ownable retires,
+    /// None for a plain live delete); the pass correlation id always rides so
+    /// a mid-pass delete cannot split the history group.
+    fn retire_head(
+        &self,
+        path: &str,
+        only_if_text_head: bool,
+        summary: Option<String>,
+    ) -> Result<(), CaptureError> {
         match self.actor.capture_retire_blocking(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
                 path: path.to_owned(),
+                metadata_summary: summary,
+                metadata_correlation_id: self.provenance.correlation_id.clone(),
                 now_ms: self.now_ms,
                 request_id: None,
                 only_if_text_head,
@@ -694,7 +699,7 @@ impl StoreCaptureSink {
             (PathClassification::Ignored, _) => Ok(()),
             (PathClassification::Secret, _) => Ok(()),
             (PathClassification::Tracked, Some(normalized)) if normalized == path => {
-                self.retire_head(path, false)
+                self.retire_head(path, false, Some("Stopped tracking by policy".to_owned()))
             }
             (PathClassification::Tracked, _) => Ok(()),
         }
@@ -765,7 +770,7 @@ impl CaptureSink for StoreCaptureSink {
             // on disk, a stale entry would suppress a genuine external
             // revert.
             self.self_writes.clear_path(&self.workspace_id, path);
-            self.retire_head(path, false)?;
+            self.retire_head(path, false, Some("Stopped tracking by policy".to_owned()))?;
             return Ok(IngestOutcome::NotOwned);
         }
         // A Changed observation resolves suppression against what the
@@ -794,15 +799,29 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                 }
             }
-            CurrentContent::Untracked => {
+            CurrentContent::Absent => {
                 if changed {
                     self.self_writes.clear_path(&self.workspace_id, path);
                 }
-                // The path stopped being engine-ownable text (absent, symlink,
-                // non-file, or over cap): retire so no stale snapshot remains,
-                // and report NotOwned so the manifest forgets the path instead
-                // of recording the planned ingest as captured.
-                self.retire_head(path, false)?;
+                // Raced a delete between scan and re-read: retire like an
+                // ordinary delete (pass provenance; no ownership label), and
+                // report NotOwned so the manifest forgets the path.
+                self.retire_head(path, false, self.provenance.summary.clone())?;
+                Ok(IngestOutcome::NotOwned)
+            }
+            CurrentContent::NonOwnable => {
+                if changed {
+                    self.self_writes.clear_path(&self.workspace_id, path);
+                }
+                // Still present but no longer engine-ownable (symlink,
+                // non-file, over cap): retire with the honest TS label so no
+                // stale snapshot remains, and report NotOwned so the manifest
+                // forgets the path instead of recording the planned ingest.
+                self.retire_head(
+                    path,
+                    false,
+                    Some("Stopped tracking non-text content".to_owned()),
+                )?;
                 Ok(IngestOutcome::NotOwned)
             }
             CurrentContent::Binary(bytes) => {
@@ -863,15 +882,19 @@ impl CaptureSink for StoreCaptureSink {
                 // tracked file gone; an escape retains last-known-good.
                 match contained_parent(&self.shadow_root, path) {
                     Containment::Contained => {}
-                    Containment::Absent => return self.retire_head(path, false),
+                    Containment::Absent => {
+                        return self.retire_head(path, false, self.provenance.summary.clone());
+                    }
                     Containment::Escaped => return Err(ESCAPES_ROOT),
                 }
                 match std::fs::symlink_metadata(&absolute) {
                     Ok(metadata) if metadata.file_type().is_file() => Err(RETIRE_RACED),
                     // A non-regular replacement confirms the tracked regular
                     // file gone; absence confirms it outright.
-                    Ok(_) => self.retire_head(path, false),
-                    Err(err) if absent_error(&err) => self.retire_head(path, false),
+                    Ok(_) => self.retire_head(path, false, self.provenance.summary.clone()),
+                    Err(err) if absent_error(&err) => {
+                        self.retire_head(path, false, self.provenance.summary.clone())
+                    }
                     // Indeterminate (permissions, locks): cannot prove
                     // absence — retain last-known-good, fail-safe.
                     Err(_) => Err(RETIRE_FAILED),
@@ -904,8 +927,13 @@ enum CurrentContent {
     Text(String),
     /// Present, engine-ownable binary bytes.
     Binary(Vec<u8>),
-    /// Absent, or present but not engine-ownable at this path.
-    Untracked,
+    /// Confirmed absent (raced a delete between scan and re-read).
+    Absent,
+    /// Present but not engine-ownable at this path (symlink, non-file,
+    /// over cap). Split from [`CurrentContent::Absent`] so the retire can
+    /// carry the honest TS label ("Stopped tracking non-text content")
+    /// without mislabeling a plain raced delete.
+    NonOwnable,
 }
 
 fn absent_error(err: &std::io::Error) -> bool {
@@ -1159,6 +1187,23 @@ mod tests {
             .expect("moment count")
     }
 
+    /// (metadata_summary, metadata_correlation_id) of the LATEST secret
+    /// moment for `path`.
+    fn secret_moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT metadata_summary, metadata_correlation_id FROM secret_moments \
+                     WHERE workspace_id = ?1 AND path = ?2 \
+                     ORDER BY moment_order DESC LIMIT 1",
+                    [WORKSPACE_ID, path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("secret moment metadata")
+    }
+
     /// (metadata_summary, metadata_correlation_id) of the LATEST moment for
     /// `path`.
     fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
@@ -1179,16 +1224,28 @@ mod tests {
     #[test]
     fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
         // MUTATION: dropping the provenance plumb-through in ingest_text /
-        // ingest_binary (or in the domain's capture_ingest paths) fails this:
-        // a multi-file offline reconcile would render as ungrouped unlabeled
-        // history rows.
+        // ingest_binary / retire_head (or in the domain's capture paths)
+        // fails this: a multi-file offline reconcile would render as
+        // ungrouped unlabeled history rows, and a mid-pass DELETE would
+        // split the group (history groups only CONSECUTIVE same-correlation
+        // moments).
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
+        // A pre-pass live capture that the reconcile pass will DELETE.
+        write_file(scratch.path(), "gone.md", b"deleted while closed");
+        let (db, mut live_sink) = sink_for(&scratch, &supervisor);
+        assert!(matches!(
+            ingest(&mut live_sink, "gone.md").expect("seed capture"),
+            IngestOutcome::Captured { .. }
+        ));
+        drop(live_sink);
+        std::fs::remove_file(scratch.path().join("gone.md")).expect("offline delete");
+
         write_file(scratch.path(), "notes/a.md", b"offline edit a");
         write_file(scratch.path(), "photo.png", &[0xff, 0x00, 0xfe]);
+        write_file(scratch.path(), ".env", b"TOKEN=offline");
 
-        let db = scratch.engine_db_path().expect("engine db path");
-        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let actor = supervisor.open(&db, 2).expect("open actor").actor;
         let mut sink = StoreCaptureSink::new_with_self_writes(
             actor,
             WORKSPACE_ID,
@@ -1210,10 +1267,17 @@ mod tests {
             ingest_as(&mut sink, "photo.png", "image/png").expect("binary ingest"),
             IngestOutcome::Captured { .. }
         ));
+        assert!(matches!(
+            ingest(&mut sink, ".env").expect("secret ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        sink.retire("gone.md").expect("pass delete");
         drop(sink);
         supervisor.close(&db).expect("close actor");
 
-        for path in ["notes/a.md", "photo.png"] {
+        // The delete moment carries the SAME provenance as the pass's
+        // writes, so the history group stays contiguous.
+        for path in ["notes/a.md", "photo.png", "gone.md"] {
             let (summary, correlation) = moment_metadata(&db, path);
             assert_eq!(
                 summary.as_deref(),
@@ -1226,26 +1290,72 @@ mod tests {
                 "{path} must carry the shared pass correlation id"
             );
         }
+        // Secret moments keep their per-file label (TS parity) but ride the
+        // pass correlation so they group with the plaintext moments.
+        let (secret_summary, secret_correlation) = secret_moment_metadata(&db, ".env");
+        assert_eq!(secret_summary.as_deref(), Some("Updated .env"));
+        assert_eq!(secret_correlation.as_deref(), Some("reconcile-test-pass"));
     }
 
     #[test]
-    fn a_live_ingest_stamps_a_per_file_updated_summary_with_no_correlation() {
-        // TS parity: watcher-batch captures label each moment
-        // "Updated <basename>" and never mint a correlation id.
+    fn live_text_captures_carry_no_summary_and_binary_captures_stay_labeled() {
+        // TS parity: a live TEXT write carries NO summary (the renderer's
+        // copy for null is "Edited <basename>"); only BINARY (and secret)
+        // writes carry the per-file "Updated <basename>" label. Neither
+        // mints a correlation id.
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
         let (db, mut sink) = sink_for(&scratch, &supervisor);
         write_file(scratch.path(), "notes/live.md", b"live edit");
+        write_file(scratch.path(), "photo.png", &[0xff, 0x00, 0xfe]);
         assert!(matches!(
-            ingest(&mut sink, "notes/live.md").expect("live ingest"),
+            ingest(&mut sink, "notes/live.md").expect("live text ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        assert!(matches!(
+            ingest_as(&mut sink, "photo.png", "image/png").expect("live binary ingest"),
             IngestOutcome::Captured { .. }
         ));
         drop(sink);
         supervisor.close(&db).expect("close actor");
 
-        let (summary, correlation) = moment_metadata(&db, "notes/live.md");
-        assert_eq!(summary.as_deref(), Some("Updated live.md"));
+        assert_eq!(moment_metadata(&db, "notes/live.md"), (None, None));
+        let (summary, correlation) = moment_metadata(&db, "photo.png");
+        assert_eq!(summary.as_deref(), Some("Updated photo.png"));
         assert_eq!(correlation, None);
+    }
+
+    #[test]
+    fn content_kind_transitions_get_honest_moment_summaries() {
+        // TS `writeIfChanged` parity: a tracked path flipping text<->binary
+        // keeps its object identity and the moment says so honestly.
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "notes/flip.md", b"plain text");
+        assert!(matches!(
+            ingest(&mut sink, "notes/flip.md").expect("text ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        // Binary in disguise under a text suffix: invalid UTF-8 routes to the
+        // binary store and the moment records the flip.
+        write_file(scratch.path(), "notes/flip.md", &[0xff, 0x00, 0xfe]);
+        assert!(matches!(
+            ingest(&mut sink, "notes/flip.md").expect("flip to binary"),
+            IngestOutcome::Captured { .. }
+        ));
+        let (summary, _) = moment_metadata(&db, "notes/flip.md");
+        assert_eq!(summary.as_deref(), Some("Became a binary file"));
+
+        write_file(scratch.path(), "notes/flip.md", b"text again");
+        assert!(matches!(
+            ingest(&mut sink, "notes/flip.md").expect("flip back to text"),
+            IngestOutcome::Captured { .. }
+        ));
+        let (summary, _) = moment_metadata(&db, "notes/flip.md");
+        assert_eq!(summary.as_deref(), Some("Became a text file"));
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
     }
 
     #[test]

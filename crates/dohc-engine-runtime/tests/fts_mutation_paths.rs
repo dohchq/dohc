@@ -109,6 +109,8 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
                 workspace_id: WS.to_owned(),
                 version_id: VERSION.to_owned(),
                 path: PATH.to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 now_ms: 50,
                 request_id: None,
                 only_if_text_head: false,

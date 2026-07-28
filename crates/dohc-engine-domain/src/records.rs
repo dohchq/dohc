@@ -401,6 +401,14 @@ pub struct CaptureRetire {
     pub workspace_id: String,
     pub version_id: String,
     pub path: String,
+    /// Honest delete provenance (TS parity): the pass summary for a
+    /// reconcile-pass delete, "Stopped tracking by policy" /
+    /// "Stopped tracking non-text content" for ownership retires, None for a
+    /// plain live delete.
+    pub metadata_summary: Option<String>,
+    /// The pass correlation id, so a delete recorded mid-reconcile does not
+    /// split the pass's history group.
+    pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,
     /// Retire ONLY when the current head is text. The plaintext capture sink

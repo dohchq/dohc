@@ -541,6 +541,8 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
                 workspace_id: WS.to_owned(),
                 version_id: "main".to_owned(),
                 path: PATH.to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 now_ms: 40,
                 request_id: Some("retire-artifact".to_owned()),
                 only_if_text_head: false,

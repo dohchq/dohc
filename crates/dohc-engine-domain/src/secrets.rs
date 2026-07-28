@@ -128,6 +128,11 @@ pub struct CaptureSecret {
     pub path: String,
     pub text: String,
     pub metadata_origin: String,
+    /// The reconcile pass's correlation id, so secret moments group with the
+    /// pass's plaintext moments in history; None for live batches. The
+    /// summary stays the internally stamped "Updated <basename>" (TS parity:
+    /// secret writes always carry the per-file label, even in a reconcile).
+    pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
     /// Whether this write may overwrite a tip written by a DIFFERENT origin
     /// (API, replication). Capture sets it only when it OBSERVED the disk
@@ -161,6 +166,9 @@ pub struct CaptureSecretRetire {
     pub version_id: String,
     pub path: String,
     pub metadata_origin: String,
+    /// See [`CaptureSecret::metadata_correlation_id`]; the summary stays the
+    /// internally stamped "Deleted <basename>".
+    pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
     /// Retire ONLY a tip the engine recorded as being on disk. The capture
     /// sink sets it so a disk delete can never destroy a tip whose plaintext
@@ -449,7 +457,7 @@ impl<'a> SecretFileStore<'a> {
                 moment_id,
                 metadata_origin: input.metadata_origin.clone(),
                 metadata_summary: Some(format!("Updated {basename}")),
-                metadata_correlation_id: None,
+                metadata_correlation_id: input.metadata_correlation_id.clone(),
                 now_ms: input.now_ms,
                 disk_intent: SecretDiskIntent::AlreadyOnDisk,
             },
@@ -1516,7 +1524,7 @@ pub fn capture_secret_retire(
             moment_id,
             metadata_origin: input.metadata_origin.clone(),
             metadata_summary: Some(format!("Deleted {basename}")),
-            metadata_correlation_id: None,
+            metadata_correlation_id: input.metadata_correlation_id.clone(),
             now_ms: input.now_ms,
         },
         SecretDeleteDiskIntent::AlreadyAbsent,

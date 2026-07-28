@@ -113,6 +113,15 @@ where
     // yet (nor can any workspace be open), so such notices are dropped rather
     // than delivered ahead of the helloAck. The generation is stored only
     // AFTER the ack is queued on output_tx, so an event can never overtake it.
+    //
+    // ONE seq counter for the whole session's Event stream. Safe today
+    // because the daemon emits only capture.momentRecorded and no consumer
+    // enforces contiguity over it — but ydocLiveAdapter.receiveEvent marks a
+    // session stale on ANY gap between consecutive ydoc.remoteUpdate seqs,
+    // and it filters by name first, so interleaved capture events would read
+    // as gaps. When daemon-side ydoc.remoteUpdate emission lands, it needs
+    // its own per-session sequencing (or the adapter's gap rule must learn
+    // about the shared stream) before reusing this counter.
     let session_generation = Arc::new(AtomicU64::new(0));
     let events_output = output_tx.clone();
     let events_generation = Arc::clone(&session_generation);
