@@ -61,10 +61,11 @@ use dohc_engine_domain::{
     apply_secret_file_from_version, binary_delete_job_id, binary_rename_delete_job_id,
     binary_rename_write_job_id, binary_rollback_job_identity, capture_ingest_binary_in_tx,
     capture_ingest_in_tx, capture_manifest_seed, capture_retire_in_tx, capture_secret_retire,
-    compare_secret_files_page_keyless, delete_secret_file_keyless, derive_capture_object_id,
-    enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless,
-    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
-    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_page_keyless,
+    compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
+    delete_secret_file_keyless, derive_capture_object_id, enqueue_binary_delete,
+    enqueue_binary_rename, enqueue_write, fork_version_keyless, get_secret_moment_keyless,
+    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
+    list_secret_files_keyless_page, list_secret_moments_page_keyless,
     restore_secret_file_verbatim_with_metadata, secret_file_len_keyless,
     select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
     write_projected_text_in_tx, write_text_in_tx,
@@ -1167,6 +1168,7 @@ enum Command {
     },
     MaterializeReplayPending {
         root_dir: PathBuf,
+        workspace_id: String,
         now_ms: i64,
         reply: oneshot::Sender<Result<usize, RuntimeError>>,
     },
@@ -3337,12 +3339,14 @@ impl ActorHandle {
     pub async fn materialize_replay_pending(
         &self,
         root_dir: PathBuf,
+        workspace_id: String,
         now_ms: i64,
     ) -> Result<usize, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::MaterializeReplayPending {
                 root_dir,
+                workspace_id,
                 now_ms,
                 reply,
             })
@@ -5549,21 +5553,47 @@ struct MaterializationReplaySummary {
     selected_seen: usize,
 }
 
+#[derive(Clone, Copy)]
+struct MaterializationReplayScope<'a> {
+    workspace_id: &'a str,
+    self_writes: Option<&'a dyn SelfWriteRecorder>,
+}
+
 const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_";
 
-fn is_rollback_restore_job(job_id: &str) -> bool {
-    job_id.starts_with(ROLLBACK_RESTORE_PREFIX)
-        || job_id
-            .strip_prefix("binary-rename-0-write-mat_")
-            .is_some_and(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
-        || job_id
-            .strip_prefix("binary-rename-1-delete-mat_")
-            .is_some_and(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
+fn rollback_restore_identity(job_id: &str) -> Option<&str> {
+    if job_id.starts_with(ROLLBACK_RESTORE_PREFIX) {
+        return Some(job_id);
+    }
+    job_id
+        .strip_prefix("binary-rename-0-write-mat_")
+        .or_else(|| job_id.strip_prefix("binary-rename-1-delete-mat_"))
+        .filter(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
+}
+
+fn legacy_rollback_restore_is_corroborated(
+    store: &EngineStore,
+    rollback_id: &str,
+) -> Result<bool, RuntimeError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT 1 FROM moments WHERE moment_id = ?1 LIMIT 1",
+                [rollback_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|ordinary_moment| ordinary_moment.is_none())
+            .map_err(StorageError::corrupt_public)
+        })
+        .map_err(RuntimeError::from)
 }
 
 fn rollback_write_matches_active_snapshot(
     store: &EngineStore,
     write_job: &MaterializationJob,
+    workspace_id: &str,
+    version_id: Option<&str>,
     additionally_absent_path: Option<&str>,
 ) -> Result<bool, RuntimeError> {
     store
@@ -5579,7 +5609,9 @@ fn rollback_write_matches_active_snapshot(
                    AND a.path = ?1 \
                  JOIN snapshots s ON s.workspace_id = a.workspace_id \
                    AND s.version_id = a.version_id AND s.object_id = a.object_id \
-                 WHERE CASE COALESCE(s.content_kind, 'text') \
+                 WHERE w.workspace_id = ?4 \
+                   AND (?5 IS NULL OR a.version_id = ?5) \
+                   AND CASE COALESCE(s.content_kind, 'text') \
                          WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END = ?2 \
                    AND (?3 IS NULL OR NOT EXISTS ( \
                        SELECT 1 FROM path_aliases occupied \
@@ -5590,7 +5622,9 @@ fn rollback_write_matches_active_snapshot(
                 params![
                     write_job.target_path,
                     write_job.content_sha256,
-                    additionally_absent_path
+                    additionally_absent_path,
+                    workspace_id,
+                    version_id
                 ],
                 |_| Ok(()),
             )
@@ -5604,12 +5638,19 @@ fn rollback_write_matches_active_snapshot(
 fn rollback_delete_matches_active_absence(
     store: &EngineStore,
     delete_job: &MaterializationJob,
+    workspace_id: &str,
+    version_id: Option<&str>,
 ) -> Result<bool, RuntimeError> {
     store
         .read_with(|conn| {
             conn.query_row(
                 "SELECT 1 FROM versioned_workspaces w \
-                 WHERE NOT EXISTS ( \
+                 WHERE w.workspace_id = ?2 \
+                   AND (?3 IS NULL OR COALESCE( \
+                       (SELECT av.version_id FROM active_versions av \
+                        WHERE av.workspace_id = w.workspace_id), \
+                       w.main_version_id) = ?3) \
+                   AND NOT EXISTS ( \
                      SELECT 1 FROM path_aliases a \
                      WHERE a.workspace_id = w.workspace_id \
                        AND a.version_id = COALESCE( \
@@ -5618,7 +5659,7 @@ fn rollback_delete_matches_active_absence(
                            w.main_version_id) \
                        AND a.path = ?1) \
                  LIMIT 1",
-                [delete_job.target_path.as_str()],
+                params![delete_job.target_path, workspace_id, version_id],
                 |_| Ok(()),
             )
             .optional()
@@ -5630,37 +5671,63 @@ fn rollback_delete_matches_active_absence(
 
 fn rollback_job_matches_active(
     store: &EngineStore,
+    replay_workspace_id: &str,
     job: &MaterializationJob,
-) -> Result<bool, RuntimeError> {
-    if let Some(rollback_id) = job
-        .job_id
-        .strip_prefix("binary-rename-1-delete-mat_")
-        .filter(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
-    {
+) -> Result<Option<bool>, RuntimeError> {
+    let Some(rollback_id) = rollback_restore_identity(&job.job_id) else {
+        return Ok(None);
+    };
+    let version_id = match decode_binary_rollback_job_identity(rollback_id) {
+        Some((workspace_id, version_id, _)) => {
+            if workspace_id != replay_workspace_id {
+                return Ok(Some(false));
+            }
+            Some(version_id)
+        }
+        None if rollback_id.contains('\u{1f}') => return Ok(Some(false)),
+        None => {
+            if !legacy_rollback_restore_is_corroborated(store, rollback_id)? {
+                return Ok(None);
+            }
+            None
+        }
+    };
+    if job.job_id.starts_with("binary-rename-1-delete-mat_") {
         let write_id = binary_rename_write_job_id(rollback_id);
         let Some(write_job) = store.load_materialization_job(&write_id)? else {
-            return Ok(false);
+            return Ok(Some(false));
         };
-        return rollback_write_matches_active_snapshot(store, &write_job, Some(&job.target_path));
+        return rollback_write_matches_active_snapshot(
+            store,
+            &write_job,
+            replay_workspace_id,
+            version_id,
+            Some(&job.target_path),
+        )
+        .map(Some);
     }
-    if is_rollback_restore_job(&job.job_id) {
-        return match job.operation {
-            MaterializationOperation::Write => {
-                rollback_write_matches_active_snapshot(store, job, None)
-            }
-            MaterializationOperation::Delete => rollback_delete_matches_active_absence(store, job),
-        };
+    match job.operation {
+        MaterializationOperation::Write => rollback_write_matches_active_snapshot(
+            store,
+            job,
+            replay_workspace_id,
+            version_id,
+            None,
+        ),
+        MaterializationOperation::Delete => {
+            rollback_delete_matches_active_absence(store, job, replay_workspace_id, version_id)
+        }
     }
-    Ok(true)
+    .map(Some)
 }
 
 fn replay_pending_materializations(
     store: &mut EngineStore,
     root_dir: &std::path::Path,
+    scope: MaterializationReplayScope<'_>,
     now_ms: i64,
     faults: &dyn FaultInjector,
     selected: Option<&HashSet<String>>,
-    switch_suppression: Option<(&str, &dyn SelfWriteRecorder)>,
     superseded_after_projection_is_drained: bool,
 ) -> Result<MaterializationReplaySummary, RuntimeError> {
     let jobs = store.list_pending_materialization_jobs()?;
@@ -5757,8 +5824,8 @@ fn replay_pending_materializations(
                 }
             };
             let plaintext_sha = hex_sha256(plaintext.as_bytes());
-            if let Some((workspace_id, self_writes)) = switch_suppression {
-                self_writes.record(workspace_id, &job.target_path, &plaintext_sha);
+            if let Some(self_writes) = scope.self_writes {
+                self_writes.record(scope.workspace_id, &job.target_path, &plaintext_sha);
             }
             let outcome = materialize_secret_one(
                 store,
@@ -5782,8 +5849,8 @@ fn replay_pending_materializations(
                     | JobOutcome::Crashed(_),
                 )
                 | Err(_) => {
-                    if let Some((workspace_id, self_writes)) = switch_suppression {
-                        self_writes.retract(workspace_id, &job.target_path, &plaintext_sha);
+                    if let Some(self_writes) = scope.self_writes {
+                        self_writes.retract(scope.workspace_id, &job.target_path, &plaintext_sha);
                     }
                     summary.failed += 1;
                 }
@@ -5799,7 +5866,10 @@ fn replay_pending_materializations(
             }
             continue;
         }
-        if !rollback_job_matches_active(store, &job)? {
+        if matches!(
+            rollback_job_matches_active(store, scope.workspace_id, &job)?,
+            Some(false)
+        ) {
             continue;
         }
         if let Some(moment_id) = job.job_id.strip_prefix("binary-rename-1-delete-mat_") {
@@ -5814,11 +5884,11 @@ fn replay_pending_materializations(
                 continue;
             }
         }
-        let outcome = if let Some((workspace_id, self_writes)) = switch_suppression {
+        let outcome = if let Some(self_writes) = scope.self_writes {
             let (materialized, reported) = materialize_pending_job(
                 store,
                 root_dir,
-                workspace_id,
+                scope.workspace_id,
                 &job,
                 self_writes,
                 now_ms,
@@ -5971,10 +6041,13 @@ fn switch_active_version_on_store(
     let replay = replay_pending_materializations(
         store,
         root_dir,
+        MaterializationReplayScope {
+            workspace_id,
+            self_writes: Some(self_writes),
+        },
         now_ms,
         faults,
         Some(&selected),
-        Some((workspace_id, self_writes)),
         false,
     )?;
     let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
@@ -5990,7 +6063,10 @@ fn switch_active_version_on_store(
     // conflicting with the projection's disk preimage.
     let mut rollback_restores = HashSet::new();
     for job in store.list_pending_materialization_jobs()? {
-        if is_rollback_restore_job(&job.job_id) && rollback_job_matches_active(store, &job)? {
+        if matches!(
+            rollback_job_matches_active(store, workspace_id, &job)?,
+            Some(true)
+        ) {
             rollback_restores.insert(job.job_id);
         }
     }
@@ -5998,10 +6074,13 @@ fn switch_active_version_on_store(
         let replay = replay_pending_materializations(
             store,
             root_dir,
+            MaterializationReplayScope {
+                workspace_id,
+                self_writes: Some(self_writes),
+            },
             now_ms,
             faults,
             Some(&rollback_restores),
-            Some((workspace_id, self_writes)),
             true,
         )?;
         let failed_jobs =
@@ -7075,6 +7154,7 @@ fn worker_main(
             }
             Command::MaterializeReplayPending {
                 root_dir,
+                workspace_id,
                 now_ms,
                 reply,
             } => {
@@ -7082,7 +7162,16 @@ fn worker_main(
                 // switch path calls the same tolerant per-job executor with a
                 // selected durable job set and watcher suppression enabled.
                 let outcome = replay_pending_materializations(
-                    &mut store, &root_dir, now_ms, &NoFaults, None, None, false,
+                    &mut store,
+                    &root_dir,
+                    MaterializationReplayScope {
+                        workspace_id: &workspace_id,
+                        self_writes: None,
+                    },
+                    now_ms,
+                    &NoFaults,
+                    None,
+                    false,
                 )
                 .map(|summary| summary.completed);
                 let _ = reply.send(outcome);
@@ -7097,10 +7186,13 @@ fn worker_main(
                 let outcome = replay_pending_materializations(
                     &mut store,
                     &root_dir,
+                    MaterializationReplayScope {
+                        workspace_id: &workspace_id,
+                        self_writes: Some(self_writes.as_ref()),
+                    },
                     now_ms,
                     &NoFaults,
                     None,
-                    Some((&workspace_id, self_writes.as_ref())),
                     false,
                 )
                 .and_then(|summary| {

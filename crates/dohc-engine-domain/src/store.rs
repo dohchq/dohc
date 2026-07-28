@@ -2444,9 +2444,23 @@ pub fn capture_manifest_seed(
                          AND j.target_path = a.path \
                          AND j.content_sha256 = CASE COALESCE(s.content_kind, 'text') \
                              WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END \
-                         AND (j.job_id GLOB 'rollback-restore_*' \
-                              OR j.job_id GLOB \
-                                 'binary-rename-0-write-mat_rollback-restore_*')) \
+                         AND (substr(j.job_id, 1, length(?3)) = ?3 \
+                              OR substr(j.job_id, \
+                                    length('binary-rename-0-write-mat_') + 1, \
+                                    length(?3)) = ?3 \
+                              OR ((j.job_id GLOB 'rollback-restore_*' \
+                                   OR j.job_id GLOB \
+                                      'binary-rename-0-write-mat_rollback-restore_*') \
+                                  AND instr(j.job_id, char(31)) = 0 \
+                                  AND NOT EXISTS ( \
+                                      SELECT 1 FROM moments rollback_spoof \
+                                      WHERE rollback_spoof.moment_id = CASE \
+                                            WHEN j.job_id GLOB \
+                                                'binary-rename-0-write-mat_*' \
+                                            THEN substr(j.job_id, \
+                                                length( \
+                                                    'binary-rename-0-write-mat_') + 1) \
+                                            ELSE j.job_id END)))) \
                  UNION ALL \
                  SELECT j.target_path, 'binary', NULL, NULL, \
                         j.content_sha256, bb.byte_length \
@@ -2454,8 +2468,12 @@ pub fn capture_manifest_seed(
                  JOIN binary_blobs bb ON bb.sha256 = j.content_sha256 \
                  WHERE j.status = 'pending' AND j.operation = 'delete' \
                     AND (substr(j.job_id, 1, length(?3)) = ?3 \
+                         OR substr(j.job_id, \
+                               length('binary-rename-1-delete-mat_') + 1, \
+                               length(?3)) = ?3 \
                          OR (j.job_id GLOB \
                                 'binary-rename-1-delete-mat_rollback-restore_*' \
+                             AND instr(j.job_id, char(31)) = 0 \
                              AND EXISTS ( \
                                  SELECT 1 \
                                  FROM materialization_jobs restore \
@@ -4089,6 +4107,25 @@ pub fn binary_rollback_job_identity(
         "{}{mutation_moment_id}",
         binary_rollback_job_version_prefix(workspace_id, version_id)
     )
+}
+
+/// Recover the workspace, version, and mutation moment bound into a rollback
+/// materialization identity. Legacy identities intentionally return `None`.
+#[doc(hidden)]
+pub fn decode_binary_rollback_job_identity(job_id: &str) -> Option<(&str, &str, &str)> {
+    let encoded = job_id.strip_prefix("rollback-restore_\u{1f}")?;
+    let (workspace_len, encoded) = encoded.split_once(':')?;
+    let workspace_len = workspace_len.parse::<usize>().ok()?;
+    let workspace_id = encoded.get(..workspace_len)?;
+    let encoded = encoded.get(workspace_len..)?;
+    let (version_len, encoded) = encoded.split_once(':')?;
+    let version_len = version_len.parse::<usize>().ok()?;
+    let version_id = encoded.get(..version_len)?;
+    let mutation_moment_id = encoded.get(version_len..)?.strip_prefix(':')?;
+    if mutation_moment_id.is_empty() {
+        return None;
+    }
+    Some((workspace_id, version_id, mutation_moment_id))
 }
 
 fn binary_rollback_job_version_prefix(workspace_id: &str, version_id: &str) -> String {

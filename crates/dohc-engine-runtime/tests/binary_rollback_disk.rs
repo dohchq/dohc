@@ -293,7 +293,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
     assert!(faults.fired());
 
     actor
-        .materialize_replay_pending(scratch.path().to_path_buf(), 30)
+        .materialize_replay_pending(scratch.path().to_path_buf(), WORKSPACE.to_owned(), 30)
         .await
         .expect("complete rollback restore");
     assert_eq!(
@@ -575,7 +575,7 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
     );
 
     actor
-        .materialize_replay_pending(scratch.path().to_path_buf(), 30)
+        .materialize_replay_pending(scratch.path().to_path_buf(), WORKSPACE.to_owned(), 30)
         .await
         .expect("retry pending rename delete");
     assert!(!scratch.path().join("new-pending.bin").exists());
@@ -1107,7 +1107,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
     assert!(!scratch.path().join("inactive.bin").exists());
     assert_eq!(
         actor
-            .materialize_replay_pending(scratch.path().to_path_buf(), 31)
+            .materialize_replay_pending(scratch.path().to_path_buf(), WORKSPACE.to_owned(), 31)
             .await
             .expect("inactive replay"),
         0
@@ -1342,5 +1342,311 @@ async fn post_commit_active_version_lookup_failure_returns_committed_rollback() 
         .expect("durable restore job");
     assert_eq!(status, "pending");
     drop(connection);
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_replay_cannot_delete_another_workspaces_file() {
+    const WORKSPACE_A: &str = "ws-rollback-owner";
+    const WORKSPACE_B: &str = "ws-replay-root";
+
+    let database = ScratchDir::new().expect("database scratch");
+    let root_a = ScratchDir::new().expect("workspace A root");
+    let root_b = ScratchDir::new().expect("workspace B root");
+    let db = database.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    for workspace_id in [WORKSPACE_A, WORKSPACE_B] {
+        actor
+            .ensure_main_version(
+                workspace_id.to_owned(),
+                1,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("main version");
+    }
+
+    actor
+        .versioned_binary_write(
+            WriteBinary {
+                workspace_id: WORKSPACE_A.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "workspace-a-object".to_owned(),
+                path: "shared.bin".to_owned(),
+                bytes: BYTES.to_vec(),
+                moment_id: "workspace-a-write".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+            },
+            root_a.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("workspace A write");
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    actor
+        .versioned_text_rollback(
+            RollbackTextFileMutation {
+                workspace_id: WORKSPACE_A.to_owned(),
+                version_id: "main".to_owned(),
+                path: "shared.bin".to_owned(),
+                mutation_moment_id: "workspace-a-write".to_owned(),
+                request_id: None,
+                legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
+            },
+            root_a.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("committed workspace A rollback");
+    assert!(faults.fired());
+    assert_eq!(
+        std::fs::read(root_a.path().join("shared.bin")).expect("pending A delete"),
+        BYTES
+    );
+
+    std::fs::write(root_b.path().join("shared.bin"), UPDATED_BYTES).expect("workspace B file");
+    actor
+        .materialize_replay_pending_for_fence(
+            root_b.path().to_path_buf(),
+            WORKSPACE_B.to_owned(),
+            Arc::new(NoRecorder),
+            20,
+        )
+        .await
+        .expect("workspace B replay");
+    assert_eq!(
+        std::fs::read(root_b.path().join("shared.bin")).expect("workspace B file survives"),
+        UPDATED_BYTES
+    );
+
+    let connection = rusqlite::Connection::open(&db).expect("read pending A restore");
+    let restore_job_id = binary_rollback_job_identity(WORKSPACE_A, "main", "workspace-a-write");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            [restore_job_id],
+            |row| row.get(0),
+        )
+        .expect("workspace A restore job");
+    assert_eq!(status, "pending");
+    drop(connection);
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_rollback_prefixed_write_is_superseded_normally() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let spoofed_moment_id = "rollback-restore_ordinary-write";
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+
+    let first = actor
+        .versioned_binary_write(
+            binary_write("spoof.bin", spoofed_moment_id),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("committed spoof-prefixed write");
+    assert_eq!(
+        first.materialize_outcome,
+        PostCommitMaterializeOutcome::Error
+    );
+    assert!(faults.fired());
+    std::fs::write(scratch.path().join("spoof.bin"), BYTES).expect("first bytes on disk");
+
+    actor
+        .versioned_binary_write(
+            binary_write_for("main", "spoof.bin", "newer-write", UPDATED_BYTES),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("newer write");
+    assert_eq!(
+        std::fs::read(scratch.path().join("spoof.bin")).expect("newer disk bytes"),
+        UPDATED_BYTES
+    );
+
+    assert_eq!(
+        actor
+            .materialize_replay_pending(scratch.path().to_path_buf(), WORKSPACE.to_owned(), 30)
+            .await
+            .expect("replay ordinary pending job"),
+        0,
+        "the stale ordinary write is superseded without touching disk"
+    );
+    let connection = rusqlite::Connection::open(&db).expect("read ordinary job");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
+            [spoofed_moment_id],
+            |row| row.get(0),
+        )
+        .expect("spoof-prefixed ordinary job");
+    assert_eq!(status, "complete");
+    assert_eq!(
+        std::fs::read(scratch.path().join("spoof.bin")).expect("newer bytes remain"),
+        UPDATED_BYTES
+    );
+    drop(connection);
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    std::fs::write(scratch.path().join("captured.bin"), BYTES).expect("capture disk seed");
+    actor
+        .capture_ingest_binary(
+            CaptureIngestBinary {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                path: "captured.bin".to_owned(),
+                bytes: BYTES.to_vec(),
+                metadata_origin: "capture".to_owned(),
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+                claim_foreign_head: false,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture main file");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "inactive".to_owned(),
+                name: "Inactive".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 11,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fork inactive version");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "inactive".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 12,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("activate inactive version");
+    actor
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "inactive".to_owned(),
+                path: "captured.bin".to_owned(),
+                moment_id: "inactive-delete".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 13,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("delete on inactive version");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 14,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("reactivate main");
+    let rollback = actor
+        .versioned_text_rollback(
+            rollback("inactive", "captured.bin", "inactive-delete"),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rollback inactive delete");
+    assert_eq!(
+        rollback.materialize_outcome,
+        PostCommitMaterializeOutcome::Skipped
+    );
+
+    std::fs::remove_file(scratch.path().join("captured.bin")).expect("user deletes main file");
+    let seed = actor
+        .capture_manifest_seed(WORKSPACE.to_owned(), "main".to_owned())
+        .await
+        .expect("main capture seed");
+    assert!(
+        seed.iter().any(|entry| entry.path == "captured.bin"),
+        "the inactive version's pending write must not exclude the active capture alias"
+    );
+    let manifest = ScanManifest::from_entries(seed.into_iter().map(|entry| {
+        (
+            entry.path,
+            ManifestEntry {
+                size: entry.size,
+                sha256: entry.sha256,
+            },
+        )
+    }));
+    let mut capture = ReconcileController::rehydrated(manifest, ScanGeneration::default());
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let plan = match capture
+        .reconcile(&scanner, scratch.path(), &CancellationToken::new())
+        .expect("scan deleted active file")
+    {
+        ReconcileRun::Completed(plan) => plan,
+        other => panic!("unexpected capture run: {other:?}"),
+    };
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, CaptureOp::Retire { path } if path == "captured.bin"))
+    );
     supervisor.close(&db).expect("close actor");
 }
