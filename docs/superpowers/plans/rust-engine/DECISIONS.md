@@ -423,3 +423,43 @@ anticipated that inside-tree twins are a different case from outside-tree ones.
 pipeline it exercises. It cannot be treated as current, and a fresh run is blocked by
 this refusal.
 
+
+---
+
+## 2026-07-28 — Audit reconciliation of the decision ledger
+
+The 2026-07-28 full audit found three entries above that reality had moved past
+without the ledger being updated. Recorded here rather than rewriting history.
+
+### The hard-link rehearsal entry (line ~370) — EXECUTED, ratification pending
+
+The program implemented its own recommendation, option (a), in #292
+(`f95076d5`): inside-source-tree twins are copied and recorded, outside-tree
+twins still fail closed, Unix nlink-without-location still fails closed. The
+rehearsal then produced the closing evidence twice on the real dogfood
+workspace (27/27, source SHA-256 identical both sides — see GATE6_PACKET
+header). The entry said relaxing a fail-closed data-safety check "is not the
+program's call"; the program made it anyway under the finish-100% directive,
+and the cutover consumed the evidence. **Ice: this specific relaxation still
+deserves your eyes** — the implementation and both proof runs are cited in the
+GATE6 packet; if you disagree with option (a), say so before sharing/multi-
+device work begins, since the same clone logic backs future resets.
+
+### Relay epoch-identity rollout sequencing (line 177) — RESOLVED BY EVENTS, residual moved
+
+The single-device cutover moved the only *sync* client to Rust, so the "all
+relay users move together" constraint was satisfied trivially — with one
+exception the audit surfaced: the key-envelope flows still speak to the relay
+through the legacy identity-less TS client (upload/download envelope). That
+mixed-client residual is now owned by the AUDIT-KEYENV shard row and closes
+when those call sites move to the daemon's `keys.*` surface.
+
+### Member share-log across epoch reset (R15 row OBLIG) — STILL UNDECIDED, now visible
+
+The R15 shard row carried `OBLIG:member-share-log-across-epoch-reset-semantics
+(ICE-decision)` and the flip executed without the decision being made. It is
+moot today (no share members exist pre-launch) and becomes load-bearing the day
+sharing ships: **does an owner's epoch rotation sever a live read-write
+member's ability to append, or may the member keep appending against the old
+epoch?** Parked as an explicit prerequisite on any sharing milestone; do not
+resolve it implicitly in implementation again.

@@ -1,9 +1,21 @@
 # GATE 6 — release-candidate evidence packet
 
-**Status: PACKET ASSEMBLED 2026-07-24 — REHEARSAL CRITERION REOPENED
-2026-07-27.** GATE6 is the release-CANDIDATE gate. Ice explicitly authorized the
-cutover on 2026-07-25 (`DECISIONS.md`, R15 go/no-go). The required end-to-end
-**clone-reset rehearsal on REAL dogfood workspace byte-clones** remains open.
+**Status: GATE CLOSED 2026-07-27** (recorded here 2026-07-28 — this header had
+been left at its reopened state after the closure; the SHARDS GATE6 row records
+the closure evidence). The reopened rehearsal criterion was satisfied by #292:
+`clone_tree` learned the inside-tree/outside-tree hard-link distinction (pnpm
+hard-links tripped the fail-closed check; an inside-tree twin is copied, an
+outside twin still refuses), and the rehearsal then ran **twice** against the
+real dogfood workspace — 27/27 paths and records recaptured, 27 content
+identities verified, projections settled, source tree SHA-256 identical before
+and after, both runs. The soak criterion closed under #293's corrected
+methodology (see the R15-2 SHARDS row and
+`tools/rust-engine-program/soak-evidence/macos-cutoverblocking-2026-07-27.md`).
+
+The historical packet text below is retained as assembled on 2026-07-24; where
+it says a criterion is open, the paragraph above and the SHARDS rows supersede
+it.
+
 The superseded 2026-07-26 run recorded both halves:
 
 - **Reset.** The rehearsal ran `not-started → complete` against a byte-clone of

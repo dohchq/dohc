@@ -229,14 +229,19 @@ the pull pass. Receiver-local Y.Doc identity pins remain retryable until a
 later delete/rename frees the path; already-ACKed deferred rows instead retain
 their CRDT bytes and surface a terminal refusal during drain. A
 `secret.version.fork` whose sealed snapshot does not yet match local source
-tips remains hard/retryable for two retries so cross-origin source updates can
-arrive; durable per-coordinate attempt three revalidates, then refuses and ACKs
-a still-bad fork instead of wedging the actor indefinitely. This is a
+tips remains hard/retryable and is **never refused-and-acked without source
+progress** — retries continue until the sealed source converges (or a
+malformed sealed source is classified as local corruption and stays unacked).
+An earlier draft used a fixed three-attempt durable retry budget; that was
+deliberately removed before merge because a budget can ack away a fork whose
+source is merely slow to arrive. (This paragraph previously described the
+removed budget and cited its deleted test — corrected 2026-07-28.) This is a
 deliberate availability fix, not bug-for-bug parity.
 Regression coverage:
 `malformed_moment_append_is_refused_and_acked_before_the_origin_continues`,
 `ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges`,
-`secret_version_fork_mismatch_is_refused_after_the_durable_retry_budget`,
+`secret_version_fork_mismatch_never_acks_without_source_progress`,
+`secret_version_fork_retries_after_the_sealed_source_converges`,
 `central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compatibly`,
 `refused_op_acks_and_the_next_same_origin_op_applies`,
 `relay_pull_surfaces_refusal_reason_to_the_caller`,
