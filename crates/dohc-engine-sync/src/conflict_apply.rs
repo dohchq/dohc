@@ -869,17 +869,17 @@ fn apply_mirrored_text_write(
         },
     )?;
     if outcome == MirroredOutcome::Applied {
-        delete_live_search_row(
-            tx,
-            &envelope.workspace_id,
-            &conflict.target_version_id,
-            live,
-        )?;
+        let object_id = live
+            .snapshot
+            .as_ref()
+            .map_or(input.object_id.as_str(), |snapshot| {
+                snapshot.object_id.as_str()
+            });
         upsert_file_search_index(
             tx,
             &envelope.workspace_id,
             &conflict.target_version_id,
-            &input.object_id,
+            object_id,
             &input.path,
             Some(&input.text),
             search_policy,

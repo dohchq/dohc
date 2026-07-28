@@ -6591,8 +6591,13 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome =
-                    create_named_version_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .create_named_version(&input, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::PreflightCreateNamedVersion {
@@ -8102,35 +8107,6 @@ fn ensure_mutation_version_on_store(
     }
     versions.ensure_main_version(workspace_id, "main", now_ms, faults)?;
     Ok(())
-}
-
-fn create_named_version_on_store(
-    store: &mut EngineStore,
-    input: &CreateNamedVersion,
-    faults: &dyn FaultInjector,
-    token: &CancellationToken,
-) -> Result<VersionRecord, RuntimeError> {
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
-    let root_dir = workspace_root_from_database(store.database_path())
-        .ok_or(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "version creation requires the canonical workspace database path",
-        })?
-        .to_path_buf();
-    VersionedTextStore::new(store)
-        .create_named_version_with(input, faults, |tx, _| {
-            ensure_search_index_for_version(
-                tx,
-                &root_dir,
-                &input.workspace_id,
-                &input.new_version_id,
-                input.now_ms,
-                faults,
-            )
-            .map_err(search_domain)
-        })
-        .map_err(RuntimeError::from)
 }
 
 #[allow(clippy::too_many_arguments)]

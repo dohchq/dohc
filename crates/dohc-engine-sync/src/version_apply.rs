@@ -1,13 +1,10 @@
 use std::collections::HashSet;
 
-use dohc_engine_files::{
-    PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
-};
+use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
 
-use crate::file_search::{search_policy_for_store, upsert_file_search_index};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 
 #[derive(Deserialize)]
@@ -62,10 +59,7 @@ pub fn apply_version_envelope(
     if envelope.op_kind != "version.create" {
         return Err(SyncError::UnsupportedOperation);
     }
-    let search_policy = search_policy_for_store(store);
-    apply_envelope_with(store, envelope, faults, |tx, op| {
-        apply_version_create(tx, op, search_policy.as_ref())
-    })
+    apply_envelope_with(store, envelope, faults, apply_version_create)
 }
 
 fn apply_workspace_init(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
@@ -98,11 +92,7 @@ fn apply_workspace_init(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
     Ok(())
 }
 
-fn apply_version_create(
-    tx: &Transaction<'_>,
-    op: &ReplicationEnvelope,
-    search_policy: Option<&SearchPolicySnapshot>,
-) -> Result<(), SyncError> {
+fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
     let has_fork_snapshots = op
         .payload
         .as_object()
@@ -183,7 +173,6 @@ fn apply_version_create(
         for snapshot in snapshots {
             insert_shipped_snapshot(tx, op, &payload.version_id, payload.created_at_ms, snapshot)?;
         }
-        index_version_heads(tx, &op.workspace_id, &payload.version_id, search_policy)?;
         return Ok(());
     }
 
@@ -210,52 +199,6 @@ fn apply_version_create(
         params![op.workspace_id, payload.version_id, source],
     )
     .map_err(SyncError::persist)?;
-    index_version_heads(tx, &op.workspace_id, &payload.version_id, search_policy)?;
-    Ok(())
-}
-
-fn index_version_heads(
-    tx: &Transaction<'_>,
-    workspace_id: &str,
-    version_id: &str,
-    search_policy: Option<&SearchPolicySnapshot>,
-) -> Result<(), SyncError> {
-    let rows = {
-        let mut statement = tx
-            .prepare(
-                "SELECT s.object_id, s.path, s.content_kind, b.text \
-                 FROM snapshots s \
-                 LEFT JOIN blobs b ON b.sha256=s.blob_sha256 \
-                 WHERE s.workspace_id=?1 AND s.version_id=?2",
-            )
-            .map_err(SyncError::corrupt)?;
-        let mapped = statement
-            .query_map(params![workspace_id, version_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })
-            .map_err(SyncError::corrupt)?;
-        mapped
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(SyncError::corrupt)?
-    };
-    for (object_id, path, content_kind, text) in rows {
-        upsert_file_search_index(
-            tx,
-            workspace_id,
-            version_id,
-            &object_id,
-            &path,
-            (content_kind == "text")
-                .then_some(text.as_deref())
-                .flatten(),
-            search_policy,
-        )?;
-    }
     Ok(())
 }
 
