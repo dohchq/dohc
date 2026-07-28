@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,7 +18,6 @@ import {
   MixedRelayTransportError,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
-  relayTransportModeForRoot,
 } from "./engineRelayClient";
 import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 import { refreshSharedViewOnce } from "./sharedView";
@@ -344,24 +343,56 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  it("keeps fresh roots on TypeScript until a valid shadow clone exists", async () => {
-    const rootPath = await mkdtemp(join(tmpdir(), "dohc-relay-mode-unit-"));
-    roots.push(rootPath);
+  it("binds a marker-less rooted workspace to the daemon before session preparation", async () => {
+    const { daemon, routes, sessions } = await harness();
 
     expect(
-      relayTransportModeForRoot(rootPath),
-      "MUTATION: routing a marker-less join to the daemon makes workspace.open fail",
-    ).toBe("typescript");
+      routes.modeFor("workspace-a"),
+      "MUTATION: a rooted workspace must never bind the legacy TypeScript relay",
+    ).toBe("daemon");
     expect(
-      relayTransportModeForRoot(null),
-      "MUTATION: a daemon preflight has no relay identity to present",
-    ).toBe("typescript");
-    const markerDirectory = join(rootPath, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(join(markerDirectory, "SHADOW_CLONE"), "forged");
-    expect(relayTransportModeForRoot(rootPath)).toBe("typescript");
-    await writeFile(join(markerDirectory, "SHADOW_CLONE"), "a".repeat(64));
-    expect(relayTransportModeForRoot(rootPath)).toBe("daemon");
+      daemon.requests,
+      "bind must not require workspace preparation or workspace.open",
+    ).toEqual([]);
+    await sessions.closeAll();
+  });
+
+  it("allows a rooted daemon bind after a rootless probe route is released", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "dohc-relay-probe-route-"));
+    roots.push(rootPath);
+    const routes = new RelayTransportRouteGuard();
+    const relay = { baseUrl: "https://relay.test", token: "secret-token" };
+    routes.bind({
+      workspaceId: "workspace-probed",
+      rootPath: "relay-probe:workspace-probed",
+      relay,
+      mode: "typescript",
+    });
+
+    expect(routes.modeFor("workspace-probed")).toBe("typescript");
+    routes.releaseWorkspace("workspace-probed");
+
+    const daemon = new MockDaemon();
+    const sessions = new EngineWorkspaceSessions(
+      new RelayConfiguredDaemonClientSource(
+        { currentClient: () => daemon },
+        routes,
+      ),
+      { transportRebindAttempts: 1 },
+    );
+    const live = new EngineRelayClient({ sessions, routes });
+    live.bind({
+      workspaceId: "workspace-probed",
+      rootPath,
+      relay,
+    });
+    expect(routes.modeFor("workspace-probed")).toBe("daemon");
+    routes.releaseWorkspace("workspace-probed", "typescript");
+    expect(
+      routes.modeFor("workspace-probed"),
+      "a late probe cleanup must not release a newer daemon route",
+    ).toBe("daemon");
+    await sessions.closeAll();
   });
 
   it("drains every daemon pull page before reporting synchronization complete", async () => {

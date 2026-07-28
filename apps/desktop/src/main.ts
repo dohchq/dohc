@@ -336,7 +336,6 @@ import {
 } from "./workspaces/shareMounts";
 import {
   createVersionedTextStore,
-  claimRelayWorkspace,
   downloadKeyEnvelope,
   installWorkspaceDataKey,
   probeRelayWorkspace,
@@ -352,7 +351,6 @@ import {
   GENERAL_CHANNEL_WIRE_ID,
   fetchShareViewInfo,
   fetchSharedChannelInfo,
-  pullSharedChannel,
   unwrapWorkspaceDataKey,
   uploadKeyEnvelope,
   wrapWorkspaceDataKey,
@@ -382,7 +380,6 @@ import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
-  relayTransportModeForRoot,
   type EngineRelayWorkspaceClient,
 } from "./workspaces/engineRelayClient";
 import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
@@ -1342,20 +1339,16 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
       workspaceId: entry.workspaceId,
       relay,
       channels: matching,
-      ...(daemonRelay
-        ? {
-            pull: async (input) =>
-              await daemonRelay.pullSharedChannel({
-                shareId: input.shareId,
-                channelWireId: input.channelWireId,
-              }),
-            push: async (input) =>
-              await daemonRelay.pushSharedChannel({
-                shareId: input.shareId,
-                channelWireId: input.channelWireId,
-              }),
-          }
-        : {}),
+      pull: async (input) =>
+        await daemonRelay.pullSharedChannel({
+          shareId: input.shareId,
+          channelWireId: input.channelWireId,
+        }),
+      push: async (input) =>
+        await daemonRelay.pushSharedChannel({
+          shareId: input.shareId,
+          channelWireId: input.channelWireId,
+        }),
     });
     if (result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
       const ended = new Set(result.endedShareIds);
@@ -1489,10 +1482,7 @@ function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
-}): EngineRelayWorkspaceClient | null {
-  const mode = relayTransportModeForRoot(input.rootPath);
-  relayTransportRoutes.bind({ ...input, mode });
-  if (mode === "typescript") return null;
+}): EngineRelayWorkspaceClient {
   if (!rustEngineRelayClient) {
     throw new Error("Rust engine relay client is unavailable.");
   }
@@ -1506,13 +1496,12 @@ async function probeWorkspaceRelay(input: {
   relayTransportRoutes.bind({
     ...input,
     rootPath: `relay-probe:${input.workspaceId}`,
-    mode: relayTransportModeForRoot(null),
+    mode: "typescript",
   });
   try {
     return await probeRelayWorkspace(input);
-  } catch (error) {
-    relayTransportRoutes.releaseWorkspace(input.workspaceId);
-    throw error;
+  } finally {
+    relayTransportRoutes.releaseWorkspace(input.workspaceId, "typescript");
   }
 }
 
@@ -1540,15 +1529,11 @@ function engineForWorkspace(
     rootDir: workspace.rootPath,
     remoteWorkspaceId: remote.remoteWorkspaceId,
     relay,
-    ...(daemonRelay
-      ? {
-          operations: {
-            push: () => daemonRelay.push(),
-            pull: () => daemonRelay.pull(),
-            recoverOrigin: () => daemonRelay.recoverOrigin(),
-          },
-        }
-      : {}),
+    operations: {
+      push: () => daemonRelay.push(),
+      pull: () => daemonRelay.pull(),
+      recoverOrigin: () => daemonRelay.recoverOrigin(),
+    },
     capture,
     onChange: () => {
       notifyRenderer();
@@ -3716,14 +3701,7 @@ function registerIpcHandlers(
         relay,
       });
       try {
-        if (daemonRelay) {
-          await daemonRelay.claim();
-        } else {
-          await claimRelayWorkspace({
-            workspaceId: workspace.workspaceId,
-            relay,
-          });
-        }
+        await daemonRelay.claim();
       } catch (error) {
         if (error instanceof RelayWorkspaceUnavailableError) {
           throw new Error("This workspace id is already claimed by another account");
@@ -4152,18 +4130,10 @@ function registerIpcHandlers(
         rootPath: workspace.rootPath,
         relay,
       });
-      const pulled = daemonRelay
-        ? await daemonRelay.pullSharedChannel({
-            shareId: info.shareId,
-            channelWireId: info.channelWireId,
-          })
-        : await pullSharedChannel({
-            rootDir: workspace.rootPath,
-            workspaceId: workspace.workspaceId,
-            relay,
-            shareId: info.shareId,
-            channelWireId: info.channelWireId,
-          });
+      const pulled = await daemonRelay.pullSharedChannel({
+        shareId: info.shareId,
+        channelWireId: info.channelWireId,
+      });
       if (pulled.applied > 0) {
         await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
       }
@@ -4279,14 +4249,10 @@ function registerIpcHandlers(
         workspaceId: created.workspaceId,
         relay,
         shareId: parsed.shareId,
-        ...(daemonRelay
-          ? {
-              pull: async (input) =>
-                await daemonRelay.pullShareView({
-                  shareId: input.shareId,
-                }),
-            }
-          : {}),
+        pull: async (input) =>
+          await daemonRelay.pullShareView({
+            shareId: input.shareId,
+          }),
       });
       if (outcome.status === "ended") {
         throw new ShareUnavailableError();
@@ -4350,14 +4316,10 @@ function registerIpcHandlers(
       workspaceId: workspace.workspaceId,
       relay,
       shareId: shareView.shareId,
-      ...(daemonRelay
-        ? {
-            pull: async (input) =>
-              await daemonRelay.pullShareView({
-                shareId: input.shareId,
-              }),
-          }
-        : {}),
+      pull: async (input) =>
+        await daemonRelay.pullShareView({
+          shareId: input.shareId,
+        }),
     });
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
@@ -6337,18 +6299,10 @@ function registerIpcHandlers(
           rootPath: workspace.rootPath,
           relay,
         });
-        const pulled = daemonRelay
-          ? await daemonRelay.pullSharedChannel({
-              shareId: info.shareId,
-              channelWireId: info.channelWireId,
-            })
-          : await pullSharedChannel({
-              rootDir: workspace.rootPath,
-              workspaceId: workspace.workspaceId,
-              relay,
-              shareId: info.shareId,
-              channelWireId: info.channelWireId,
-            });
+        const pulled = await daemonRelay.pullSharedChannel({
+          shareId: info.shareId,
+          channelWireId: info.channelWireId,
+        });
         if (pulled.applied > 0) {
           await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
         }

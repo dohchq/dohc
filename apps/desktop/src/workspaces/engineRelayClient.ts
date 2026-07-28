@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
@@ -61,21 +59,6 @@ function normalizedRelayUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/u, "");
 }
 
-export function relayTransportModeForRoot(
-  rootPath: string | null,
-): RelayTransportMode {
-  if (rootPath === null) return "typescript";
-  try {
-    const marker = readFileSync(
-      join(rootPath, ".dohc", "engine", "SHADOW_CLONE"),
-      "utf8",
-    );
-    return /^[0-9a-f]{64}$/u.test(marker) ? "daemon" : "typescript";
-  } catch {
-    return "typescript";
-  }
-}
-
 /**
  * Process-lifetime authority for the relay implementation used by a logical
  * workspace + relay origin. A live route can refresh its bearer token, but it
@@ -129,7 +112,16 @@ export class RelayTransportRouteGuard {
     return this.routes.get(workspaceId)?.mode ?? null;
   }
 
-  releaseWorkspace(workspaceId: string): void {
+  releaseWorkspace(
+    workspaceId: string,
+    expectedMode?: RelayTransportMode,
+  ): void {
+    if (
+      expectedMode !== undefined &&
+      this.routes.get(workspaceId)?.mode !== expectedMode
+    ) {
+      return;
+    }
     this.routes.delete(workspaceId);
   }
 

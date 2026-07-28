@@ -128,7 +128,7 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
-  it("uses one bound operation set for the whole pass without TypeScript fallback", async () => {
+  it("never invokes legacy TypeScript relay operations for a rooted daemon operation set", async () => {
     const operations: RelaySyncOperations = {
       push: vi.fn(async () => ({ pushed: 1, originsPushed: [] })),
       pull: vi.fn(async () => pullResult()),
