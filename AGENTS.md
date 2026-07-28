@@ -130,11 +130,19 @@ Deterministic software should provide the sturdy pieces: permissions, storage, s
 
 ## Guidelines when creating PRs and merging them
 
+**CI is deliberately disabled for now (Ice's decision, 2026-07-28).** The PR
+gate (`.github/workflows/pr-checks.yml`) is dispatch-only while we are
+pre-launch; it will be re-enabled when it makes more sense (approaching
+launch / first users). Do not "fix" the missing checks. Consequence for you:
+there is no automated safety net, so before merging any PR you must run the
+canonical Rust gate (`node tools/rust-engine-program/run-rust-checks.mjs`)
+and the JS `typecheck` + `test` suites locally and say so in the PR.
+
 When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. These are setup (coderabbit and codex) to review every PR reliably.
 
 For codex, you have to tag the bot (In a pull request comment, mention @codex review) to trigger a rereview after you commit and push the fixes.
 
-Claude is not setup to review PRs automatically (not part of my subscription), so you have to invoke this review locally (ideally after the PR is created and in parallel with coderabbit and codex reviews). So you have to manually ask claude via the local cli to review the PR and manually go back and forth with it until no issues remain. Everytime claude finishes a review please update the PR via commenting what claude reviewed, then address them. So basically we're trying to do a pseudo claude PR review bot we orchestrate ourselves. Use fable-5 and fallback to opus-4.8 if fable is unavailable or rate limited.
+Claude is not setup to review PRs automatically (not part of my subscription), so you have to invoke this review locally (ideally after the PR is created and in parallel with coderabbit and codex reviews). So you have to manually ask claude via the local cli to review the PR and manually go back and forth with it until no issues remain. Everytime claude finishes a review please update the PR via commenting what claude reviewed, then address them. So basically we're trying to do a pseudo claude PR review bot we orchestrate ourselves. Use fable-5 and fallback to opus-5 if fable is unavailable or rate limited.
 
 ## Regarding long code comments
 

@@ -62,17 +62,17 @@ test("PR workflow validates the canonical verdict and installed cargo-deny versi
   );
 });
 
-test("PR workflow covers merge queues and pull requests targeting every branch", () => {
-  // pull_request must stay bare -- a branches: filter under it would silently
-  // skip PRs. The push trigger is the one place a branch list is correct: it
-  // exists to seed main-readable caches and verify main post-merge, and
-  // restricting it to main is the point, not an accident.
-  assert.match(triggerBlock, /^  pull_request:\s*$/m);
-  assert.match(triggerBlock, /^  merge_group:\s*$/m);
-  const pullRequestBlock = triggerBlock.slice(
-    triggerBlock.indexOf("pull_request:"),
-    triggerBlock.indexOf("push:"),
-  );
-  assert.doesNotMatch(pullRequestBlock, /^\s+branches:/m);
-  assert.match(triggerBlock, /^  push:\n\s+branches: \[main\]$/m);
+test("PR workflow is deliberately disabled: dispatch-only, decision documented", () => {
+  // Ice's 2026-07-28 pre-launch decision: the gate is dispatch-only for now.
+  // This test pins that state so a half re-enable (say, pull_request without
+  // push) can't drift in unnoticed, and so the disable itself reads as a
+  // decision rather than an accident. When re-enabling, restore the previous
+  // version of this test (it asserted: bare `pull_request:` with no branches
+  // filter, `merge_group:`, and `push:` restricted to main).
+  assert.match(triggerBlock, /^  workflow_dispatch:\s*$/m);
+  assert.doesNotMatch(triggerBlock, /^  pull_request:/m);
+  assert.doesNotMatch(triggerBlock, /^  push:/m);
+  assert.doesNotMatch(triggerBlock, /^  merge_group:/m);
+  // The disable must stay explained in the workflow itself.
+  assert.match(workflow, /DISABLED ON PURPOSE \(2026-07-28\)/);
 });
