@@ -11,9 +11,12 @@ use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, StorageError, Tx
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 
-use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
+use dohc_engine_files::{
+    PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
+};
 
 use crate::error::local_corruption;
+use crate::file_search::{search_policy_for_store, upsert_file_search_index};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
 #[derive(Deserialize)]
@@ -171,6 +174,7 @@ pub fn drain_deferred_ydoc_for_key(
     if pending.is_empty() {
         return Ok(YdocDrainResult::default());
     }
+    let search_policy = search_policy_for_store(store);
     let mut applied = 0usize;
     let mut refusals = Vec::new();
     let mut last_payload: Option<YdocUpdatePayload> = None;
@@ -281,6 +285,7 @@ pub fn drain_deferred_ydoc_for_key(
                 drain_origin,
                 drain_seq,
                 payload_recorded_at,
+                search_policy.as_ref(),
             )
         });
         match projected {
@@ -378,6 +383,7 @@ pub fn project_and_write_in_tx(
     origin_id: &str,
     origin_seq: i64,
     now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
     let current = validate_ydoc_identity(tx, key, path)?;
     let projection = doc
@@ -445,6 +451,15 @@ pub fn project_and_write_in_tx(
         },
     )
     .map_err(|error| map_domain_payload_error(error, "ydoc.update projection write failed"))?;
+    upsert_file_search_index(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &result.snapshot.object_id,
+        &result.snapshot.path,
+        Some(&result.snapshot.text),
+        search_policy,
+    )?;
     enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the
@@ -480,6 +495,7 @@ pub fn apply_ydoc_envelope(
             return refuse_ydoc(store, envelope, faults, "ydoc.update payload is malformed");
         }
     };
+    let search_policy = search_policy_for_store(store);
     // Gate on the SAME floor the projection sink applies
     // (`validate_plaintext_storable_path`) rather than R10's narrow
     // share-boundary classifier, which misses reserved 8.3 aliases (`dohc~1`
@@ -715,6 +731,7 @@ pub fn apply_ydoc_envelope(
                 &op.origin_id,
                 op.origin_seq,
                 op.recorded_at_ms,
+                search_policy.as_ref(),
             )?;
             Ok(YdocApplyResult {
                 deferred: false,
@@ -853,6 +870,7 @@ pub fn apply_ydoc_envelope(
                 &op.origin_id,
                 op.origin_seq,
                 op.recorded_at_ms,
+                search_policy.as_ref(),
             ) {
                 Ok(()) => {
                     tx.execute_batch("RELEASE dohc_ydoc_projection")

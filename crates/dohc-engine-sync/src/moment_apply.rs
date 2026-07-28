@@ -1,15 +1,15 @@
-use std::cmp::Ordering;
-use std::path::Path;
-
 use dohc_engine_files::{
-    PathClassification, classify_engine_file_path_normalized,
-    search_policy::{SearchPolicySnapshot, path_is_search_indexed, read_engine_search_policy},
+    PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, get_binary_blob, hex_sha256};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 
+use crate::file_search::{
+    delete_file_search_index, search_policy_for_store, upsert_file_search_index,
+};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,8 +196,7 @@ pub(crate) fn apply_moment_envelope_detailed(
         return Err(SyncError::UnsupportedOperation);
     }
     envelope.validate()?;
-    let search_policy =
-        workspace_root_from_database(store.database_path()).map(read_engine_search_policy);
+    let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
         let payload: MomentAppendPayload = serde_json::from_value(envelope.payload.clone())
             .map_err(|_| SyncError::InvalidInput {
@@ -448,7 +447,7 @@ fn apply_moment_append(
                 params![envelope.workspace_id, payload.version_id, payload.object_id],
             )
             .map_err(SyncError::persist)?;
-            delete_search_row(
+            delete_file_search_index(
                 tx,
                 &envelope.workspace_id,
                 &payload.version_id,
@@ -1229,21 +1228,6 @@ fn upsert_snapshot(
     Ok(())
 }
 
-fn delete_search_row(
-    tx: &Transaction<'_>,
-    workspace_id: &str,
-    version_id: &str,
-    object_id: &str,
-) -> Result<(), SyncError> {
-    tx.execute(
-        "DELETE FROM engine_search_files_fts \
-         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![workspace_id, version_id, object_id],
-    )
-    .map_err(SyncError::persist)?;
-    Ok(())
-}
-
 fn upsert_search_row(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -1252,43 +1236,15 @@ fn upsert_search_row(
     text: &str,
     policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
-    let Some(policy) = policy.filter(|policy| !policy.is_degraded()) else {
-        tx.execute(
-            "UPDATE engine_search_index_state SET file_policy_degraded=1 \
-             WHERE workspace_id=?1 AND version_id=?2",
-            params![workspace_id, payload.version_id],
-        )
-        .map_err(SyncError::persist)?;
-        return Ok(());
-    };
-    delete_search_row(tx, workspace_id, &payload.version_id, &payload.object_id)?;
-    if kind == ContentKind::Text && path_is_search_indexed(policy, &payload.payload_after_path) {
-        tx.execute(
-            "INSERT INTO engine_search_files_fts (workspace_id,version_id,object_id,path,text) \
-             VALUES (?1,?2,?3,?4,?5)",
-            params![
-                workspace_id,
-                payload.version_id,
-                payload.object_id,
-                payload.payload_after_path,
-                text
-            ],
-        )
-        .map_err(SyncError::persist)?;
-    }
-    Ok(())
-}
-
-fn workspace_root_from_database(database_path: &Path) -> Option<&Path> {
-    let engine_dir = database_path.parent()?;
-    let dohc_dir = engine_dir.parent()?;
-    if database_path.file_name()? != "engine.db"
-        || engine_dir.file_name()? != "engine"
-        || dohc_dir.file_name()? != ".dohc"
-    {
-        return None;
-    }
-    dohc_dir.parent()
+    upsert_file_search_index(
+        tx,
+        workspace_id,
+        &payload.version_id,
+        &payload.object_id,
+        &payload.payload_after_path,
+        (kind == ContentKind::Text).then_some(text),
+        policy,
+    )
 }
 
 fn side_from_snapshot(snapshot: &Snapshot) -> ConflictSide {

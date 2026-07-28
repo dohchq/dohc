@@ -58,7 +58,8 @@ use dohc_engine_domain::{
     ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
     VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
     apply_secret_file_from_version, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, capture_manifest_seed, capture_secret_retire,
+    binary_rename_write_job_id, capture_ingest_binary_in_tx, capture_ingest_in_tx,
+    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire,
     compare_secret_files_page_keyless, delete_secret_file_keyless, derive_capture_object_id,
     enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless,
     get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
@@ -6590,13 +6591,8 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .create_named_version(&input, faults.as_ref())
-                        .map_err(RuntimeError::from)
-                };
+                let outcome =
+                    create_named_version_on_store(&mut store, &input, faults.as_ref(), &token);
                 let _ = reply.send(outcome);
             }
             Command::PreflightCreateNamedVersion {
@@ -6862,13 +6858,8 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .resolve_text_conflict(&input, faults.as_ref())
-                        .map_err(RuntimeError::from)
-                };
+                let outcome =
+                    conflict_resolve_on_store(&mut store, &input, faults.as_ref(), &token);
                 let _ = reply.send(outcome);
             }
             Command::ConflictApplyReplicated {
@@ -8113,6 +8104,35 @@ fn ensure_mutation_version_on_store(
     Ok(())
 }
 
+fn create_named_version_on_store(
+    store: &mut EngineStore,
+    input: &CreateNamedVersion,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<VersionRecord, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let root_dir = workspace_root_from_database(store.database_path())
+        .ok_or(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "version creation requires the canonical workspace database path",
+        })?
+        .to_path_buf();
+    VersionedTextStore::new(store)
+        .create_named_version_with(input, faults, |tx, _| {
+            ensure_search_index_for_version(
+                tx,
+                &root_dir,
+                &input.workspace_id,
+                &input.new_version_id,
+                input.now_ms,
+                faults,
+            )
+            .map_err(search_domain)
+        })
+        .map_err(RuntimeError::from)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
@@ -8611,6 +8631,16 @@ fn ydoc_settle_on_store(
                 request_id: None,
             },
         )?;
+        upsert_file_search_index(
+            tx,
+            root_dir,
+            &key.workspace_id,
+            &key.version_id,
+            &result.snapshot.object_id,
+            &result.snapshot.path,
+            &result.snapshot.text,
+        )
+        .map_err(search_domain)?;
         enqueue_write(tx, &result, preimage, "ydoc")?;
         // The settle marker commits ATOMICALLY with the moment: a crash can
         // never leave a minted settlement moment whose lineage still reads
@@ -9018,6 +9048,18 @@ fn search_domain(error: crate::search::SearchError) -> dohc_engine_domain::Domai
     }
 }
 
+fn workspace_root_from_database(database_path: &std::path::Path) -> Option<&std::path::Path> {
+    let engine_dir = database_path.parent()?;
+    let dohc_dir = engine_dir.parent()?;
+    if database_path.file_name()? != "engine.db"
+        || engine_dir.file_name()? != "engine"
+        || dohc_dir.file_name()? != ".dohc"
+    {
+        return None;
+    }
+    dohc_dir.parent()
+}
+
 fn versioned_text_rename_on_store(
     store: &mut EngineStore,
     input: &RenameTextFile,
@@ -9389,9 +9431,31 @@ fn capture_ingest_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
-        .capture_ingest(input, faults)
-        .map_err(RuntimeError::from)
+    let root_dir = workspace_root_from_database(store.database_path())
+        .ok_or(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "capture requires the canonical workspace database path",
+        })?
+        .to_path_buf();
+    let outcome = store.write_with(faults, |tx| {
+        let result = capture_ingest_in_tx(tx, input).map_err(RuntimeError::from)?;
+        if !result.deduped {
+            upsert_file_search_index(
+                tx,
+                &root_dir,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                &result.snapshot.path,
+                &result.snapshot.text,
+            )
+            .map_err(RuntimeError::from)?;
+        }
+        Ok::<_, RuntimeError>(result)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
 }
 
 fn capture_ingest_binary_on_store(
@@ -9413,9 +9477,23 @@ fn capture_ingest_binary_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
-        .capture_ingest_binary(input, faults)
-        .map_err(RuntimeError::from)
+    let outcome = store.write_with(faults, |tx| {
+        let result = capture_ingest_binary_in_tx(tx, input).map_err(RuntimeError::from)?;
+        if !result.deduped {
+            delete_file_search_index(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object_id,
+            )
+            .map_err(RuntimeError::from)?;
+        }
+        Ok::<_, RuntimeError>(result)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
 }
 
 fn capture_secret_on_store(
@@ -9484,9 +9562,25 @@ fn capture_retire_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
-        .capture_retire(input, faults)
-        .map_err(RuntimeError::from)
+    let outcome = store.write_with(faults, |tx| {
+        let result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
+        if !result.deduped
+            && let Some(retired) = result.retired.as_ref()
+        {
+            delete_file_search_index(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &retired.object.object_id,
+            )
+            .map_err(RuntimeError::from)?;
+        }
+        Ok::<_, RuntimeError>(result)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
 }
 
 fn conflict_open_on_store(
@@ -9516,6 +9610,48 @@ fn conflict_open_on_store(
         TxnOutcome::Committed(inserted) => Ok(inserted),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
+}
+
+fn conflict_resolve_on_store(
+    store: &mut EngineStore,
+    input: &ResolveTextConflict,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<ResolveTextConflictResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let root_dir = workspace_root_from_database(store.database_path())
+        .ok_or(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "conflict resolution requires the canonical workspace database path",
+        })?
+        .to_path_buf();
+    VersionedTextStore::new(store)
+        .resolve_text_conflict_with(input, faults, |tx, result| {
+            if let Some(delete) = result.delete.as_ref() {
+                delete_file_search_index(
+                    tx,
+                    &input.workspace_id,
+                    &delete.before.version_id,
+                    &delete.object.object_id,
+                )
+                .map_err(search_domain)?;
+            }
+            if let Some(write) = result.write.as_ref() {
+                upsert_file_search_index(
+                    tx,
+                    &root_dir,
+                    &input.workspace_id,
+                    &write.snapshot.version_id,
+                    &write.snapshot.object_id,
+                    &write.snapshot.path,
+                    &write.snapshot.text,
+                )
+                .map_err(search_domain)?;
+            }
+            Ok(())
+        })
+        .map_err(RuntimeError::from)
 }
 
 /// Execute a run of bounded units, checking `token` BETWEEN units. Each unit is

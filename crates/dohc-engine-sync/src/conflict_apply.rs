@@ -15,11 +15,15 @@ use dohc_engine_domain::{
     load_text_conflict_in_tx, update_text_conflict_row, validate_delete_input,
     validate_write_input, write_binary_file_in_tx, write_text_in_tx,
 };
+use dohc_engine_files::search_policy::SearchPolicySnapshot;
 use dohc_engine_storage::{EngineStore, FaultInjector, Preimage};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use crate::error::local_corruption;
+use crate::file_search::{
+    delete_file_search_index, search_policy_for_store, upsert_file_search_index,
+};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 
 /// Result details callers surface instead of silently swallowing an unmatched
@@ -85,10 +89,11 @@ pub fn apply_conflict_envelope(
     ) {
         return Err(SyncError::UnsupportedOperation);
     }
+    let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, op| {
         let result = match op.op_kind.as_str() {
             "conflict.open" => apply_open(tx, op),
-            "conflict.resolve" => apply_resolve(tx, op),
+            "conflict.resolve" => apply_resolve(tx, op, search_policy.as_ref()),
             _ => Err(SyncError::UnsupportedOperation),
         }?;
         if let Some(pending) = result.pending_resolve.as_ref() {
@@ -429,6 +434,7 @@ enum MirroredOutcome {
 fn apply_resolve(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
+    search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<ConflictApplyResult, SyncError> {
     let payload: ResolvePayload =
         serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
@@ -500,7 +506,8 @@ fn apply_resolve(
     // arm), NOT falsely defer `BinaryUnhydrated`. Only the sync-mirror path
     // below applies recorded content in-transaction.
     if target.metadata_origin == "sync" {
-        match apply_mirrored_content(tx, envelope, &target.conflict_id, resolution)? {
+        match apply_mirrored_content(tx, envelope, &target.conflict_id, resolution, search_policy)?
+        {
             MirroredOutcome::Applied => {}
             MirroredOutcome::Deferred(reason) => {
                 return Ok(ConflictApplyResult {
@@ -550,6 +557,7 @@ fn apply_mirrored_content(
     envelope: &ReplicationEnvelope,
     conflict_id: &str,
     resolution: ConflictResolution,
+    search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<MirroredOutcome, SyncError> {
     if resolution == ConflictResolution::KeptCurrent {
         return Ok(MirroredOutcome::Applied);
@@ -599,9 +607,14 @@ fn apply_mirrored_content(
                 return apply_mirrored_binary_write(tx, envelope, &conflict, &live);
             }
             match &conflict.incoming.snapshot {
-                Some(incoming) => {
-                    apply_mirrored_text_write(tx, envelope, &conflict, &live, &incoming.text)
-                }
+                Some(incoming) => apply_mirrored_text_write(
+                    tx,
+                    envelope,
+                    &conflict,
+                    &live,
+                    &incoming.text,
+                    search_policy,
+                ),
                 // An existing text side always carries a snapshot; a missing one
                 // is nothing to apply rather than invented content.
                 None => Ok(MirroredOutcome::Applied),
@@ -795,12 +808,27 @@ fn apply_mirrored_binary_write(
     // non-normalized path, …) is distinct from the unhydrated pre-check: roll
     // back the partial write and surface `BinaryApplyFailed`, not
     // `BinaryUnhydrated`.
-    apply_within_savepoint(
+    let outcome = apply_within_savepoint(
         tx,
         "mirrored_binary_write",
         PendingResolveReason::BinaryApplyFailed,
         |tx| write_binary_file_in_tx(tx, &input),
-    )
+    )?;
+    if outcome == MirroredOutcome::Applied {
+        delete_live_search_row(
+            tx,
+            &envelope.workspace_id,
+            &conflict.target_version_id,
+            live,
+        )?;
+        delete_file_search_index(
+            tx,
+            &envelope.workspace_id,
+            &conflict.target_version_id,
+            &input.object_id,
+        )?;
+    }
+    Ok(outcome)
 }
 
 /// Apply an incoming text side inside its own savepoint. A validation-class
@@ -813,6 +841,7 @@ fn apply_mirrored_text_write(
     conflict: &TextConflict,
     live: &ConflictFileState,
     text: &str,
+    search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<MirroredOutcome, SyncError> {
     let input = WriteText {
         workspace_id: envelope.workspace_id.clone(),
@@ -829,7 +858,7 @@ fn apply_mirrored_text_write(
         request_id: None,
     };
     let preimage = state_preimage(live);
-    apply_within_savepoint(
+    let outcome = apply_within_savepoint(
         tx,
         "mirrored_text_apply",
         PendingResolveReason::TextApplyRejected,
@@ -838,7 +867,25 @@ fn apply_mirrored_text_write(
             let result = write_text_in_tx(tx, &input)?;
             enqueue_write(tx, &result, preimage, "sync-resolve")
         },
-    )
+    )?;
+    if outcome == MirroredOutcome::Applied {
+        delete_live_search_row(
+            tx,
+            &envelope.workspace_id,
+            &conflict.target_version_id,
+            live,
+        )?;
+        upsert_file_search_index(
+            tx,
+            &envelope.workspace_id,
+            &conflict.target_version_id,
+            &input.object_id,
+            &input.path,
+            Some(&input.text),
+            search_policy,
+        )?;
+    }
+    Ok(outcome)
 }
 
 fn state_preimage(state: &ConflictFileState) -> Preimage {
@@ -885,7 +932,7 @@ fn apply_mirrored_delete(
         author_json: None,
         now_ms: envelope.recorded_at_ms,
     };
-    apply_within_savepoint(
+    let outcome = apply_within_savepoint(
         tx,
         "mirrored_text_apply",
         PendingResolveReason::TextApplyRejected,
@@ -894,7 +941,35 @@ fn apply_mirrored_delete(
             let result = delete_text_in_tx(tx, &input)?;
             enqueue_delete(tx, &result, "sync-resolve")
         },
-    )
+    )?;
+    if outcome == MirroredOutcome::Applied {
+        delete_live_search_row(
+            tx,
+            &envelope.workspace_id,
+            &conflict.target_version_id,
+            live,
+        )?;
+    }
+    Ok(outcome)
+}
+
+fn delete_live_search_row(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    live: &ConflictFileState,
+) -> Result<(), SyncError> {
+    let object_id = match live.content_kind {
+        ConflictContentKind::Text => live
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.object_id.as_str()),
+        ConflictContentKind::Binary => live.binary_object_id.as_deref(),
+    };
+    if let Some(object_id) = object_id {
+        delete_file_search_index(tx, workspace_id, version_id, object_id)?;
+    }
+    Ok(())
 }
 
 /// Run a mirrored content apply inside a named savepoint. On success the
