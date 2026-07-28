@@ -313,7 +313,6 @@ import { claimDmHome, readDmHome } from "./workspaces/dmHomeStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
-import { validateSecretPassphrase } from "./workspaces/secretPassphrase";
 import {
   createChatChannelIpcHandler,
   createReadAwareChatIpcHandler,
@@ -338,23 +337,17 @@ import {
 } from "./workspaces/shareMounts";
 import {
   createVersionedTextStore,
-  downloadKeyEnvelope,
   installWorkspaceDataKey,
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
-  RelayKeyEnvelopeMissingError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   searchWorkspaceEngine,
-  SecretKeyEnvelopeError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   GENERAL_CHANNEL_WIRE_ID,
   fetchShareViewInfo,
   fetchSharedChannelInfo,
-  unwrapWorkspaceDataKey,
-  uploadKeyEnvelope,
-  wrapWorkspaceDataKey,
   type ChannelThreadSummary,
   type ChatChannelSummary,
   type ChatMessage,
@@ -365,6 +358,7 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
+import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
 import {
   engineMomentDetailForIpc,
   engineMomentForIpc,
@@ -3686,6 +3680,11 @@ function registerIpcHandlers(
         rootPath: workspace.rootPath,
         relay,
       });
+      if (!daemonRelay) {
+        throw new Error(
+          "Rust engine relay transport is required for key enrollment.",
+        );
+      }
       try {
         await daemonRelay.claim();
       } catch (error) {
@@ -3698,66 +3697,16 @@ function registerIpcHandlers(
         workspace.rootPath,
         workspace.workspaceId,
       );
-      if (dataKey) {
-        const passphrase = input.passphrase ?? "";
-        const passphraseError = validateSecretPassphrase(passphrase);
-        if (passphraseError) {
-          throw new Error(passphraseError);
-        }
-        try {
-          const { envelopeJson } = await wrapWorkspaceDataKey({
-            dataKey,
-            passphrase,
-            workspaceId: workspace.workspaceId,
-          });
-          await uploadKeyEnvelope({
-            workspaceId: workspace.workspaceId,
-            relay: {
-              baseUrl: credentials.relayUrl,
-              token: credentials.token,
-            },
-            envelopeJson,
-          });
-        } finally {
-          dataKey.fill(0);
-        }
-      } else {
-        let envelopeJson: string | null = null;
-        try {
-          envelopeJson = await downloadKeyEnvelope({
-            workspaceId: workspace.workspaceId,
-            relay: {
-              baseUrl: credentials.relayUrl,
-              token: credentials.token,
-            },
-          });
-        } catch (error) {
-          if (!(error instanceof RelayKeyEnvelopeMissingError)) throw error;
-        }
-        if (envelopeJson) {
-          if (!input.passphrase) {
-            throw new Error("Passphrase required to unlock synced secrets.");
-          }
-          let unwrapped: Buffer;
-          try {
-            unwrapped = await unwrapWorkspaceDataKey({
-              envelopeJson,
-              passphrase: input.passphrase,
-              workspaceId: workspace.workspaceId,
-            });
-          } catch (error) {
-            if (error instanceof SecretKeyEnvelopeError) {
-              throw new Error("Passphrase could not unlock synced secrets.");
-            }
-            throw error;
-          }
-          try {
-            await installWorkspaceDataKey(workspace.rootPath, unwrapped);
-          } finally {
-            unwrapped.fill(0);
-          }
-        }
-      }
+      await enrollWorkspaceKeyEnvelope({
+        workspaceId: workspace.workspaceId,
+        dataKey,
+        ...(input.passphrase === undefined
+          ? {}
+          : { passphrase: input.passphrase }),
+        transport: daemonRelay,
+        installDataKey: async (unwrapped) =>
+          await installWorkspaceDataKey(workspace.rootPath, unwrapped),
+      });
     }
 
     setWorkspaceRemote(workspace.workspaceId, {

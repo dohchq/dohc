@@ -5,6 +5,38 @@ import type { Retryability } from "../ydoc/generated/Retryability";
 import type { WireError } from "../ydoc/generated/WireError";
 import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
 
+export type DaemonErrorCode =
+  | ErrorCode
+  | "CONFLICT"
+  | "ORIGIN_DIVERGED"
+  | "SHARE_UNAVAILABLE"
+  | "KEY_ENVELOPE_MISSING"
+  | "EPOCH_SUPERSEDED"
+  | "IDENTITY_NOT_RECOGNIZED"
+  | "FORBIDDEN"
+  | "SHARE_READ_ONLY"
+  | "SHARE_OPERATION_REJECTED"
+  | "PAYLOAD_TOO_LARGE"
+  | "QUOTA_EXCEEDED"
+  | "RELAY_NO_PROGRESS"
+  | "BLOB_MISSING"
+  | "BLOB_REFERENCE_MISSING"
+  | "BLOB_INVALID"
+  | "IDENTITY_REQUIRED"
+  | "STREAM_IDENTITY_MISMATCH"
+  | "AUTHORSHIP_MISMATCH"
+  | "UNKNOWN_CHAT_OPERATION"
+  | "PRESENCE_CAPACITY"
+  | "SELF_SHARE"
+  | "AMBIGUOUS_SELECTOR"
+  | "INVALID_CHANNEL"
+  | "RELAY_METHOD_NOT_ALLOWED"
+  | "RELAY_INVALID_RESPONSE";
+
+export interface DaemonWireError extends Omit<WireError, "code"> {
+  code: DaemonErrorCode;
+}
+
 export interface MinimalDaemonClient {
   sendRequest(request: Request): Promise<Response>;
   readonly helloAck?: {
@@ -46,12 +78,12 @@ export class DaemonProtocolError extends Error {
 }
 
 export class DaemonRefusalError extends Error {
-  readonly wireCode: ErrorCode;
+  readonly wireCode: DaemonErrorCode;
   readonly retry: Retryability;
   readonly disposition: DaemonRefusalDisposition;
   override readonly cause: unknown;
 
-  constructor(wireError: WireError, cause: unknown) {
+  constructor(wireError: DaemonWireError, cause: unknown) {
     super(wireError.message);
     this.name = "DaemonRefusalError";
     this.wireCode = wireError.code;
@@ -68,7 +100,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-const ERROR_CODES: readonly ErrorCode[] = [
+const ERROR_CODES: readonly DaemonErrorCode[] = [
   "AUTH_FAILED",
   "PROTOCOL_VERSION_UNSUPPORTED",
   "MALFORMED_FRAME",
@@ -81,7 +113,31 @@ const ERROR_CODES: readonly ErrorCode[] = [
   "OVERLOADED",
   "SESSION_EXPIRED",
   "WORKSPACE_UNAVAILABLE",
+  "CONFLICT",
+  "ORIGIN_DIVERGED",
   "SHARE_UNAVAILABLE",
+  "KEY_ENVELOPE_MISSING",
+  "EPOCH_SUPERSEDED",
+  "IDENTITY_NOT_RECOGNIZED",
+  "FORBIDDEN",
+  "SHARE_READ_ONLY",
+  "SHARE_OPERATION_REJECTED",
+  "PAYLOAD_TOO_LARGE",
+  "QUOTA_EXCEEDED",
+  "RELAY_NO_PROGRESS",
+  "BLOB_MISSING",
+  "BLOB_REFERENCE_MISSING",
+  "BLOB_INVALID",
+  "IDENTITY_REQUIRED",
+  "STREAM_IDENTITY_MISMATCH",
+  "AUTHORSHIP_MISMATCH",
+  "UNKNOWN_CHAT_OPERATION",
+  "PRESENCE_CAPACITY",
+  "SELF_SHARE",
+  "AMBIGUOUS_SELECTOR",
+  "INVALID_CHANNEL",
+  "RELAY_METHOD_NOT_ALLOWED",
+  "RELAY_INVALID_RESPONSE",
   "INTERNAL",
 ];
 
@@ -95,12 +151,12 @@ const RETRYABILITIES: readonly Retryability[] = [
 // This intentionally duck-types EngineClientError because the package cannot
 // import the desktop app. Source of truth:
 // apps/desktop/src/workspaces/engineClient.ts:423-448.
-function wireErrorFrom(error: unknown): WireError | null {
+function wireErrorFrom(error: unknown): DaemonWireError | null {
   if (!isRecord(error) || !isRecord(error.wireError)) return null;
   const candidate = error.wireError;
   if (
     typeof candidate.code !== "string" ||
-    !ERROR_CODES.includes(candidate.code as ErrorCode) ||
+    !ERROR_CODES.includes(candidate.code as DaemonErrorCode) ||
     typeof candidate.message !== "string" ||
     typeof candidate.retry !== "string" ||
     !RETRYABILITIES.includes(candidate.retry as Retryability)
@@ -108,7 +164,7 @@ function wireErrorFrom(error: unknown): WireError | null {
     return null;
   }
   return {
-    code: candidate.code as ErrorCode,
+    code: candidate.code as DaemonErrorCode,
     message: candidate.message,
     retry: candidate.retry as Retryability,
   };

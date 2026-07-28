@@ -17,6 +17,7 @@ export * from "./chats/chatsLoopbackEngine";
 export * from "./chats/chatsLiveAdapter";
 export * from "./chats/chatsWireContract";
 export * from "./live/daemonLiveAdapter";
+export * from "./relay/keyEnvelopeWireContract";
 export * from "./versioned/versionedLoopbackEngine";
 export * from "./versioned/versionedLiveAdapter";
 export * from "./versioned/versionedWireContract";
