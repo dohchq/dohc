@@ -423,3 +423,47 @@ anticipated that inside-tree twins are a different case from outside-tree ones.
 pipeline it exercises. It cannot be treated as current, and a fresh run is blocked by
 this refusal.
 
+
+---
+
+## 2026-07-28 — Audit reconciliation of the decision ledger
+
+The 2026-07-28 full audit found three entries above that reality had moved past
+without the ledger being updated. Recorded here rather than rewriting history.
+
+### The hard-link rehearsal entry (line ~370) — EXECUTED, ratification pending
+
+The program implemented its own recommendation, option (a), in #292
+(`f95076d5`): inside-source-tree twins are copied and recorded, outside-tree
+twins still fail closed, Unix nlink-without-location still fails closed. The
+rehearsal then produced the closing evidence twice on the real dogfood
+workspace (27/27, source SHA-256 identical both sides — see GATE6_PACKET
+header). The entry said relaxing a fail-closed data-safety check "is not the
+program's call"; the program made it anyway under the finish-100% directive,
+and the cutover consumed the evidence. **Ice: this specific relaxation still
+deserves your eyes** — the implementation and both proof runs are cited in the
+GATE6 packet; if you disagree with option (a), say so before sharing/multi-
+device work begins, since the same clone logic backs future resets.
+
+### Relay epoch-identity rollout sequencing (line 177) — STILL OPEN; closure rides two audit shards
+
+First recorded here as "resolved by events" — codex review correctly rejected
+that: the AUDIT-MARKERRACE defect means a rooted workspace could still lose
+the first-open race and bind the identity-less TS sync client for a whole
+process lifetime, which is precisely the mixed-client 409 scenario the
+original decision describes. So the constraint was NOT satisfied trivially.
+The entry stays OPEN until both audit shards land: AUDIT-MARKERRACE (rooted
+transport is unconditionally the daemon — removes the racy TS sync path) and
+AUDIT-KEYENV (envelope call sites onto the daemon `keys.*` surface — removes
+the last deliberate TS relay caller). Record the closure here when both are
+merged.
+
+### Member share-log across epoch reset (R15 row OBLIG) — STILL UNDECIDED, now visible
+
+The R15 shard row carried `OBLIG:member-share-log-across-epoch-reset-semantics
+(ICE-decision)` and the flip executed without the decision being made. It is
+moot today (no share members exist pre-launch) and becomes load-bearing the day
+sharing ships: **does an owner's epoch rotation sever a live read-write
+member's ability to append, or may the member keep appending against the old
+epoch?** Parked as an explicit prerequisite on any sharing milestone; do not
+resolve it implicitly in implementation again.

@@ -2747,3 +2747,54 @@ Two rules earned today:
   measuring the code.
 - **Normalize per unit of work.** Bytes per second falls when throughput falls, so the
   bound is flattered exactly when things are getting worse.
+
+## 2026-07-28 — Full post-cutover audit: the engine core held; the edges did not
+
+A 25-agent audit (completeness, test-quality, eight subsystem reviews, every
+serious finding independently re-derived by an adversarial verifier) ran
+against `edaeb575`, alongside direct evidence runs: canonical Windows gate
+PASS, desktop suite 176 files / 2,257 tests green, and all four real-daemon
+e2e suites passing — including relay push/pull between two replicas.
+
+What held under hostile review: the yrs decode pre-validation (all 53 call
+sites), the refuse-and-ack transaction shape, #294's eviction completeness,
+migration-drift impossibility (no separate fresh-create path), the daemon
+handshake, and the cutover itself — no fallback-to-legacy path exists.
+
+What did not: **eleven confirmed P1s**, every one an instance of the program's
+two known shapes (a guarantee skipped on the sibling path; a check that checks
+nothing). The tracker gained one `AUDIT-*` row per finding; headline set:
+
+- Replicated chat applies skip chat FTS (apply.rs:1198) — synced messages
+  permanently unsearchable. Capture ingest/retire/binary and ydoc settle skip
+  file FTS (actor.rs:9373) — search rots on the primary editing paths.
+- One refused ydoc recordUpdate poisons settle AND close (silent edit loss, a
+  leaked daemon lease); applyLocalUpdate applies renderer-first and drops
+  edits on non-reconnect errors.
+- conflicts.list is the one unpaged read — an over-frame response kills the
+  daemon session in a loop. Rolled-back binary delete/rename never restores
+  disk, and the next open capture-retires the restored head.
+- Ordinary materialization follows symlinked ancestors (secret paths walk;
+  ordinary paths do not). Desktop search still opens a second WRITABLE
+  connection to the daemon-owned engine.db. The SHADOW_CLONE relay-mode sniff
+  races the daemon's own marker write. CLI daemon reads collide with the
+  desktop's Full-mode handle. The collab crash/exactly-once test family is
+  compiled out of every gate (all 17 pass when forced — today).
+
+The most expensive discovery was operational, not code: **every workflow was
+disabled** (#300, for cost) — the PR gate built in #275 never ran again, and
+the R16 groups merged "verified locally with CI disabled". #306 re-fits the
+gate inside Blacksmith's free tier (3,000 x64-2vCPU-min/month): rust-cache,
+prebuilt pinned deny/audit (compiling them from source had cost more than the
+rest of the gate), and a paths filter. Same checks, verbatim honesty
+machinery; measured cost to be posted on the PR before merge.
+
+Ledger corrections in this commit: REPLICATION-REFUSAL and R15-2 rows flipped
+to their real states (both had been left open after closing), RPC-E parent
+closed, the R13b-S10/R13b-rest contradiction resolved, the GATE6 packet header
+updated to the closure, the macOS soak evidence banked in-repo before its run
+logs expire, RPC_GAP's removed retry-budget paragraph corrected to the shipped
+never-ack-without-progress semantics, and DECISIONS.md reconciled (hard-link
+relaxation executed-pending-ratification; relay sequencing resolved-by-events
+with the key-envelope residual moved to AUDIT-KEYENV; the member-share-log
+epoch question recorded as a sharing-milestone prerequisite).
