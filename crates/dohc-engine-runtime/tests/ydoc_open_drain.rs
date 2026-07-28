@@ -47,6 +47,8 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
                 path: PATH.to_owned(),
                 text: "before".to_owned(),
                 metadata_origin: "capture".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
                 author_json: None,
                 now_ms: 10,
                 request_id: Some("drain-gate-seed".to_owned()),

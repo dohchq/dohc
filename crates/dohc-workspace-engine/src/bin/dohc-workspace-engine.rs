@@ -10,12 +10,12 @@ use dohc_engine_protocol::{
     supervisor::{Supervisor, SupervisorConfig},
     transport::{BlobEgress, EngineService as ProtocolEngineService},
     wire::{
-        BlobStart, Envelope, ErrorEnvelope, Hello, HelloAck, PROTOCOL_VERSION, Response,
+        BlobStart, Envelope, ErrorEnvelope, Event, Hello, HelloAck, PROTOCOL_VERSION, Response,
         decode_control, encode_control,
     },
 };
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
-use dohc_workspace_engine::EngineService;
+use dohc_workspace_engine::{EngineEventNotice, EngineService};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -67,6 +67,7 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
         tokio::io::stdin(),
         tokio::io::stdout(),
         supervisor,
+        service.events().subscribe(),
         || WorkspaceSupervisor::global().close_all(),
     )
     .await;
@@ -83,6 +84,7 @@ async fn run_transport<R, W, S, C>(
     mut input: R,
     output: W,
     supervisor: Arc<Supervisor<S>>,
+    mut events_rx: tokio::sync::mpsc::UnboundedReceiver<EngineEventNotice>,
     close_workspaces: C,
 ) -> Result<(), io::Error>
 where
@@ -104,6 +106,34 @@ where
             write_output(output, &mut output_rx, &writer_limits, writer_active_egress).await;
         let _ = writer_signal.send(true);
         result
+    });
+
+    // Service-initiated notices become wire Event envelopes, sequenced per
+    // session. Generation 0 = pre-handshake: no authenticated consumer exists
+    // yet (nor can any workspace be open), so such notices are dropped rather
+    // than delivered ahead of the helloAck. The generation is stored only
+    // AFTER the ack is queued on output_tx, so an event can never overtake it.
+    let session_generation = Arc::new(AtomicU64::new(0));
+    let events_output = output_tx.clone();
+    let events_generation = Arc::clone(&session_generation);
+    let event_forwarder = tokio::spawn(async move {
+        let mut seq: u64 = 0;
+        while let Some(notice) = events_rx.recv().await {
+            let generation = events_generation.load(Ordering::SeqCst);
+            if generation == 0 {
+                continue;
+            }
+            seq += 1;
+            let envelope = Envelope::Event(Event {
+                seq,
+                session_generation: generation,
+                name: notice.name,
+                payload: notice.payload,
+            });
+            if events_output.send(envelope.into()).await.is_err() {
+                break;
+            }
+        }
     });
 
     let mut decoder = FrameDecoder::new(limits);
@@ -199,12 +229,17 @@ where
                     Ok(ack) => {
                         authenticated = true;
                         negotiated_capabilities.extend(ack.capabilities.iter().cloned());
+                        let generation = ack.session_generation;
                         if output_tx
                             .send(Envelope::HelloAck(ack).into())
                             .await
                             .is_err()
                         {
                             keep_running = false;
+                        } else {
+                            // Events unlock only once the ack is ORDERED on
+                            // the output queue, so none can precede it.
+                            session_generation.store(generation, Ordering::SeqCst);
                         }
                     }
                     Err(error) => {
@@ -248,6 +283,10 @@ where
         cancel_active_requests(&supervisor, &active_requests);
     }
     let close_result = drain_requests_then_close(&mut request_tasks, close_workspaces).await;
+    // The forwarder holds an output_tx clone; end it BEFORE dropping ours or
+    // the writer's channel never closes and the join below hangs forever.
+    event_forwarder.abort();
+    let _ = event_forwarder.await;
     drop(output_tx);
     drop(writer_gone_tx);
     let writer_result = writer
@@ -659,6 +698,12 @@ mod tests {
     use tokio::sync::Notify;
 
     const TEST_AUTH_TOKEN: &str = "r14-test-token";
+
+    /// A pre-closed events channel for transports whose test does not
+    /// exercise event delivery.
+    fn no_events() -> tokio::sync::mpsc::UnboundedReceiver<EngineEventNotice> {
+        tokio::sync::mpsc::unbounded_channel().1
+    }
 
     fn encode_envelope(envelope: &Envelope) -> Vec<u8> {
         // `encode_control` already returns a COMPLETE frame (header + JSON
@@ -1115,6 +1160,7 @@ mod tests {
                 server_input,
                 server_output,
                 supervisor,
+                no_events(),
                 || Ok(()),
             ));
             client_output
@@ -1204,6 +1250,98 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn service_events_flow_as_event_envelopes_only_after_hello_ack() {
+        // MUTATION: dropping the event forwarder makes the event read hang
+        // (timeout); skipping the generation gate delivers the pre-handshake
+        // notice / stamps generation 0; resetting seq per notice breaks the
+        // seq == 1 assertion for the first DELIVERED event.
+        let service = Arc::new(CountingService {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
+        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Queued BEFORE the handshake: must be dropped, never delivered ahead
+        // of the helloAck.
+        events_tx
+            .send(EngineEventNotice {
+                name: "capture.momentRecorded".to_owned(),
+                payload: serde_json::json!({ "marker": "pre-handshake" }),
+            })
+            .expect("queue pre-handshake notice");
+
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (server_input, server_output) = tokio::io::split(server);
+        let (mut client_input, mut client_output) = tokio::io::split(client);
+        let run = tokio::spawn(run_transport(
+            TEST_AUTH_TOKEN.to_owned(),
+            server_input,
+            server_output,
+            supervisor,
+            events_rx,
+            || Ok(()),
+        ));
+        // Let the forwarder consume the early notice against generation 0.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        client_output
+            .write_all(&hello_bytes())
+            .await
+            .expect("send hello");
+
+        let limits = WireLimits::default();
+        let mut decoder = FrameDecoder::new(limits.clone());
+        async fn next_envelope(
+            decoder: &mut FrameDecoder,
+            input: &mut (impl AsyncRead + Unpin),
+            limits: &WireLimits,
+        ) -> Envelope {
+            loop {
+                if let Some(frame) = decoder.next_frame().expect("frame") {
+                    let Frame::Control(payload) = frame else {
+                        panic!("expected a control frame");
+                    };
+                    return decode_control(&payload, limits).expect("decode envelope");
+                }
+                let mut buf = [0_u8; 4096];
+                let read = input.read(&mut buf).await.expect("read");
+                assert!(read > 0, "transport closed before the expected frame");
+                decoder.push(&buf[..read]);
+            }
+        }
+        let Envelope::HelloAck(ack) = next_envelope(&mut decoder, &mut client_input, &limits).await
+        else {
+            panic!("first envelope must be HelloAck");
+        };
+
+        events_tx
+            .send(EngineEventNotice {
+                name: "capture.momentRecorded".to_owned(),
+                payload: serde_json::json!({ "marker": "post-handshake" }),
+            })
+            .expect("queue post-handshake notice");
+        let event = tokio::time::timeout(
+            Duration::from_secs(10),
+            next_envelope(&mut decoder, &mut client_input, &limits),
+        )
+        .await
+        .expect("event envelope arrives");
+        let Envelope::Event(event) = event else {
+            panic!("second envelope must be the Event");
+        };
+        assert_eq!(event.name, "capture.momentRecorded");
+        assert_eq!(event.payload["marker"], "post-handshake");
+        assert_eq!(
+            event.seq, 1,
+            "the dropped pre-handshake notice must not consume a seq"
+        );
+        assert_eq!(event.session_generation, ack.session_generation);
+
+        client_output.shutdown().await.expect("close client input");
+        run.await
+            .expect("transport task")
+            .expect("transport succeeds");
+    }
+
     #[test]
     fn blob_capability_is_negotiated_only_when_requested() {
         // MUTATION: omit "blobs" from the daemon's supported capabilities or
@@ -1239,6 +1377,7 @@ mod tests {
                 HelloThenEndlessRequests::new(),
                 FailingWriter,
                 supervisor,
+                no_events(),
                 || Ok(()),
             ),
         )
@@ -1274,6 +1413,7 @@ mod tests {
             HelloThenRequests::new(&[1]),
             SinkWriter,
             supervisor,
+            no_events(),
             move || {
                 close_witness.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
@@ -1326,6 +1466,7 @@ mod tests {
                 HelloThenRequestsThenError::new(&[1]),
                 SinkWriter,
                 supervisor,
+                no_events(),
                 move || {
                     close_witness.store(true, std::sync::atomic::Ordering::SeqCst);
                     Ok(())

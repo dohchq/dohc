@@ -59,6 +59,17 @@ const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
     reason: "workspace secret key unavailable",
 };
 
+/// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
+/// pass stamps ONE summary + correlation id across every moment it records
+/// ("Reconciled offline edits"); a live watcher batch leaves both unset and
+/// each ingest falls back to a per-file "Updated <basename>" summary with no
+/// correlation id.
+#[derive(Clone, Default)]
+pub struct CaptureProvenance {
+    pub summary: Option<String>,
+    pub correlation_id: Option<String>,
+}
+
 /// Single-shot identities of daemon-materialized Y.Doc projections. Capture
 /// consumes a matching `(workspace, path, sha)` observation instead of
 /// claiming the just-settled head as a new external edit.
@@ -213,6 +224,7 @@ pub struct StoreCaptureSink {
     /// mint a key file.
     secret_key: Option<SecretDataKey>,
     self_writes: SelfWriteSuppression,
+    provenance: CaptureProvenance,
 }
 
 /// The sink's view of `.dohc/files.toml`, split by WHY there are no rules.
@@ -249,6 +261,7 @@ impl StoreCaptureSink {
             now_ms,
             author_json,
             SelfWriteSuppression::default(),
+            CaptureProvenance::default(),
         )
     }
 
@@ -261,6 +274,7 @@ impl StoreCaptureSink {
         now_ms: i64,
         author_json: Option<String>,
         self_writes: SelfWriteSuppression,
+        provenance: CaptureProvenance,
     ) -> Self {
         let shadow_root = shadow_root.into();
         // `.dohc/files.toml` can only NARROW engine ownership below the hard
@@ -288,7 +302,17 @@ impl StoreCaptureSink {
             policy_held: std::cell::Cell::new(false),
             secret_key: None,
             self_writes,
+            provenance,
         }
+    }
+
+    /// The summary for one recorded moment: the pass-level provenance when
+    /// set (a reconcile), otherwise the TS live-batch convention.
+    fn moment_summary(&self, path: &str) -> Option<String> {
+        Some(match &self.provenance.summary {
+            Some(summary) => summary.clone(),
+            None => format!("Updated {}", path.rsplit('/').next().unwrap_or(path)),
+        })
     }
 
     fn ensure_secret_key(&mut self) -> Result<&SecretDataKey, CaptureError> {
@@ -435,6 +459,8 @@ impl StoreCaptureSink {
                 path: path.to_owned(),
                 text,
                 metadata_origin: CAPTURE_METADATA_ORIGIN.to_owned(),
+                metadata_summary: self.moment_summary(path),
+                metadata_correlation_id: self.provenance.correlation_id.clone(),
                 author_json: self.author_json.clone(),
                 now_ms: self.now_ms,
                 request_id: None,
@@ -474,6 +500,8 @@ impl StoreCaptureSink {
                 path: path.to_owned(),
                 bytes,
                 metadata_origin: CAPTURE_METADATA_ORIGIN.to_owned(),
+                metadata_summary: self.moment_summary(path),
+                metadata_correlation_id: self.provenance.correlation_id.clone(),
                 author_json: self.author_json.clone(),
                 now_ms: self.now_ms,
                 request_id: None,
@@ -1129,6 +1157,95 @@ mod tests {
                 )
             })
             .expect("moment count")
+    }
+
+    /// (metadata_summary, metadata_correlation_id) of the LATEST moment for
+    /// `path`.
+    fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT metadata_summary, metadata_correlation_id FROM moments \
+                     WHERE workspace_id = ?1 AND path = ?2 \
+                     ORDER BY moment_order DESC LIMIT 1",
+                    [WORKSPACE_ID, path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("moment metadata")
+    }
+
+    #[test]
+    fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
+        // MUTATION: dropping the provenance plumb-through in ingest_text /
+        // ingest_binary (or in the domain's capture_ingest paths) fails this:
+        // a multi-file offline reconcile would render as ungrouped unlabeled
+        // history rows.
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        write_file(scratch.path(), "notes/a.md", b"offline edit a");
+        write_file(scratch.path(), "photo.png", &[0xff, 0x00, 0xfe]);
+
+        let db = scratch.engine_db_path().expect("engine db path");
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let mut sink = StoreCaptureSink::new_with_self_writes(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            scratch.path(),
+            10,
+            None,
+            SelfWriteSuppression::default(),
+            CaptureProvenance {
+                summary: Some("Reconciled offline edits".to_owned()),
+                correlation_id: Some("reconcile-test-pass".to_owned()),
+            },
+        );
+        assert!(matches!(
+            ingest(&mut sink, "notes/a.md").expect("text ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        assert!(matches!(
+            ingest_as(&mut sink, "photo.png", "image/png").expect("binary ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+
+        for path in ["notes/a.md", "photo.png"] {
+            let (summary, correlation) = moment_metadata(&db, path);
+            assert_eq!(
+                summary.as_deref(),
+                Some("Reconciled offline edits"),
+                "{path} must carry the pass summary"
+            );
+            assert_eq!(
+                correlation.as_deref(),
+                Some("reconcile-test-pass"),
+                "{path} must carry the shared pass correlation id"
+            );
+        }
+    }
+
+    #[test]
+    fn a_live_ingest_stamps_a_per_file_updated_summary_with_no_correlation() {
+        // TS parity: watcher-batch captures label each moment
+        // "Updated <basename>" and never mint a correlation id.
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "notes/live.md", b"live edit");
+        assert!(matches!(
+            ingest(&mut sink, "notes/live.md").expect("live ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+
+        let (summary, correlation) = moment_metadata(&db, "notes/live.md");
+        assert_eq!(summary.as_deref(), Some("Updated live.md"));
+        assert_eq!(correlation, None);
     }
 
     #[test]
@@ -1794,6 +1911,7 @@ mod tests {
             4,
             None,
             self_writes,
+            CaptureProvenance::default(),
         );
         let observed_sha = match sink.read_current_secret(".env").expect("read secret") {
             SecretContent::Text(text) => sha256_hex(text.as_bytes()),

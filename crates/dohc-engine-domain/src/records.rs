@@ -342,6 +342,12 @@ pub struct CaptureIngest {
     pub path: String,
     pub text: String,
     pub metadata_origin: String,
+    /// Human-readable moment provenance (TS parity: "Reconciled offline
+    /// edits" for a reconcile pass, "Updated <basename>" for a live batch).
+    pub metadata_summary: Option<String>,
+    /// Ties the per-file moments of one reconcile pass together so history
+    /// surfaces can group them; NULL for live watcher batches.
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,
@@ -366,6 +372,10 @@ pub struct CaptureIngestBinary {
     pub path: String,
     pub bytes: Vec<u8>,
     pub metadata_origin: String,
+    /// See [`CaptureIngest::metadata_summary`].
+    pub metadata_summary: Option<String>,
+    /// See [`CaptureIngest::metadata_correlation_id`].
+    pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,

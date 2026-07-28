@@ -61,6 +61,55 @@ use std::{
 const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 
+/// Emitted once per settled capture batch / reconcile pass that recorded at
+/// least one moment. The renderer's history timeline refreshes on it — in
+/// daemon mode no TS write path runs, so nothing else announces these writes.
+pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
+
+/// An engine-initiated notification for the transport host to deliver as a
+/// wire `Event` envelope. The service assigns only the NAME and PAYLOAD;
+/// the per-session `seq`/`sessionGeneration` belong to the transport.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineEventNotice {
+    pub name: String,
+    pub payload: Value,
+}
+
+/// Cloneable emitter handle shared between the service and its background
+/// tasks (the capture driver). At most one subscriber (the stdio host); with
+/// no subscriber, notices are dropped — an embedded in-process host that
+/// never subscribes owes no drain.
+#[derive(Clone, Default)]
+pub struct EngineEvents {
+    subscriber: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<EngineEventNotice>>>>,
+}
+
+impl EngineEvents {
+    /// Route subsequent notices to the returned receiver, replacing any
+    /// previous subscriber.
+    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<EngineEventNotice> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        *lock(&self.subscriber) = Some(tx);
+        rx
+    }
+
+    pub(crate) fn emit(&self, name: &str, payload: Value) {
+        let mut subscriber = lock(&self.subscriber);
+        if let Some(tx) = subscriber.as_ref()
+            && tx
+                .send(EngineEventNotice {
+                    name: name.to_owned(),
+                    payload,
+                })
+                .is_err()
+        {
+            // The receiver is gone; drop it so later emits stop cloning
+            // payloads into a dead channel.
+            *subscriber = None;
+        }
+    }
+}
+
 /// In-band CONTENT (binary bytes, secret plaintext) uses the capture contract's
 /// smaller request cap. Larger binary blobs use the full-range write endpoint
 /// or raw blob-chunk egress.
@@ -476,6 +525,7 @@ pub struct EngineService {
     /// lifetime's ledger rows (hash-mismatch refusals or false dedupes).
     session_epoch: String,
     self_writes: SelfWriteSuppression,
+    events: EngineEvents,
     #[cfg(feature = "harness")]
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
     /// PER-EngineService by design. Production runs exactly ONE EngineService per
@@ -629,6 +679,7 @@ impl EngineService {
                     std::sync::LazyLock::new(SelfWriteSuppression::default);
                 GLOBAL_SELF_WRITES.clone()
             },
+            events: EngineEvents::default(),
             #[cfg(feature = "harness")]
             capture_apply_probe: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
@@ -1229,6 +1280,12 @@ impl EngineService {
         }
     }
 
+    /// The service's event emitter. The transport host subscribes once and
+    /// forwards notices to the connected client as wire `Event` envelopes.
+    pub fn events(&self) -> EngineEvents {
+        self.events.clone()
+    }
+
     async fn workspace_open(
         &self,
         ctx: &RequestContext,
@@ -1463,6 +1520,7 @@ impl EngineService {
                 self.self_writes.scoped(&root),
                 Arc::clone(&capture_apply_gate),
                 capture_author_json.flatten(),
+                self.events.clone(),
                 #[cfg(feature = "harness")]
                 self.capture_apply_probe.clone(),
             );
@@ -2930,6 +2988,7 @@ impl EngineService {
         let handle = handle.clone();
         let sessions = Arc::clone(&self.sessions);
         let self_writes = self.self_writes.clone();
+        let events = self.events.clone();
         let detached_operation = operation.to_owned();
         let settle_summary = settle_summary.to_owned();
         #[cfg(feature = "harness")]
@@ -2986,6 +3045,7 @@ impl EngineService {
                 &capture_status,
                 &self_writes.scoped(&open.root),
                 capture_author_json,
+                events.clone(),
                 token.clone(),
             )
             .await;

@@ -144,6 +144,7 @@ export class EngineDaemonLifecycle {
   private readonly inFlightLaunches = new Set<InFlightLaunch>();
   private readonly launchingClients = new Set<EngineDaemonClient>();
   private readonly workspaceRequestTails = new Map<string, Promise<void>>();
+  private readonly eventHandlers = new Set<(event: Event) => void>();
 
   constructor(options: EngineDaemonLifecycleOptions) {
     this.options = options;
@@ -284,6 +285,16 @@ export class EngineDaemonLifecycle {
 
   currentClient(): EngineDaemonClient {
     return this.requireClient();
+  }
+
+  // Daemon-initiated events, surviving restarts: handlers registered here are
+  // fanned out from every client this lifecycle launches, so a consumer never
+  // has to know the daemon was replaced.
+  onEvent(handler: (event: Event) => void): () => void {
+    this.eventHandlers.add(handler);
+    return () => {
+      this.eventHandlers.delete(handler);
+    };
   }
 
   async stop(): Promise<void> {
@@ -453,6 +464,12 @@ export class EngineDaemonLifecycle {
       );
     }
     this.launchingClients.add(client);
+    // Attach the fan-out BEFORE the smoke: a capture event from a workspace
+    // reopened early in the daemon's life must not be lost to subscription
+    // ordering. The subscription dies with the client if this launch fails.
+    client.onEvent?.((event) => {
+      for (const handler of this.eventHandlers) handler(event);
+    });
     try {
       if (this.stopping || this.exitedGenerations.has(generation)) {
         await this.closeClient(client);

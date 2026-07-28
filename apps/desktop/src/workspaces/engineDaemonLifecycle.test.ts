@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Request, Response } from "@dohc/workspace-engine-client";
+import type { Event, Request, Response } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineClientSpawnOptions } from "./engineClient";
 import {
@@ -115,6 +115,59 @@ describe("Rust engine daemon lifecycle", () => {
     expect(tokens[1]).toMatch(/^[0-9a-f]{64}$/);
     expect(tokens[1]).not.toBe(tokens[0]);
     await lifecycle.stop();
+  });
+
+  it("fans daemon events out to lifecycle handlers across restarts", async () => {
+    // MUTATION: dropping the client.onEvent re-subscription in launchOnce (or
+    // the handler fan-out) leaves `seen` empty and this test fails — in daemon
+    // mode capture events are the ONLY history-refresh signal.
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const emitters: ((event: Event) => void)[] = [];
+    class EventfulClient extends FakeClient {
+      onEvent(handler: (event: Event) => void): () => void {
+        emitters.push(handler);
+        return () => {};
+      }
+    }
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new EventfulClient();
+      },
+    });
+    const seen: number[] = [];
+    lifecycle.onEvent((event) => {
+      if (event.name === "capture.momentRecorded") seen.push(event.sessionGeneration);
+    });
+
+    try {
+      await lifecycle.start();
+      expect(emitters).toHaveLength(1);
+      emitters[0]?.({
+        seq: 1,
+        sessionGeneration: 1,
+        name: "capture.momentRecorded",
+        payload: null,
+      });
+      expect(seen).toEqual([1]);
+
+      // The daemon restarts: the SAME lifecycle handler keeps receiving from
+      // the replacement client without re-registering.
+      exits[0]?.(1, null);
+      await vi.waitFor(() => expect(emitters.length).toBeGreaterThan(1));
+      emitters[1]?.({
+        seq: 1,
+        sessionGeneration: 2,
+        name: "capture.momentRecorded",
+        payload: null,
+      });
+      expect(seen).toEqual([1, 2]);
+    } finally {
+      await lifecycle.stop();
+    }
   });
 
   it("fails loudly before launch when the configured binary is missing", async () => {

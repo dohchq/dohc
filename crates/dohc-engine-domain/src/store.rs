@@ -1900,6 +1900,13 @@ pub fn capture_ingest_in_tx(
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
+    // Frame extended with the summary/correlation provenance fields: the
+    // capture sink passes request_id: None, so no store holds recorded
+    // capture-ingest requests and no legacy-hash compatibility shim is owed
+    // (same reasoning as the capture-retire frame below).
+    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+    let (correlation_kind, correlation) =
+        hash_optional_text_fields(input.metadata_correlation_id.as_deref());
     let payload_hash = hash_fields(&[
         b"capture-ingest",
         input.workspace_id.as_bytes(),
@@ -1907,6 +1914,10 @@ pub fn capture_ingest_in_tx(
         input.path.as_bytes(),
         input.text.as_bytes(),
         input.metadata_origin.as_bytes(),
+        summary_kind,
+        summary,
+        correlation_kind,
+        correlation,
         author_kind,
         author_json,
         if input.claim_foreign_head {
@@ -1989,8 +2000,8 @@ pub fn capture_ingest_in_tx(
         text: input.text.clone(),
         moment_id,
         metadata_origin: input.metadata_origin.clone(),
-        metadata_summary: None,
-        metadata_correlation_id: None,
+        metadata_summary: input.metadata_summary.clone(),
+        metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
         request_id: None,
@@ -2200,6 +2211,10 @@ pub fn capture_ingest_binary_in_tx(
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
+    // Frame extended with summary/correlation; see `capture_ingest_in_tx`.
+    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+    let (correlation_kind, correlation) =
+        hash_optional_text_fields(input.metadata_correlation_id.as_deref());
     let payload_hash = hash_fields(&[
         b"capture-ingest-binary",
         input.workspace_id.as_bytes(),
@@ -2207,6 +2222,10 @@ pub fn capture_ingest_binary_in_tx(
         path.as_bytes(),
         binary_sha256.as_bytes(),
         input.metadata_origin.as_bytes(),
+        summary_kind,
+        summary,
+        correlation_kind,
+        correlation,
         author_kind,
         author_json,
         if input.claim_foreign_head {
@@ -2332,8 +2351,8 @@ pub fn capture_ingest_binary_in_tx(
             binary_sha256: &binary_sha256,
             moment_id: &moment_id,
             metadata_origin: &input.metadata_origin,
-            metadata_summary: None,
-            metadata_correlation_id: None,
+            metadata_summary: input.metadata_summary.as_deref(),
+            metadata_correlation_id: input.metadata_correlation_id.as_deref(),
             author_json: input.author_json.as_deref(),
             now_ms: input.now_ms,
         },

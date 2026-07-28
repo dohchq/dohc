@@ -17,6 +17,8 @@ fn ingest(path: &str, text: &str, now_ms: i64) -> CaptureIngest {
         path: path.to_owned(),
         text: text.to_owned(),
         metadata_origin: "capture-test".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms,
         request_id: None,
@@ -150,6 +152,8 @@ fn length_prefixed_capture_ids_distinguish_embedded_nul_tuples() {
         path: PATH.to_owned(),
         text: text.to_owned(),
         metadata_origin: "capture-test".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms,
         request_id: None,
@@ -465,6 +469,8 @@ fn ingest_binary(path: &str, bytes: &[u8], now_ms: i64) -> CaptureIngestBinary {
         path: path.to_owned(),
         bytes: bytes.to_vec(),
         metadata_origin: "capture-test".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         author_json: None,
         now_ms,
         request_id: None,
@@ -1045,4 +1051,55 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
         )
         .expect("protected retire is a no-op");
     assert!(protected.retired.is_none(), "RPC heads stay protected");
+}
+
+#[test]
+fn capture_ingest_persists_the_supplied_summary_and_correlation() {
+    // MUTATION: reverting either plumb-through in capture_ingest_in_tx /
+    // capture_ingest_binary_in_tx (back to hardcoded None) fails this test —
+    // the daemon reconcile pass depends on both reaching the moment row.
+    let (_scratch, mut store) = open_store();
+    let mut text_input = ingest("notes/a.md", "A", 10);
+    text_input.metadata_summary = Some("Reconciled offline edits".to_owned());
+    text_input.metadata_correlation_id = Some("reconcile-1".to_owned());
+    let text_result = VersionedTextStore::new(&mut store)
+        .capture_ingest(&text_input, &NO_FAULTS)
+        .expect("text capture");
+    assert_eq!(
+        text_result.moment.metadata_summary.as_deref(),
+        Some("Reconciled offline edits")
+    );
+    assert_eq!(
+        text_result.moment.metadata_correlation_id.as_deref(),
+        Some("reconcile-1")
+    );
+
+    let mut binary_input = ingest_binary("img.png", &[0xff, 0x00, 0x01], 20);
+    binary_input.metadata_summary = Some("Reconciled offline edits".to_owned());
+    binary_input.metadata_correlation_id = Some("reconcile-1".to_owned());
+    let binary_result = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&binary_input, &NO_FAULTS)
+        .expect("binary capture");
+    let moments = VersionedTextStore::new(&mut store)
+        .list_moments(&ListMomentsQuery {
+            workspace_id: WS.to_owned(),
+            version_id: Some(VERSION.to_owned()),
+            object_id: Some(binary_result.object_id.clone()),
+            limit: 10,
+            before_moment_order: None,
+        })
+        .expect("list binary moments");
+    let moment = moments
+        .moments
+        .iter()
+        .find(|moment| moment.moment_id == binary_result.moment_id)
+        .expect("binary capture moment");
+    assert_eq!(
+        moment.metadata_summary.as_deref(),
+        Some("Reconciled offline edits")
+    );
+    assert_eq!(
+        moment.metadata_correlation_id.as_deref(),
+        Some("reconcile-1")
+    );
 }

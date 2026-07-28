@@ -369,6 +369,7 @@ import {
   defaultEngineBinaryPath,
   type EngineDaemonLifecycle,
 } from "./workspaces/engineDaemonLifecycle";
+import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
 import {
   EngineRelayClient,
   probeWorkspaceRelay,
@@ -7269,6 +7270,10 @@ async function startRustEngineDaemon(): Promise<boolean> {
   });
   try {
     await rustEngineDaemon.start();
+    // The daemon owns capture: its capture.momentRecorded events are the ONLY
+    // signal that a moment landed, so bridge them onto the renderer's
+    // workspace-activity ping or the history timeline goes permanently stale.
+    bridgeCaptureEventsToRenderer(rustEngineDaemon, notifyRenderer);
     const relaySource = new RelayConfiguredDaemonClientSource(
       rustEngineDaemon,
       relayTransportRoutes,

@@ -9,7 +9,10 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::{
+    CAPTURE_MOMENT_RECORDED_EVENT, EngineEventNotice, EngineService,
+    shadow_fence::write_shadow_marker_for_harness,
+};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
@@ -212,6 +215,135 @@ async fn autonomous_capture_notices_external_disk_changes() {
         )
         .await
         .expect("close");
+}
+
+/// Drain `capture.momentRecorded` events until one carries `path`, panicking
+/// past the shared WAIT deadline.
+async fn wait_for_moment_event(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<EngineEventNotice>,
+    path: &str,
+) -> EngineEventNotice {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let notice = tokio::time::timeout(remaining, events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for a capture event carrying {path}"))
+            .expect("event channel stays open");
+        assert_eq!(notice.name, CAPTURE_MOMENT_RECORDED_EVENT);
+        assert_eq!(notice.payload["workspaceId"], WORKSPACE_ID);
+        if notice.payload["paths"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|entry| entry == path))
+        {
+            return notice;
+        }
+    }
+}
+
+/// (metadataSummary, metadataCorrelationId) of the latest moment for `path`,
+/// read AFTER workspace close through a fresh store connection.
+fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
+    let store = EngineStore::open(db, 100).expect("reopen store");
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT metadata_summary, metadata_correlation_id FROM moments \
+                 WHERE workspace_id = ?1 AND path = ?2 ORDER BY moment_order DESC LIMIT 1",
+                [WORKSPACE_ID, path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("moment metadata")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() {
+    // The D1/D2 acceptance pair. MUTATION: reverting the sink provenance
+    // plumb-through leaves both summaries NULL; reverting start_layer's
+    // shared provenance splits the correlation ids; deleting the apply-path
+    // emit leaves the event wait to time out.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "offline-a.md", b"edited while closed a");
+    write_file(scratch.path(), "offline-b.md", b"edited while closed b");
+
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "offline-a.md",
+        Some("edited while closed a"),
+    )
+    .await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "offline-b.md",
+        Some("edited while closed b"),
+    )
+    .await;
+
+    // ONE batched event per settled reconcile pass covers both files.
+    let notice = wait_for_moment_event(&mut events, "offline-a.md").await;
+    let paths = notice.payload["paths"].as_array().expect("paths").clone();
+    if !paths.iter().any(|entry| entry == "offline-b.md") {
+        wait_for_moment_event(&mut events, "offline-b.md").await;
+    }
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_100, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary_a, correlation_a) = moment_metadata(&db_path, "offline-a.md");
+    let (summary_b, correlation_b) = moment_metadata(&db_path, "offline-b.md");
+    assert_eq!(summary_a.as_deref(), Some("Reconciled offline edits"));
+    assert_eq!(summary_b.as_deref(), Some("Reconciled offline edits"));
+    let correlation_a = correlation_a.expect("baseline moments carry a correlation id");
+    assert_eq!(
+        Some(correlation_a.as_str()),
+        correlation_b.as_deref(),
+        "one reconcile pass = ONE correlation id across its per-file moments"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_live_capture_emits_an_event_and_stamps_an_updated_summary() {
+    // D2 for the watcher path: with no TS write in the loop, this event is
+    // the ONLY signal that tells the renderer a moment landed. D1: live
+    // moments keep the TS per-file label and mint no correlation id.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+
+    write_file(scratch.path(), "notes/live.md", b"external edit");
+    wait_for_text(&transport, &handle, "notes/live.md", Some("external edit")).await;
+    wait_for_moment_event(&mut events, "notes/live.md").await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_200, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, correlation) = moment_metadata(&db_path, "notes/live.md");
+    assert_eq!(summary.as_deref(), Some("Updated live.md"));
+    assert_eq!(correlation, None, "live captures mint no correlation id");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
