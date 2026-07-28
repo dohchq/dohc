@@ -1,11 +1,10 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  probeRelayWorkspace,
   type PendingConflictResolve,
   type ProbeRelayWorkspaceResult,
   type PullSharedChannelResult,
@@ -61,21 +60,6 @@ function normalizedRelayUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/u, "");
 }
 
-export function relayTransportModeForRoot(
-  rootPath: string | null,
-): RelayTransportMode {
-  if (rootPath === null) return "typescript";
-  try {
-    const marker = readFileSync(
-      join(rootPath, ".dohc", "engine", "SHADOW_CLONE"),
-      "utf8",
-    );
-    return /^[0-9a-f]{64}$/u.test(marker) ? "daemon" : "typescript";
-  } catch {
-    return "typescript";
-  }
-}
-
 /**
  * Process-lifetime authority for the relay implementation used by a logical
  * workspace + relay origin. A live route can refresh its bearer token, but it
@@ -129,7 +113,16 @@ export class RelayTransportRouteGuard {
     return this.routes.get(workspaceId)?.mode ?? null;
   }
 
-  releaseWorkspace(workspaceId: string): void {
+  releaseWorkspace(
+    workspaceId: string,
+    expectedMode?: RelayTransportMode,
+  ): void {
+    if (
+      expectedMode !== undefined &&
+      this.routes.get(workspaceId)?.mode !== expectedMode
+    ) {
+      return;
+    }
     this.routes.delete(workspaceId);
   }
 
@@ -144,6 +137,27 @@ export class RelayTransportRouteGuard {
     const route = this.routes.get(workspaceId);
     if (!route || route.mode !== "daemon") return null;
     return route.locations.get(rootPath) ?? null;
+  }
+}
+
+export async function probeWorkspaceRelay(
+  routes: RelayTransportRouteGuard,
+  input: {
+    workspaceId: string;
+    relay: SyncRelayConnection;
+  },
+): Promise<ProbeRelayWorkspaceResult> {
+  routes.bind({
+    ...input,
+    rootPath: `relay-probe:${input.workspaceId}`,
+    mode: "typescript",
+  });
+  try {
+    return await probeRelayWorkspace(input);
+  } finally {
+    // Mode-conditional cleanup cannot tear down a daemon route that replaced
+    // the transient probe route while its HTTP request was in flight.
+    routes.releaseWorkspace(input.workspaceId, "typescript");
   }
 }
 
@@ -367,6 +381,9 @@ function pendingCursor(
 function translateRelayError(method: string, error: unknown): never {
   if (!(error instanceof DaemonRefusalError)) throw error;
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
+  if (error.wireCode === "SHARE_UNAVAILABLE") {
+    throw new ShareUnavailableError();
+  }
   if (error.wireCode === "WORKSPACE_UNAVAILABLE") {
     if (method.startsWith("share.")) throw new ShareUnavailableError();
     throw new RelayWorkspaceUnavailableError();

@@ -81,6 +81,7 @@ const ERROR_CODES: readonly ErrorCode[] = [
   "OVERLOADED",
   "SESSION_EXPIRED",
   "WORKSPACE_UNAVAILABLE",
+  "SHARE_UNAVAILABLE",
   "INTERNAL",
 ];
 

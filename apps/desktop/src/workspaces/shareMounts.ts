@@ -149,6 +149,16 @@ export function mountStoreWorkspaceIdFor(shareId: string): string {
   return `share-mount-${shareId}`;
 }
 
+export function relayTargetForShareMount(
+  hostRoot: string,
+  mount: Pick<ShareMountRecord, "shareId" | "label">,
+): { workspaceId: string; rootPath: string } {
+  return {
+    workspaceId: mountStoreWorkspaceIdFor(mount.shareId),
+    rootPath: mountRootFor(hostRoot, mount.label),
+  };
+}
+
 // One refresh pass for one mount: pull the share's filtered ops into the
 // mount's nested store, materialize under shared-with-me/<label>/, commit
 // the cursor. Same crash-safe ordering as the standalone shared view
@@ -158,6 +168,7 @@ export async function refreshShareMountOnce(input: {
   hostRoot: string;
   mount: Pick<ShareMountRecord, "shareId" | "label">;
   relay: SyncRelayConnection;
+  pull: Parameters<typeof refreshSharedViewOnce>[0]["pull"];
 }): Promise<RefreshSharedViewOutcome> {
   const rootDir = mountRootFor(input.hostRoot, input.mount.label);
   await assertRealMountRoot(input.hostRoot, input.mount.label);
@@ -175,6 +186,7 @@ export async function refreshShareMountOnce(input: {
     workspaceId: storeWorkspaceId,
     relay: input.relay,
     shareId: input.mount.shareId,
+    pull: input.pull,
   });
   if (repaired === 0) return outcome;
   return {

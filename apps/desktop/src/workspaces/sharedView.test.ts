@@ -3,9 +3,10 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { pullShareView } from "@dohc/workspace-engine";
 import {
   materializeSharedViewPaths,
-  refreshSharedViewOnce,
+  refreshSharedViewOnce as refreshSharedViewOnceWithPull,
 } from "./sharedView";
 
 const WORKSPACE = "shared-view-ws";
@@ -26,6 +27,15 @@ async function tempRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "dohc-shared-view-desktop-"));
   roots.push(root);
   return root;
+}
+
+function refreshSharedViewOnce(
+  input: Omit<
+    Parameters<typeof refreshSharedViewOnceWithPull>[0],
+    "pull"
+  >,
+) {
+  return refreshSharedViewOnceWithPull({ ...input, pull: pullShareView });
 }
 
 function sha256(content: string): string {

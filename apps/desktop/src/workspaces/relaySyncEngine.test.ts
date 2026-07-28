@@ -31,6 +31,20 @@ const pushMock = vi.mocked(pushWorkspaceToRelay);
 const pullMock = vi.mocked(pullWorkspaceFromRelay);
 const recoverMock = vi.mocked(recoverRelayOrigin);
 
+const mockRelayInput = {
+  rootDir: "/tmp/workspace",
+  workspaceId: "workspace-a",
+  relay: { baseUrl: "http://relay.test", token: "token" },
+};
+
+function mockOperations(): RelaySyncOperations {
+  return {
+    push: () => pushMock(mockRelayInput),
+    pull: () => pullMock(mockRelayInput),
+    recoverOrigin: () => recoverMock(mockRelayInput),
+  };
+}
+
 function pullResult(
   overrides: Partial<PullWorkspaceFromRelayResult> = {},
 ): PullWorkspaceFromRelayResult {
@@ -100,7 +114,7 @@ function engine(input: {
     ...(input.onRustEngineAdapterPull
       ? { onRustEngineAdapterPull: input.onRustEngineAdapterPull }
       : {}),
-    ...(input.operations ? { operations: input.operations } : {}),
+    operations: input.operations ?? mockOperations(),
     debounceMs: 100,
     initialBackoffMs: 500,
     maxBackoffMs: 2000,
@@ -128,7 +142,7 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
-  it("uses one bound operation set for the whole pass without TypeScript fallback", async () => {
+  it("never invokes legacy TypeScript relay operations for a rooted daemon operation set", async () => {
     const operations: RelaySyncOperations = {
       push: vi.fn(async () => ({ pushed: 1, originsPushed: [] })),
       pull: vi.fn(async () => pullResult()),
@@ -414,6 +428,7 @@ describe("relaySyncEngine", () => {
       rootDir: "/tmp/workspace",
       remoteWorkspaceId: "workspace-a",
       relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(),
       capture: cap,
       onChange: vi.fn(),
       countOpenConflicts: async () => openConflicts,
@@ -485,6 +500,7 @@ describe("relaySyncEngine", () => {
       rootDir: "/tmp/workspace",
       remoteWorkspaceId: "workspace-a",
       relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(),
       capture: capture(),
       onChange: vi.fn(),
       listOpenConflictIds: async () => openConflictIds,
@@ -526,6 +542,7 @@ describe("relaySyncEngine", () => {
       rootDir: "/tmp/workspace",
       remoteWorkspaceId: "workspace-a",
       relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(),
       capture: capture(),
       onChange: changes,
       listOpenConflictIds: async () => [],
@@ -559,6 +576,7 @@ describe("relaySyncEngine", () => {
       rootDir: "/tmp/workspace",
       remoteWorkspaceId: "workspace-a",
       relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(),
       capture: capture(),
       onChange: vi.fn(),
       joinBootstrap: true,
@@ -590,6 +608,7 @@ describe("relaySyncEngine", () => {
       rootDir: "/tmp/workspace",
       remoteWorkspaceId: "workspace-a",
       relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(),
       capture: capture(),
       onChange: vi.fn(),
       joinBootstrap: true,
