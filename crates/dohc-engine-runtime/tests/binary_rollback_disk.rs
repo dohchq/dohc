@@ -30,6 +30,22 @@ impl SelfWriteRecorder for NoRecorder {
     fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
 }
 
+#[derive(Default)]
+struct CountingRecorder {
+    records: AtomicUsize,
+    retracts: AtomicUsize,
+}
+
+impl SelfWriteRecorder for CountingRecorder {
+    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {
+        self.records.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {
+        self.retracts.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 struct CrashSecondMaterialization {
     visits: AtomicUsize,
 }
@@ -2208,6 +2224,8 @@ async fn migration_backfill_keeps_secret_job_with_colliding_secret_moment() {
     const ORDINARY_WORKSPACE: &str = "ordinary-collision-workspace";
     const SECRET_WORKSPACE: &str = "secret-collision-workspace";
     const SHARED_MOMENT: &str = "shared-secret-id";
+    const BARE_SECRET_MOMENT: &str = "bare-secret-id";
+    const BARE_SECRET_JOB: &str = "secret-mat_bare-secret-id";
 
     let database = ScratchDir::new().expect("database scratch");
     let db = database.engine_db_path().expect("db");
@@ -2227,7 +2245,8 @@ async fn migration_backfill_keeps_secret_job_with_colliding_secret_moment() {
                  VALUES ('ordinary-collision-workspace', 'main', 'main', 'Main', 1), \
                         ('secret-collision-workspace', 'main', 'main', 'Main', 1);
              INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                 VALUES ('ordinary-collision-workspace', 'ordinary-object', 1);
+                 VALUES ('ordinary-collision-workspace', 'ordinary-object', 1), \
+                        ('ordinary-collision-workspace', 'bare-ordinary-object', 1);
              INSERT INTO blobs (sha256, byte_length, text) \
                  VALUES ('ordinary-text-sha', 4, 'text');
              DROP INDEX idx_materialization_jobs_workspace_path_status_generation;
@@ -2247,6 +2266,16 @@ async fn migration_backfill_keeps_secret_job_with_colliding_secret_moment() {
         .expect("ordinary collision moment");
     connection
         .execute(
+            "INSERT INTO moments \
+             (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+              recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin) \
+             VALUES (?1, 8, ?2, 'main', 'bare-ordinary-object', 'bare-ordinary.md', 3, \
+                     'write', 'ordinary-text-sha', 0, 'api')",
+            rusqlite::params![ORDINARY_WORKSPACE, BARE_SECRET_JOB],
+        )
+        .expect("bare ordinary identity collision moment");
+    connection
+        .execute(
             "INSERT INTO secret_moments \
              (workspace_id, moment_order, moment_id, version_id, path, recorded_at_ms, \
               operation, metadata_origin, after_present) \
@@ -2256,6 +2285,15 @@ async fn migration_backfill_keeps_secret_job_with_colliding_secret_moment() {
         .expect("secret collision moment");
     connection
         .execute(
+            "INSERT INTO secret_moments \
+             (workspace_id, moment_order, moment_id, version_id, path, recorded_at_ms, \
+              operation, metadata_origin, after_present) \
+             VALUES (?1, 8, ?2, 'main', '.bare-env', 3, 'write', 'api', 1)",
+            rusqlite::params![SECRET_WORKSPACE, BARE_SECRET_MOMENT],
+        )
+        .expect("bare secret collision moment");
+    connection
+        .execute(
             "INSERT INTO materialization_jobs \
              (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
               target_generation, status, created_at_ms, completed_at_ms, operation) \
@@ -2263,22 +2301,36 @@ async fn migration_backfill_keeps_secret_job_with_colliding_secret_moment() {
             rusqlite::params![format!("secret-mat_{SHARED_MOMENT}"), content_sha],
         )
         .expect("legacy secret job");
+    connection
+        .execute(
+            "INSERT INTO materialization_jobs \
+             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+              target_generation, status, created_at_ms, completed_at_ms, operation) \
+             VALUES (?1, '.bare-env', ?2, 0, NULL, 8, 'pending', 11, NULL, 'write')",
+            rusqlite::params![BARE_SECRET_JOB, content_sha],
+        )
+        .expect("legacy bare-equality secret job");
     drop(connection);
 
     let migrated = EngineStore::open(&db, 20).expect("upgrade legacy store");
-    let workspace_id: String = migrated
-        .read_with(|connection| {
-            connection.query_row(
-                "SELECT workspace_id FROM materialization_jobs WHERE job_id = ?1",
-                [format!("secret-mat_{SHARED_MOMENT}")],
-                |row| row.get(0),
-            )
-        })
-        .expect("backfilled secret workspace");
-    assert_eq!(
-        workspace_id, SECRET_WORKSPACE,
-        "a secret job must not be captured by the ordinary suffix backfill"
-    );
+    for (job_id, collision_kind) in [
+        (format!("secret-mat_{SHARED_MOMENT}"), "ordinary suffix"),
+        (BARE_SECRET_JOB.to_owned(), "bare ordinary equality"),
+    ] {
+        let workspace_id: String = migrated
+            .read_with(|connection| {
+                connection.query_row(
+                    "SELECT workspace_id FROM materialization_jobs WHERE job_id = ?1",
+                    [&job_id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("backfilled secret workspace");
+        assert_eq!(
+            workspace_id, SECRET_WORKSPACE,
+            "a secret job must not be captured by the {collision_kind} backfill"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2380,11 +2432,12 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
         .expect_err("switch projection is interrupted after the active row commits");
     assert!(switch_faults.fired());
 
+    let rollback_recorder = Arc::new(CountingRecorder::default());
     let rolled_back = actor
         .versioned_text_rollback(
             rollback(BRANCH, PATH, "inactive-delete-mutation"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            rollback_recorder.clone(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2400,6 +2453,16 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
         BYTES,
         "rollback must restore the active version's bytes without activating the branch"
     );
+    assert_eq!(
+        rollback_recorder.records.load(Ordering::Acquire),
+        1,
+        "the active-version reprojection must register its self-write suppression"
+    );
+    assert_eq!(
+        rollback_recorder.retracts.load(Ordering::Acquire),
+        0,
+        "a completed reprojection must leave its suppression available to capture"
+    );
     let connection = rusqlite::Connection::open(&db).expect("read active version");
     let active_version_id: String = connection
         .query_row(
@@ -2410,6 +2473,260 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
         .expect("active version");
     assert_eq!(active_version_id, "main");
     drop(connection);
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_rename_rollback_removes_destination_from_the_active_projection() {
+    const BRANCH: &str = "inactive-rename-reconcile";
+    const OLD_PATH: &str = "inactive-rename-old.bin";
+    const NEW_PATH: &str = "inactive-rename-new.bin";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .versioned_binary_write(
+            binary_write_for("main", OLD_PATH, "rename-main-seed", BYTES),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main seed");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: BRANCH.to_owned(),
+                name: "Inactive rename reconcile".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 11,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch");
+    actor
+        .versioned_binary_write(
+            binary_write_for(
+                "main",
+                OLD_PATH,
+                "rename-main-diverged",
+                OTHER_LINEAGE_BYTES,
+            ),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("diverge main");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: BRANCH.to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 12,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("activate branch");
+    actor
+        .versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: BRANCH.to_owned(),
+                from_path: OLD_PATH.to_owned(),
+                to_path: NEW_PATH.to_owned(),
+                moment_id: "inactive-rename-mutation".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch rename");
+    assert!(!scratch.path().join(OLD_PATH).exists());
+    assert_eq!(
+        std::fs::read(scratch.path().join(NEW_PATH)).expect("renamed branch bytes"),
+        BYTES
+    );
+
+    let switch_faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 21,
+            },
+            switch_faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("interrupt main projection after committing the active row");
+    assert!(switch_faults.fired());
+    assert!(
+        scratch.path().join(NEW_PATH).exists(),
+        "the rollback must encounter the stranded rename destination"
+    );
+
+    let rolled_back = actor
+        .versioned_text_rollback(
+            rollback(BRANCH, NEW_PATH, "inactive-rename-mutation"),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("inactive rename rollback");
+    assert!(rolled_back.materialize_enqueued);
+    assert_eq!(
+        rolled_back.materialize_outcome,
+        PostCommitMaterializeOutcome::Skipped
+    );
+    assert!(
+        !scratch.path().join(NEW_PATH).exists(),
+        "the active version does not own the rename destination"
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join(OLD_PATH)).expect("active divergent bytes"),
+        OTHER_LINEAGE_BYTES,
+        "reconciling the inactive rollback must preserve the active version's content"
+    );
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_create_rollback_removes_created_path_from_the_active_projection() {
+    const BRANCH: &str = "inactive-create-reconcile";
+    const PATH: &str = "inactive-created.bin";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: BRANCH.to_owned(),
+                name: "Inactive create reconcile".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("branch");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: BRANCH.to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 3,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("activate branch");
+    actor
+        .versioned_binary_write(
+            binary_write_for(BRANCH, PATH, "inactive-create-mutation", BYTES),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("create branch file");
+    assert_eq!(
+        std::fs::read(scratch.path().join(PATH)).expect("created branch bytes"),
+        BYTES
+    );
+
+    let switch_faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 10,
+            },
+            switch_faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("interrupt main projection after committing the active row");
+    assert!(switch_faults.fired());
+    assert!(
+        scratch.path().join(PATH).exists(),
+        "the rollback must encounter the stranded created path"
+    );
+
+    let rolled_back = actor
+        .versioned_text_rollback(
+            rollback(BRANCH, PATH, "inactive-create-mutation"),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("inactive create rollback");
+    assert!(!rolled_back.materialize_enqueued);
+    assert_eq!(
+        rolled_back.materialize_outcome,
+        PostCommitMaterializeOutcome::Skipped
+    );
+    assert!(
+        !scratch.path().join(PATH).exists(),
+        "the active version does not own the rolled-back created path"
+    );
     supervisor.close(&db).expect("close actor");
 }
 
@@ -2526,6 +2843,75 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
     assert!(rolled_back.materialized);
     assert_eq!(
         std::fs::read(scratch.path().join(path)).expect("restored bytes"),
+        BYTES
+    );
+
+    let conflict_moment_id = "long-identity-conflict-mutation";
+    let conflict_job_id =
+        binary_rollback_job_identity(&workspace_id, &version_id, conflict_moment_id);
+    assert!(
+        format!("{path}.{conflict_job_id}.conflict").len() > 255,
+        "the unbounded conflict component must exceed common filesystem limits"
+    );
+    actor
+        .versioned_binary_write(
+            write(conflict_moment_id, UPDATED_BYTES, 30),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("conflicting mutation");
+    std::fs::write(scratch.path().join(path), OTHER_LINEAGE_BYTES)
+        .expect("external conflicting occupant");
+    let conflicted = actor
+        .versioned_text_rollback(
+            RollbackTextFileMutation {
+                workspace_id: workspace_id.clone(),
+                version_id: version_id.clone(),
+                path: path.to_owned(),
+                mutation_moment_id: conflict_moment_id.to_owned(),
+                request_id: None,
+                legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("conflicting rollback with long identity");
+    assert_eq!(
+        conflicted.materialize_outcome,
+        PostCommitMaterializeOutcome::Conflict
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join(path)).expect("external occupant"),
+        OTHER_LINEAGE_BYTES
+    );
+    let conflict_artifacts: Vec<_> = std::fs::read_dir(scratch.path())
+        .expect("list conflict artifacts")
+        .map(|entry| entry.expect("conflict directory entry").path())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".conflict"))
+        })
+        .collect();
+    assert_eq!(conflict_artifacts.len(), 1);
+    assert!(
+        conflict_artifacts[0]
+            .file_name()
+            .expect("conflict file name")
+            .to_string_lossy()
+            .len()
+            <= 255
+    );
+    assert_eq!(
+        std::fs::read(&conflict_artifacts[0]).expect("preserved rollback content"),
         BYTES
     );
     supervisor.close(&db).expect("close actor");

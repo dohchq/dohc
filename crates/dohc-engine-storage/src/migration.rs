@@ -1806,14 +1806,14 @@ UPDATE materialization_jobs AS job
    SET workspace_id = (
        SELECT moment.workspace_id
          FROM moments AS moment
-        WHERE (job.job_id = moment.moment_id
+        WHERE job.job_id NOT GLOB 'secret-mat_*'
+          AND (job.job_id = moment.moment_id
            OR job.job_id = 'ydoc-mat_' || moment.moment_id
            OR job.job_id = 'binary-delete-mat_' || moment.moment_id
            OR job.job_id = 'binary-rename-0-write-mat_' || moment.moment_id
            OR job.job_id = 'binary-rename-1-delete-mat_' || moment.moment_id
-           OR (job.job_id NOT GLOB 'secret-mat_*'
-               AND substr(job.job_id, -length('-mat_' || moment.moment_id)) =
-                   '-mat_' || moment.moment_id))
+           OR substr(job.job_id, -length('-mat_' || moment.moment_id)) =
+                   '-mat_' || moment.moment_id)
           AND job.target_generation = moment.moment_order
         ORDER BY moment.moment_order DESC
         LIMIT 1
@@ -1822,14 +1822,14 @@ UPDATE materialization_jobs AS job
    AND EXISTS (
        SELECT 1
          FROM moments AS moment
-        WHERE (job.job_id = moment.moment_id
+        WHERE job.job_id NOT GLOB 'secret-mat_*'
+          AND (job.job_id = moment.moment_id
            OR job.job_id = 'ydoc-mat_' || moment.moment_id
            OR job.job_id = 'binary-delete-mat_' || moment.moment_id
            OR job.job_id = 'binary-rename-0-write-mat_' || moment.moment_id
            OR job.job_id = 'binary-rename-1-delete-mat_' || moment.moment_id
-           OR (job.job_id NOT GLOB 'secret-mat_*'
-               AND substr(job.job_id, -length('-mat_' || moment.moment_id)) =
-                   '-mat_' || moment.moment_id))
+           OR substr(job.job_id, -length('-mat_' || moment.moment_id)) =
+                   '-mat_' || moment.moment_id)
           AND job.target_generation = moment.moment_order
    );
 

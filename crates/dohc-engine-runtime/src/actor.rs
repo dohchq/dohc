@@ -5235,11 +5235,16 @@ fn planned_projection(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "projection coordinates and rollback-only pre-state paths are independent"
+)]
 fn plan_plaintext_switch(
     store: &mut EngineStore,
     workspace_id: &str,
     target_version_id: &str,
     previous_version_id: &str,
+    additional_previous_paths: &[(&str, i64)],
     root_dir: &std::path::Path,
     now_ms: i64,
     token: &CancellationToken,
@@ -5304,15 +5309,27 @@ fn plan_plaintext_switch(
     let previous = VersionedTextStore::new(store)
         .list_snapshots(workspace_id, previous_version_id)
         .map_err(RuntimeError::from)?;
+    let mut previous_paths: Vec<(String, i64)> = previous
+        .into_iter()
+        .map(|snapshot| (snapshot.path, snapshot.updated_at_ms))
+        .collect();
+    for (path, target_generation) in additional_previous_paths {
+        if !previous_paths
+            .iter()
+            .any(|(previous_path, _)| previous_path == path)
+        {
+            previous_paths.push(((*path).to_owned(), *target_generation));
+        }
+    }
     if !policy.is_degraded() {
         let empty_sha = hex_sha256(&[]);
-        for snapshot in previous {
+        for (path, target_generation) in previous_paths {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
-            if target_paths.contains(snapshot.path.as_str())
+            if target_paths.contains(path.as_str())
                 || !resolve_effective_policy(
-                    &snapshot.path,
+                    &path,
                     policy.files_policy.as_deref(),
                     policy.visibility_policy.as_deref(),
                 )
@@ -5320,19 +5337,18 @@ fn plan_plaintext_switch(
             {
                 continue;
             }
-            let state =
-                probe_projection_target(root_dir, &snapshot.path, ProjectionTargetKind::Plaintext);
+            let state = probe_projection_target(root_dir, &path, ProjectionTargetKind::Plaintext);
             let Some(preimage @ Preimage::Present(_)) = projection_preimage(&state) else {
                 continue;
             };
             projections.push(planned_projection(
                 workspace_id,
                 target_version_id,
-                snapshot.path,
+                path,
                 MaterializationOperation::Delete,
                 empty_sha.clone(),
                 preimage,
-                snapshot.updated_at_ms,
+                target_generation,
                 now_ms,
                 false,
                 Some(Vec::new()),
@@ -5987,6 +6003,7 @@ fn reconcile_active_plaintext_projection_on_store(
     workspace_id: &str,
     active_version_id: &str,
     inactive_version_id: &str,
+    rollback_paths: &[(&str, i64)],
     root_dir: &std::path::Path,
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
@@ -5998,6 +6015,7 @@ fn reconcile_active_plaintext_projection_on_store(
         workspace_id,
         active_version_id,
         inactive_version_id,
+        rollback_paths,
         root_dir,
         now_ms,
         token,
@@ -6075,6 +6093,7 @@ fn switch_active_version_on_store(
         workspace_id,
         version_id,
         &previous.version_id,
+        &[],
         root_dir,
         now_ms,
         token,
@@ -9769,14 +9788,6 @@ fn versioned_text_rollback_on_store(
             (job, rename_write_job, rename_delete_job)
         };
     let has_jobs = job.is_some() || rename_write_job.is_some() || rename_delete_job.is_some();
-    if !has_jobs {
-        return Ok(RollbackExecutionResult {
-            deduped,
-            materialize_enqueued: false,
-            materialized: false,
-            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-        });
-    }
 
     let active_version =
         if faults.poll(FaultPoint::RollbackBeforeActiveVersionLookup) == FaultAction::Crash {
@@ -9805,17 +9816,26 @@ fn versioned_text_rollback_on_store(
     };
     let target_is_active = active_version.version_id == input.version_id;
     if !target_is_active {
+        let reconcile_now_ms = job
+            .as_ref()
+            .or(rename_write_job.as_ref())
+            .or(rename_delete_job.as_ref())
+            .map_or(0, |job| job.created_at_ms);
+        let reconcile_generation = job
+            .as_ref()
+            .or(rename_write_job.as_ref())
+            .or(rename_delete_job.as_ref())
+            .map_or(0, |job| job.target_generation);
+        let rollback_paths = [(input.path.as_str(), reconcile_generation)];
         if let Err(error) = reconcile_active_plaintext_projection_on_store(
             store,
             &input.workspace_id,
             &active_version.version_id,
             &input.version_id,
+            &rollback_paths,
             root_dir,
             self_writes,
-            job.as_ref()
-                .or(rename_write_job.as_ref())
-                .or(rename_delete_job.as_ref())
-                .map_or(0, |job| job.created_at_ms),
+            reconcile_now_ms,
             faults,
             token,
         ) {
@@ -9832,7 +9852,15 @@ fn versioned_text_rollback_on_store(
         }
         return Ok(RollbackExecutionResult {
             deduped,
-            materialize_enqueued: true,
+            materialize_enqueued: has_jobs,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+    if !has_jobs {
+        return Ok(RollbackExecutionResult {
+            deduped,
+            materialize_enqueued: false,
             materialized: false,
             materialize_outcome: PostCommitMaterializeOutcome::Skipped,
         });
