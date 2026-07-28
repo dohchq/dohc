@@ -93,7 +93,7 @@ for (const step of required) {
     // A skipped required step is a FAIL: stamping PASS with a row missing is
     // exactly the blind spot this gate exists to prevent.
     console.error(
-      `  ${step.name} — SKIPPED (${step.skipReason}) — required steps may not skip; install the missing dependency (e.g. \`bun install\`) and rerun.`,
+      `  ${step.name} — SKIPPED (${step.skipReason}) — required steps may not skip; install the missing dependency (\`pnpm install --frozen-lockfile\`) and rerun.`,
     );
     failed = true;
     results.push({
