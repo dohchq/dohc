@@ -5661,6 +5661,7 @@ fn replay_pending_materializations(
     faults: &dyn FaultInjector,
     selected: Option<&HashSet<String>>,
     switch_suppression: Option<(&str, &dyn SelfWriteRecorder)>,
+    superseded_after_projection_is_drained: bool,
 ) -> Result<MaterializationReplaySummary, RuntimeError> {
     let jobs = store.list_pending_materialization_jobs()?;
     let mut summary = MaterializationReplaySummary {
@@ -5854,6 +5855,9 @@ fn replay_pending_materializations(
                 summary.completed += 1;
             }
             Ok(JobOutcome::Blocked) => summary.failed += 1,
+            Ok(JobOutcome::Superseded) if superseded_after_projection_is_drained => {
+                summary.completed += 1;
+            }
             Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
                 summary.failed += 1;
                 if let Some(moment_id) = job.job_id.strip_prefix("ydoc-mat_") {
@@ -5971,6 +5975,7 @@ fn switch_active_version_on_store(
         faults,
         Some(&selected),
         Some((workspace_id, self_writes)),
+        false,
     )?;
     let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
     if failed_jobs > 0 {
@@ -5997,6 +6002,7 @@ fn switch_active_version_on_store(
             faults,
             Some(&rollback_restores),
             Some((workspace_id, self_writes)),
+            true,
         )?;
         let failed_jobs =
             replay.failed + rollback_restores.len().saturating_sub(replay.selected_seen);
@@ -7076,7 +7082,7 @@ fn worker_main(
                 // switch path calls the same tolerant per-job executor with a
                 // selected durable job set and watcher suppression enabled.
                 let outcome = replay_pending_materializations(
-                    &mut store, &root_dir, now_ms, &NoFaults, None, None,
+                    &mut store, &root_dir, now_ms, &NoFaults, None, None, false,
                 )
                 .map(|summary| summary.completed);
                 let _ = reply.send(outcome);
@@ -7095,6 +7101,7 @@ fn worker_main(
                     &NoFaults,
                     None,
                     Some((&workspace_id, self_writes.as_ref())),
+                    false,
                 )
                 .and_then(|summary| {
                     if summary.failed == 0 {

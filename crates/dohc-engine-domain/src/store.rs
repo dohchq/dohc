@@ -2406,6 +2406,10 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 /// no disk counterpart yet, and seeding it would make the next baseline
 /// scan diff it as "removed" and RETIRE it — capture deleting content it
 /// never owned.
+///
+/// Pending rollback deletes are emitted as transient last-known-disk entries.
+/// This keeps a surviving delete target out of capture until the compensating
+/// job becomes terminal, without creating a database head for that path.
 pub fn capture_manifest_seed(
     store: &EngineStore,
     workspace_id: &str,
@@ -2440,7 +2444,21 @@ pub fn capture_manifest_seed(
                              WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END \
                          AND (j.job_id GLOB 'rollback-restore_*' \
                               OR j.job_id GLOB \
-                                 'binary-rename-0-write-mat_rollback-restore_*'))",
+                                 'binary-rename-0-write-mat_rollback-restore_*')) \
+                 UNION ALL \
+                 SELECT j.target_path, 'binary', NULL, NULL, \
+                        j.content_sha256, bb.byte_length \
+                 FROM materialization_jobs j \
+                 JOIN binary_blobs bb ON bb.sha256 = j.content_sha256 \
+                 WHERE j.status = 'pending' AND j.operation = 'delete' \
+                   AND (j.job_id GLOB 'rollback-restore_*' \
+                        OR j.job_id GLOB \
+                           'binary-rename-1-delete-mat_rollback-restore_*') \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM path_aliases a \
+                       WHERE a.workspace_id = ?1 AND a.version_id = ?2 \
+                         AND a.path = j.target_path) \
+                 ORDER BY 1",
             )
             .map_err(DomainError::sql_corrupt)?;
         let rows = stmt
@@ -3745,13 +3763,19 @@ fn alias_object_id(
 }
 
 pub(crate) fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
-    // Store-global MAX+1. Correct for one-workspace-per-engine.db (global ==
-    // per-workspace); a future multi-workspace / share-mount shard MUST add a
-    // `WHERE workspace_id = ?` bound here (see the `moments` schema comment).
+    // Materialization rows are the durable high-water mark when rollback
+    // history surgery removes a tip moment. Including pending and terminal
+    // jobs guarantees that every later mutation is strictly newer than an
+    // already-issued compensating restore.
     let max: Option<i64> = conn
-        .query_row("SELECT MAX(moment_order) FROM moments", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT MAX(generation) FROM ( \
+                 SELECT moment_order AS generation FROM moments \
+                 UNION ALL \
+                 SELECT target_generation AS generation FROM materialization_jobs)",
+            [],
+            |row| row.get(0),
+        )
         .map_err(DomainError::sql_corrupt)?;
     Ok(max.unwrap_or(0) + 1)
 }
