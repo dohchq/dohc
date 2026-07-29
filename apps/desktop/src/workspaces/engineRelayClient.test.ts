@@ -456,11 +456,12 @@ describe("EngineRelayClient", () => {
     const { rootPath, daemon, routes, sessions, live, relay } = await harness();
     const mount = { shareId: "share-mounted", label: "alex" };
     await createMountDirectory(rootPath, mount.label);
-    const target = relayTargetForShareMount(rootPath, mount);
+    const target = relayTargetForShareMount("workspace-a", rootPath, mount);
     const mountRelay = live.bind({ ...target, relay });
 
     await expect(
       refreshShareMountOnce({
+        hostWorkspaceId: "workspace-a",
         hostRoot: rootPath,
         mount,
         relay,

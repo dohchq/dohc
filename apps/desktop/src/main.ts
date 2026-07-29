@@ -4395,7 +4395,11 @@ function registerIpcHandlers(
       recipientEmail: credentials.email ?? null,
     };
     await createMountDirectory(workspace.rootPath, mount.label);
-    const mountRelayTarget = relayTargetForShareMount(workspace.rootPath, mount);
+    const mountRelayTarget = relayTargetForShareMount(
+      workspace.workspaceId,
+      workspace.rootPath,
+      mount,
+    );
     try {
       // Inside the rollback scope: a failed registry write (ENOSPC, perms)
       // must also remove the just-created folder — the app deliberately
@@ -4410,6 +4414,7 @@ function registerIpcHandlers(
         relay,
       });
       const outcome = await refreshShareMountOnce({
+        hostWorkspaceId: workspace.workspaceId,
         hostRoot: workspace.rootPath,
         mount,
         relay,
@@ -4504,6 +4509,7 @@ function registerIpcHandlers(
           token: credentials.token,
         };
         const mountRelayTarget = relayTargetForShareMount(
+          workspace.workspaceId,
           workspace.rootPath,
           mount,
         );
@@ -4512,6 +4518,7 @@ function registerIpcHandlers(
           relay,
         });
         const outcome = await refreshShareMountOnce({
+          hostWorkspaceId: workspace.workspaceId,
           hostRoot: workspace.rootPath,
           mount,
           relay,
@@ -4572,7 +4579,7 @@ function registerIpcHandlers(
     // record removal filters the CURRENT set (the lock serializes mount
     // operations, so no writer can interleave here anyway).
     await closeRelayTransportWorkspace(
-      mountStoreWorkspaceIdFor(mount.shareId),
+      mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
     );
     await removeMountFolder(workspace.rootPath, mount.label);
     const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];

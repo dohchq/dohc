@@ -13,6 +13,7 @@ import {
   createMountDirectory,
   mountLabelFor,
   mountRootFor,
+  mountStoreWorkspaceIdFor,
   refreshShareMountOnce as refreshShareMountOnceWithPull,
   removeMountFolder,
   validMountLabel,
@@ -20,6 +21,7 @@ import {
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 
 const SHARE_ID = "share-1";
+const HOST_WORKSPACE = "host-workspace-1";
 const TOKEN = "test:recipient";
 
 let roots: string[] = [];
@@ -41,10 +43,11 @@ async function tempHostRoot(): Promise<string> {
 function refreshShareMountOnce(
   input: Omit<
     Parameters<typeof refreshShareMountOnceWithPull>[0],
-    "openStore" | "pull"
+    "openStore" | "pull" | "hostWorkspaceId"
   >,
 ) {
   return refreshShareMountOnceWithPull({
+    hostWorkspaceId: HOST_WORKSPACE,
     ...input,
     pull: pullShareView,
     openStore: ({ rootPath }) => createVersionedTextStore(rootPath),
@@ -171,6 +174,30 @@ describe("mount labels", () => {
     expect(validMountLabel("prod-env")).toBe(true);
   });
 
+  // Daemon sessions and relay routes are keyed by workspace id ALONE, and the
+  // session cache returns a binding without comparing rootPath. So two host
+  // workspaces mounting the same share must not derive the same id, or the
+  // second refresh reuses a connection bound to the first host's folder and
+  // can read one host's store while writing into the other's tree.
+  it("gives the same share a different store identity in each host workspace", () => {
+    const a = mountStoreWorkspaceIdFor("host-a", SHARE_ID);
+    const b = mountStoreWorkspaceIdFor("host-b", SHARE_ID);
+    expect(a).not.toBe(b);
+
+    // Same host + same share is stable, so a refresh reuses its own session
+    // rather than leaking a new daemon workspace every pass.
+    expect(mountStoreWorkspaceIdFor("host-a", SHARE_ID)).toBe(a);
+
+    // The host is a fixed-width digest, not a raw id: concatenating two opaque
+    // ids with a separator would let these two distinct pairs collide.
+    expect(mountStoreWorkspaceIdFor("host-a", "s")).not.toBe(
+      mountStoreWorkspaceIdFor("host", "a-s"),
+    );
+
+    // Two different shares in ONE host stay distinct too.
+    expect(mountStoreWorkspaceIdFor("host-a", "share-2")).not.toBe(a);
+  });
+
   it("mountRootFor refuses labels that escape shared-with-me", async () => {
     const host = await tempHostRoot();
     expect(() => mountRootFor(host, "../outside")).toThrow(/Invalid share mount label/);
@@ -233,6 +260,7 @@ describe("refreshShareMountOnce", () => {
     relay.addWrite("docs/brief.md", "the brief");
 
     const outcome = await refreshShareMountOnceWithPull({
+      hostWorkspaceId: HOST_WORKSPACE,
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
       relay: relay.connection(),
