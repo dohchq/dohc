@@ -239,6 +239,13 @@ import {
   SEARCH_EVENT_MAX_ENTRIES,
   type EngineYDocSaveStateName,
 } from "./ipc/channels";
+import {
+  createEngineYDocSaveSeqState,
+  noteLocalEdit,
+  noteSettleOutcome,
+  noteSettleStart,
+  type EngineYDocSaveSeqState,
+} from "./workspaces/engineYDocSaveSeq";
 // The relay presence transport is a dependency-free module (no DOM/React): main
 // reuses it so the presence wire contract (routes, publish/leave/poll) lives in
 // ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
@@ -2354,12 +2361,10 @@ interface EngineYDocSessionEntry {
   // before pushing a save state back.
   sender: Electron.WebContents;
   generation: number;
-  // The newest local-edit seq the renderer has shipped, and the seq the
-  // in-flight settle started at. A settle only vouches for edits journaled
-  // before it began, so "saved" is reported against settlingSeq — never
-  // against edits typed while it was running.
-  dirtySeq: number;
-  settlingSeq: number;
+  // Edit/settle bookkeeping for the honest save indicator. Several settles
+  // are routinely in flight at once, so this is a FIFO, not a scalar — see
+  // engineYDocSaveSeq.ts.
+  saveSeq: EngineYDocSaveSeqState;
 }
 const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
 
@@ -7127,15 +7132,20 @@ function registerIpcHandlers(
           // zero-byte .md. Report every outcome to the renderer that owns it.
           onSaveState: (state) => {
             const entry = engineYDocSessions.get(input.sessionId);
-            if (state === "settling" && entry) {
-              entry.settlingSeq = entry.dirtySeq;
-            }
+            // Pair every outcome with ITS OWN start: the oldest in-flight
+            // settle is the one completing, and it may only vouch for what
+            // had been journaled when it began.
+            const seq = !entry
+              ? 0
+              : state === "settling"
+                ? noteSettleStart(entry.saveSeq)
+                : noteSettleOutcome(entry.saveSeq);
             sendEngineYDocSaveState(
               sender,
               generation,
               input.sessionId,
               state,
-              entry?.settlingSeq ?? 0,
+              seq,
             );
           },
           onRemoteUpdate: (update) => {
@@ -7204,8 +7214,7 @@ function registerIpcHandlers(
         workspaceId: workspace.workspaceId,
         sender,
         generation,
-        dirtySeq: 0,
-        settlingSeq: 0,
+        saveSeq: createEngineYDocSaveSeqState(),
       });
       return OpenEngineYDocSessionResult.parse({
         available: true,
@@ -7240,7 +7249,7 @@ function registerIpcHandlers(
     }
     // Record the edit BEFORE handing it over: applyLocalUpdate arms the
     // debounced settle, whose onSettleStart snapshots the journaled seq.
-    entry.dirtySeq = input.seq;
+    noteLocalEdit(entry.saveSeq, input.seq);
     entry.session.applyLocalUpdate(input.update);
   });
 
