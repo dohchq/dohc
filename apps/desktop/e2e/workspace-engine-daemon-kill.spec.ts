@@ -57,7 +57,69 @@ function mainProcessCrashText(
     );
 }
 
-test("a hard daemon kill mid-typing keeps the pre-kill text and leaves the editor writable", async () => {
+interface KilledSession {
+  desktop: Awaited<ReturnType<typeof launchDesktopApp>>;
+  editor: ReturnType<Page["getByTestId"]>;
+}
+
+// Launches the app, warms a settled edit, types `preKill`, hard-kills the real
+// daemon before the debounced settle can run, keeps typing through the outage,
+// and waits for the supervisor's replacement. Returns with the app still open.
+async function killDaemonMidTyping(
+  temp: Awaited<ReturnType<typeof createTempWorkspace>>,
+  input: { docPath: string; preKill: string; postKill: string },
+): Promise<KilledSession> {
+  const desktop = await launchDesktopApp({ workspace: temp });
+  const { page, app } = desktop;
+  const appPid = app.process().pid;
+  if (appPid === undefined) throw new Error("Electron app has no pid.");
+
+  const workspace = await openWorkspaceFromFirstRun(page, temp);
+  await waitForWorkspaceFile(page, workspace.workspaceId, input.docPath);
+  await openEngineDoc(page, input.docPath);
+
+  const editor = page.getByTestId("markdown-editor");
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+End");
+
+  // A first settled edit proves the session is genuinely live before the kill,
+  // so a later missing sentinel cannot be blamed on a doc that never worked.
+  await page.keyboard.type(" WARMUP_KILLREC");
+  await expect
+    .poll(
+      async () =>
+        await readFile(join(temp.rootPath, input.docPath), "utf8").catch(
+          () => "",
+        ),
+      { timeout: 20_000 },
+    )
+    .toContain("WARMUP_KILLREC");
+
+  const victims = await engineDaemonPids(appPid);
+  expect(victims.length).toBeGreaterThan(0);
+
+  // The must-survive sentinel, then an immediate kill — before the debounced
+  // settle can project it. This is the only window in which the renderer and
+  // the canonical doc are the sole holders of the text.
+  await page.keyboard.type(` ${input.preKill}`);
+  for (const pid of victims) await hardKillPid(pid);
+
+  // Keep typing through the outage, exactly like the journey's user did.
+  await page.keyboard.type(` ${input.postKill}`);
+
+  const replacement = await waitForFreshEngineDaemon(appPid, victims);
+  expect(victims).not.toContain(replacement);
+
+  // (a) The daemon dying must never become a user-facing main-process crash.
+  expect(mainProcessCrashText(desktop.logs)).toEqual([]);
+
+  return { desktop, editor };
+}
+
+// THE journey's scenario. Its user stopped typing before the app went away, so
+// recovery that only runs on the next keystroke never runs at all: nothing is
+// typed here between the daemon's return and the quit.
+test("a hard daemon kill keeps the outage text when the user never types again", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const preKill = "KILLREC_PRE_a1b2c3";
@@ -72,68 +134,24 @@ test("a hard daemon kill mid-typing keeps the pre-kill text and leaves the edito
       { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
     ]);
 
-    desktop = await launchDesktopApp({ workspace: temp });
-    const { page, app } = desktop;
-    const appPid = app.process().pid;
-    if (appPid === undefined) throw new Error("Electron app has no pid.");
+    const killed = await killDaemonMidTyping(temp, {
+      docPath,
+      preKill,
+      postKill,
+    });
+    desktop = killed.desktop;
 
-    const workspace = await openWorkspaceFromFirstRun(page, temp);
-    await waitForWorkspaceFile(page, workspace.workspaceId, docPath);
-    await openEngineDoc(page, docPath);
-
-    const editor = page.getByTestId("markdown-editor");
-    await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
-
-    // A first settled edit proves the session is genuinely live before the kill,
-    // so a later missing sentinel cannot be blamed on a doc that never worked.
-    await page.keyboard.type(" WARMUP_KILLREC");
-    await expect
-      .poll(
-        async () =>
-          await readFile(join(temp.rootPath, docPath), "utf8").catch(() => ""),
-        { timeout: 20_000 },
-      )
-      .toContain("WARMUP_KILLREC");
-
-    const victims = await engineDaemonPids(appPid);
-    expect(victims.length).toBeGreaterThan(0);
-
-    // Type the must-survive sentinel and kill the daemon immediately — before
-    // the debounced settle can project it to disk. This is the only window in
-    // which the renderer is the sole holder of the text.
-    await page.keyboard.type(` ${preKill}`);
-    for (const pid of victims) await hardKillPid(pid);
-
-    // Keep typing through the outage, exactly like the journey's user did.
-    await page.keyboard.type(` ${postKill}`);
-
-    const replacement = await waitForFreshEngineDaemon(appPid, victims);
-    expect(victims).not.toContain(replacement);
-
-    // (a) The daemon dying must never become a user-facing main-process crash.
-    expect(mainProcessCrashText(desktop.logs)).toEqual([]);
-
-    // (a) The editor must still be writable after the restart.
-    await page.keyboard.type(" KILLREC_AFTER_RESTART");
-    await expect(editor).toContainText("KILLREC_AFTER_RESTART");
-
-    // (b) The pre-kill sentinel must reach disk through the replacement daemon.
-    await expect
-      .poll(
-        async () =>
-          await readFile(join(temp.rootPath, docPath), "utf8").catch(() => ""),
-        { timeout: 30_000 },
-      )
-      .toContain(preKill);
-    const onDisk = await readFile(join(temp.rootPath, docPath), "utf8");
-    expect(onDisk).toContain(postKill);
-
-    // (b) And it must still be there for the NEXT launch — the journey lost the
-    // pre-kill token only once the whole app went away.
-    await expect(editor).toContainText(preKill);
+    // Quit with no further typing — the app's settling close is the last chance
+    // to persist what the canonical doc has been holding since the kill.
     await desktop.close();
     desktop = null;
+
+    const onDisk = await readFile(join(temp.rootPath, docPath), "utf8");
+    expect(onDisk).toContain(preKill);
+    expect(onDisk).toContain(postKill);
+    // The document must be recovered, not duplicated.
+    expect(onDisk.match(/Anchor paragraph\./g)).toHaveLength(1);
+    expect(onDisk.match(new RegExp(preKill, "g"))).toHaveLength(1);
 
     desktop = await launchDesktopApp({ workspace: temp });
     const relaunched = desktop.page;
@@ -143,6 +161,49 @@ test("a hard daemon kill mid-typing keeps the pre-kill text and leaves the edito
     await expect(relaunched.getByTestId("markdown-editor")).toContainText(
       preKill,
     );
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("a hard daemon kill leaves the editor writable and lands the outage text", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const preKill = "KILLREC_PRE_9f8e7d";
+  const postKill = "KILLREC_POST_6c5b4a";
+  const docPath = "abuse/kill.md";
+
+  try {
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    await writeWorkspaceFiles(temp, [
+      { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
+    ]);
+
+    const killed = await killDaemonMidTyping(temp, {
+      docPath,
+      preKill,
+      postKill,
+    });
+    desktop = killed.desktop;
+
+    // (a) The editor must still accept input after the restart, not sit dead.
+    await desktop.page.keyboard.type(" KILLREC_AFTER_RESTART");
+    await expect(killed.editor).toContainText("KILLREC_AFTER_RESTART");
+
+    // (b) And the keystroke path persists everything through the replacement.
+    await expect
+      .poll(
+        async () =>
+          await readFile(join(temp.rootPath, docPath), "utf8").catch(() => ""),
+        { timeout: 30_000 },
+      )
+      .toContain(preKill);
+    const onDisk = await readFile(join(temp.rootPath, docPath), "utf8");
+    expect(onDisk).toContain(postKill);
+    expect(onDisk).toContain("KILLREC_AFTER_RESTART");
+    expect(onDisk.match(/Anchor paragraph\./g)).toHaveLength(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
