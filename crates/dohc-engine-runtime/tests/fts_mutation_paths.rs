@@ -115,6 +115,7 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
                 request_id: None,
                 only_if_text_head: false,
                 only_if_capture_origin: true,
+                allow_ydoc_origin: true,
             },
             Arc::new(NoFaults),
             CancellationToken::new(),

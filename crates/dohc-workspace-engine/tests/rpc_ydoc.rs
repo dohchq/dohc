@@ -882,6 +882,103 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_markdow
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_must_not_retire_the_settled_head_of_an_over_cap_ydoc() {
+    // AUDIT-SILENTSAVE round 5. This is the race that made
+    // `a_settle_past_the_inband_cap…` fail under `cargo test --workspace`
+    // while passing in isolation — the capture pass only gets scheduled
+    // between the settle and the close under load.
+    //
+    // A settled Y.Doc past MAX_CAPTURE_TEXT_BYTES (128 KiB) reads as
+    // "no longer engine-ownable" to the capture sink, which retires the head.
+    // Self-write suppression cannot help: it matches a WRITE by sha, and this
+    // is a retire taken on a size classification. The next settle — including
+    // the one ydoc.close performs by default — then sees a changed target and
+    // fails ConflictStaleTarget.
+    //
+    // Driven deterministically here (sleep past the debounce + capture.flush)
+    // rather than by hoping the scheduler interleaves.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-capture", 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "load/big.md", "contentKind": "plaintext" }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    // Past the capture text cap, like the dogfood journey's 131,442 bytes.
+    let huge = "pasted load-test paragraph.\n".repeat(5_000);
+    assert!(huge.len() > 128 * 1024, "fixture must exceed the capture cap");
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "paste" }),
+    )
+    .await;
+
+    // Let the watcher observe the settle's own materialized write and settle
+    // its batch — exactly what happens under load between settle and close.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let flushed = call(&transport, &handle, 5, "capture.flush", json!({})).await;
+    assert_eq!(flushed["settled"], json!(true));
+
+    // THE load-bearing assertion: the head survived, still owned by the
+    // Y.Doc. Before the fix this listing came back EMPTY — capture had
+    // retired the record for a document the user had just saved.
+    let listed = call(
+        &transport,
+        &handle,
+        6,
+        "versionedText.list",
+        json!({ "versionId": "main" }),
+    )
+    .await;
+    let head = listed["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .find(|file| file["path"] == json!("load/big.md"));
+    assert!(
+        head.is_some(),
+        "capture retired the settled over-cap head: {}",
+        listed["files"]
+    );
+    let head = head.expect("head");
+    assert_eq!(head["metadataOrigin"], json!("ydoc"));
+    assert_eq!(head["byteLength"], json!(140_000));
+
+    // And the close — which settles by default — succeeds instead of failing
+    // ConflictStaleTarget against a head capture moved underneath it.
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 8, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
     // The shape the desktop's New File IPC actually leaves behind, which no
     // test covered: a ZERO-BYTE file already on disk, with no engine head and
