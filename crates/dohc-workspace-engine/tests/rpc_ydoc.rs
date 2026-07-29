@@ -916,7 +916,10 @@ async fn capture_must_not_retire_the_settled_head_of_an_over_cap_ydoc() {
 
     // Past the capture text cap, like the dogfood journey's 131,442 bytes.
     let huge = "pasted load-test paragraph.\n".repeat(5_000);
-    assert!(huge.len() > 128 * 1024, "fixture must exceed the capture cap");
+    assert!(
+        huge.len() > 128 * 1024,
+        "fixture must exceed the capture cap"
+    );
     call(
         &transport,
         &handle,
