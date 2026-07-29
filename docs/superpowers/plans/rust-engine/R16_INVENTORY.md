@@ -111,8 +111,11 @@ replacement homes rather than swaps — and it is not a rounding error:
 
 **17 homeless types**, computed. Method: names with an `export interface|type`
 under `packages/workspace-engine/src`, that are **actually imported from
-`@dohc/workspace-engine`** by code outside it, and have no `export` of the same
-name anywhere else.
+`@dohc/workspace-engine`** by code outside it, and have no `export interface|type`
+of the same name **anywhere under `packages/`, `apps/` or `services/` other than
+`packages/workspace-engine/src` itself** (excluding `node_modules`, `dist`,
+`target` and worktrees). A barrel re-export does NOT count as a home — a
+re-export from the legacy package dies with it; only a definition elsewhere counts.
 
 That middle condition is load-bearing. An earlier version of this list intersected
 on bare *name references* instead of imports and wrongly included `EngineSqliteDb`
@@ -147,8 +150,16 @@ Earlier hand-built versions of this list said 4, then 13; a name-reference
 intersection said 20. Re-derive with the method above rather than trusting any
 number here.
 
-The raw file count (54 files import the package) still overstates the *runtime*
-work; that surface is **42 runtime symbols**.
+The raw file count (54 files import the package) overstates the *runtime* work —
+and so did the "42 runtime symbols" figure this line used to carry. Recomputed
+from the actual import statements in `apps/desktop/src` non-test, the runtime
+surface is **33 distinct names across 12 files**.
+
+The 42 included entries with **no value import anywhere** in that scope, imported
+only in type position: `pullShareView`, `pullSharedChannel`, `pushSharedChannel`,
+`pullWorkspaceFromRelay`, `pushWorkspaceToRelay`, `recoverRelayOrigin`. Counting
+those as runtime work is the exact miscount the warning at the top of this file
+exists to prevent.
 
 ## Errors and constants — shared vocabulary, NOT engine implementation
 
