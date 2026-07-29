@@ -4,8 +4,11 @@ import {
   validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
+// The path floor is a cross-process security contract with a Rust twin, not
+// engine state — the same reason workspaceFiles/workspaceGraph/workspaceSearch
+// and the relay's shareFilter already read it from here.
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
-  classifyEngineFilePath,
   compareVersionFiles,
   createSecretFileStore,
   createVersionedTextStore,
