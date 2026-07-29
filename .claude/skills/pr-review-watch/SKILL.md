@@ -496,8 +496,15 @@ review_status() {
   # The head can move while these queries run — this repo has concurrent sessions,
   # and this function is the synchronous pre-merge gate, so a stale OK is the one
   # answer that must never happen. Re-read the head and void the result if it moved.
-  now=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null)
-  if [ -n "$now" ] && [ "$now" != "$head" ]; then
+  # A failed or empty re-read is NOT confirmation that the head held still. Skipping
+  # the check on failure would let reviews of the old head produce OK unverified,
+  # which is the same mistake as treating a failed query as "no reviews".
+  if ! now=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null) \
+     || [ -z "$now" ]; then
+    echo "  HEAD RE-CHECK FAILED — cannot confirm $short is still the head; verdict VOID"
+    return 2
+  fi
+  if [ "$now" != "$head" ]; then
     echo "  HEAD MOVED during the check ($short -> ${now:0:10}) — verdict VOID, run it again"
     return 2
   fi
