@@ -41,9 +41,10 @@ new became usable, it is a Change.
   `the relay could not be reached`.
 - **Name the thing the user names it.** Use the glossary in the writing skill:
   `file`, `folder`, `workspace`, `chat`, `share`, `history`, `agent`. Never
-  `atom`, `entity`, `capture`, `item`, or `object` in UI copy — `capture` is
-  the engine's name for the recorder; the user's word for the feature is
-  `history`.
+  `atom`, `entity`, `capture`, or `object` in UI copy — `capture` is the
+  engine's name for the recorder; the user's word for the feature is
+  `history`. Use `item` only for a selection that genuinely mixes files and
+  folders, where neither noun is true of everything in it.
 - **Same word every time.** If it is a `file` in the sidebar it is a `file` in
   the error. Do not vary wording to avoid repetition.
 - **No figurative language, no jokes, no irony.** Not because dohc is humorless
@@ -93,11 +94,16 @@ An empty state is a **Next**, not a shrug. One `text-sm text-muted` line that
 says what is missing and what to do about it, per the `EmptyState` recipe in
 `ui-language.md`.
 
+**The Next must work on that surface.** Verify the control or the flow exists
+there before you write the instruction. An empty state that tells the user to
+do something the surface does not offer is worse than one that says nothing,
+because it costs them a search.
+
 | Instead of | Write |
 | --- | --- |
 | `No results` | `No files match "budget". Try a shorter search.` |
 | `Nothing here yet` | `This folder is empty. Add a file to start.` |
-| `No chats` | `No chats in this workspace yet. Open a text file to start one.` |
+| `No chats` | `No chats in this workspace yet.` — beside a control that actually creates one |
 
 ## Agent copy
 
@@ -115,10 +121,13 @@ Agent activity gets the olive `agent` voice visually. In words:
 
 - Name the exact thing and the exact count. `Delete 12 files from Research?`
 - **State the true recovery path, including the fallback.** dohc file deletes
-  are always recoverable: the system trash, or `.dohc/trash` on drives without
-  one. The shipping dialog is the model — `It moves to the system trash — or to
-  this workspace's .dohc/trash folder on drives without one — and can be
-  restored from there.` Never write `This cannot be undone.` here.
+  are always recoverable: the system trash, or `<workspace>/.dohc/trash`
+  whenever the system-trash operation fails — which is any rejection, not only
+  a drive that lacks a trash. Name both locations. Never write
+  `This cannot be undone.` here.
+  (The shipping dialog at `Explorer.tsx:1528` says "on drives without one",
+  which understates the trigger — `deletePath` catches *any* `trashItem`
+  error. Correct it when you touch that dialog.)
 - Write `This cannot be undone` only where it is true, and verify before you
   write it. Durability is a contract, not a tone — see the product invariants
   in `AGENTS.md`.
@@ -133,7 +142,7 @@ Agent activity gets the olive `agent` voice visually. In words:
 | `Something went wrong. Please try again later.` | `dohc could not reach the sync relay. Check your connection.` — with a `Retry` action | Names the failing actor, one instruction per sentence, and the retry is a control rather than a second instruction. |
 | `Seamlessly sync your workspace across all your devices` | `When you turn on sync, this workspace stays current on every machine you join it from.` | Marketing word out, and the opt-in stays visible — sync is off by default and signing in alone does not enable it. |
 | `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, glossary noun, shorter. |
-| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/trash, and can be restored.` | States the count and the true recovery path including the fallback — dohc deletes are recoverable, so `This cannot be undone` would be false. |
+| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/trash if that fails, and can be restored.` | States the count and the true recovery path including the fallback — dohc deletes are recoverable, so `This cannot be undone` would be false. |
 | `AI is analyzing your workspace…` | `Agent is reading 40 files.` | Concrete, countable, no magic. |
 
 ## Known violations in shipping copy
@@ -145,10 +154,9 @@ automatically conformant. Two are confirmed:
   uses `page`, a banned synonym for `file`.
 - `apps/desktop/src/renderer/settings/SettingsDialog.tsx:487` — "without
   changing document content" uses `document`, a banned synonym for `file`.
-- `apps/desktop/src/renderer/workbench/Explorer.tsx:1524` — the delete dialog
-  counts `${confirmDelete.length} items`, and `item` is banned in UI copy. The
-  same dialog's recovery sentence is the house standard for destructive copy,
-  so fix the noun without touching the rest.
+Not a violation, though it looks like one: the delete dialog's
+`${confirmDelete.length} items` (`Explorer.tsx:1524`) is correct — that
+selection can mix files and folders, so `files` would be false.
 
 Fix these when you next touch the surface. Do not read existing copy as an
 example of the rules.
