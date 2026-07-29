@@ -112,13 +112,11 @@ export function momentTextsForPath(rootPath: string, path: string): string[] {
 export function textFileTrackedByEngine(rootPath: string, path: string): boolean {
   return (
     withEngineDb(rootPath, (db) => {
+      // No join on active_versions: that table only gains a row once a
+      // version is explicitly switched, so joining it reports "untracked"
+      // for every ordinary single-version workspace.
       const row = db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM snapshots s
-             JOIN active_versions a
-               ON a.workspace_id = s.workspace_id AND a.version_id = s.version_id
-            WHERE s.path = ?`,
-        )
+        .prepare("SELECT COUNT(*) AS n FROM snapshots WHERE path = ?")
         .get(path) as { n: number } | undefined;
       return Number(row?.n ?? 0) > 0;
     }) ?? false

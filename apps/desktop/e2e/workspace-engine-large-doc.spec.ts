@@ -143,6 +143,14 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
       ),
     ).toBe(true);
 
+    // Sanity: the record IS tracked before the restart. Without this the
+    // post-restart assertion could be failing on a broken query rather than
+    // on a retired record.
+    expect(
+      textFileTrackedByEngine(temp.rootPath, "load/big.md"),
+      "precondition: the engine tracks the doc before the restart",
+    ).toBe(true);
+
     // RESTART. The startup reconcile re-reads every file and retires anything
     // it cannot own as text — and a >128 KiB file is exactly that. Without
     // the lineage guard it journals a "Stopped tracking non-text content"
