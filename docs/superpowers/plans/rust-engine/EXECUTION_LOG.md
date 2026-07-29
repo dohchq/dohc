@@ -3057,3 +3057,68 @@ found and fixed defects a human dogfood would likely have suffered silently
 (an editor that never engaged; typing that settled back to the pre-edit file while
 claiming "Saved"). R16 is GO for the local core once the journeys' open P1s land.
 The cloud punch-list above is Ice's to sequence; it is tracked, not silent.
+
+### Addendum, same day: the journeys' P1s, and what fixing them exposed
+
+The entry above said R16 was GO for the local core "once the journeys' open P1s land".
+They landed, and the landing was the most instructive part of the campaign.
+
+**The daemon-kill pair (#343, three rounds).** The uncaught EPIPE was never the
+daemon's stdin: main's own `console.error` throws synchronously on a broken
+stderr pipe, and it threw *inside* the catch handler reporting the daemon's
+death, turning a recoverable event into an unhandled rejection that aborted the
+in-flight rebind. The lost text was `EngineClient` forgetting *why* it closed —
+`fail()` recorded `transport-error` but later requests reported a bare
+`"closed"`, so `isTransportError()`, the sole gate on "the daemon may be
+relaunching, retry", read false. Review round two found the fix was wired into
+`applyLocalUpdate` only, so a revived session's text was still discarded by
+`close()` — including the settling close at quit, which is exactly the journey's
+scenario (the user stopped typing before the kill). Round three found that the
+resulting fix burned 2,579 ms of the 3,000 ms `will-quit` budget, leaving too
+little for the SQLite closes chained behind it; bounded, it now costs 117 ms and
+still recovers a daemon that returns mid-relaunch, because
+`retryTransportErrors: false` is two attempts 100 ms apart — which happens to
+match the supervisor's own first-relaunch delay.
+
+**The silent-save fix (#345, five rounds) walked into the bug beneath it.** The
+48 KiB cap was only a response-encoding constraint, so the file could be
+materialized from a projection the daemon already held. But making over-cap
+documents actually reach disk created a state nothing had produced before, and
+the capture sink retires anything past its 128 KiB ownership limit. Self-write
+suppression could not prevent it: suppression matches a *write* by sha, while
+this is a *retire* on a size classification that never consults it. The result
+would have been the exact inverse of the bug being fixed — an honest "Saved",
+then the record retired, then "Couldn't save" on a document that genuinely
+saved. It was caught because the orchestrator ran the canonical gate itself
+rather than accepting a reported one; the test failed only in the parallel
+workspace run and passed 3/3 in isolation.
+
+**Two invariants were written down as true and were not.** The save-sequence
+mechanism — built specifically to stop a settle vouching for edits it never
+carried — twice relied on completion ordering, and twice the ordering claim was
+false: first because one scalar cannot hold several in-flight settles, then
+because a settle that aborts before the barrier announces itself and never joins
+the queue it was assumed to join. Both were found by replaying the real
+provider's callback stream rather than by reading the code. It now pairs on an
+explicit token, so correctness no longer depends on which paths queue where.
+
+**Three JS tests were green because the machine was quiet** (#339, #340, #341),
+and one of those fixes was itself fake: it polled a variable initialised to
+`null` with `toBeDefined()`, which passes immediately, so the guard never waited
+(#351). That fix had survived a merge, a citation in this log, and a rebase
+before anyone checked the assertion itself. Agent worktrees also silently voided
+whole test runs — they check out inside the repo, so an excluded crate attaches
+to the outer manifest, and because the root test script bails on first failure
+the entire JS suite died in about two seconds before `apps/desktop` ran (#348).
+That is the mechanism behind one subagent's reported-green run that had executed
+nothing.
+
+Local-first suites on final main: canonical Rust gate PASS on every row, JS
+typecheck clean with 3,666 tests across 268 files, and the desktop e2e at
+**54 passed / 7 failed / 5 skipped** — from 28 passed / 30 failed when the
+campaign began. Every remaining failure maps to a filed issue: the
+win32-disabled CLI, five cloud-surface gaps (#335), and the binary-merge
+contract (#336). No unexplained failure remains.
+
+R16 stays GO for the local core. The cloud punch-list (#335) is unchanged and
+still Ice'''s to sequence.
