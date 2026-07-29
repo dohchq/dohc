@@ -502,9 +502,11 @@ import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
 import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 
-// Before anything can log: a launcher that exited leaves main's stdout/stderr a
-// pipe with no reader, and a pipe write throws synchronously. Diagnostics must
-// never be able to crash the app they are diagnosing.
+// A launcher that exited leaves main's stdout/stderr a pipe with no reader, and
+// a pipe write throws synchronously. Diagnostics must never be able to crash the
+// app they are diagnosing. This runs before main does any work; module-eval-time
+// logging in the imports above is still unguarded, which is why this stays a
+// top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
 
 // Custom scheme that serves a workspace file's bytes to the renderer:

@@ -27,6 +27,9 @@ import {
 //  (b) text typed just BEFORE a kill was ultimately lost from BOTH the app and
 //      the .md on disk.
 //
+// These specs own (b) end to end, and the "editor went dead" half of (a). The
+// EPIPE half is not reproducible here (see the note in killDaemonMidTyping).
+//
 // The daemon dying is an EXPECTED, recoverable event — EngineDaemonLifecycle
 // exists precisely to restart it. These specs drive the real app against a real
 // daemon and hard-kill the real process, because that is the layer that broke;
@@ -110,7 +113,12 @@ async function killDaemonMidTyping(
   const replacement = await waitForFreshEngineDaemon(appPid, victims);
   expect(victims).not.toContain(replacement);
 
-  // (a) The daemon dying must never become a user-facing main-process crash.
+  // A daemon death must never become a user-facing main-process crash. This
+  // cannot observe the journey's EPIPE class — Playwright keeps a reader on the
+  // app's stdio, so the pipe never breaks and this assertion holds on unfixed
+  // main too. The EPIPE fix is covered by stdioResilience.test.ts and by the
+  // throwing-sink test in workspaceEngineYDocRestart.test.ts; this guards the
+  // rest of the uncaught-exception class.
   expect(mainProcessCrashText(desktop.logs)).toEqual([]);
 
   return { desktop, editor };
