@@ -1,10 +1,12 @@
 import {
-  RelayConflictError,
-  RelayKeyEnvelopeMissingError,
-  RelayWorkspaceUnavailableError,
   SecretKeyEnvelopeError,
   unwrapWorkspaceDataKey,
   wrapWorkspaceDataKey,
+} from "@dohc/security-contract/secret-key-envelope";
+import {
+  RelayConflictError,
+  RelayKeyEnvelopeMissingError,
+  RelayWorkspaceUnavailableError,
 } from "@dohc/workspace-engine";
 import { validateSecretPassphrase } from "./secretPassphrase";
 import type { EngineRelayWorkspaceClient } from "./engineRelayClient";

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import { createLinkedChatStore, linkedChatProjectionPath } from "./linkedChatStore";
 import { VERSIONED_TEXT_STORE_RELATIVE_PATH, createVersionedTextStore } from "./versionedTextStore";
-import { resolveEffectivePolicy, type FilesPolicyRule } from "./effectivePolicy";
+import { resolveEffectivePolicy, type FilesPolicyRule } from "@dohc/security-contract/effective-policy";
 import {
   classifyEngineFilePath,
   classifyEngineFilePathForRead,

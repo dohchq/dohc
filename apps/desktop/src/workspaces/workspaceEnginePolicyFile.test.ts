@@ -1,5 +1,6 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy";
 import type { TextFileSnapshot } from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nativeTmpdir } from "./testTemp";

@@ -17,7 +17,7 @@ import type {
   VersionId,
   WorkspaceId,
 } from "./versionedTextStore";
-import { resolveEffectivePolicy } from "./effectivePolicy";
+import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy";
 
 export const WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS = 180;
 

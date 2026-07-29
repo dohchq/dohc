@@ -9,7 +9,7 @@ import {
   type PolicyParseResult,
   type VisibilityPolicyRule,
 } from "./effectivePolicy";
-import { classifyEngineFilePath } from "./workspaceSearch";
+import { classifyEngineFilePath } from "./enginePathFloor";
 
 function expectReject(result: PolicyParseResult<unknown>, pattern?: RegExp): void {
   expect(result.ok).toBe(false);

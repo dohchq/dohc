@@ -17,7 +17,7 @@ import {
   SECRET_KEY_ENVELOPE_SCRYPT_R,
   unwrapWorkspaceDataKey,
   wrapWorkspaceDataKey,
-} from "./secretKeyEnvelope";
+} from "@dohc/security-contract/secret-key-envelope";
 import { createVersionedTextStore } from "./versionedTextStore";
 
 const WORKSPACE_ID = "workspace-envelope";
