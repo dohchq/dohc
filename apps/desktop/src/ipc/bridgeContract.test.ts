@@ -12,6 +12,7 @@ import {
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
+  ApplyEngineYDocUpdatePayload,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
   InvokeSiteSdkPayload,
@@ -1277,5 +1278,39 @@ describe("document export IPC contract", () => {
     expect(ExportDocumentFileResult.parse({ path: "/tmp/out.html" })).toEqual({
       path: "/tmp/out.html",
     });
+  });
+});
+
+describe("engine Y.Doc update IPC contract", () => {
+  // AUDIT-SILENTSAVE round 2 (D1). The engine Y.Doc apply-update handler is a
+  // hardened boundary: for an unknown, foreign, or read-only-shared session it
+  // must be an INERT NO-OP that never throws. Zod runs before the session
+  // lookup, so a REQUIRED seq would reject a hostile/legacy caller with an
+  // exception and convert that silent refusal into a throwing one. The
+  // e2e that pins the refusal (workspace-shares.spec.ts) cannot run without
+  // share infrastructure, so the contract is pinned here instead.
+  it("accepts a payload with no seq, defaulting it, so the boundary cannot throw", () => {
+    const parsed = ApplyEngineYDocUpdatePayload.parse({
+      sessionId: "shared-view-bypass",
+      update: new Uint8Array([1, 2, 3]),
+    });
+    expect(parsed.seq).toBe(0);
+  });
+
+  it("keeps a supplied seq and still rejects a nonsense one", () => {
+    expect(
+      ApplyEngineYDocUpdatePayload.parse({
+        sessionId: "s",
+        update: new Uint8Array([1]),
+        seq: 7,
+      }).seq,
+    ).toBe(7);
+    expect(() =>
+      ApplyEngineYDocUpdatePayload.parse({
+        sessionId: "s",
+        update: new Uint8Array([1]),
+        seq: -1,
+      }),
+    ).toThrow();
   });
 });
