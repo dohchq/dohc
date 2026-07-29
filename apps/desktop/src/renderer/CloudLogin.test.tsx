@@ -202,6 +202,40 @@ describe("CloudLogin", () => {
     );
   });
 
+  // Enrollment is gated (#356), but the protect/unlock buttons on a SYNCED
+  // workspace still call enableSync, so its workspace-switch guard is live
+  // code. This is the only test that switches workspaces mid-flight, which is
+  // what makes deleting that guard fail rather than pass silently.
+  it("does not let a stale protect result mark the next workspace as synced", async () => {
+    const staleEnable = deferred<void>();
+    bridgeMock.cloudStatus.mockImplementation(async (payload) => ({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: payload?.workspaceId === "old",
+      ...(payload?.workspaceId === "old"
+        ? { workspaceSecretState: "protected-key-present" as const }
+        : {}),
+    }));
+    bridgeMock.cloudEnableSync.mockReturnValueOnce(staleEnable.promise);
+
+    const { rerender } = render(<CloudLogin workspaceId="old" />);
+    fireEvent.click(await screen.findByTestId("cloud-protect-secrets"));
+    fireEvent.change(await screen.findByTestId("cloud-sync-passphrase"), {
+      target: { value: "shared passphrase" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-protect-secrets"));
+    await waitFor(() => expect(bridgeMock.cloudEnableSync).toHaveBeenCalled());
+
+    rerender(<CloudLogin workspaceId="new" />);
+    await screen.findByTestId("cloud-enable-sync");
+
+    await act(async () => {
+      staleEnable.resolve();
+    });
+
+    expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
+  });
+
   it("unlocks protected files later when a synced workspace is missing its local key", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: true,
