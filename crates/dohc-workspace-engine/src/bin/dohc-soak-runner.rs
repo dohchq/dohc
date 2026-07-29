@@ -253,6 +253,152 @@ fn parse_options() -> Options {
     }
 }
 
+// ---------------------------------------------------------------- provenance
+
+/// The exact question asked of git, recorded beside the answer: untracked
+/// files (build logs, the evidence file itself) are deliberately not what
+/// "dirty" means here.
+const DIRTY_CHECK: &str = "git status --porcelain --untracked-files=no";
+/// What the commit reads when git could not answer. Never a fabricated sha.
+const UNKNOWN_COMMIT: &str = "unknown";
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Invocation {
+    argv: Vec<String>,
+    tier: &'static str,
+    minutes: u64,
+    cycles: u64,
+    quick: bool,
+    evidence_path: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonFingerprint {
+    path: String,
+    size_bytes: Option<u64>,
+    modified_unix_ms: Option<u64>,
+}
+
+/// Which tree, which invocation and which binary produced this artifact.
+/// Without it the same PASS payload can be re-banked under any commit, and an
+/// older run's numbers can stand in for a tree that was never soaked.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Provenance {
+    commit: String,
+    /// `None` when git could not answer — a clean tree is never assumed.
+    tree_dirty: Option<bool>,
+    dirty_check: &'static str,
+    invocation: Invocation,
+    daemon: DaemonFingerprint,
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").args(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn daemon_fingerprint(path: &Path) -> DaemonFingerprint {
+    let metadata = std::fs::metadata(path).ok();
+    DaemonFingerprint {
+        path: path.display().to_string(),
+        size_bytes: metadata.as_ref().map(|metadata| metadata.len()),
+        modified_unix_ms: metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since_epoch| since_epoch.as_millis() as u64),
+    }
+}
+
+fn collect_provenance(options: &Options, tier: &'static str) -> Provenance {
+    Provenance {
+        commit: git_output(&["rev-parse", "HEAD"])
+            .map(|sha| sha.trim().to_owned())
+            .filter(|sha| !sha.is_empty())
+            .unwrap_or_else(|| UNKNOWN_COMMIT.to_owned()),
+        tree_dirty: git_output(&["status", "--porcelain", "--untracked-files=no"])
+            .map(|status| !status.trim().is_empty()),
+        dirty_check: DIRTY_CHECK,
+        invocation: Invocation {
+            argv: std::env::args().collect(),
+            tier,
+            minutes: options.minutes,
+            cycles: options.cycles,
+            quick: options.quick,
+            evidence_path: options.evidence.display().to_string(),
+        },
+        daemon: daemon_fingerprint(&options.daemon),
+    }
+}
+
+/// The rule applied to the ARTIFACT, so a reader checks exactly what the
+/// runner checked: every provenance field present and concrete.
+fn provenance_is_complete(provenance: &Value) -> bool {
+    let commit_is_a_real_sha = provenance["commit"].as_str().is_some_and(|commit| {
+        (40..=64).contains(&commit.len()) && commit.chars().all(|digit| digit.is_ascii_hexdigit())
+    });
+    let clean_tree = provenance["treeDirty"] == json!(false);
+    let invocation = &provenance["invocation"];
+    let invocation_recorded = invocation["argv"]
+        .as_array()
+        .is_some_and(|argv| !argv.is_empty())
+        && invocation["tier"]
+            .as_str()
+            .is_some_and(|tier| !tier.is_empty());
+    let daemon = &provenance["daemon"];
+    let daemon_fingerprinted = daemon["path"].as_str().is_some_and(|path| !path.is_empty())
+        && daemon["sizeBytes"].as_u64().is_some()
+        && daemon["modifiedUnixMs"].as_u64().is_some();
+    commit_is_a_real_sha && clean_tree && invocation_recorded && daemon_fingerprinted
+}
+
+impl Provenance {
+    fn attributable(&self) -> bool {
+        provenance_is_complete(&serde_json::to_value(self).expect("serialize provenance"))
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "commit={} tree={}",
+            self.commit,
+            match self.tree_dirty {
+                Some(false) => "clean",
+                Some(true) => "dirty",
+                None => "unknown",
+            }
+        )
+    }
+}
+
+/// The last gate before the artifact exists: a verdict that claims a PASS is a
+/// claim ABOUT A TREE, so it may only be written with provenance a reader can
+/// check it against. A FAIL or an INVALID is recorded either way — discarding
+/// a failing run's samples would help nobody.
+fn write_evidence(path: &Path, evidence: &Value) -> Result<(), String> {
+    let verdict = evidence["verdict"].as_str().unwrap_or_default();
+    if verdict.starts_with("PASS") && !provenance_is_complete(&evidence["provenance"]) {
+        return Err(format!(
+            "refusing to write {verdict} evidence to {}: provenance is incomplete — {}",
+            path.display(),
+            serde_json::to_string(&evidence["provenance"]).unwrap_or_default()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create evidence directory: {error}"))?;
+        }
+    }
+    let document = serde_json::to_string_pretty(evidence)
+        .map_err(|error| format!("serialize evidence: {error}"))?;
+    std::fs::write(path, document).map_err(|error| format!("write evidence: {error}"))
+}
+
 // ---------------------------------------------------------------- DOP1 client
 
 /// In-flight request table: id -> the caller waiting on its result.
@@ -829,6 +975,44 @@ fn classify_drain(baseline_rss: u64, samples: &[Sample]) -> DrainDisposition {
     }
 }
 
+/// Every input the tier verdict depends on, so the precedence between FAIL,
+/// the INVALIDs and the qualified PASSes is one function a test can drive.
+#[derive(Debug, Clone, Copy)]
+struct VerdictInputs {
+    daemon_healthy: bool,
+    provenance_attributable: bool,
+    bounded_working_set: bool,
+    hard_capped: bool,
+    crash_prelude_complete: bool,
+    trend_evaluated: bool,
+    retention_signal: bool,
+}
+
+fn verdict_for(inputs: VerdictInputs) -> &'static str {
+    if !inputs.daemon_healthy {
+        // A handle leak, a thread leak or a dirty shutdown are conclusions
+        // nothing else in this chain can invalidate.
+        "FAIL"
+    } else if !inputs.provenance_attributable {
+        // Measurements no reader can tie to a tree are not this tier's
+        // evidence, however healthy the daemon looked.
+        "INVALID(provenance-unattributable)"
+    } else if !inputs.bounded_working_set {
+        "INVALID(workload-working-set-unbounded)"
+    } else if inputs.hard_capped {
+        // The requested targets were NOT met — evidence, but not the tier's.
+        "PASS-INCOMPLETE(hard-cap)"
+    } else if !inputs.crash_prelude_complete {
+        "PASS-INCOMPLETE(crash-prelude)"
+    } else if !inputs.trend_evaluated {
+        "PASS-SCENARIOS-ONLY(trend-not-evaluated)"
+    } else if inputs.retention_signal {
+        "PASS-RETENTION-SIGNAL(rss-drain-reclaimed)"
+    } else {
+        "PASS"
+    }
+}
+
 fn rss_drain_delta(start: Option<u64>, end: Option<u64>) -> Option<i64> {
     start.zip(end).map(|(start, end)| {
         let delta = i128::from(end) - i128::from(start);
@@ -1152,6 +1336,9 @@ async fn main() {
         "cutoverBlocking"
     };
     let process_sampling = process_sampling_metadata();
+    // Asked BEFORE any work: the runner writes its evidence into the tree, so
+    // a dirty check taken later would report on its own output.
+    let provenance = collect_provenance(&options, tier);
     let mut timeline = SoakTimeline::new();
     let budget = Duration::from_secs(options.minutes * 60);
     eprintln!(
@@ -1159,6 +1346,20 @@ async fn main() {
         options.cycles,
         options.minutes,
         options.daemon.display()
+    );
+    eprintln!(
+        "soak: provenance — {} ({}) daemon {} bytes; {}",
+        provenance.summary(),
+        DIRTY_CHECK,
+        provenance
+            .daemon
+            .size_bytes
+            .map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string()),
+        if provenance.attributable() {
+            "ATTRIBUTABLE"
+        } else {
+            "UNATTRIBUTABLE — this run cannot produce a PASS verdict"
+        }
     );
     eprintln!(
         "soak: handle/thread slack calibration for {}: {} — {}",
@@ -1426,25 +1627,22 @@ async fn main() {
     // went unread. Only the RSS-derived part of the verdict is gated, and
     // rss_ok is forced true below when the precondition fails so it can
     // contribute in neither direction.
-    let verdict = if !(handles_ok && threads_ok && rss_ok && clean_shutdown) {
-        "FAIL"
-    } else if !bounded_working_set {
-        "INVALID(workload-working-set-unbounded)"
-    } else if hard_capped {
-        // The requested targets were NOT met — evidence, but not the tier's.
-        "PASS-INCOMPLETE(hard-cap)"
-    } else if !crash_prelude_complete {
-        "PASS-INCOMPLETE(crash-prelude)"
-    } else if !trend_evaluated {
-        "PASS-SCENARIOS-ONLY(trend-not-evaluated)"
-    } else if rss_disposition.is_retention_signal() {
-        "PASS-RETENTION-SIGNAL(rss-drain-reclaimed)"
-    } else {
-        "PASS"
-    };
+    let verdict = verdict_for(VerdictInputs {
+        daemon_healthy: handles_ok && threads_ok && rss_ok && clean_shutdown,
+        provenance_attributable: provenance.attributable(),
+        bounded_working_set,
+        hard_capped,
+        crash_prelude_complete,
+        trend_evaluated,
+        retention_signal: rss_disposition.is_retention_signal(),
+    });
     let evidence = json!({
         "tier": tier,
         "verdict": verdict,
+        // What tree, what invocation and what binary produced this file.
+        // Asked of git at startup; `unknown`/`dirty` when it could not be
+        // established, never a fabricated attribution.
+        "provenance": provenance,
         "cyclesRequested": options.cycles,
         // Phase-2 WORKLOAD cycles only — the phase-1 crash prelude reports
         // under crashRestarts/scenarioCounts, never in this denominator.
@@ -1586,19 +1784,10 @@ async fn main() {
         ],
         "samples": samples,
     });
-    if let Some(parent) = options.evidence.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).expect("create evidence directory");
-        }
-    }
-    std::fs::write(
-        &options.evidence,
-        serde_json::to_string_pretty(&evidence).expect("serialize evidence"),
-    )
-    .expect("write evidence");
+    write_evidence(&options.evidence, &evidence).unwrap_or_else(|error| panic!("{error}"));
 
     println!(
-        "- {} | soak-{tier} | {}/{} | {} | cycles={} crashes={} durationSecs={} \
+        "- {} | soak-{tier} | {}/{} | {} | {} cycles={} crashes={} durationSecs={} \
          rssDisposition={} rssSlopeWholeB/s={:.1} rssSlopeTailB/s={:.1} \
          warmupDominatedWholeRunFit={} drain={} rssDrain {}->{} min={} \
          drop={} ({}) handles {}->{} threads {}->{} handleThreadSlackCalibration={} \
@@ -1607,6 +1796,9 @@ async fn main() {
         std::env::consts::OS,
         std::env::consts::ARCH,
         verdict,
+        // The pasted EXECUTION_LOG line carries the attribution too, so a
+        // banked verdict line is checkable without opening the JSON.
+        provenance.summary(),
         // Phase-2 workload cycles, same denominator as the evidence JSON —
         // never a sum over counts (supplemental counters like the overlap
         // tally would inflate it).
@@ -1743,6 +1935,203 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    fn complete_provenance() -> Provenance {
+        Provenance {
+            commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            tree_dirty: Some(false),
+            dirty_check: DIRTY_CHECK,
+            invocation: Invocation {
+                argv: vec![
+                    "dohc-soak-runner".to_owned(),
+                    "--minutes".to_owned(),
+                    "60".to_owned(),
+                ],
+                tier: "cutoverBlocking",
+                minutes: 60,
+                cycles: 1_000,
+                quick: false,
+                evidence_path: "soak-evidence/run.json".to_owned(),
+            },
+            daemon: DaemonFingerprint {
+                path: "target/release/dohc-workspace-engine".to_owned(),
+                size_bytes: Some(12_345_678),
+                modified_unix_ms: Some(1_784_000_000_000),
+            },
+        }
+    }
+
+    fn passing_inputs() -> VerdictInputs {
+        VerdictInputs {
+            daemon_healthy: true,
+            provenance_attributable: true,
+            bounded_working_set: true,
+            hard_capped: false,
+            crash_prelude_complete: true,
+            trend_evaluated: true,
+            retention_signal: false,
+        }
+    }
+
+    /// The whole point of the provenance stamp: a run whose numbers cannot be
+    /// tied to a tree may not report a PASS, however healthy the daemon was.
+    #[test]
+    fn an_unattributable_run_cannot_report_a_pass_verdict() {
+        assert_eq!(verdict_for(passing_inputs()), "PASS");
+        assert_eq!(
+            verdict_for(VerdictInputs {
+                provenance_attributable: false,
+                ..passing_inputs()
+            }),
+            "INVALID(provenance-unattributable)"
+        );
+        // A real daemon failure is still the conclusion — missing provenance
+        // must not launder a FAIL into a merely-unattributable run.
+        assert_eq!(
+            verdict_for(VerdictInputs {
+                daemon_healthy: false,
+                provenance_attributable: false,
+                ..passing_inputs()
+            }),
+            "FAIL"
+        );
+    }
+
+    #[test]
+    fn provenance_is_attributable_only_from_a_known_commit_and_a_clean_tree() {
+        assert!(complete_provenance().attributable());
+
+        let unattributable = [
+            Provenance {
+                commit: UNKNOWN_COMMIT.to_owned(),
+                ..complete_provenance()
+            },
+            Provenance {
+                commit: "deadbeef".to_owned(),
+                ..complete_provenance()
+            },
+            Provenance {
+                tree_dirty: Some(true),
+                ..complete_provenance()
+            },
+            Provenance {
+                tree_dirty: None,
+                ..complete_provenance()
+            },
+            Provenance {
+                daemon: DaemonFingerprint {
+                    size_bytes: None,
+                    ..complete_provenance().daemon
+                },
+                ..complete_provenance()
+            },
+            Provenance {
+                daemon: DaemonFingerprint {
+                    modified_unix_ms: None,
+                    ..complete_provenance().daemon
+                },
+                ..complete_provenance()
+            },
+            Provenance {
+                invocation: Invocation {
+                    argv: Vec::new(),
+                    ..complete_provenance().invocation
+                },
+                ..complete_provenance()
+            },
+        ];
+        for provenance in unattributable {
+            assert!(
+                !provenance.attributable(),
+                "must not be attributable: {provenance:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_write_refuses_a_pass_it_cannot_attribute() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let path = scratch.path().join("evidence.json");
+
+        let error = write_evidence(
+            &path,
+            &json!({ "tier": "cutoverBlocking", "verdict": "PASS" }),
+        )
+        .expect_err("an unstamped PASS must be refused");
+        assert!(error.contains("provenance is incomplete"), "{error}");
+        assert!(
+            !path.exists(),
+            "a refused PASS must leave no artifact behind"
+        );
+
+        let dirty = serde_json::to_value(Provenance {
+            tree_dirty: Some(true),
+            ..complete_provenance()
+        })
+        .expect("serialize provenance");
+        let error = write_evidence(&path, &json!({ "verdict": "PASS", "provenance": dirty }))
+            .expect_err("a dirty-tree PASS must be refused");
+        assert!(error.contains("provenance is incomplete"), "{error}");
+        assert!(!path.exists());
+
+        let complete = serde_json::to_value(complete_provenance()).expect("serialize provenance");
+        write_evidence(&path, &json!({ "verdict": "PASS", "provenance": complete }))
+            .expect("an attributable PASS is written");
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read evidence"))
+                .expect("evidence JSON");
+        assert_eq!(
+            written["provenance"]["commit"],
+            json!("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    /// Pins the guard to the runner's actual verdict vocabulary: every verdict
+    /// the chain can emit that reads as a pass needs provenance, so renaming
+    /// or adding one cannot route around the check.
+    #[test]
+    fn every_passing_verdict_the_runner_can_emit_needs_provenance() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let passing = [
+            verdict_for(passing_inputs()),
+            verdict_for(VerdictInputs {
+                hard_capped: true,
+                ..passing_inputs()
+            }),
+            verdict_for(VerdictInputs {
+                crash_prelude_complete: false,
+                ..passing_inputs()
+            }),
+            verdict_for(VerdictInputs {
+                trend_evaluated: false,
+                ..passing_inputs()
+            }),
+            verdict_for(VerdictInputs {
+                retention_signal: true,
+                ..passing_inputs()
+            }),
+        ];
+        for verdict in passing {
+            assert!(verdict.starts_with("PASS"), "{verdict}");
+            let path = scratch
+                .path()
+                .join(format!("{}.json", verdict.replace(['(', ')'], "-")));
+            write_evidence(&path, &json!({ "verdict": verdict }))
+                .expect_err("a passing verdict without provenance must be refused");
+            assert!(!path.exists(), "{verdict} was written unattributed");
+        }
+    }
+
+    #[test]
+    fn a_failing_run_is_still_recorded_without_provenance() {
+        let scratch = ScratchDir::new().expect("scratch");
+        for verdict in ["FAIL", "INVALID(provenance-unattributable)"] {
+            let path = scratch.path().join(format!("{}.json", verdict.len()));
+            write_evidence(&path, &json!({ "verdict": verdict }))
+                .expect("a non-passing run's samples are still worth keeping");
+            assert!(path.exists());
+        }
     }
 
     #[test]

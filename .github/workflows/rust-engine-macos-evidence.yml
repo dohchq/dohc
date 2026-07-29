@@ -290,6 +290,15 @@ jobs:
             console.log("RSS DISPOSITION (final-half B/s threshold): " + d.rssDisposition);
             console.log("WARMUP-DOMINATED WHOLE-RUN FIT: " + d.warmupDominatedWholeRunFit);
             console.log("RUN VERDICT: " + d.verdict);
+            const p = d.provenance;
+            console.log(
+              "PROVENANCE: " +
+                (p
+                  ? "commit=" + p.commit + " treeDirty=" + p.treeDirty +
+                    " daemonBytes=" + p.daemon?.sizeBytes +
+                    " argv=" + JSON.stringify(p.invocation?.argv)
+                  : "MISSING — this artifact predates provenance stamping and is attributable to nothing")
+            );
           ' "$SOAK_EVIDENCE_PATH"
 
       # The artifact quota is account-wide, so uploads can fail for reasons this

@@ -14,6 +14,10 @@ local evidence pipeline.
 | `run-native-suite.mjs` | TS-NATIVE-CI local equivalent: runs the reference `@dohc/workspace-engine` `typecheck` + `test` suites natively, asserts host arch, prints an evidence line. This is the native evidence GATE0/TS-NATIVE-CI depends on. |
 | `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 
+Banked soak artifacts live in `soak-evidence/`; see
+[`soak-evidence/README.md`](soak-evidence/README.md) for the provenance block
+every artifact carries, which files predate it, and the residual gap.
+
 ## Requirements
 
 - Node >= 22 (repo uses v24). The runner scripts themselves import nothing
