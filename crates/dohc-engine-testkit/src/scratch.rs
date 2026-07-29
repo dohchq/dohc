@@ -2,6 +2,8 @@
 //! directory-alias helper (symlink on POSIX, junction/symlink on Windows) used
 //! to prove canonical-identity convergence.
 
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,10 +20,14 @@ pub struct ScratchDir {
 impl ScratchDir {
     /// Create a fresh unique scratch directory.
     pub fn new() -> io::Result<Self> {
+        // The nonce is what makes the name unique across *runs*: Windows reuses
+        // PIDs, and a crashed run never runs `Drop`, so pid+counter alone can
+        // name a directory a dead run already left behind.
         let unique = format!(
-            "dohc-cal1-{}-{}",
+            "dohc-cal1-{}-{}-{:016x}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed),
+            RandomState::new().build_hasher().finish(),
         );
         let path = std::env::temp_dir().join(unique);
         // `create_dir` (not `create_dir_all`): a pre-existing path — stale
@@ -140,4 +146,38 @@ pub fn try_make_file_symlink(target: &Path, link: &Path) -> io::Result<bool> {
 /// file identity). Hard links are unprivileged on all supported platforms.
 pub fn make_hardlink(target: &Path, link: &Path) -> io::Result<()> {
     std::fs::hard_link(target, link)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nonce_of(dir: &ScratchDir) -> String {
+        let name = dir.path().file_name().unwrap().to_str().unwrap();
+        let (_, nonce) = name.rsplit_once('-').expect("name carries a nonce segment");
+        assert!(
+            u64::from_str_radix(nonce, 16).is_ok(),
+            "nonce must be hex, got {nonce}"
+        );
+        nonce.to_string()
+    }
+
+    #[test]
+    fn scratch_names_carry_a_per_allocation_nonce() {
+        let first = ScratchDir::new().unwrap();
+        let second = ScratchDir::new().unwrap();
+
+        // MUTATION: drop the nonce and the trailing segment is the counter,
+        // which is not 16 hex digits — the width assertion is what bites.
+        assert_eq!(
+            nonce_of(&first).len(),
+            16,
+            "nonce must be a full u64 in hex"
+        );
+        assert_ne!(
+            nonce_of(&first),
+            nonce_of(&second),
+            "each allocation draws fresh entropy, so a stale same-pid directory cannot collide"
+        );
+    }
 }
