@@ -10,9 +10,20 @@
 >   module top level with no skip gate. Root `pnpm test` **and** `pnpm typecheck`
 >   both hard-fail on deletion, and they are real end-to-end relay coverage that
 >   needs porting, not muting.
-> - **10 desktop test files** build legacy SQLite stores directly, and the **three
+> - **13 desktop test files** instantiate legacy stores directly, and the **three
 >   e2e specs** use the legacy store to seed the granter side. That is the bulk of
->   the work.
+>   the work. The 13 (by `createVersionedTextStore` / `createSecretFileStore` /
+>   `createLinkedChatStore` / `createAgentDispatchStore` / `createChangeSetStore` /
+>   `createYDocEngineDriver`):
+>   `agents/chatDispatchService`, `agents/runnerThreadContext`, `cli/cliServer`,
+>   `collab/ydocEngineProviderSession`, `main.chatSecurity`,
+>   `workspaces/captureOracleGoldens`, `workspaces/dmChats`,
+>   `workspaces/sharedChannels`, `workspaces/workspaceEngineCapture`,
+>   `workspaces/workspaceEngineGeneratedText`,
+>   `workspaces/workspaceEngineSecretCapture`,
+>   `workspaces/workspaceEngineYDocSession`, `workspaces/workspaceVersionOperations`.
+>   Note `main.chatSecurity.test.ts` sits outside `workspaces/`, so a scan scoped
+>   to that directory misses it — which is how the count kept coming out low.
 > - **CI/gate references**: `.github/workflows/desktop-release.yml:151,154` and
 >   `tools/rust-engine-program/run-native-suite.mjs:76,80` invoke
 >   `pnpm --filter @dohc/workspace-engine test|typecheck`.
