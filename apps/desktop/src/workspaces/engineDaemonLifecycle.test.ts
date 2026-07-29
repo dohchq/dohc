@@ -14,6 +14,10 @@ import {
   type EngineDaemonClient,
 } from "./engineDaemonLifecycle";
 
+// The healthy window the restart-budget test configures; its wait is derived
+// from this so the two can never drift apart.
+const HEALTHY_RESET_MS = 20;
+
 class FakeClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
   readonly cancelledRequestIds: number[] = [];
@@ -295,7 +299,7 @@ describe("Rust engine daemon lifecycle", () => {
       command: fakeBinary(),
       maxRestarts: 1,
       initialBackoffMs: 0,
-      healthyResetMs: 20,
+      healthyResetMs: HEALTHY_RESET_MS,
       launch: async (options) => {
         exits.push(options.onExit);
         return new FakeClient();
@@ -306,7 +310,12 @@ describe("Rust engine daemon lifecycle", () => {
       await lifecycle.start();
       exits[0]?.(1, null);
       await vi.waitFor(() => expect(exits).toHaveLength(2));
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      // The budget reset is an internal unref'd timer with no observable seam,
+      // and it is SCHEDULED asynchronously after the generation launches — so a
+      // sleep only slightly longer than the window can end before the callback
+      // has run, leaving the budget unreset and the exit below terminal. Wait a
+      // wide multiple of the window rather than racing it.
+      await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
       exits[1]?.(1, null);
       await vi.waitFor(() => expect(exits).toHaveLength(3));
     } finally {
