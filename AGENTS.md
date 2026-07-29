@@ -144,6 +144,31 @@ For codex, you have to tag the bot (In a pull request comment, mention @codex re
 
 Claude is not setup to review PRs automatically (not part of my subscription), so you have to invoke this review locally (ideally after the PR is created and in parallel with coderabbit and codex reviews). So you have to manually ask claude via the local cli to review the PR and manually go back and forth with it until no issues remain. Everytime claude finishes a review please update the PR via commenting what claude reviewed, then address them. So basically we're trying to do a pseudo claude PR review bot we orchestrate ourselves. Use fable-5 and fallback to opus-5 if fable is unavailable or rate limited.
 
+**Use the `pr-review-watch` skill for this — do not hand-roll a review poller.**
+See [`.claude/skills/pr-review-watch/SKILL.md`](.claude/skills/pr-review-watch/SKILL.md).
+Hand-rolled watchers have failed in every way available: filtering on guessed
+commit timestamps (and so hiding a `CHANGES_REQUESTED`), exiting after the first
+round so the next one went unseen, polling only one bot, and never noticing that
+a `@codex review` trigger silently did not take.
+
+The rule the skill enforces, and the one worth remembering even without it: **a
+review applies to a COMMIT, not to a PR.** Before merging anything, compare each
+review's `commit_id` against the PR's `headRefOid`:
+
+```
+gh pr view <N> --json headRefOid --jq .headRefOid
+gh api repos/dohc-ai/dohc/pulls/<N>/reviews --jq '.[]|"\(.user.login) \(.state) \(.commit_id[0:10])"'
+```
+
+If no review's `commit_id` matches the head, the current code is **unreviewed**
+however many reviews the PR has collected. Reviews of superseded commits look
+identical to current ones in the GitHub UI.
+
+Two adjacent traps that have both cost real cycles: CodeRabbit announces a rate
+limit in a comment body rather than failing, so its silence is not approval; and
+the canonical Rust gate can exit 0 while its own summary block says FAIL, so read
+`== summary ==` and never the exit code.
+
 ## Regarding long code comments
 
 If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong -- fix the code
