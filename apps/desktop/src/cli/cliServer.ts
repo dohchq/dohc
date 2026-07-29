@@ -18,7 +18,6 @@ import { validateUserReadPath } from "@dohc/workspace-core";
 import {
   AgentDispatchStoreError,
   LINKED_CHAT_STORE_RELATIVE_PATH,
-  queryChatMessagesGranular,
   type ChannelThreadSummary,
   type ChatChannelSummary,
   type ChatMessage,
