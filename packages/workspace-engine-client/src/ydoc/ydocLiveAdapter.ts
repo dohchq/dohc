@@ -133,6 +133,12 @@ export interface OpenYdocAdapterSessionInput {
   versionId: string;
   path: string;
   contentKind?: YdocContentKind;
+  // An object with no durable CRDT lineage is normally seeded from its
+  // markdown. Set false when the caller ALREADY holds the document's canonical
+  // state and will replay it: a seed carries a fresh client id, so merging it
+  // into a populated doc appends a second copy of the file instead of
+  // resuming it. Callers that pass false own re-establishing the content.
+  seedAbsentLineage?: boolean;
 }
 
 export interface ApplyLocalUpdateOptions {
@@ -434,6 +440,9 @@ export class YdocAdapterSession {
   readonly contentKind: YdocContentKind;
   readonly workspace: WorkspaceHandle;
   readonly sessionId: string;
+  // Whether the daemon resumed a durable CRDT lineage for this object, or
+  // found none. Set by openSession.
+  lineage: "present" | "absent" = "present";
 
   private readonly adapter: YdocLiveAdapter;
   private closed = false;
@@ -940,11 +949,18 @@ export class YdocLiveAdapter {
       initialUpdate: base64ToBytes(result.initialUpdateBase64),
     });
     this.sessions.set(result.sessionId, session);
-    if (
+    const lineageAbsent =
       rawResult !== null &&
       !Array.isArray(rawResult) &&
       typeof rawResult === "object" &&
-      rawResult.lineage === "absent" &&
+      rawResult.lineage === "absent";
+    session.lineage = lineageAbsent ? "absent" : "present";
+    if (
+      lineageAbsent &&
+      input.seedAbsentLineage !== false &&
+      rawResult !== null &&
+      !Array.isArray(rawResult) &&
+      typeof rawResult === "object" &&
       typeof rawResult.seedMarkdown === "string"
     ) {
       try {

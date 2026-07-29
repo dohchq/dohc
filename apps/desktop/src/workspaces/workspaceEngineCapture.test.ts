@@ -419,6 +419,7 @@ describe("workspaceEngineCapture batch capture", () => {
           initialUpdate: staleInitialUpdate,
           contentKind: "plaintext",
           path: "note.md",
+          lineage: "present" as const,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), markdown: "" }) as never,

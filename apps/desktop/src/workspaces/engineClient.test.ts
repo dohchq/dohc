@@ -1219,7 +1219,7 @@ describe("EngineClient", () => {
     });
     expect(onEvent).not.toHaveBeenCalled();
     await expect(transport.sendRequest(request(1, "after.failure"))).rejects.toMatchObject(
-      { code: "closed" },
+      { code: "handshake-failed", message: expect.stringContaining("is closed") },
     );
   });
 
@@ -1293,7 +1293,7 @@ describe("EngineClient", () => {
 
     await expect(pending).rejects.toMatchObject({ code: "protocol-error" });
     await expect(transport.sendRequest(request(83, "after.batch"))).rejects.toMatchObject(
-      { code: "closed" },
+      { code: "protocol-error", message: expect.stringContaining("is closed") },
     );
   });
 
@@ -1311,7 +1311,7 @@ describe("EngineClient", () => {
 
     await expect(pending).rejects.toMatchObject({ code: "protocol-error" });
     await expect(transport.sendRequest(request(85, "after.batch"))).rejects.toMatchObject(
-      { code: "closed" },
+      { code: "protocol-error", message: expect.stringContaining("is closed") },
     );
   });
 
@@ -1329,7 +1329,7 @@ describe("EngineClient", () => {
       code: "handshake-failed",
     });
     await expect(transport.sendRequest(request(86, "after.ack"))).rejects.toMatchObject(
-      { code: "closed" },
+      { code: "handshake-failed", message: expect.stringContaining("is closed") },
     );
   });
 
@@ -1357,7 +1357,7 @@ describe("EngineClient", () => {
     await expect(transport.ready()).resolves.toBe(transport);
     expect(onEvent).not.toHaveBeenCalled();
     await expect(transport.sendRequest(request(87, "after.frame"))).rejects.toMatchObject(
-      { code: "closed" },
+      { code: "protocol-error", message: expect.stringContaining("is closed") },
     );
   });
 
@@ -1383,6 +1383,38 @@ describe("EngineClient", () => {
     });
   });
 
+  // AUDIT-KILLREC. A client that died because the daemon crashed and a client
+  // the desktop deliberately closed are NOT the same condition: the first is a
+  // relaunching daemon that callers must retry through (isTransportError gates
+  // every rebind path), the second is a shutdown they must not. Reporting a
+  // bare "closed" for both made a hard daemon kill abandon a recoverable
+  // restart and permanently kill the editor's Y.Doc session.
+  it("keeps reporting the transport failure that closed it, not a bare closed", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+
+    peer.closeFromPeer();
+
+    await expect(
+      transport.sendRequest(request(200, "after.daemon.death")),
+    ).rejects.toMatchObject({ code: "transport-error" });
+  });
+
+  it("still reports a deliberate close as closed", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+
+    transport.close();
+
+    await expect(
+      transport.sendRequest(request(201, "after.shutdown")),
+    ).rejects.toMatchObject({ code: "closed" });
+  });
+
   it("turns malformed peer bytes into a terminal typed client failure", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
@@ -1390,7 +1422,8 @@ describe("EngineClient", () => {
     await transport.ready();
     peer.sendRaw(Buffer.alloc(12));
     await expect(transport.sendRequest(request(1, "after.bad.frame"))).rejects.toMatchObject({
-      code: "closed",
+      code: "protocol-error",
+      message: expect.stringContaining("is closed"),
     });
   });
 });
