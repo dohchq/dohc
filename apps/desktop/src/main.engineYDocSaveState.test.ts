@@ -34,7 +34,9 @@ describe("engine Y.Doc save-state reporting in main", () => {
     const applyAt = handler.indexOf("entry.session.applyLocalUpdate(");
     expect(reportAt).toBeGreaterThan(guardAt);
     expect(reportAt).toBeLessThan(applyAt);
-    expect(handler.slice(reportAt, applyAt)).toContain('"error"');
+    // Its OWN state, not the generic error: in a shared view every later edit
+    // is refused too, so "try another edit" would be futile advice.
+    expect(handler.slice(reportAt, applyAt)).toContain('"read-only"');
     // And it still refuses rather than writing.
     expect(handler.indexOf("return;", reportAt)).toBeLessThan(applyAt);
   });

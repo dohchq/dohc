@@ -1922,14 +1922,18 @@ export function createWorkspaceEngineCapture(
       );
     }
     const diskPaths = new Set<string>();
-    // Paths the Y.Doc editor owns, read ONCE for the whole pass. The retire
-    // rule below asks this before deciding a path stopped being engine-
-    // ownable — see the `untracked-content` branch.
-    const ydocOwnedPaths = new Set(
-      (await listTextFileMetadata(engine, versionId))
-        .filter((file) => file.hasYdocMarker)
-        .map((file) => file.path),
-    );
+    // Paths the Y.Doc editor owns. Resolved LAZILY and memoized: only a path
+    // the reader calls un-ownable needs this, which is rare, and the listing
+    // is not worth paying for on a pass where nothing is retired.
+    let ydocOwnedPathsCache: Set<string> | null = null;
+    const ydocOwnedPaths = async (): Promise<Set<string>> => {
+      ydocOwnedPathsCache ??= new Set(
+        (await listTextFileMetadata(engine, versionId))
+          .filter((file) => file.hasYdocMarker)
+          .map((file) => file.path),
+      );
+      return ydocOwnedPathsCache;
+    };
     // Secret paths reconcile into the ENCRYPTED store (PR 08): capture the
     // current disk plaintext (metadata-only moments), and retire entries
     // whose files vanished. Transiently unreadable secrets are left alone.
@@ -1974,7 +1978,10 @@ export function createWorkspaceEngineCapture(
       if (disk.kind === "unreadable") continue;
       if (disk.kind === "text" || disk.kind === "binary") {
         await writeIfChanged(engine, versionId, file.path, disk, metadata);
-      } else if (disk.kind === "untracked-content" && ydocOwnedPaths.has(file.path)) {
+      } else if (
+        disk.kind === "untracked-content" &&
+        (await ydocOwnedPaths()).has(file.path)
+      ) {
         // A path the Y.Doc EDITOR owns. Its content is whatever the CRDT
         // projects — a settle is bounded by nothing, so it routinely exceeds
         // the caps ordinary captured text is held to, and the reader then
