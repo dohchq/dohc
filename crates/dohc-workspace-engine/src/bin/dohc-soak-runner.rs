@@ -196,13 +196,26 @@ impl SoakTimeline {
     }
 
     fn run_elapsed(&self) -> Duration {
-        self.run_started.elapsed()
+        self.run_elapsed_at(Instant::now())
     }
 
     fn workload_elapsed(&self) -> Duration {
-        self.workload_started
-            .expect("phase-2 workload clock has started")
-            .elapsed()
+        self.workload_elapsed_at(Instant::now())
+    }
+
+    // Elapsed against an EXPLICIT now, so a test can state "the run has been
+    // going 40 minutes" by moving `now` forward instead of moving the start
+    // backward. `Instant` counts from boot, so `Instant::now() - 40min` panics
+    // outright on a machine with less uptime than that.
+    fn run_elapsed_at(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.run_started)
+    }
+
+    fn workload_elapsed_at(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(
+            self.workload_started
+                .expect("phase-2 workload clock has started"),
+        )
     }
 }
 
@@ -2214,12 +2227,13 @@ mod tests {
             json!([60, 90])
         );
 
-        let now = Instant::now();
+        let start = Instant::now();
         let timeline = SoakTimeline {
-            run_started: now - Duration::from_secs(40 * 60),
-            workload_started: Some(now - Duration::from_secs(30 * 60)),
+            run_started: start,
+            workload_started: Some(start + Duration::from_secs(10 * 60)),
         };
-        assert!(timeline.workload_elapsed() < Duration::from_secs(31 * 60));
+        let now = start + Duration::from_secs(40 * 60);
+        assert!(timeline.workload_elapsed_at(now) < Duration::from_secs(31 * 60));
 
         // At the minimum dispatchable budget, the final-half window has twice
         // the required span at the normal cadence.
@@ -2231,15 +2245,16 @@ mod tests {
 
     #[test]
     fn workload_duration_excludes_warmup_and_crash_prelude() {
-        let now = Instant::now();
+        let start = Instant::now();
         let timeline = SoakTimeline {
-            run_started: now - Duration::from_secs(2_400),
-            workload_started: Some(now - Duration::from_secs(1_800)),
+            run_started: start,
+            workload_started: Some(start + Duration::from_secs(600)),
         };
+        let now = start + Duration::from_secs(2_400);
 
-        assert!(timeline.run_elapsed() >= Duration::from_secs(2_400));
-        assert!(timeline.workload_elapsed() >= Duration::from_secs(1_800));
-        assert!(timeline.workload_elapsed() < Duration::from_secs(1_801));
+        assert!(timeline.run_elapsed_at(now) >= Duration::from_secs(2_400));
+        assert!(timeline.workload_elapsed_at(now) >= Duration::from_secs(1_800));
+        assert!(timeline.workload_elapsed_at(now) < Duration::from_secs(1_801));
     }
 
     #[test]
