@@ -368,7 +368,7 @@ describe("markdown editor unmount flush", () => {
     // registered?.() optional-chains to a silent no-op until the inspector has
     // handed back its toggle, which leaves the view in wysiwyg and fails the
     // editor lookup below with a confusing "not found". Wait for the toggle.
-    await waitFor(() => expect(registered).toBeDefined());
+    await waitFor(() => expect(registered).not.toBeNull());
     act(() => registered?.()); // wysiwyg -> editable source (legacy branch)
     await user.type(await screen.findByTestId("markdown-editor"), "Raw!");
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
