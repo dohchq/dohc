@@ -547,7 +547,6 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
                 request_id: Some("retire-artifact".to_owned()),
                 only_if_text_head: false,
                 only_if_capture_origin: true,
-                allow_ydoc_origin: true,
             },
             Arc::new(NoFaults),
             CancellationToken::new(),

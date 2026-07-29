@@ -1317,7 +1317,6 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
                         request_id: None,
                         only_if_text_head: false,
                         only_if_capture_origin: true,
-                        allow_ydoc_origin: true,
                     },
                     Arc::new(NoFaults),
                     CancellationToken::new(),

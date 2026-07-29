@@ -2127,7 +2127,7 @@ pub fn capture_retire_in_tx(
         // rather than leave a stale snapshot readable forever.
         if input.only_if_capture_origin
             && head.metadata_origin != CAPTURE_ORIGIN
-            && !(input.allow_ydoc_origin && head.metadata_origin == YDOC_ORIGIN)
+            && head.metadata_origin != YDOC_ORIGIN
         {
             record_request(
                 tx,

@@ -652,16 +652,6 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
     ) -> Result<(), CaptureError> {
-        self.retire_head_with(path, only_if_text_head, summary, true)
-    }
-
-    fn retire_head_with(
-        &self,
-        path: &str,
-        only_if_text_head: bool,
-        summary: Option<String>,
-        allow_ydoc_origin: bool,
-    ) -> Result<(), CaptureError> {
         match self.actor.capture_retire_blocking(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
@@ -673,7 +663,6 @@ impl StoreCaptureSink {
                 request_id: None,
                 only_if_text_head,
                 only_if_capture_origin: true,
-                allow_ydoc_origin,
             },
             Arc::new(NoFaults),
         ) {
@@ -828,18 +817,10 @@ impl CaptureSink for StoreCaptureSink {
                 // non-file, over cap): retire with the honest TS label so no
                 // stale snapshot remains, and report NotOwned so the manifest
                 // forgets the path instead of recording the planned ingest.
-                //
-                // A MATERIALIZED Y.DOC head is exempt. A Y.Doc is bounded by
-                // nothing, so its own settled artifact routinely lands past
-                // the capture caps and arrives here as "non-ownable" — but it
-                // is the engine's own output, not content that stopped being
-                // ownable. Retiring it drops a document the user is actively
-                // editing out of the engine on every reconcile.
-                self.retire_head_with(
+                self.retire_head(
                     path,
                     false,
                     Some("Stopped tracking non-text content".to_owned()),
-                    false,
                 )?;
                 Ok(IngestOutcome::NotOwned)
             }
