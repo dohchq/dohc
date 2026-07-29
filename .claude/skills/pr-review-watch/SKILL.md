@@ -109,9 +109,30 @@ green-lights a head with unresolved findings.
 
 ## The watcher — notices, does not judge
 
-Run via `Monitor` with `persistent: true`. Extract it from this file at launch
-(`bash <(awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==1{print}' SKILL.md)`)
-so the running process and the documented script cannot drift apart.
+Run via `Monitor` with `persistent: true`, extracting it from this file at launch:
+
+```
+bash <(awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==1{print}' SKILL.md)
+```
+
+That guarantees the running process matches this file **at the moment it started**, not
+forever. **Whenever you edit block 1, restart the watcher** — otherwise a process that
+looks armed is running logic you already fixed, which is how a corrected watcher stayed
+silent about a rate-limited reviewer for another half hour. Diff to be sure rather than
+guessing:
+
+```
+git show <prev>:SKILL.md | awk '…n==1…' > /tmp/old.sh
+awk '…n==1…' SKILL.md > /tmp/new.sh
+diff -q /tmp/old.sh /tmp/new.sh || echo "restart the watcher"
+```
+
+Also read from a path **only you control** — a worktree, not a shared checkout. A
+concurrent session switching branches in a shared tree deleted this file out from under
+a running watcher, the extraction produced nothing, and `bash` of an empty script exited
+instantly: a monitor that reported nothing because it was dead. Make the launcher check
+the file is non-empty and `bash -n` the extracted script, print a line when it arms, and
+print a line if it ever exits, so silence can never be ambiguous.
 
 ```bash
 REPO=dohc-ai/dohc
