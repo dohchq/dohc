@@ -45,10 +45,25 @@ it("restoring a guarded stream puts its own write back", () => {
   expect(stream.write).toBe(original);
 });
 
+// ignoreErrors:false is the console shape the journey actually hit — its stack
+// showed the EPIPE propagating THROUGH console.error's write into the caller,
+// so a console that swallows write errors itself would prove nothing here.
+function brokenPipeConsole(stream: BrokenPipeStream): Console {
+  return new Console({ stdout: stream, stderr: stream, ignoreErrors: false });
+}
+
+it("console.error over an unguarded broken pipe throws into its caller", () => {
+  const stream = new BrokenPipeStream();
+  const console = brokenPipeConsole(stream);
+  expect(() => {
+    console.error("[desktop] Rust engine daemon:", new Error("exited"));
+  }).toThrow(/EPIPE/);
+});
+
 it("console.error over a guarded broken pipe cannot crash its caller", () => {
   const stream = new BrokenPipeStream();
   const restore = makeStreamWriteNonFatal(stream);
-  const console = new Console({ stdout: stream, stderr: stream });
+  const console = brokenPipeConsole(stream);
   try {
     expect(() => {
       console.error("[desktop] Rust engine daemon:", new Error("exited"));
