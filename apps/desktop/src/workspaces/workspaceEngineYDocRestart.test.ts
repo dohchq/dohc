@@ -281,7 +281,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
             destructive: false,
           },
         };
-        await options.onSettled?.(result);
+        await options.onSettled?.(result, 1);
         return result;
       },
       async applyExternalMarkdownEdit(markdown) {
@@ -999,7 +999,7 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
             destructive: false,
           },
         };
-        await options.onSettled?.(result);
+        await options.onSettled?.(result, 1);
         return result;
       },
       async applyExternalMarkdownEdit(markdown) {
@@ -1100,7 +1100,7 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
             destructive: false,
           },
         };
-        await options.onSettled?.(result);
+        await options.onSettled?.(result, 1);
         return result;
       },
       async applyExternalMarkdownEdit(markdown) {

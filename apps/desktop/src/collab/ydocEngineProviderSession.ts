@@ -68,13 +68,13 @@ export interface EngineYDocProviderSessionOptions {
   // Fired after each debounced settle with the projected markdown, so the IPC
   // layer can also write the on-disk .md (the engine.db store is a disk MIRROR
   // in the desktop; disk is where the file the user/agent sees actually lives).
-  onSettled?: (result: YDocSettleResult) => void | Promise<void>;
-  // A settle is going to the engine now — paired with onSettled/onSettleError
-  // so the caller can report an HONEST save state rather than a timer's guess.
-  onSettleStart?: () => void;
+  onSettled?: (result: YDocSettleResult, token: number) => void | Promise<void>;
+  // A settle is going to the engine now, identified by `token`; every outcome
+  // echoes the SAME token so a caller pairs by identity, never arrival order.
+  onSettleStart?: (token: number) => void;
   // A settle FAILED. The debounced settle is the only path that writes the
   // user's edits to the file, so a dropped failure here is silent data loss.
-  onSettleError?: (error: unknown) => void;
+  onSettleError?: (error: unknown, token: number) => void;
   // Debounce a settle this long after the last update. Matches the local
   // autosave cadence (FileInspector scheduleSave, 800ms) so the editor feel is
   // unchanged.
@@ -199,19 +199,20 @@ export async function openEngineYDocProviderSession(
       void runSettle().catch(() => undefined);
     }, settleDebounceMs);
   }
+  // Monotonic per-session settle identity; never reused.
+  let settleTokens = 0;
   let settleChain: Promise<void> = Promise.resolve();
   async function runSettle(summary?: string): Promise<YDocSettleResult> {
     // Wait for pending journaling so the projection reflects every recorded
     // edit, then settle. Chained so two settles never overlap the write lane.
     await journalChain.catch(() => undefined);
-    // Fire at the JOURNAL BARRIER, not inside the chain below. Everything
-    // journaled up to here is what this settle is guaranteed to carry, so a
-    // caller snapshotting progress on this hook UNDER-claims (edits arriving
-    // while we queue behind an in-flight settle land after the snapshot)
-    // rather than over-claims. Inside the chain, a settle queued behind
-    // another could vouch for keystrokes typed during the wait.
+    // One identity per settle, echoed by whichever outcome this run produces,
+    // so a caller pairs on it rather than on arrival order. Announced at the
+    // JOURNAL BARRIER — outside the chain below, because a settle queued
+    // inside it could otherwise vouch for keystrokes typed while it waited.
+    const token = ++settleTokens;
     try {
-      onSettleStart?.();
+      onSettleStart?.(token);
     } catch {
       // Observer boundary: never re-enter the driver from a status hook.
     }
@@ -227,7 +228,7 @@ export async function openEngineYDocProviderSession(
       .then(async () => {
         result = await session.settle(summary !== undefined ? { summary } : undefined);
         // onSettled is what lands the .md; its failure is a save failure too.
-        await onSettled?.(result);
+        await onSettled?.(result, token);
       })
       .catch((error) => {
         settleError = error;
@@ -235,7 +236,7 @@ export async function openEngineYDocProviderSession(
         // only place a background settle failure can be observed. Dropping it
         // is silent data loss — the file never got the user's edits.
         try {
-          onSettleError?.(error);
+          onSettleError?.(error, token);
         } catch {
           // Observer boundary.
         }

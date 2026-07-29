@@ -320,7 +320,7 @@ export interface WorkspaceEngineCapture {
     // disk is therefore behind the editor. A failed settle used to reach
     // nothing at all — the doc kept reading "Saved" over a stale (or empty)
     // file, which is silent data loss.
-    onSaveState?: (state: EngineYDocSaveState) => void;
+    onSaveState?: (state: EngineYDocSaveState, token: number) => void;
   }): Promise<EngineYDocProviderSession>;
   // WS-G2-C-2 (gate fix 3): flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does NOT run through the capture chain
@@ -1058,12 +1058,15 @@ export function createWorkspaceEngineCapture(
     onDead: () => void;
     onAlive: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
-    onSettled: (result: {
-      sha256: string;
-      markdown: string | null;
-    }) => void | Promise<void>;
-    onSettleStart: () => void;
-    onSettleError: (error: unknown) => void;
+    onSettled: (
+      result: {
+        sha256: string;
+        markdown: string | null;
+      },
+      token: number,
+    ) => void | Promise<void>;
+    onSettleStart: (token: number) => void;
+    onSettleError: (error: unknown, token: number) => void;
   }): Promise<EngineYDocProviderSession> {
     const sessions = options.rustEngineSessions!;
     const openProvider =
@@ -2418,15 +2421,19 @@ export function createWorkspaceEngineCapture(
       // write connection and node:sqlite deadlocks.
       const engine = await engineStore();
       const versionId = await activeVersionIdOf(engine);
-      const reportSaveState = (state: EngineYDocSaveState): void => {
+      const reportSaveState = (
+        state: EngineYDocSaveState,
+        token: number,
+      ): void => {
         try {
-          input.onSaveState?.(state);
+          input.onSaveState?.(state, token);
         } catch {
           // Observer boundary: a renderer-facing status hook must never
           // re-enter the session or wedge the settle chain.
         }
       };
-      const onSettled = async (result: {
+      const onSettled = async (
+        result: {
         sha256: string;
         markdown: string | null;
         // OPTIONAL here on purpose, though the daemon wire decoder REQUIRES
@@ -2435,7 +2442,9 @@ export function createWorkspaceEngineCapture(
         // separate materialization step to fail", which is the safe reading
         // for that driver — only an explicit `false` suppresses the save.
         materialized?: boolean;
-      }) => {
+        },
+        token: number,
+      ) => {
         // The settle committed, but the engine says the FILE did not move
         // (materialization blocked by containment — a symlinked target — with
         // the write pending a retry). Nothing below would notice: the
@@ -2449,7 +2458,7 @@ export function createWorkspaceEngineCapture(
               "the engine committed the settle but could not write the file (blocked target); the write is pending a retry",
             ),
           );
-          reportSaveState("error");
+          reportSaveState("error", token);
           return;
         }
         // Register the settle's self-write (sha of the settled markdown) so
@@ -2464,7 +2473,7 @@ export function createWorkspaceEngineCapture(
         // materialized it — writing result.markdown here would truncate the
         // user's file, which is exactly the loss this path must prevent.
         if (result.markdown === null) {
-          reportSaveState("saved");
+          reportSaveState("saved", token);
           return;
         }
         try {
@@ -2475,19 +2484,19 @@ export function createWorkspaceEngineCapture(
         } catch (error) {
           cancel();
           onError(`ydoc settle disk write of ${input.path}`, error);
-          reportSaveState("error");
+          reportSaveState("error", token);
           return;
         }
-        reportSaveState("saved");
+        reportSaveState("saved", token);
       };
-      const onSettleStart = () => reportSaveState("settling");
+      const onSettleStart = (token: number) => reportSaveState("settling", token);
       // The one place a background settle failure is observable. Log it with
       // the path and the wire error, and tell the editor the file on disk is
       // behind — a settle that never lands is the user's content going
       // nowhere.
-      const onSettleError = (error: unknown) => {
+      const onSettleError = (error: unknown, token: number) => {
         onError(`ydoc settle of ${input.path}`, error);
-        reportSaveState("error");
+        reportSaveState("error", token);
       };
       let entry: LiveYDocSession | null = null;
       const session = useRustEngine

@@ -7130,16 +7130,16 @@ function registerIpcHandlers(
           // nothing at all while the editor's own timer kept saying "Saved" —
           // three dogfood journeys watched a doc report Saved over a
           // zero-byte .md. Report every outcome to the renderer that owns it.
-          onSaveState: (state) => {
+          onSaveState: (state, token) => {
             const entry = engineYDocSessions.get(input.sessionId);
-            // Pair every outcome with ITS OWN start: the oldest in-flight
-            // settle is the one completing, and it may only vouch for what
-            // had been journaled when it began.
+            // Pair every outcome with ITS OWN start BY TOKEN. Not by order:
+            // an aborting settle never queues on settleChain, and
+            // settleChain is per generation while this state is per session.
             const seq = !entry
               ? 0
               : state === "settling"
-                ? noteSettleStart(entry.saveSeq)
-                : noteSettleOutcome(entry.saveSeq);
+                ? noteSettleStart(entry.saveSeq, token)
+                : noteSettleOutcome(entry.saveSeq, token);
             sendEngineYDocSaveState(
               sender,
               generation,
