@@ -106,6 +106,25 @@ export function momentTextsForPath(rootPath: string, path: string): string[] {
   );
 }
 
+// Does the engine still hold a HEAD for this path in the active version? A
+// retirement (deleteIfTracked) removes the snapshot row, so this goes false
+// the moment a reconcile pass decides the path is no longer engine-ownable.
+export function textFileTrackedByEngine(rootPath: string, path: string): boolean {
+  return (
+    withEngineDb(rootPath, (db) => {
+      const row = db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM snapshots s
+             JOIN active_versions a
+               ON a.workspace_id = s.workspace_id AND a.version_id = s.version_id
+            WHERE s.path = ?`,
+        )
+        .get(path) as { n: number } | undefined;
+      return Number(row?.n ?? 0) > 0;
+    }) ?? false
+  );
+}
+
 // Replication ops whose payload carries the given plaintext needle, grouped by
 // op_kind. A ydoc.update payload is opaque Yjs binary (plaintext is not
 // searchable), so the ONLY way typed plaintext lands in a replication op is a

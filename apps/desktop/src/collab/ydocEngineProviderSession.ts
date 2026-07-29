@@ -204,6 +204,17 @@ export async function openEngineYDocProviderSession(
     // Wait for pending journaling so the projection reflects every recorded
     // edit, then settle. Chained so two settles never overlap the write lane.
     await journalChain.catch(() => undefined);
+    // Fire at the JOURNAL BARRIER, not inside the chain below. Everything
+    // journaled up to here is what this settle is guaranteed to carry, so a
+    // caller snapshotting progress on this hook UNDER-claims (edits arriving
+    // while we queue behind an in-flight settle land after the snapshot)
+    // rather than over-claims. Inside the chain, a settle queued behind
+    // another could vouch for keystrokes typed during the wait.
+    try {
+      onSettleStart?.();
+    } catch {
+      // Observer boundary: never re-enter the driver from a status hook.
+    }
     let result!: YDocSettleResult;
     // Capture (never swallow) a settle failure: an EXPLICIT settleNow/close
     // caller must see it — a version/rename op that flushes a live session
@@ -214,11 +225,6 @@ export async function openEngineYDocProviderSession(
     let settleError: unknown;
     settleChain = settleChain
       .then(async () => {
-        try {
-          onSettleStart?.();
-        } catch {
-          // Observer boundary: never re-enter the driver from a status hook.
-        }
         result = await session.settle(summary !== undefined ? { summary } : undefined);
         // onSettled is what lands the .md; its failure is a save failure too.
         await onSettled?.(result);

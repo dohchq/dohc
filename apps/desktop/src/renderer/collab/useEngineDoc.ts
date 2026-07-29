@@ -28,7 +28,11 @@ import {
 
 // "error" = a settle FAILED, so the file on disk is behind what the editor
 // shows. It is never inferred; main pushes it from a real settle outcome.
-export type EngineDocSaveState = "saved" | "saving" | "error";
+// "error" = a settle FAILED, so the file on disk is behind what the editor
+// shows. "read-only" = the workspace is a read-only shared view and the edit
+// was discarded outright; retrying cannot help, so it gets its own copy.
+// Neither is ever inferred — main pushes both from real outcomes.
+export type EngineDocSaveState = "saved" | "saving" | "error" | "read-only";
 
 export type UseEngineDoc = {
   // True once the engine session is open and the mirror doc is bound. false =>
@@ -176,8 +180,8 @@ export function useEngineDoc(input: {
         unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
           if (cancelled || token !== openTokenRef.current) return;
           if (event.sessionId !== sessionId) return;
-          if (event.state === "error") {
-            setSaveState("error");
+          if (event.state === "error" || event.state === "read-only") {
+            setSaveState(event.state);
             return;
           }
           if (event.state === "settling") {

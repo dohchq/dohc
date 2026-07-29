@@ -120,6 +120,15 @@ pub struct SnapshotMetadata {
     /// "text" | "binary" (the stored discriminant).
     pub content_kind: String,
     pub binary_sha256: Option<String>,
+    /// Does a `ydoc_docs` marker exist for this object — i.e. is this path
+    /// owned by the Y.Doc editor? MARKER-EXISTS, deliberately not
+    /// durable-state: a default local close prunes updates and snapshots but
+    /// KEEPS the marker, and such a file is still Y.Doc-owned.
+    ///
+    /// Callers use this to avoid mistaking the engine's own artifacts for
+    /// content it cannot own. A settled Y.Doc is bounded by nothing, so it
+    /// can exceed limits that ordinary captured text is held to.
+    pub has_ydoc_marker: bool,
 }
 
 /// The materialized current state of an object within a version.

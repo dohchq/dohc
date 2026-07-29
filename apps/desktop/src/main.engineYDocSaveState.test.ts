@@ -46,16 +46,8 @@ describe("engine Y.Doc save-state reporting in main", () => {
     );
   });
 
-  it("defaults the edit seq instead of requiring it, so the boundary cannot throw", () => {
-    // A required field rejects at the schema BEFORE the session lookup,
-    // turning the documented "inert no-op, never throws" refusal for an
-    // unknown/foreign/read-only session into an exception.
-    const contract = readFileSync(
-      new URL("./ipc/bridgeContract.ts", import.meta.url),
-      "utf8",
-    );
-    const start = contract.indexOf("export const ApplyEngineYDocUpdatePayload");
-    const payload = contract.slice(start, contract.indexOf("});", start));
-    expect(payload).toContain("z.number().int().nonnegative().default(0)");
-  });
+  // The defaulted seq is pinned BEHAVIORALLY in ipc/bridgeContract.test.ts
+  // ("accepts a payload with no seq, defaulting it") — parsing a real payload,
+  // not matching the schema's source text. A source-echo assertion here would
+  // break on any semantically identical refactor while proving less.
 });

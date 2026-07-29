@@ -145,6 +145,14 @@ export async function openEngineYdocProviderSession(
       notifyError(options.onSettleError, error);
       throw error;
     }
+    // Reachable ONLY when session.applyLocalUpdate threw SYNCHRONOUSLY: that
+    // path records the error without ever attaching it to journalChain, so
+    // the await above resolves. After an async rejection journalChain stays
+    // rejected and the branch above always wins first — which is why a
+    // mutation of this line alone does not fail a test, and why the covering
+    // test (`reports a JOURNAL failure to onSettleError too`) exercises the
+    // rejected-chain branch instead. Kept because the synchronous throw is a
+    // real transport failure mode and must not go to onSessionError alone.
     if (localEditError !== null) {
       notifyError(options.onSettleError, localEditError);
       throw localEditError;

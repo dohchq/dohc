@@ -390,7 +390,16 @@ export function parseEngineYDocRemoteUpdateEvent(
 // The editor's save indicator, pushed from main on every real settle outcome.
 // It replaced a renderer-side timer that flipped to "saved" on a timeout no
 // matter what the engine did — a doc could read "Saved" over a zero-byte file.
-export const ENGINE_YDOC_SAVE_STATES = ["settling", "saved", "error"] as const;
+// "read-only" is a SEPARATE refusal from "error": the workspace became a
+// read-only shared view, so this edit and every edit after it is discarded.
+// Advice that suits a transient failure ("try another edit") is futile there,
+// so the two must not share a string.
+export const ENGINE_YDOC_SAVE_STATES = [
+  "settling",
+  "saved",
+  "error",
+  "read-only",
+] as const;
 export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];
 
 export interface EngineYDocSaveStateEvent {

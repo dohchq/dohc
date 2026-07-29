@@ -3605,6 +3605,7 @@ impl EngineService {
                     "metadataOrigin": row.metadata_origin,
                     "metadataSummary": row.metadata_summary,
                     "metadataCorrelationId": row.metadata_correlation_id,
+                    "hasYdocMarker": row.has_ydoc_marker,
                 })
             })
             .collect();

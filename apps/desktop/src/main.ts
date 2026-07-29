@@ -7233,7 +7233,7 @@ function registerIpcHandlers(
         entry.sender,
         entry.generation,
         input.sessionId,
-        "error",
+        "read-only",
         input.seq,
       );
       return;

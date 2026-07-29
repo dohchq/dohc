@@ -645,7 +645,13 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
     // (round-trips through UTF-8) is held to the smaller text cap.
     if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
     const bytes = await readFile(absolute);
-    if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
+    if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
+      // Bytes in hand: carry the sha so a settle's own materialization past
+      // even the BINARY cap is recognizable as our write, exactly like the
+      // text-cap case below. (The size-only early-out above cannot — it
+      // deliberately refuses to load the file to find out.)
+      return { kind: "untracked-content", sha256: sha256Bytes(bytes) };
+    }
     const text = bytes.toString("utf8");
     // The engine only stores text that round-trips through UTF-8; anything
     // else is binary in disguise, not engine-ownable as text.
@@ -1610,6 +1616,12 @@ export function createWorkspaceEngineCapture(
       return await captureEngine.listTextFileMetadata({ workspaceId, versionId });
     }
     const snapshots = await engine.listTextFiles({ workspaceId, versionId });
+    // The in-process store has no metadata listing, so the Y.Doc marker is
+    // read straight from engine.db through the write lane it owns. An engine
+    // without the lane answers "no marker", which only costs the oversized
+    // Y.Doc protection the daemon path gets — it never retires anything the
+    // old code would have kept.
+    const ydocObjectIds = await ydocMarkedObjectIds(engine, versionId);
     return snapshots.map((snapshot) => ({
       path: snapshot.path,
       objectId: snapshot.objectId,
@@ -1622,7 +1634,35 @@ export function createWorkspaceEngineCapture(
           : sha256Utf8(snapshot.text)),
       updatedAtMs: snapshot.updatedAtMs,
       latestMomentId: snapshot.latestMomentId,
+      hasYdocMarker: ydocObjectIds.has(snapshot.objectId),
     }));
+  }
+
+  // Object ids carrying a ydoc_docs marker in this version. MARKER-EXISTS,
+  // not durable-state: a default local close prunes updates and snapshots but
+  // KEEPS the marker, and such a file is still Y.Doc-owned.
+  async function ydocMarkedObjectIds(
+    engine: VersionedTextStore,
+    versionId: string,
+  ): Promise<Set<string>> {
+    const runInLane = engine.runInEngineWriteLane?.bind(engine);
+    if (!runInLane) return new Set();
+    try {
+      const ids = await runInLane((connection) => {
+        const rows = connection
+          .prepare(
+            "SELECT object_id AS objectId FROM ydoc_docs WHERE workspace_id = ? AND version_id = ?",
+          )
+          .all(workspaceId, versionId) as Array<{ objectId: string }>;
+        return rows.map((row) => row.objectId);
+      });
+      return new Set(ids);
+    } catch (error) {
+      // A store without the table (or a read failure) must not take the
+      // reconcile pass down; fall back to "no markers".
+      onError("ydoc marker lookup", error);
+      return new Set();
+    }
   }
 
   function consumeExpectedEvent(
@@ -1834,6 +1874,13 @@ export function createWorkspaceEngineCapture(
       ) {
         return;
       }
+      // No sha to match on (the reader refuses to load a file past the binary
+      // cap just to hash it), but a LIVE Y.Doc session means the editor owns
+      // this path right now. Retiring its record mid-edit is wrong whoever
+      // wrote the bytes. This is not the blanket live-path skip that gate fix
+      // 1 removed — ordinary capture of a live path is untouched; only the
+      // retirement decision defers to ownership.
+      if (liveYDocSessions.has(event.path)) return;
       // The path stopped being engine-ownable text: retire it from engine
       // state rather than leaving a stale snapshot behind. The batch author
       // rides along — the run's write is what retired it.
@@ -1875,6 +1922,14 @@ export function createWorkspaceEngineCapture(
       );
     }
     const diskPaths = new Set<string>();
+    // Paths the Y.Doc editor owns, read ONCE for the whole pass. The retire
+    // rule below asks this before deciding a path stopped being engine-
+    // ownable — see the `untracked-content` branch.
+    const ydocOwnedPaths = new Set(
+      (await listTextFileMetadata(engine, versionId))
+        .filter((file) => file.hasYdocMarker)
+        .map((file) => file.path),
+    );
     // Secret paths reconcile into the ENCRYPTED store (PR 08): capture the
     // current disk plaintext (metadata-only moments), and retire entries
     // whose files vanished. Transiently unreadable secrets are left alone.
@@ -1919,6 +1974,19 @@ export function createWorkspaceEngineCapture(
       if (disk.kind === "unreadable") continue;
       if (disk.kind === "text" || disk.kind === "binary") {
         await writeIfChanged(engine, versionId, file.path, disk, metadata);
+      } else if (disk.kind === "untracked-content" && ydocOwnedPaths.has(file.path)) {
+        // A path the Y.Doc EDITOR owns. Its content is whatever the CRDT
+        // projects — a settle is bounded by nothing, so it routinely exceeds
+        // the caps ordinary captured text is held to, and the reader then
+        // reports it as un-ownable. Retiring here would journal a "Stopped
+        // tracking" delete for a document the user is actively editing, on
+        // every single launch, and drop it back to the plain editor.
+        //
+        // The expected-event registry cannot help at this layer: those
+        // entries expire in seconds and reconciliation runs at startup, long
+        // after the write. Ownership is the durable fact, so ownership is
+        // what this asks.
+        continue;
       } else {
         // absent (raced a delete) or no longer engine-ownable text.
         await deleteIfTracked(engine, versionId, file.path, metadata);
@@ -2328,6 +2396,11 @@ export function createWorkspaceEngineCapture(
       const onSettled = async (result: {
         sha256: string;
         markdown: string | null;
+        // OPTIONAL here on purpose, though the daemon wire decoder REQUIRES
+        // it: the in-process driver (packages/workspace-engine) has no
+        // materialization job and never sets it. Absent therefore means "no
+        // separate materialization step to fail", which is the safe reading
+        // for that driver — only an explicit `false` suppresses the save.
         materialized?: boolean;
       }) => {
         // The settle committed, but the engine says the FILE did not move

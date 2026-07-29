@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { momentTextsForPath } from "./helpers/engineDb";
+import { momentTextsForPath, textFileTrackedByEngine } from "./helpers/engineDb";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -124,6 +124,10 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
     const finalText = await readFile(absolute, "utf8");
     const finalSize = (await stat(absolute)).size;
     expect(finalSize).toBeGreaterThan(INBAND_CAP_BYTES);
+    // The point of a ~140 KiB fixture: it is past the desktop capture layer's
+    // text cap too, which is where the record-retiring trap lives. Asserting
+    // only the 48 KiB in-band cap would let the fixture shrink back under it.
+    expect(finalSize).toBeGreaterThan(CAPTURE_TEXT_CAP_BYTES);
     expect(finalText).toContain(TAIL_SENTINEL);
     expect(finalText).toContain("Start small.");
 
@@ -138,6 +142,29 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
         text.includes(TAIL_SENTINEL),
       ),
     ).toBe(true);
+
+    // RESTART. The startup reconcile re-reads every file and retires anything
+    // it cannot own as text — and a >128 KiB file is exactly that. Without
+    // the lineage guard it journals a "Stopped tracking non-text content"
+    // delete and the document silently stops being engine-backed on every
+    // launch. Bytes survive; the engine record and history continuity do not.
+    await desktop.close();
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await waitForWorkspaceFile(
+      desktop.page,
+      workspace.workspaceId,
+      "load/big.md",
+    );
+    // Give the reconcile pass room to run and converge.
+    await desktop.page.waitForTimeout(3_000);
+
+    expect(
+      textFileTrackedByEngine(temp.rootPath, "load/big.md"),
+      "the startup reconcile retired the engine record for the over-cap doc",
+    ).toBe(true);
+    // And the file itself is untouched.
+    expect(await readFile(absolute, "utf8")).toContain(TAIL_SENTINEL);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

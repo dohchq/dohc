@@ -344,6 +344,51 @@ it("a settle past the 128 KiB CAPTURE cap keeps the engine record — the watche
   await capture.stop();
 });
 
+it("a settled over-cap doc SURVIVES an app restart — the startup reconcile must not retire it", async () => {
+  // AUDIT-SILENTSAVE round 3. Guarding only the live watcher path was not
+  // enough: the STARTUP RECONCILE retires by the same "not engine-ownable
+  // text" rule, and it cannot use the expected-event registry at all — those
+  // entries expire in seconds while reconcile runs at launch. Without an
+  // ownership check the user pastes 131 KB, sees an honest "Saved" with the
+  // bytes on disk, quits, reopens — and the engine record is gone, the
+  // document silently demoted out of the engine editor, on every launch.
+  const capture = makeCapture();
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });
+  const huge = "Oversized settled paragraph that must survive a restart.\n".repeat(3_500);
+  expect(Buffer.byteLength(huge, "utf8")).toBeGreaterThan(128 * 1024);
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, huge);
+  await session.settleNow();
+  await session.close();
+  await capture.stop();
+
+  const beforeRestart = await store.readTextFile({ workspaceId: WS, versionId, path: PATH });
+  expect(beforeRestart?.text).toContain("Oversized settled paragraph");
+
+  // THE RESTART: a brand-new capture over the same store + root, started
+  // exactly as the app does at launch.
+  const relaunched = createWorkspaceEngineCapture({
+    workspaceId: WS,
+    rootPath: root,
+    store,
+  });
+  relaunched.start();
+  await relaunched.flush();
+
+  const afterRestart = await store.readTextFile({ workspaceId: WS, versionId, path: PATH });
+  expect(
+    afterRestart,
+    "the startup reconcile retired the engine record for the over-cap Y.Doc",
+  ).not.toBeNull();
+  expect(afterRestart?.text).toContain("Oversized settled paragraph");
+  // The file itself was never in danger — only the engine record.
+  expect(await readFile(join(root, PATH), "utf8")).toContain(
+    "Oversized settled paragraph",
+  );
+
+  await relaunched.stop();
+});
+
 it("a FAILING settle is logged and reported as an error save-state — the doc never reads Saved", async () => {
   // AUDIT-SILENTSAVE. This is the seam the bug lived in: a settle failure went
   // to onSessionError, which the capture wires to a reconnect handler that
