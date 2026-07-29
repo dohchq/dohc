@@ -161,7 +161,7 @@ different live concepts — see the next section before assuming.
 | `file` | A user-visible item of workspace content. Contract type `WorkspaceFile`; its `kind` is `atom`, `asset`, or `database`. | page, note, document, item |
 | `asset` | A file kind alongside `atom` and `database`. `AssetKind` is the full enum: image, audio, video, pdf, csv, json, sqlite, file. In UI copy say `file` unless the kind matters. | attachment, media, upload |
 | `folder` | A container of files. | directory (in UI copy), collection |
-| `chat` | A conversation the user opens. Read the conflict note below before writing a count. | conversation |
+| `chat` | **Unsettled — see the conflict note below.** The UI and the engine disagree on whether this names the surface or one conversation. Do not rely on either reading. | conversation |
 | `history` | The user-facing name for the versioned record of workspace changes. `capture` is the engine's name for the recorder that produces it. | versions, backups, timeline |
 | `channel` | A named division of the chat surface. Durable rows key on `channel_id`; load-bearing in sharing and authorization. | room, group, space |
 | `thread` | A message sequence with exactly one owner — a linked file or a channel, never both and never neither. | topic, reply chain |
@@ -178,7 +178,7 @@ their own meaning. Collapsing either one makes copy and technical docs wrong.
 
 | Term | Means | Not the same as |
 | --- | --- | --- |
-| `dm` | A direct-message channel — `channelKind: "dm"`, with its own relay grants and navigation. | `channel`, which is named; `chat`, the whole surface |
+| `dm` | A direct-message channel — `channelKind: "dm"`, with its own relay grants and navigation. | `channel`, which is named |
 | `import` | The user-initiated operation that brings outside files in (`ImportWorkspaceFiles`, `ImportToDatabase`). | `capture`, which records workspace history |
 | `model` | The inference model an agent runs on (`AgentModel`), selectable independently of the agent. | `agent`, which is the actor |
 | `permission` | The agent tool-approval gate. `AgentPermissionRequestSchema` is a *pending request*. Only the `allow_once` and `allow_always` decisions grant it — `reject_once`, `reject_always`, and `cancel` do not. Never write copy implying the agent may act before an allow decision. | `share`, which grants access to another person |
@@ -200,10 +200,12 @@ their own meaning. Collapsing either one makes copy and technical docs wrong.
 
   Use `atom` in contract and editor code, with that layer's meaning. Never put
   it in UI copy. The user's word is `file`.
-- **`doc` / `document`** appear widely but inconsistently. They mean a `file`,
-  a `Y.Doc`, or prose under `docs/`, depending on where you stand. In new
-  writing say `file` for content, `Y.Doc` for the CRDT, and `docs` only for
-  the directory.
+- **`doc` / `document`** appear widely and mean at least five things: a `file`,
+  a `Y.Doc`, prose under `docs/`, a ProseMirror document in the editor, and a
+  CodeMirror document in the source view. In new *product* writing say `file`
+  for content, `Y.Doc` for the CRDT, and `docs` only for the directory. In
+  editor and source-view code, `doc` keeps its library meaning — do not rename
+  a ProseMirror or CodeMirror `doc` to `file`.
 - **`chat`** is not settled between the UI and the engine. The engine models
   `channel` and `thread` as separate things. The UI counts threads and labels
   the count `chats` — `ChatsView` renders `${channel.threadCount} chats`. Copy
@@ -247,7 +249,9 @@ Revising:
   is just as real.
 - Do not claim strict ASD-STE100 conformance. We use its discipline, not its
   certified dictionary, and we have not checked against the current edition.
-- Do not rewrite code, identifiers, commands, or quoted text.
+- Do not rewrite code, identifiers, or commands.
+- Do not rewrite an attributed quotation or a verbatim citation. Text the user
+  quoted *so that you would rewrite it* is the target, not a quotation.
 
 ## Final pass
 

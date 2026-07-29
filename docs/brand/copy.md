@@ -53,8 +53,10 @@ new became usable, it is a Change.
   folder`, not `New Folder`.
 - **No terminal period on labels, buttons, or fragments.** Full sentences in
   body text and errors keep their periods.
-- **Numerals for all counts**, including one through nine. `1 file`, not
-  `one file`.
+- **Numerals for counts the user scans or acts on** — `3 files changed`,
+  `Delete 12 files`, `2 conflicts`. A number woven into a sentence may be a
+  word where that reads better: `A file changed on two machines` is correct.
+  The test is whether the reader is counting something or reading a sentence.
 - **Never magical.** No `magically`, `automatically figures out`, `just works`,
   `powered by AI`. State the mechanism or say nothing.
 - **No marketing words.** `seamless`, `robust`, `powerful`, `effortless`,
@@ -81,7 +83,9 @@ like this:
 > `Your other machine removed this file.`
 > `One file has two copies.`
 
-Each names the actor, states one fact, and uses the user's noun.
+Each names the actor, states one fact, and uses the user's noun. Their spelled
+numbers are deliberate — these are sentences, not counts. See the numerals rule
+above.
 
 ## Empty states
 
@@ -110,9 +114,11 @@ Agent activity gets the olive `agent` voice visually. In words:
 ## Destructive and irreversible actions
 
 - Name the exact thing and the exact count. `Delete 12 files from Research?`
-- **State the true recovery path.** dohc file deletes are always recoverable —
-  the OS trash, or `.dohc/trash` when the OS refuses. Write `They move to your
-  trash.`, not `This cannot be undone.`
+- **State the true recovery path, including the fallback.** dohc file deletes
+  are always recoverable: the system trash, or `.dohc/trash` on drives without
+  one. The shipping dialog is the model — `It moves to the system trash — or to
+  this workspace's .dohc/trash folder on drives without one — and can be
+  restored from there.` Never write `This cannot be undone.` here.
 - Write `This cannot be undone` only where it is true, and verify before you
   write it. Durability is a contract, not a tone — see the product invariants
   in `AGENTS.md`.
@@ -127,7 +133,7 @@ Agent activity gets the olive `agent` voice visually. In words:
 | `Something went wrong. Please try again later.` | `dohc could not reach the sync relay. Check your connection.` — with a `Retry` action | Names the failing actor, one instruction per sentence, and the retry is a control rather than a second instruction. |
 | `Seamlessly sync your workspace across all your devices` | `When you turn on sync, this workspace stays current on every machine you join it from.` | Marketing word out, and the opt-in stays visible — sync is off by default and signing in alone does not enable it. |
 | `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, glossary noun, shorter. |
-| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to your trash.` | States the count and the true recovery path — dohc deletes are recoverable, so `This cannot be undone` would be false. |
+| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/trash, and can be restored.` | States the count and the true recovery path including the fallback — dohc deletes are recoverable, so `This cannot be undone` would be false. |
 | `AI is analyzing your workspace…` | `Agent is reading 40 files.` | Concrete, countable, no magic. |
 
 ## Known violations in shipping copy
@@ -139,6 +145,10 @@ automatically conformant. Two are confirmed:
   uses `page`, a banned synonym for `file`.
 - `apps/desktop/src/renderer/settings/SettingsDialog.tsx:487` — "without
   changing document content" uses `document`, a banned synonym for `file`.
+- `apps/desktop/src/renderer/workbench/Explorer.tsx:1524` — the delete dialog
+  counts `${confirmDelete.length} items`, and `item` is banned in UI copy. The
+  same dialog's recovery sentence is the house standard for destructive copy,
+  so fix the noun without touching the rest.
 
 Fix these when you next touch the surface. Do not read existing copy as an
 example of the rules.
