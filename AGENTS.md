@@ -173,9 +173,10 @@ SHORT=${HEAD:0:10}
 
 # 1. formal reviews of THIS head (codex when it HAS findings; CodeRabbit usually).
 #    Note codex files findings as COMMENTED, never CHANGES_REQUESTED.
-[ -n "$HEAD" ] && { gh api "repos/dohc-ai/dohc/pulls/$PR/reviews" --paginate \
-  --jq ".[]|select(.commit_id==\"$HEAD\")|\"\(.user.login) \(.state)\"" \
-  || echo "reviews query FAILED — unknown, not empty"; }
+[ -n "$HEAD" ] && { R1=$(gh api "repos/dohc-ai/dohc/pulls/$PR/reviews" --paginate \
+  --jq ".[]|select(.commit_id==\"$HEAD\")|\"\(.user.login) \(.state)\"") \
+  || echo "reviews query FAILED — unknown, not empty"
+printf '%s\n' "$R1"; }
 
 # 2. a codex CLEAN pass is an ISSUE comment, not a review — check it too.
 #    Guarded on HEAD: with SHORT empty, contains("") matches every historical
@@ -183,15 +184,24 @@ SHORT=${HEAD:0:10}
 [ -n "$HEAD" ] && { CB=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
   --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|contains(\"$SHORT\"))|.body") \
   || echo "codex comment query FAILED — unknown, not empty"
-printf '%s' "$CB" | grep -iE "didn.t find any major issues|no major issues|create an environment for this repo"; }
+printf '%s' "$CB" | grep -iE "didn.t find any major issues|no major issues"; }
+
+# 2b. codex's "cannot run" reply names NO sha, so it can never appear in (2).
+#     Query it separately or you will wait for a review that is not coming.
+gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+  --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|test(\"create an environment for this repo\"))|.created_at" \
+  | tail -1
 
 # 3. CodeRabbit's status comment, which it EDITS IN PLACE, names the head it
-#    RECEIVED — it is NOT proof it reviewed. Only (1) proves that. Read this to
-#    learn WHY a review is missing.
-[ -n "$HEAD" ] && { CR=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+#    RECEIVED — it is NOT proof it reviewed. Only (1) proves that.
+#    ONLY consult it when (1) shows no CodeRabbit review: the rate-limit wrapper
+#    NEVER leaves the comment, so on a head CodeRabbit approved this would
+#    otherwise contradict (1) and reject a reviewed PR forever (see #317).
+[ -n "$HEAD" ] && ! printf '%s' "$R1" | grep -q coderabbitai && {
+CR=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
   --jq ".[]|select(.user.login==\"coderabbitai[bot]\")|select(.body|contains(\"$HEAD\"))|.body") \
   || echo "CodeRabbit comment query FAILED — unknown, not empty"
-printf '%s' "$CR" | grep -iE "currently processing|review limit|rate limit|review failed" \
+printf '%s' "$CR" | grep -iE "review limit|rate limit|review failed|currently processing" \
   && echo "^ CodeRabbit received this head but did NOT review it — not approval"; }
 ```
 

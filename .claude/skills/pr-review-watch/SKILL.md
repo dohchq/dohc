@@ -52,11 +52,17 @@ Two live PRs had the status comment naming their head with zero reviews ever pro
 accepting that as coverage returns `OK` on genuinely unreviewed code. Use the status
 comment only to explain *why* a review is missing.
 
-And read it **scoped to the comment that names the head**, because the rate-limit
-wrapper and its help text (`your plan's rate limits`, `How do review limits work?`)
-**never leave** the comment once added. Grepping the concatenation of every CodeRabbit
-comment asserts "degraded on this head" from evidence about some other head — and
-since the wrapper is permanent, it blocks the PR forever.
+**What keeps a rate limit from blocking the PR forever is the ORDER, not the scoping.**
+The rate-limit wrapper and its help text (`your plan's rate limits`, `How do review
+limits work?`) never leave the comment once added — and since CodeRabbit keeps *one*
+comment that it edits to name the current head, the comment you scope to *is* the one
+holding the permanent wrapper. Scoping cannot help with that. Only consulting the
+status comment **when no review of this head exists** does. #317 is the proof: its
+head-scoped comment matches "Review limit reached" for a head CodeRabbit
+**approved** — get the order wrong and you reject a genuinely reviewed PR forever.
+
+Scoping to the head-naming comment is still right, for a smaller reason: it keeps the
+"received this head" claim honest when CodeRabbit never got this head at all.
 
 CodeRabbit is also incremental and says so: *"does not re-review already reviewed
 commits."* An explicit `@coderabbitai review` on an unchanged head returns
@@ -140,7 +146,6 @@ DEADLINE_MIN=25
 CODEX="chatgpt-codex-connector[bot]"
 RABBIT="coderabbitai[bot]"
 CLEAN="didn.t find any major issues|no major issues"
-DEGRADED="Review limit|rate limit|Review failed"
 
 declare -A high seen watched firstseen qn
 fails=0
@@ -338,7 +343,7 @@ review_status() {
   local CODEX="chatgpt-codex-connector[bot]" RABBIT="coderabbitai[bot]"
   local CLEAN="didn.t find any major issues|no major issues"
   local DEGRADED="Review limit|rate limit|Review failed"
-  local head short rows lines rid st cnt blen who body cbody newest verdict=OK
+  local head short rows lines rid st cnt blen who body cbody envt newest verdict=OK
   local blocked=0 findings=0 unknown=0 unreviewed=0 pending=0
 
   [ -n "$n" ] || { echo "review_status: no PR number given"; return 2; }
@@ -424,7 +429,7 @@ review_status() {
       if envt=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
             --jq ".[]|select(.user.login==\"$CODEX\")|select(.body|test(\"create an environment for this repo\"))|.created_at" 2>/dev/null) \
          && [ -n "$envt" ]; then
-        echo "  $who — note: it replied \"create an environment for this repo\" on this PR (latest $(printf '%s' "$envt" | sort | tail -1)); some triggers here silently do not take"
+        echo "  $who — note: it replied \"create an environment for this repo\" on this PR (latest $(printf '%s' "$envt" | sort | tail -1)); if a round seems missing, check first whether the head was superseded"
       fi
     fi
 
@@ -438,12 +443,15 @@ review_status() {
         echo "  $who — status-comment query FAILED, coverage UNKNOWN"; unknown=1; continue
       fi
       if [ -n "$body" ]; then
-        if printf '%s' "$body" | grep -qiE "currently processing|review in progress"; then
-          echo "  $who — NO REVIEW of this head; it says it is still processing — wait, do not re-trigger"
-          pending=1
-        elif printf '%s' "$body" | grep -qiE "$DEGRADED"; then
+        # DEGRADED is tested FIRST: the wrapper is permanent, so a rate-limited
+        # comment often still carries processing text, and reporting "just wait"
+        # for a round that is actually blocked sends you to wait forever.
+        if printf '%s' "$body" | grep -qiE "$DEGRADED"; then
           echo "  $who — NO REVIEW of this head; rate-limited or failed — its silence is NOT approval"
           unreviewed=1
+        elif printf '%s' "$body" | grep -qiE "currently processing|review in progress"; then
+          echo "  $who — NO REVIEW of this head; it says it is still processing — wait, do not re-trigger"
+          pending=1
         else
           echo "  $who — NO REVIEW of this head; it acknowledged receiving $short but filed no review"
           unreviewed=1
