@@ -104,6 +104,29 @@ describe("desktop workspace secret enrollment state", () => {
     await sessions.closeAll();
   });
 
+  // The relay route table is keyed by the registry's rootPath as an EXACT
+  // string, and registry paths are forward-slashed even on Windows. A
+  // `resolve()`d copy reaches the daemon as backslashes, misses the route, and
+  // opens the workspace with no relay configuration. mkdtemp already returns
+  // native separators, so only a deliberately forward-slashed root shows this.
+  it("opens the daemon with the caller's rootPath spelling, not a resolved copy", async () => {
+    const root = await tempRoot();
+    await createEngineDb(root);
+    const forwardSlashed = root.replaceAll("\\", "/");
+    const daemon = new SecretStateDaemon();
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => daemon,
+    });
+
+    await readWorkspaceSecretState(forwardSlashed, WORKSPACE_ID, sessions);
+
+    const open = daemon.requests.find(
+      (request) => request.method === "workspace.open",
+    );
+    expect(open?.params).toMatchObject({ rootDir: forwardSlashed });
+    await sessions.closeAll();
+  });
+
   it("does not open the daemon or create engine.db for an opted-out workspace", async () => {
     const root = await tempRoot();
     const daemon = new SecretStateDaemon();
