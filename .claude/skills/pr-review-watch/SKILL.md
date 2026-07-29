@@ -115,14 +115,29 @@ green-lights a head with unresolved findings.
 
 ## The watcher — notices, does not judge
 
-Run via `Monitor` with `persistent: true`, extracting it from this file at launch:
+Run via `Monitor` with `persistent: true`, extracting it from this file at launch.
+Use this launcher, not a bare `bash <(awk …)` — the point is that silence can never be
+ambiguous, and a bare process substitution of an empty extraction exits instantly
+while looking armed:
 
 ```
-bash <(awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==1{print}' SKILL.md)
+S=.claude/skills/pr-review-watch/SKILL.md
+awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==1{print}' "$S" > /tmp/live-watcher.sh
+[ -s /tmp/live-watcher.sh ] || { echo "WATCHER CANNOT START — empty extraction from $S"; exit 1; }
+bash -n /tmp/live-watcher.sh || { echo "WATCHER CANNOT START — extracted script does not parse"; exit 1; }
+echo "WATCHER ARMED from $S ($(wc -l < /tmp/live-watcher.sh) lines)"
+bash /tmp/live-watcher.sh
+echo "WATCHER EXITED unexpectedly (rc=$?) — no longer watching"
 ```
 
-That guarantees the running process matches this file **at the moment it started**, not
-forever. **Whenever you edit block 1, restart the watcher** — otherwise a process that
+If you add invariant checks (say, that a recent fix is present in the extraction),
+make them **warn and start anyway**. A guard that refuses to start converts a
+staleness worry into a total outage: one of mine had an unmatchable `grep -F` pattern
+and took the watcher down for several minutes, which is strictly worse than running
+slightly stale logic.
+
+Extraction guarantees the running process matches this file **at the moment it
+started**, not forever. **Whenever you edit block 1, restart the watcher** — otherwise a process that
 looks armed is running logic you already fixed, which is how a corrected watcher stayed
 silent about a rate-limited reviewer for another half hour. Diff to be sure rather than
 guessing:
@@ -160,6 +175,18 @@ note() {
 }
 clear_note() { unset "qn[$1]"; }
 
+# Clearing only watched[] on closure leaves high/firstseen/seen/qn behind. If the PR
+# is reopened at the same head, the stale seen key suppresses every timeout and the
+# stale activity watermark suppresses the first notice — a reopened PR that is watched
+# in name only. Every per-PR key is prefixed "$n|" so one sweep clears all of it.
+forget_pr() {
+  local p="$1" k
+  unset "watched[$p]" "high[$p]"
+  for k in "${!firstseen[@]}"; do case "$k" in "$p|"*) unset "firstseen[$k]";; esac; done
+  for k in "${!seen[@]}";      do case "$k" in "$p|"*) unset "seen[$k]";;      esac; done
+  for k in "${!qn[@]}";        do case "$k" in "$p|"*) unset "qn[$k]";;        esac; done
+}
+
 # Newest bot event across all three endpoints, into ACTIVITY_LATEST, plus
 # ACTIVITY_OK = how many of the three queries succeeded, so a dead endpoint
 # cannot read as quiet. Both are globals and the caller must NOT wrap this in
@@ -185,7 +212,7 @@ newest_bot_event() {
 # means no timeout AND no notice, which is the single outcome this watcher exists
 # to prevent.
 qfail() {
-  note "qf-$1-$3-$4" "QUERY FAILED #$1 @$2 — the $4 query for $3 errored; coverage is UNKNOWN, not clear"
+  note "$1|qf|$3|$4" "QUERY FAILED #$1 @$2 — the $4 query for $3 errored; coverage is UNKNOWN, not clear"
 }
 
 while true; do
@@ -203,7 +230,7 @@ while true; do
     printf '%s\n' "$prs" | grep -qx "$n" && continue
     st=$(gh pr view "$n" --repo "$REPO" --json state --jq .state 2>/dev/null) || st="UNKNOWN"
     echo "PR #$n is $st — stopped watching"
-    unset "watched[$n]"
+    forget_pr "$n"
   done
 
   for n in $prs; do
@@ -214,17 +241,17 @@ while true; do
     # match against every historical comment, so a PR with any past bot activity
     # looks reviewed.
     if ! head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null) || [ -z "$head" ]; then
-      note "hq-$n" "HEAD QUERY FAILING #$n — cannot resolve its head; this PR is UNCHECKED, not clear"
+      note "$n|hq" "HEAD QUERY FAILING #$n — cannot resolve its head; this PR is UNCHECKED, not clear"
       continue
     fi
-    clear_note "hq-$n"
+    clear_note "$n|hq"
     short=${head:0:10}
 
     newest_bot_event "$n"
     if [ "${ACTIVITY_OK:-0}" -lt 3 ]; then
-      note "deg-$n" "PARTIAL VIEW #$n @$short — only ${ACTIVITY_OK:-0}/3 activity queries succeeded; quiet here may mean broken, not idle"
+      note "$n|deg" "PARTIAL VIEW #$n @$short — only ${ACTIVITY_OK:-0}/3 activity queries succeeded; quiet here may mean broken, not idle"
     else
-      clear_note "deg-$n"
+      clear_note "$n|deg"
     fi
     if [ -n "$ACTIVITY_LATEST" ] && [ "$ACTIVITY_LATEST" != "${high[$n]:-}" ]; then
       high[$n]=$ACTIVITY_LATEST
@@ -234,7 +261,7 @@ while true; do
     # Deadlines run from when WE first saw this head, never from the commit's
     # committer date — that is when it was authored, so a branch cut from an
     # older commit would alert on the first poll, before the bots had the PR.
-    fk="$n-$short"
+    fk="$n|$short"
     [ -n "${firstseen[$fk]:-}" ] || firstseen[$fk]=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     for who in "$CODEX" "$RABBIT"; do
@@ -284,15 +311,15 @@ while true; do
             --jq ".[]|select(.commit_id==\"$head\" and .user.login==\"$who\" and (.state==\"APPROVED\" or .state==\"CHANGES_REQUESTED\" or .state==\"COMMENTED\"))|.id" 2>/dev/null); then
         qfail "$n" "$short" "$who" reviews; continue
       fi
-      answered=$(printf '%s' "$rows" | grep -c .)
+      answered=$(printf '%s' "$rows" | grep -c . || true)
       if [ "$answered" -eq 0 ] && [ "$ans" != false ]; then
         if ! rows=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
               --jq ".[]|select(.user.login==\"$who\")|select($ans)|.id" 2>/dev/null); then
           qfail "$n" "$short" "$who" comments; continue
         fi
-        answered=$(printf '%s' "$rows" | grep -c .)
+        answered=$(printf '%s' "$rows" | grep -c . || true)
       fi
-      clear_note "qf-$n-$who-reviews"; clear_note "qf-$n-$who-comments"; clear_note "qf-$n-$who-trigger"
+      clear_note "$n|qf|$who|reviews"; clear_note "$n|qf|$who|comments"; clear_note "$n|qf|$who|trigger"
       [ "$answered" -eq 0 ] || continue
 
       age=$(( ( $(date -u +%s) - $(date -u -d "$base" +%s) ) / 60 ))
@@ -302,7 +329,7 @@ while true; do
       # Don't prescribe a remedy the watcher cannot diagnose: a re-trigger is
       # useless against a rate limit, and useless against codex lacking an
       # environment. Point at the judge, which knows which case this is.
-      k="to-$n-$short-$who-$base"
+      k="$n|to|$short|$who|$base"
       [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "NO REVIEW #$n @$short from $who after ${age}m of this round — run: review_status $n"; }
     done
   done
@@ -380,7 +407,7 @@ review_status() {
               --jq ".[]|select(.pull_request_review_id==$rid)|.id" 2>/dev/null); then
           echo "  $who review $rid [$st] — inline-count query FAILED, UNKNOWN"; unknown=1; continue
         fi
-        cnt=$(printf '%s' "$lines" | grep -c .)
+        cnt=$(printf '%s' "$lines" | grep -c . || true)
         if ! blen=$(gh api "repos/$REPO/pulls/$n/reviews/$rid" --jq '.body|length' 2>/dev/null); then
           echo "  $who review $rid [$st] — body query FAILED, UNKNOWN"; unknown=1; continue
         fi
