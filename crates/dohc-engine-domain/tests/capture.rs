@@ -37,6 +37,7 @@ fn retire(path: &str, now_ms: i64) -> CaptureRetire {
         request_id: None,
         only_if_text_head: false,
         only_if_capture_origin: false,
+        allow_ydoc_origin: true,
     }
 }
 
@@ -1013,6 +1014,7 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
         .capture_retire(
             &CaptureRetire {
                 only_if_capture_origin: true,
+                allow_ydoc_origin: true,
                 ..retire("notes/settled.md", 20)
             },
             &NO_FAULTS,
@@ -1047,12 +1049,90 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
         .capture_retire(
             &CaptureRetire {
                 only_if_capture_origin: true,
+                allow_ydoc_origin: true,
                 ..retire("notes/api.md", 40)
             },
             &NO_FAULTS,
         )
         .expect("protected retire is a no-op");
     assert!(protected.retired.is_none(), "RPC heads stay protected");
+}
+
+#[test]
+fn a_non_ownable_retire_must_not_destroy_a_materialized_ydoc_head() {
+    // AUDIT-SILENTSAVE round 3. The origin gate admits Y.Doc heads so a file
+    // DELETED while the daemon was down still retires. The capture sink then
+    // reused that permission for a different reason — "no longer
+    // engine-ownable" — and a settled Y.Doc past the 128 KiB capture cap is
+    // reported exactly that way. Result: the user pastes 131 KB, sees an
+    // honest "Saved" with the bytes on disk, quits, reopens, and reconcile
+    // journals "Stopped tracking non-text content" over a document they are
+    // actively editing. The reason must decide, not the origin alone.
+    let (_scratch, mut store) = open_store();
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "obj-ydoc-overcap".to_owned(),
+                    path: "notes/huge.md".to_owned(),
+                    text: "settled body past the capture cap".to_owned(),
+                    moment_id: "m-ydoc-overcap".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+            )
+        })
+        .expect("ydoc head");
+
+    let refused = VersionedTextStore::new(&mut store)
+        .capture_retire(
+            &CaptureRetire {
+                only_if_capture_origin: true,
+                // The "stopped being ownable" reason: a Y.Doc's own artifact
+                // is never that.
+                allow_ydoc_origin: false,
+                ..retire("notes/huge.md", 20)
+            },
+            &NO_FAULTS,
+        )
+        .expect("non-ownable retire settles");
+    assert!(
+        refused.retired.is_none(),
+        "a settled Y.Doc head must survive a not-engine-ownable retire"
+    );
+
+    // The head is genuinely still readable — not merely "no moment minted".
+    let head = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "notes/huge.md")
+        .expect("read head");
+    assert!(
+        head.is_some(),
+        "the Y.Doc head must still be there after the refused retire"
+    );
+
+    // And the DELETE reason still retires it, so a file removed while the
+    // daemon was down does not leave a stale snapshot readable forever.
+    let deleted = VersionedTextStore::new(&mut store)
+        .capture_retire(
+            &CaptureRetire {
+                only_if_capture_origin: true,
+                allow_ydoc_origin: true,
+                ..retire("notes/huge.md", 30)
+            },
+            &NO_FAULTS,
+        )
+        .expect("delete-driven retire");
+    assert!(
+        deleted.retired.is_some(),
+        "the delete reason must still own materialized ydoc heads"
+    );
 }
 
 #[test]
