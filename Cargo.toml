@@ -41,6 +41,13 @@ members = [
 exclude = [
     "crates/workspace-kernel",
     "crates/workspace-kernel-spike",
+    # Agent worktrees check the repo out INSIDE it. Their excluded crates then
+    # walk up past their own workspace root and try to attach to this one,
+    # which fails with "believes it's in a workspace when it's not" — and
+    # because the root test script is recursive with bail-on-first-failure,
+    # that aborts the whole JS suite before apps/desktop ever runs. It has
+    # already produced one reported-green run that never executed.
+    ".claude/worktrees",
 ]
 
 # Shared package metadata. Members opt in per field via `field.workspace = true`.
