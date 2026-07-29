@@ -1499,6 +1499,7 @@ function testSyncTimingOverrides(): {
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
+  shareMount?: true;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient {
   if (!rustEngineRelayClient) {

@@ -1318,6 +1318,13 @@ impl EngineService {
         } else {
             None
         };
+        let capture_enabled = params.capture_mode.is_none();
+        if !capture_enabled && capture_author_supplied {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "captureAuthor is unavailable when captureMode is none",
+            ));
+        }
         let cancellation = OperationCancellation::new(ctx);
         let _open_serial = tokio::select! {
             biased;
@@ -1385,6 +1392,12 @@ impl EngineService {
                     return Err(wire(
                         ErrorCode::InvalidParams,
                         "workspace root is already open in a different mode",
+                    ));
+                }
+                if lock(&open.capture).is_some() != capture_enabled {
+                    return Err(wire(
+                        ErrorCode::InvalidParams,
+                        "workspace capture configuration mismatch",
                     ));
                 }
                 if open.relay != params.relay.as_ref().map(RelayOpenParams::configuration) {
@@ -1531,17 +1544,19 @@ impl EngineService {
             // The files layer spawns ONLY here — after the shadow binding
             // succeeded — so an unmarked or mismatched root can never grow a
             // watcher or files actor (the shadow-scope dormancy invariant).
-            let capture = capture_driver::CaptureDriver::spawn(
-                root.clone(),
-                actor.clone(),
-                params.workspace_id.clone(),
-                self.self_writes.scoped(&root),
-                Arc::clone(&capture_apply_gate),
-                capture_author_json.flatten(),
-                self.events.clone(),
-                #[cfg(feature = "harness")]
-                self.capture_apply_probe.clone(),
-            );
+            let capture = capture_enabled.then(|| {
+                capture_driver::CaptureDriver::spawn(
+                    root.clone(),
+                    actor.clone(),
+                    params.workspace_id.clone(),
+                    self.self_writes.scoped(&root),
+                    Arc::clone(&capture_apply_gate),
+                    capture_author_json.flatten(),
+                    self.events.clone(),
+                    #[cfg(feature = "harness")]
+                    self.capture_apply_probe.clone(),
+                )
+            });
             // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
             // disk state) must apply before the handle is handed out, or a
             // caller's first write could later be overwritten by a capture of
@@ -1569,8 +1584,10 @@ impl EngineService {
                 )
                 .await?;
             }
-            capture.wait_for_baseline().await;
-            Some(capture)
+            if let Some(capture) = &capture {
+                capture.wait_for_baseline().await;
+            }
+            capture
         };
         open_guard.disarm();
         lock(&self.handles).insert(
@@ -8025,7 +8042,15 @@ struct WorkspaceOpenParams {
     #[serde(default)]
     skip_startup_maintenance: bool,
     #[serde(default)]
+    capture_mode: Option<WorkspaceCaptureMode>,
+    #[serde(default)]
     relay: Option<RelayOpenParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceCaptureMode {
+    None,
 }
 
 #[derive(Deserialize)]
@@ -11076,6 +11101,115 @@ mod tests {
             .workspace_close(Some(full_handle))
             .await
             .expect("close full handle");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_mode_none_preserves_disk_drift_while_full_open_reconciles_it() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "capture-mode-none";
+        std::fs::write(scratch.path().join("notes.md"), "authoritative")
+            .expect("seed disk");
+        let seeded = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            )
+            .await
+            .expect("seed workspace through normal capture");
+        let seeded_handle: WorkspaceHandle =
+            serde_json::from_value(seeded["workspace"].clone()).expect("workspace handle");
+        let main = service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(seeded_handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            )
+            .await
+            .expect("ensure main");
+        service
+            .workspace_close(Some(seeded_handle))
+            .await
+            .expect("close seeded workspace");
+        std::fs::write(scratch.path().join("notes.md"), "defaced").expect("tamper disk");
+
+        let open_params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": workspace_id,
+            "captureMode": "none",
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), open_params.clone())
+            .await
+            .expect("no-capture workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        assert!(
+            lock(&service.handles)
+                .get(&handle)
+                .is_some_and(|open| lock(&open.capture).is_none()),
+            "captureMode none must not create a capture driver"
+        );
+        let preserved = service
+            .versioned_text_read(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "versionId": main["id"], "path": "notes.md" }),
+            )
+            .await
+            .expect("read preserved snapshot");
+        assert_eq!(
+            preserved["text"],
+            json!("authoritative"),
+            "a no-capture open must not reconcile tampered disk bytes"
+        );
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("close no-capture workspace");
+
+        let full = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            )
+            .await
+            .expect("normal full open");
+        let full_handle: WorkspaceHandle =
+            serde_json::from_value(full["workspace"].clone()).expect("workspace handle");
+        assert!(
+            lock(&service.handles)
+                .get(&full_handle)
+                .is_some_and(|open| lock(&open.capture).is_some()),
+            "a normal full open must still create a capture driver"
+        );
+        let reconciled = service
+            .versioned_text_read(
+                &RequestContext::unbounded(),
+                Some(full_handle.clone()),
+                json!({ "versionId": main["id"], "path": "notes.md" }),
+            )
+            .await
+            .expect("read reconciled snapshot");
+        assert_eq!(
+            reconciled["text"],
+            json!("defaced"),
+            "a normal full open must still reconcile disk state"
+        );
+        service
+            .workspace_close(Some(full_handle))
+            .await
+            .expect("close full workspace");
     }
 
     #[tokio::test]

@@ -172,10 +172,11 @@ export function relayTargetForShareMount(
   hostWorkspaceId: string,
   hostRoot: string,
   mount: Pick<ShareMountRecord, "shareId" | "label">,
-): { workspaceId: string; rootPath: string } {
+): { workspaceId: string; rootPath: string; shareMount: true } {
   return {
     workspaceId: mountStoreWorkspaceIdFor(hostWorkspaceId, mount.shareId),
     rootPath: mountRootFor(hostRoot, mount.label),
+    shareMount: true,
   };
 }
 

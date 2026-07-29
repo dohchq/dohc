@@ -253,6 +253,7 @@ describe("EngineRelayClient", () => {
         bearerToken: "secret-token",
       },
     });
+    expect(open?.params).not.toHaveProperty("captureMode");
     expect(daemon.requests.map((request) => request.method)).toEqual([
       "workspace.open",
       "sync.push",
@@ -485,6 +486,7 @@ describe("EngineRelayClient", () => {
     ).toMatchObject({
       rootDir: target.rootPath,
       workspaceId: target.workspaceId,
+      captureMode: "none",
     });
     expect(
       daemon.requests.find(
