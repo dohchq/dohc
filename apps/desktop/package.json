@@ -15,7 +15,7 @@
     "smoke:settings": "playwright test --config playwright.config.ts --grep @settings-smoke",
     "smoke:fuses": "node scripts/ensure-electron-installed.mjs && node scripts/fuse-smoke.mjs",
     "test": "vitest run",
-    "test:e2e": "pnpm run build && playwright test --config playwright.config.ts",
+    "test:e2e": "pnpm run build && node scripts/require-e2e-engine.mjs && playwright test --config playwright.config.ts",
     "test:sites:e2e": "pnpm run build && playwright test --config playwright.config.ts --grep @sites",
     "typecheck": "tsc --noEmit"
   },
