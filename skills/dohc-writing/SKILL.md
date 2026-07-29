@@ -1,6 +1,11 @@
 ---
 name: dohc-writing
-description: dohc's writing discipline — Orwell's six rules plus ASD-STE100 Simplified Technical English, applied by register. Use when drafting or editing any prose in this repo: UI copy, error messages, empty states, docs, plans, specs, PR bodies, commit messages, AGENTS.md, and skills. Also use when asked to rewrite, tighten, simplify, or de-slop existing text.
+description: >-
+  dohc's writing discipline — Orwell's six rules plus ASD-STE100 Simplified
+  Technical English, applied by register. Use when drafting or editing any prose
+  in this repo — UI copy, error messages, empty states, docs, plans, specs, PR
+  bodies, commit messages, AGENTS.md, and skills. Also use when asked to
+  rewrite, tighten, simplify, or de-slop existing text.
 ---
 
 # Writing for dohc
@@ -151,8 +156,8 @@ different live concepts — see the next section before assuming.
 | `folder` | A container of files. | directory (in UI copy), collection |
 | `chat` | The conversation surface as a whole. | conversation |
 | `channel` | A named division of the chat surface. Durable rows key on `channel_id`; load-bearing in sharing and authorization. | room, group, space |
-| `thread` | A message sequence inside a channel. | topic, reply chain |
-| `capture` | Content the engine records from outside the workspace. | clip, ingest |
+| `thread` | A message sequence with exactly one owner — a linked file or a channel, never both and never neither. | topic, reply chain |
+| `capture` | The engine's history recorder. It records settled workspace file changes into versioned history, and is a workspace's only history. | snapshot, backup |
 | `share` | An explicit grant of access beyond the owner. | invite |
 | `skill` | A reusable process an agent can run. | playbook, macro, recipe |
 | `agent` | The non-human actor. Attribution uses the olive `agent` voice. | AI, assistant, bot |
@@ -166,7 +171,7 @@ their own meaning. Collapsing either one makes copy and technical docs wrong.
 | Term | Means | Not the same as |
 | --- | --- | --- |
 | `dm` | A direct-message channel — `channelKind: "dm"`, with its own relay grants and navigation. | `channel`, which is named; `chat`, the whole surface |
-| `import` | The user-initiated operation that brings outside files in (`ImportWorkspaceFiles`, `ImportToDatabase`). | `capture`, which is the engine recording content |
+| `import` | The user-initiated operation that brings outside files in (`ImportWorkspaceFiles`, `ImportToDatabase`). | `capture`, which records workspace history |
 | `model` | The inference model an agent runs on (`AgentModel`), selectable independently of the agent. | `agent`, which is the actor |
 | `permission` | An authorization grant, including agent tool approval (`AgentPermissionRequestSchema`). | `share`, which grants access to another person |
 | `synced` | A replication state — whether copies agree. | `source-backed`, which is about provenance |
@@ -179,9 +184,11 @@ their own meaning. Collapsing either one makes copy and technical docs wrong.
     `asset` or a `database`. `AtomKind` is that file's content type
     (`markdown`, `text`, `csv`, `json`, `html`), defined in
     `packages/workspace-contracts/src/domain.ts`.
-  - `inlineAtom` in the editor — a ProseMirror **decoration**, deliberately
-    not a node or a mark, so the atom stays literal text in the document
-    model.
+  - `inlineAtom` in the editor — **both** a canonical ProseMirror node
+    (`Node.create({ name: "inlineAtom", atom: true })` in `extensions.ts`,
+    declared `canonical: "tiptap-node"` in `schema-contracts.ts`) **and** a
+    separate decoration layer in `inlineAtomPlugin.ts`. Serialization expects
+    the node. Do not remove or bypass it in favour of the decoration.
 
   Use `atom` in contract and editor code, with that layer's meaning. Never put
   it in UI copy. The user's word is `file`.
