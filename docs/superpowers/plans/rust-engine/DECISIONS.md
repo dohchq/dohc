@@ -476,3 +476,34 @@ sharing ships: **does an owner's epoch rotation sever a live read-write
 member's ability to append, or may the member keep appending against the old
 epoch?** Parked as an explicit prerequisite on any sharing milestone; do not
 resolve it implicitly in implementation again.
+
+### Native-suite evidence RETIRED (R16, 2026-07-29) — supersedes the R02 runner note above
+
+The "GitHub CI SKIPPED" entry above records that *native-suite evidence moves to
+R02's local runner scripts*. That runner is
+`tools/rust-engine-program/run-native-suite.mjs`, and what it actually runs is
+`pnpm --filter @dohc/workspace-engine typecheck|test` — the **legacy TypeScript
+engine's** suites. R16 deletes that package, so the runner's subject ceases to
+exist.
+
+**Decision (Ice, 2026-07-29): retire it, do not repoint it.** Repointing it at
+the Rust suite would only duplicate `run-rust-checks.mjs`, which is already the
+canonical gate and already runs on every merge. And the value the native suite
+protected — TS-oracle-vs-Rust parity — does **not** die with the package: the
+fixture-drift guard inside the canonical gate is anchored on
+`packages/ydoc-projection` and `packages/security-contract`, neither of which is
+being deleted.
+
+Consequences, all owned by R16:
+
+- delete the two filter steps in `run-native-suite.mjs` (and the runner itself if
+  nothing else remains in it)
+- delete the two `pnpm --filter @dohc/workspace-engine test|typecheck` steps in
+  `.github/workflows/desktop-release.yml`
+- rewrite `tools/rust-engine-program/README.md`, which currently calls this "the
+  native evidence GATE0/TS-NATIVE-CI depends on" and a "mandatory pre-release
+  obligation"
+
+**What is NOT retired:** the macOS pre-release obligation from the entry above
+still stands on its own. It is about untested platforms, not about this runner,
+and R16 does not discharge it.

@@ -90,8 +90,15 @@ fails on every pure type consumer — e.g.
 `apps/desktop/src/agents/awaitableAgentDispatchStore.ts` and
 `apps/desktop/src/ipc/engineHistoryIpc.ts`, neither of which appears in the
 runtime list below. Treat them as a separate workstream rather than as noise:
-**46 type-only occurrences across 15 files**, split into two very different
-halves.
+**90 type-position import specifiers across 21 files** in `apps/desktop/src`
+non-test — `main.ts`, `workspaceEngineCapture.ts`,
+`workspaceEngineCaptureLiveStore.ts` and `engineRelayClient.ts` account for 39 of
+them between them. Repo-wide outside the package it is **112 across 36 files**.
+An earlier version of this line said "46 across 15", which undercounted by half;
+recount by parsing the actual `import … from "@dohc/workspace-engine"`
+statements and classifying each specifier, not by counting files or names.
+
+The work splits into two very different halves.
 
 The cheap half is a one-line specifier swap, because the legacy package merely
 re-exports these from `@dohc/workspace-contracts/engine` — the chat family via
@@ -102,28 +109,43 @@ The expensive half has **no other home** and dies with the package, so it needs
 replacement homes rather than swaps — and it is not a rounding error:
 `SyncRelayConnection` alone appears in 7 files.
 
-**20 homeless types**, computed rather than eyeballed: every `export
-interface|type` defined under `packages/workspace-engine/src`, minus any name
-also defined outside it, intersected with names referenced by live `.ts`/`.tsx`
-under `packages`/`apps`/`services` (excluding `node_modules`, `dist`, `target`
-and worktrees — including them makes every name look "homed" and the answer come
-out zero).
+**17 homeless types**, computed. Method: names with an `export interface|type`
+under `packages/workspace-engine/src`, that are **actually imported from
+`@dohc/workspace-engine`** by code outside it, and have no `export` of the same
+name anywhere else.
 
-| files | type | defined in |
+That middle condition is load-bearing. An earlier version of this list intersected
+on bare *name references* instead of imports and wrongly included `EngineSqliteDb`
+and `EngineSqliteStatement` — no source outside the package imports either; the
+outside matches were independent same-named interfaces declared locally in
+`apps/desktop/src/cli/cliServer.ts:106-122`, which survive deletion untouched.
+`EffectivePolicyResult` dropped out for the same reason.
+
+`importing files` counts distinct files importing that one type.
+
+| importing files | type | defined in |
 |---|---|---|
 | 7 | `SyncRelayConnection` | `syncRelay.ts` |
-| 3 | `WorkspaceSecretState` | `secretFileStore.ts` |
 | 2 | `PullWorkspaceFromRelayResult` | `syncRelay.ts` |
-| 2 | `YDocContentKind`, `YDocSession` | `ydocEngineDriver.ts` |
-| 1 | `ProbeRelayWorkspaceResult`, `PushWorkspaceToRelayResult`, `RecoverRelayOriginResult`, `RelayMaterializedPath` | `syncRelay.ts` |
-| 1 | `PullShareViewResult`, `ShareViewChangedPath` | `syncShareView.ts` |
-| 1 | `PullSharedChannelResult`, `PushSharedChannelResult` | `syncSharedChannel.ts` |
-| 1 | `EffectivePolicyResult`, `FilesPolicyRule`, `PolicyParseResult`, `VisibilityPolicyRule` | `effectivePolicy.ts` |
-| 1 | `EngineSqliteDb`, `EngineSqliteStatement` | `engineDbSchema.ts` |
+| 2 | `YDocContentKind` | `ydocEngineDriver.ts` |
+| 2 | `YDocSession` | `ydocEngineDriver.ts` |
+| 1 | `FilesPolicyRule` | `effectivePolicy.ts` |
+| 1 | `PolicyParseResult` | `effectivePolicy.ts` |
+| 1 | `VisibilityPolicyRule` | `effectivePolicy.ts` |
+| 1 | `ProbeRelayWorkspaceResult` | `syncRelay.ts` |
+| 1 | `PullShareViewResult` | `syncShareView.ts` |
+| 1 | `PullSharedChannelResult` | `syncSharedChannel.ts` |
+| 1 | `PushSharedChannelResult` | `syncSharedChannel.ts` |
+| 1 | `PushWorkspaceToRelayResult` | `syncRelay.ts` |
+| 1 | `RecoverRelayOriginResult` | `syncRelay.ts` |
+| 1 | `RelayMaterializedPath` | `syncRelay.ts` |
+| 1 | `ShareViewChangedPath` | `syncShareView.ts` |
+| 1 | `WorkspaceSecretState` | `secretFileStore.ts` |
 | 1 | `YDocSettleResult` | `ydocEngineDriver.ts` |
 
-Successive hand-built versions of this list said 4, then 13. Both were low.
-Re-derive it with the method above rather than trusting any enumeration here.
+Earlier hand-built versions of this list said 4, then 13; a name-reference
+intersection said 20. Re-derive with the method above rather than trusting any
+number here.
 
 The raw file count (54 files import the package) still overstates the *runtime*
 work; that surface is **42 runtime symbols**.
