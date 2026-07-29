@@ -7,7 +7,7 @@ line made enforceable.
 The soul in one line: **say what is true, what changed, and what to do next —
 in that order, in as few plain words as carry it.**
 
-The discipline behind this file is `.claude/skills/dohc-writing/SKILL.md`
+The discipline behind this file is `skills/dohc-writing/SKILL.md`
 (Orwell + ASD-STE100 Simplified Technical English, applied by register). UI
 copy is almost entirely the **strict** register: the user acts on it and cannot
 ask a follow-up question.

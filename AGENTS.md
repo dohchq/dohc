@@ -148,7 +148,7 @@ Claude is not setup to review PRs automatically (not part of my subscription), s
 
 dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified
 Technical English, applied by register. It lives in
-[`.claude/skills/dohc-writing/SKILL.md`](.claude/skills/dohc-writing/SKILL.md)
+[`skills/dohc-writing/SKILL.md`](skills/dohc-writing/SKILL.md)
 and covers UI copy, errors, docs, plans, specs, PR bodies, commit messages, and
 skills. UI copy has its own concrete rules in
 [`docs/brand/copy.md`](docs/brand/copy.md).
