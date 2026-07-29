@@ -321,7 +321,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(screen.getByTestId("markdown-editor"), "Draft!");
+    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
     return { user, view };
   }
 
@@ -365,8 +365,12 @@ describe("markdown editor unmount flush", () => {
       />,
     );
     await screen.findByTestId("view-markdown");
+    // registered?.() optional-chains to a silent no-op until the inspector has
+    // handed back its toggle, which leaves the view in wysiwyg and fails the
+    // editor lookup below with a confusing "not found". Wait for the toggle.
+    await waitFor(() => expect(registered).toBeDefined());
     act(() => registered?.()); // wysiwyg -> editable source (legacy branch)
-    await user.type(screen.getByTestId("markdown-editor"), "Raw!");
+    await user.type(await screen.findByTestId("markdown-editor"), "Raw!");
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     act(() => registered?.()); // source -> wysiwyg: flushes inside the window
     await waitFor(() =>
