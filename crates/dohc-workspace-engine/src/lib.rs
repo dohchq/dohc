@@ -11112,8 +11112,7 @@ mod tests {
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
         let workspace_id = "capture-mode-none";
-        std::fs::write(scratch.path().join("notes.md"), "authoritative")
-            .expect("seed disk");
+        std::fs::write(scratch.path().join("notes.md"), "authoritative").expect("seed disk");
         let seeded = service
             .workspace_open(
                 &RequestContext::unbounded(),
