@@ -389,6 +389,35 @@ it("a settled over-cap doc SURVIVES an app restart — the startup reconcile mus
   await relaunched.stop();
 });
 
+it("an EXTERNAL oversized write to a CLOSED Y.Doc-owned doc keeps the record too", async () => {
+  // AUDIT-SILENTSAVE round 4 (D2). The watcher path deferred only to a LIVE
+  // session while the startup reconcile defers to ownership, so the two
+  // disagreed: a Y.Doc-owned doc that is not open, rewritten on disk by an
+  // agent / sync client / git checkout / formatter, got retired on evidence
+  // the reconcile would have kept. Agents writing files directly is a
+  // first-class dohc flow, so ownership has to decide in both places.
+  const capture = makeCapture();
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Owned by the Y.Doc editor.");
+  await session.settleNow();
+  // CLOSED: no live session guards this path any more.
+  await session.close();
+
+  // Somebody else rewrites the file, past the capture text cap.
+  await seedDiskFile(PATH, "x".repeat(140 * 1024));
+  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  await capture.flush();
+
+  const projected = await store.readTextFile({ workspaceId: WS, versionId, path: PATH });
+  expect(
+    projected,
+    "an external oversized write retired a Y.Doc-owned record the reconcile would keep",
+  ).not.toBeNull();
+
+  await capture.stop();
+});
+
 it("a FAILING settle is logged and reported as an error save-state — the doc never reads Saved", async () => {
   // AUDIT-SILENTSAVE. This is the seam the bug lived in: a settle failure went
   // to onSessionError, which the capture wires to a reconnect handler that

@@ -1607,6 +1607,24 @@ export function createWorkspaceEngineCapture(
     return active?.id ?? ENGINE_MAIN_VERSION_ID;
   }
 
+  // "Which paths does the Y.Doc editor own?", memoized for one task. Only a
+  // RETIREMENT decision needs it, so a task that retires nothing never builds
+  // it; a task that retires many pays for one listing, not one per path.
+  function makeYdocOwnedPathsLookup(
+    engine: VersionedTextStore,
+    versionId: string,
+  ): () => Promise<Set<string>> {
+    let cache: Set<string> | null = null;
+    return async () => {
+      cache ??= new Set(
+        (await listTextFileMetadata(engine, versionId))
+          .filter((file) => file.hasYdocMarker)
+          .map((file) => file.path),
+      );
+      return cache;
+    };
+  }
+
   async function listTextFileMetadata(
     engine: VersionedTextStore,
     versionId: string,
@@ -1817,6 +1835,7 @@ export function createWorkspaceEngineCapture(
     event: WatcherEvent,
     policy: WorkspaceEnginePolicySnapshot,
     metadata: ActorNeutralWriteMetadata,
+    ydocOwnedPaths: () => Promise<Set<string>>,
     author?: MomentAuthor,
   ): Promise<void> {
     // The secret floor outranks policy: secret paths route to the encrypted
@@ -1874,13 +1893,16 @@ export function createWorkspaceEngineCapture(
       ) {
         return;
       }
-      // No sha to match on (the reader refuses to load a file past the binary
-      // cap just to hash it), but a LIVE Y.Doc session means the editor owns
-      // this path right now. Retiring its record mid-edit is wrong whoever
-      // wrote the bytes. This is not the blanket live-path skip that gate fix
-      // 1 removed — ordinary capture of a live path is untouched; only the
-      // retirement decision defers to ownership.
+      // OWNERSHIP decides, exactly as the startup reconcile decides. A Y.Doc
+      // is bounded by nothing, so its settled artifact routinely reads as
+      // un-ownable here — and that is true whoever wrote the bytes and
+      // whether or not the doc is open. An agent writing the .md directly is
+      // a first-class dohc flow, so keying this on a LIVE session would
+      // retire records the reconcile keeps. This is not the blanket
+      // live-path skip gate fix 1 removed: ordinary capture of a live path is
+      // untouched; only the retirement decision defers to ownership.
       if (liveYDocSessions.has(event.path)) return;
+      if ((await ydocOwnedPaths()).has(event.path)) return;
       // The path stopped being engine-ownable text: retire it from engine
       // state rather than leaving a stale snapshot behind. The batch author
       // rides along — the run's write is what retired it.
@@ -1922,18 +1944,7 @@ export function createWorkspaceEngineCapture(
       );
     }
     const diskPaths = new Set<string>();
-    // Paths the Y.Doc editor owns. Resolved LAZILY and memoized: only a path
-    // the reader calls un-ownable needs this, which is rare, and the listing
-    // is not worth paying for on a pass where nothing is retired.
-    let ydocOwnedPathsCache: Set<string> | null = null;
-    const ydocOwnedPaths = async (): Promise<Set<string>> => {
-      ydocOwnedPathsCache ??= new Set(
-        (await listTextFileMetadata(engine, versionId))
-          .filter((file) => file.hasYdocMarker)
-          .map((file) => file.path),
-      );
-      return ydocOwnedPathsCache;
-    };
+    const ydocOwnedPaths = makeYdocOwnedPathsLookup(engine, versionId);
     // Secret paths reconcile into the ENCRYPTED store (PR 08): capture the
     // current disk plaintext (metadata-only moments), and retire entries
     // whose files vanished. Transiently unreadable secrets are left alone.
@@ -2349,10 +2360,19 @@ export function createWorkspaceEngineCapture(
           const engine = await engineStore();
           const versionId = await activeVersionIdOf(engine);
           const metadata: ActorNeutralWriteMetadata = { origin: "local-file" };
+          const ydocOwnedPaths = makeYdocOwnedPathsLookup(engine, versionId);
           let pathFailures = 0;
           for (const event of batch) {
             try {
-              await captureOnePath(engine, versionId, event, policy, metadata, author);
+              await captureOnePath(
+                engine,
+                versionId,
+                event,
+                policy,
+                metadata,
+                ydocOwnedPaths,
+                author,
+              );
             } catch (error) {
               // One bad path must not drop the rest of the batch.
               pathFailures += 1;
