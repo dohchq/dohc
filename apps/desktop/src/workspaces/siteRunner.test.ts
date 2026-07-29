@@ -218,6 +218,12 @@ describe("startSiteDevServer", () => {
     }
 
     // And the child is confirmed down by the time the rejection surfaces.
+    // The child writes its pid file asynchronously after spawn, and nothing in
+    // the reject path waits for it — on a loaded machine the read below can
+    // outrun the child and fail ENOENT. Wait for the file the assertion needs.
+    await expect
+      .poll(() => existsSync(pidFile), { timeout: 10_000 })
+      .toBe(true);
     const pid = Number((await readFile(pidFile, "utf8")).trim());
     expect(pid).toBeGreaterThan(0);
     let alive = true;
