@@ -799,12 +799,13 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_markdow
     .await;
     let session_id = opened["sessionId"].as_str().expect("session id");
 
-    // Comfortably past INBAND_CONTENT_CAP_BYTES (48 KiB), like the 131,442
-    // bytes journey 1 pasted into load-test.md.
-    let huge = "pasted load-test paragraph.\n".repeat(4_000);
+    // Past BOTH the 48 KiB in-band response cap and the desktop capture
+    // layer's 128 KiB text cap — the size journey 1 actually pasted into
+    // load-test.md was 131,442 bytes, and both limits sit under it.
+    let huge = "pasted load-test paragraph.\n".repeat(5_000);
     assert!(
-        huge.len() > 48 * 1024,
-        "fixture must exceed the in-band cap"
+        huge.len() > 128 * 1024,
+        "fixture must exceed both the in-band cap and the capture text cap"
     );
 
     call(

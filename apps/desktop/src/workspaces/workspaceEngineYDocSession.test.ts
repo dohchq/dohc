@@ -304,6 +304,46 @@ it("resumes the rich content on reopen (replicated lineage, no relay)", async ()
   await capture.stop();
 });
 
+it("a settle past the 128 KiB CAPTURE cap keeps the engine record — the watcher must not retire our own write", async () => {
+  // AUDIT-SILENTSAVE round 2 (codex P1). A Y.Doc is not bounded by
+  // MAX_ENGINE_CAPTURE_TEXT_BYTES (128 KiB), but the capture reader is: a
+  // settle that materializes a bigger file comes back `untracked-content`,
+  // and that branch retired the path WITHOUT checking the expected-event
+  // registry — deleting the document's engine record while the editor
+  // reported "Saved". The dogfood journey's repro was 131,442 bytes, i.e.
+  // exactly here.
+  const capture = makeCapture();
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });
+
+  // Past 128 KiB, like the journey.
+  const huge = "Oversized settled paragraph for the capture cap.\n".repeat(3_000);
+  expect(Buffer.byteLength(huge, "utf8")).toBeGreaterThan(128 * 1024);
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, huge);
+  await session.settleNow();
+
+  const momentsAfterSettle = momentCountForPath(PATH);
+  expect(momentsAfterSettle).toBeGreaterThan(0);
+  const onDisk = await readFile(join(root, PATH), "utf8");
+  expect(Buffer.byteLength(onDisk, "utf8")).toBeGreaterThan(128 * 1024);
+
+  // The watcher now observes the settle's OWN oversized write.
+  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  await capture.flush();
+
+  // THE load-bearing assertion: the record survives. Before the fix this
+  // path ran deleteIfTracked and the document vanished from the engine.
+  const projected = await store.readTextFile({ workspaceId: WS, versionId, path: PATH });
+  expect(projected).not.toBeNull();
+  expect(projected?.text).toContain("Oversized settled paragraph for the capture cap.");
+  // And it was not retired-then-recreated: no new moment was journaled for
+  // our own write.
+  expect(momentCountForPath(PATH)).toBe(momentsAfterSettle);
+
+  await session.close();
+  await capture.stop();
+});
+
 it("a FAILING settle is logged and reported as an error save-state — the doc never reads Saved", async () => {
   // AUDIT-SILENTSAVE. This is the seam the bug lived in: a settle failure went
   // to onSessionError, which the capture wires to a reconnect handler that

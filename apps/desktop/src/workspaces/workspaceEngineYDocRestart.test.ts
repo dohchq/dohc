@@ -86,6 +86,7 @@ async function reconnectFailureCapture(prefix: string) {
           path: options.path,
           markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
           projection: {
             contentKind: "plaintext",
             sourceStateVectorSha256: "a".repeat(64),
@@ -273,6 +274,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
           path: options.path,
           markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
           projection: {
             contentKind: "plaintext" as const,
             sourceStateVectorSha256: "a".repeat(64),
@@ -514,6 +516,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
           path: options.path,
           markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
           projection: {
             contentKind: "plaintext",
             sourceStateVectorSha256: "a".repeat(64),
@@ -617,6 +620,7 @@ it("releases a close-latched failed generation with settle true before the next 
           path: options.path,
           markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
           projection: {
             contentKind: "plaintext",
             sourceStateVectorSha256: "a".repeat(64),
@@ -891,6 +895,7 @@ it("treats typed session-not-found during release-first rebind as already releas
           path: options.path,
           markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
           projection: {
             contentKind: "plaintext",
             sourceStateVectorSha256: "a".repeat(64),
@@ -960,8 +965,8 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
   });
 
   // What the engine already wrote to disk when it materialized the settle.
-  const materialized = "pasted load-test paragraph.\n".repeat(4_000);
-  await writeFile(join(rootPath, "load.md"), materialized);
+  const onDiskBody = "pasted load-test paragraph.\n".repeat(4_000);
+  await writeFile(join(rootPath, "load.md"), onDiskBody);
 
   const seed = new Y.Doc();
   seed.getText("plainText").insert(0, "seed");
@@ -985,7 +990,8 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
           path: options.path,
           // The engine's over-cap answer.
           markdown: null,
-          sha256: createHash("sha256").update(materialized).digest("hex"),
+          sha256: createHash("sha256").update(onDiskBody).digest("hex"),
+          materialized: true,
           projection: {
             contentKind: "plaintext" as const,
             sourceStateVectorSha256: "b".repeat(64),
@@ -1021,12 +1027,111 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
 
   // THE load-bearing assertion: the engine's file is untouched, not truncated.
   const onDisk = await readFile(join(rootPath, "load.md"), "utf8");
-  expect(onDisk).toBe(materialized);
+  expect(onDisk).toBe(onDiskBody);
   expect(onDisk.length).toBeGreaterThan(48 * 1024);
   // And it IS saved — the settle committed; nothing about this is an error.
   expect(states).toContain("saved");
   expect(states).not.toContain("error");
   expect(onError).not.toHaveBeenCalled();
+
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("a settle whose materialization was BLOCKED reports an error, never Saved", async () => {
+  // AUDIT-SILENTSAVE round 2 (codex P2). `JobOutcome::Blocked` (a symlinked
+  // target) is deliberately a durably-pending SUCCESS for the settle contract
+  // — marker kept, write retried later — so the response is Ok. But the file
+  // on disk is still the OLD artifact. With markdown omitted (over-cap) the
+  // desktop writes nothing, so nothing else would ever notice. The engine now
+  // says `materialized: false` and the editor must not claim Saved.
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-blocked-"));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "ydoc-blocked" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+
+  const stale = "the artifact that is still on disk\n";
+  await writeFile(join(rootPath, "note.md"), stale);
+
+  const seed = new Y.Doc();
+  seed.getText("plainText").insert(0, "seed");
+  const seedUpdate = Y.encodeStateAsUpdate(seed);
+  const openProvider = async (
+    options: EngineYdocProviderSessionRustOptions,
+  ): Promise<EngineYdocProviderSessionRust> => {
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, seedUpdate);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      async applyLocalUpdate(update) {
+        Y.applyUpdate(doc, update);
+      },
+      async settleNow() {
+        const result = {
+          momentId: "moment-blocked",
+          path: options.path,
+          markdown: null,
+          sha256: createHash("sha256").update("never landed").digest("hex"),
+          // Committed, but the disk did not move.
+          materialized: false,
+          projection: {
+            contentKind: "plaintext" as const,
+            sourceStateVectorSha256: "c".repeat(64),
+            destructive: false,
+          },
+        };
+        await options.onSettled?.(result);
+        return result;
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const onError = vi.fn();
+  const states: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-blocked",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  await session.settleNow();
+
+  // THE load-bearing assertion: the document must NOT read Saved.
+  expect(states).not.toContain("saved");
+  expect(states).toContain("error");
+  expect(onError).toHaveBeenCalled();
+  expect(String(onError.mock.calls.at(-1)?.[0])).toContain("note.md");
+  // And the disk really is still the old artifact.
+  expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe(stale);
 
   await session.close({ settle: false });
   await capture.stop();

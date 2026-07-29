@@ -574,7 +574,11 @@ type DiskTextState =
   // Engine-ownable binary content within the binary cap.
   | { kind: "binary"; bytes: Buffer; sha256: string; byteLength: number }
   // Present but not engine-ownable (binary, oversized, or non-UTF-8 text).
-  | { kind: "untracked-content" }
+  // `sha256` is carried ONLY for genuine UTF-8 text that is merely over the
+  // text cap: a Y.Doc settle is not bounded by that cap, so its own
+  // materialization can land here, and the self-write check needs the same
+  // sha-precise identity every other branch uses.
+  | { kind: "untracked-content"; sha256?: string }
   // Transiently unreadable (EACCES/EBUSY/...): leave engine state alone.
   | { kind: "unreadable" };
 
@@ -649,8 +653,12 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
       return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
     }
     // Genuine text over the text cap stays untracked (established behavior —
-    // oversized text is neither snapshotted nor demoted to bytes).
-    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    // oversized text is neither snapshotted nor demoted to bytes). The sha
+    // rides along so a settle's own oversized materialization is still
+    // recognizable as OUR write rather than a reason to retire the record.
+    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+      return { kind: "untracked-content", sha256: sha256Utf8(text) };
+    }
     return { kind: "text", text, sha256: sha256Utf8(text) };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -1811,6 +1819,21 @@ export function createWorkspaceEngineCapture(
       return;
     }
     if (disk.kind === "untracked-content") {
+      // OUR OWN settle materialization can land here. A Y.Doc is not bounded
+      // by MAX_ENGINE_CAPTURE_TEXT_BYTES (128 KiB), so a document grown past
+      // it materializes a file this reader classifies as un-ownable — and
+      // retiring the record would DELETE the document's engine history while
+      // the editor reports "Saved". (The dogfood journey's repro was 131,442
+      // bytes, right into this trap.) Every other branch here checks the
+      // expected-event registry first; this one must too, with the same
+      // sha-precise identity so a genuine external oversized write still
+      // retires the path as designed.
+      if (
+        disk.sha256 !== undefined &&
+        consumeExpectedEvent("write", event.path, disk.sha256)
+      ) {
+        return;
+      }
       // The path stopped being engine-ownable text: retire it from engine
       // state rather than leaving a stale snapshot behind. The batch author
       // rides along — the run's write is what retired it.
@@ -2305,7 +2328,24 @@ export function createWorkspaceEngineCapture(
       const onSettled = async (result: {
         sha256: string;
         markdown: string | null;
+        materialized?: boolean;
       }) => {
+        // The settle committed, but the engine says the FILE did not move
+        // (materialization blocked by containment — a symlinked target — with
+        // the write pending a retry). Nothing below would notice: the
+        // over-cap path does not write, and the mirror write cannot rescue a
+        // target the engine already refused. Say so rather than report a save
+        // the disk never received.
+        if (result.materialized === false) {
+          onError(
+            `ydoc settle of ${input.path}`,
+            new Error(
+              "the engine committed the settle but could not write the file (blocked target); the write is pending a retry",
+            ),
+          );
+          reportSaveState("error");
+          return;
+        }
         // Register the settle's self-write (sha of the settled markdown) so
         // even a watcher event that lands after the live-path guard lifts on
         // close is recognized as our own. The ENGINE materializes the .md

@@ -235,6 +235,12 @@ pub struct YdocSettlement {
     /// is written to disk and the moment committed either way.
     pub markdown: Option<String>,
     pub sha256: String,
+    /// Whether the file on disk actually received these bytes. `false` means
+    /// the settle committed durably (marker, moment, snapshot) but
+    /// materialization was BLOCKED by containment, so the write is pending a
+    /// retry and the artifact on disk is still the old one. Callers must not
+    /// report the document as saved on a `false`.
+    pub materialized: bool,
     pub projection: Projection,
 }
 
@@ -9089,6 +9095,9 @@ fn ydoc_settle_on_store(
             path: current.path,
             markdown: inband_settled_markdown(current.text),
             sha256: current.blob_sha256,
+            // Any pending job for this head was replayed above, and a Blocked
+            // replay returns Err rather than reaching here.
+            materialized: true,
             projection,
         });
     }
@@ -9270,13 +9279,17 @@ fn ydoc_settle_on_store(
             return Err(error.into());
         }
     };
+    let mut materialized = true;
     match job_outcome {
         JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
         JobOutcome::Blocked => {
             // This is the same crash-consistent state as dying after the
             // marker/job commit: the write is durably pending and will land
             // once containment is restored. Keep both the advanced marker and
-            // the self-write registration, and report the committed settle.
+            // the self-write registration, and report the committed settle —
+            // but say plainly that DISK did not move, so no caller reports the
+            // document as saved over an artifact that never changed.
+            materialized = false;
         }
         JobOutcome::Conflict | JobOutcome::Superseded => {
             // The target changed on disk and the job left it untouched: this
@@ -9319,6 +9332,7 @@ fn ydoc_settle_on_store(
         path: write.snapshot.path,
         markdown: inband_settled_markdown(write.snapshot.text),
         sha256: write.snapshot.blob_sha256,
+        materialized,
         projection,
     })
 }

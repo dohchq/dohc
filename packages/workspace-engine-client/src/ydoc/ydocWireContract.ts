@@ -61,6 +61,10 @@ export type YdocSettleResult = JsonObject & {
   // rather than echoing it back over the wire.
   markdown: string | null;
   sha256: string;
+  // false => the settle committed but the FILE did not move (materialization
+  // blocked by containment; the write is pending a retry). Nothing may report
+  // the document as saved on a false.
+  materialized: boolean;
   projection: YdocProjectionProvenance;
 };
 
@@ -128,6 +132,14 @@ function nullableStringValue(
   return value;
 }
 
+function booleanValue(object: JsonObject, key: string, label: string): boolean {
+  const value = object[key];
+  if (typeof value !== "boolean") {
+    throw new YdocProtocolShapeError(`${label}.${key} must be a boolean.`);
+  }
+  return value;
+}
+
 function numberValue(object: JsonObject, key: string, label: string): number {
   const value = object[key];
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
@@ -189,6 +201,7 @@ export function decodeYdocSettleResult(value: JsonValue): YdocSettleResult {
     path: stringValue(object, "path", "ydoc.settle result"),
     markdown: nullableStringValue(object, "markdown", "ydoc.settle result"),
     sha256: stringValue(object, "sha256", "ydoc.settle result"),
+    materialized: booleanValue(object, "materialized", "ydoc.settle result"),
     projection: {
       contentKind: contentKindValue(
         projection,

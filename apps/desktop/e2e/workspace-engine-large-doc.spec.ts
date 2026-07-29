@@ -26,8 +26,12 @@ import {
 // the real app, a real engine, a real file on disk.
 
 const CHUNK = "The quick brown fox jumps over the lazy dog, repeatedly. ";
-const CHUNKS = 900; // ~50 KiB, comfortably past the 48 KiB in-band cap.
+// ~140 KiB: past BOTH the 48 KiB in-band response cap and the 128 KiB capture
+// text cap, matching the 131,442 bytes journey 1 actually pasted. Under 128 KiB
+// this spec would miss the capture layer retiring the engine record entirely.
+const CHUNKS = 2_500;
 const INBAND_CAP_BYTES = 48 * 1024;
+const CAPTURE_TEXT_CAP_BYTES = 128 * 1024;
 const TAIL_SENTINEL = "TAIL-SENTINEL-THE-LAST-BYTE-MUST-LAND";
 
 async function openEngineDoc(
