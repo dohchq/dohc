@@ -493,9 +493,11 @@ describe("EngineRelayClient", () => {
       workspaceId: target.workspaceId,
       shareId: mount.shareId,
     });
-    expect(
-      daemon.requests.some((request) => request.method === "workspace.close"),
-    ).toBe(true);
+    // The mount OWNS its nested store, so its close must be the last thing it
+    // does — after sync.commitCursor. `some(...)` would not prove that: the
+    // relay client forces its own workspace.close before the pull when it
+    // rebinds, so a mount that never closed its store would still pass.
+    expect(daemon.requests.at(-1)?.method).toBe("workspace.close");
     await sessions.closeAll();
   });
 

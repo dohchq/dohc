@@ -223,6 +223,40 @@ describe("refreshShareMountOnce", () => {
     );
   });
 
+  // The mount closes its own store, and that close is now an RPC that can
+  // fail. It must stay best-effort: mountShare treats a rejection here as a
+  // failed mount and DELETES the folder, so a dying sidecar after a committed
+  // cursor would destroy files that had already materialized.
+  it("keeps a successful refresh when closing the mount's store fails", async () => {
+    const host = await tempHostRoot();
+    const relay = new FakeShareRelay();
+    relay.addWrite("docs/brief.md", "the brief");
+
+    const outcome = await refreshShareMountOnceWithPull({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+      pull: pullShareView,
+      openStore: ({ rootPath }) => {
+        const store = createVersionedTextStore(rootPath);
+        // Release the real handle first (Windows refuses to remove an open
+        // db in afterEach), then fail the way a dying daemon would.
+        const realClose = store.close.bind(store);
+        return Object.assign(store, {
+          close: async () => {
+            await realClose();
+            throw new Error("daemon went away during close");
+          },
+        });
+      },
+    });
+
+    expect(outcome).toEqual({ status: "updated", changedPaths: 1 });
+    expect(
+      await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex/docs/brief.md"), "utf8"),
+    ).toBe("the brief");
+  });
+
   it("reports ended on revocation and leaves the files untouched", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();

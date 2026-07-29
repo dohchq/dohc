@@ -210,7 +210,11 @@ export async function refreshShareMountOnce(input: {
       changedPaths: outcome.changedPaths + repaired,
     };
   } finally {
-    await store.close();
+    // Best-effort, like every other session teardown in this flow: a failing
+    // close must not discard a refresh that already materialized and committed
+    // its cursor, or mountShare would roll back and delete the folder it just
+    // wrote.
+    await store.close().catch(() => undefined);
   }
 }
 
