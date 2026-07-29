@@ -11,11 +11,10 @@ A watcher that misses a round means merging unreviewed code — and a watcher th
 
 ## Two jobs, deliberately separated
 
-The biggest design mistake here is one thing that both watches and judges. Three
-successive versions of this skill did that, and **every** bug was in the judging
-half: false closure spam, one reviewer's findings attributed to another, a
-`CHANGES_REQUESTED` read as a pass, and a shared coverage flag that disabled the
-very timeout it was guarding.
+The biggest design mistake here is one thing that both watches and judges. Early
+versions did that, and nearly every bug landed in the judging half: a
+`CHANGES_REQUESTED` read as a pass, one reviewer's findings attributed to
+another, and a shared coverage flag that disabled the very timeout it guarded.
 
 | job | how | why |
 |---|---|---|
@@ -31,14 +30,17 @@ you to go look. `review_status` decides, at the moment you need the answer.
 
 | bot | outcome | where it lands |
 |---|---|---|
-| codex | has findings | a **review** (`pulls/N/reviews`) with `commit_id`, plus inline comments |
+| codex | has findings | a **review** with `state: COMMENTED` — *not* `CHANGES_REQUESTED` — plus inline comments |
 | codex | **no findings** | an **issue comment** reading "Didn't find any major issues", carrying `**Reviewed commit:** <short-sha>` |
 | CodeRabbit | approves / requests changes | a **review** with `state` |
 | CodeRabbit | rate-limited | an **issue comment** containing "Review limit reached" |
 | CodeRabbit | internal error | an **issue comment** containing "Review failed" |
 
 So `pulls/N/reviews` being empty says **nothing** about whether the code was
-reviewed. A clean codex pass leaves that endpoint untouched.
+reviewed — a clean codex pass leaves that endpoint untouched. And a *populated*
+`reviews` entry says nothing about whether the code **passed**: codex files real
+findings under `COMMENTED`, so keying "blocked" off `CHANGES_REQUESTED` alone
+green-lights a head with unresolved findings.
 
 **Other traps, each of which produced a wrong answer in practice:**
 
@@ -48,42 +50,56 @@ reviewed. A clean codex pass leaves that endpoint untouched.
   real answer. Embed values: `--jq ".[]|select(.x==\"$v\")"`.
 - codex writes the **10-char short SHA** in `Reviewed commit:`, while
   `headRefOid` is the full 40. `contains(full_sha)` never matches.
-- `gh api` pages at 30 by default. Without `--paginate` the current head's review
-  can fall off page one and be invisible.
+- `gh api` pages at 30 by default, and so does **`gh pr list`**. Without
+  `--paginate` / `--limit` the current head's review, or a whole PR, is invisible.
+- **A commit's committer date is not when the PR received it.** Cutting a branch
+  from an older commit makes a push-time deadline fire on the first poll.
 - **Zero findings is not a pass.** `CHANGES_REQUESTED` can carry its entire
-  explanation in the review body with no inline comments. Report the **state**,
-  and flag a non-empty body.
+  explanation in the review body with no inline comments at all.
 - GitHub **re-anchors** older inline comments onto a new `commit_id` (see
   `docs/superpowers/plans/rust-engine/SESSION_HANDOFF.md:948-950`). Count by
   `pull_request_review_id`, not by commit, or you over-count.
-- `gh pr list --state open` omits a merged PR, and its output is
-  **newline**-delimited — `case " $list " in *" $n "*)` never matches and spams
-  false closure every cycle.
+- `gh pr list --state open` output is **newline**-delimited — `case " $list " in
+  *" $n "*)` never matches and spams false closure every cycle.
 - A failing query is **not** an empty result. Treat failure as *unknown*, never as
   "no reviews", or a transient blip fires a false alarm — or exits the watcher.
 
 ## The watcher — notices, does not judge
 
-Run via `Monitor` with `persistent: true`.
+Run via `Monitor` with `persistent: true`. Extract it from this file at launch
+(`bash <(awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==1{print}' SKILL.md)`)
+so the running process and the documented script cannot drift apart.
 
 ```bash
 REPO=dohc-ai/dohc
 DEADLINE_MIN=25
 CODEX="chatgpt-codex-connector[bot]"
 RABBIT="coderabbitai[bot]"
+CLEAN="didn.t find any major issues|no major issues"
+DEGRADED="Review limit|rate limit|Review failed"
 
-declare -A high seen watched
+declare -A high seen watched firstseen
 fails=0
 
+# Newest bot event across all three endpoints, into ACTIVITY_LATEST, plus
+# ACTIVITY_OK = how many of the three queries succeeded, so a dead endpoint
+# cannot read as quiet. Both are globals and the caller must NOT wrap this in
+# `$(...)`: command substitution runs a subshell, which would discard them.
 newest_bot_event() {
-  { gh api "repos/$REPO/pulls/$1/reviews"   --paginate --jq '.[]|select(.user.type=="Bot")|.submitted_at' 2>/dev/null
-    gh api "repos/$REPO/pulls/$1/comments"  --paginate --jq '.[]|select(.user.type=="Bot")|.created_at'   2>/dev/null
-    gh api "repos/$REPO/issues/$1/comments" --paginate --jq '.[]|select(.user.type=="Bot")|.created_at'   2>/dev/null
-  } | sort | tail -1
+  local out="" part ep
+  ACTIVITY_OK=0
+  for ep in "pulls/$1/reviews" "pulls/$1/comments" "issues/$1/comments"; do
+    if part=$(gh api "repos/$REPO/$ep" --paginate \
+                --jq '.[]|select(.user.type=="Bot")|(.submitted_at // .created_at)' 2>/dev/null); then
+      ACTIVITY_OK=$((ACTIVITY_OK+1))
+      out=$(printf '%s\n%s\n' "$out" "$part")
+    fi
+  done
+  ACTIVITY_LATEST=$(printf '%s\n' "$out" | grep -v '^$' | sort | tail -1)
 }
 
 while true; do
-  if ! prs=$(gh pr list --repo "$REPO" --state open --json number --jq '.[].number' 2>/dev/null); then
+  if ! prs=$(gh pr list --repo "$REPO" --state open --limit 200 --json number --jq '.[].number' 2>/dev/null); then
     fails=$((fails+1))
     [ "$fails" = 3 ] && echo "DISCOVERY FAILING — gh pr list errored 3x; watcher alive, results may be stale"
     sleep 120; continue
@@ -102,47 +118,63 @@ while true; do
     head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null) || continue
     short=${head:0:10}
 
-    latest=$(newest_bot_event "$n")
-    if [ -n "$latest" ] && [ "$latest" != "${high[$n]:-}" ]; then
-      high[$n]=$latest
-      echo "BOT ACTIVITY #$n @$short — newest event $latest — run: review_status $n"
+    newest_bot_event "$n"
+    if [ "${ACTIVITY_OK:-0}" -lt 3 ]; then
+      k="deg-$n-$short-${ACTIVITY_OK:-0}"
+      [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "PARTIAL VIEW #$n @$short — only ${ACTIVITY_OK:-0}/3 activity queries succeeded; quiet here may mean broken, not idle"; }
+    fi
+    if [ -n "$ACTIVITY_LATEST" ] && [ "$ACTIVITY_LATEST" != "${high[$n]:-}" ]; then
+      high[$n]=$ACTIVITY_LATEST
+      echo "BOT ACTIVITY #$n @$short — newest event $ACTIVITY_LATEST — run: review_status $n"
     fi
 
-    pushed=$(gh api "repos/$REPO/commits/$head" --jq '.commit.committer.date' 2>/dev/null)
-    trig=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
-            --jq '.[]|select(.body|test("@codex review|@coderabbitai review"))|.created_at' 2>/dev/null | sort | tail -1)
-    base=$(printf '%s\n%s\n' "$pushed" "$trig" | grep -v '^$' | sort | tail -1)
-    [ -n "$base" ] || continue
+    # Deadlines run from when WE first saw this head, never from the commit's
+    # committer date — that is when it was authored, so a branch cut from an
+    # older commit would alert on the first poll, before the bots had the PR.
+    fk="$n-$short"
+    [ -n "${firstseen[$fk]:-}" ] || firstseen[$fk]=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     for who in "$CODEX" "$RABBIT"; do
-      # An answer is EITHER a review object, or the one comment shape that
-      # reviewer uses instead of one: codex names the head in a clean pass,
-      # CodeRabbit says it was limited or failed. A generic comment — a
-      # walkthrough, a "starting review" — is not an answer.
+      # An answer is a review object, or the ONE comment shape this reviewer
+      # substitutes for one. The codex case requires the SHA *and* the clean-pass
+      # phrase: a comment that merely mentions the head would otherwise suppress
+      # the timeout forever for a round that never finished.
       case "$who" in
-        "$CODEX") shape="$short" ;;
-        *)        shape="Review limit|rate limit|Review failed" ;;
+        "$CODEX") pat="@codex review"
+                  ans="(.body|contains(\"$short\")) and (.body|test(\"$CLEAN\";\"i\"))" ;;
+        *)        pat="@coderabbitai review"
+                  ans="(.body|test(\"$DEGRADED\";\"i\"))" ;;
       esac
+
+      # Each reviewer's round starts at ITS OWN newest trigger. One shared
+      # baseline lets a later "@codex review" invalidate CodeRabbit's perfectly
+      # good review of the same head, after which the watcher demands a trigger
+      # that was never missing.
+      trig=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
+              --jq ".[]|select(.body|contains(\"$pat\"))|.created_at" 2>/dev/null | sort | tail -1)
+      base=$(printf '%s\n%s\n' "${firstseen[$fk]}" "$trig" | grep -v '^$' | sort | tail -1)
+
       answered=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate \
         --jq "[.[]|select(.commit_id==\"$head\" and .user.login==\"$who\" and .submitted_at>=\"$base\")]|length" 2>/dev/null) || continue
       if [ "${answered:-0}" -eq 0 ]; then
         answered=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
-          --jq "[.[]|select(.user.login==\"$who\" and .created_at>=\"$base\")|select(.body|test(\"$shape\"))]|length" 2>/dev/null) || continue
+          --jq "[.[]|select(.user.login==\"$who\" and .created_at>=\"$base\")|select($ans)]|length" 2>/dev/null) || continue
       fi
-      if [ "${answered:-0}" -eq 0 ]; then
-        age=$(( ( $(date -u +%s) - $(date -u -d "$base" +%s) ) / 60 ))
-        if [ "$age" -ge "$DEADLINE_MIN" ]; then
-          k="to-$n-$short-$who-$base"
-          [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "NO REVIEW #$n @$short from $who after ${age}m of this round — re-post the bare trigger"; }
-        fi
-      fi
+      [ "${answered:-0}" -eq 0 ] || continue
+
+      age=$(( ( $(date -u +%s) - $(date -u -d "$base" +%s) ) / 60 ))
+      [ "$age" -ge "$DEADLINE_MIN" ] || continue
+      # The key carries the round baseline, so a SECOND failed trigger on an
+      # unchanged head still alerts instead of being suppressed as already-seen.
+      k="to-$n-$short-$who-$base"
+      [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "NO REVIEW #$n @$short from $who after ${age}m of this round — re-post the bare trigger"; }
     done
   done
   sleep 120
 done
 ```
 
-Each of these shapes was a real defect in an earlier version:
+Two more shapes worth naming, both of which were real defects:
 
 - Discovery checks the **exit status**, because an empty list from a failed query
   once made this watcher exit permanently on one transient blip — the anti-stall
@@ -150,14 +182,6 @@ Each of these shapes was a real defect in an earlier version:
 - Coverage and timeouts are **per reviewer**. A shared flag let one reviewer
   answering mask another's trigger failing, and since CodeRabbit reviews nearly
   every head, that disabled the codex timeout almost always.
-- The timeout measures from the **later of head push and newest trigger**, and its
-  key includes that baseline — so a *second* failed trigger on an unchanged head
-  still alerts instead of being suppressed as already-seen.
-- Closure matches **line-wise** (`grep -qx`), because the list is newline-delimited.
-- What counts as an answer is **shape-specific per reviewer**. Accepting any
-  comment would let CodeRabbit's opening walkthrough — or a codex "starting
-  review" — suppress the timeout for a round that then never completed, which is
-  precisely the silence this watcher exists to break.
 
 ## `review_status` — judges, on demand
 
@@ -167,66 +191,92 @@ Source it and run it before merging, and whenever the watcher says to look.
 review_status() {
   local REPO=dohc-ai/dohc n="$1"
   local CODEX="chatgpt-codex-connector[bot]" RABBIT="coderabbitai[bot]"
-  local head verdict=OK
+  local CLEAN="didn.t find any major issues|no major issues"
+  local head short rows rid st cnt blen who verdict=OK
+  local blocked=0 findings=0 unknown=0 unreviewed=0
 
   head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid) \
     || { echo "PR #$n — head query FAILED, verdict UNKNOWN"; return 2; }
-  local short=${head:0:10}
+  short=${head:0:10}
   echo "PR #$n head $short"
 
   for who in "$CODEX" "$RABBIT"; do
-    local rows
     if ! rows=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate \
           --jq ".[]|select(.commit_id==\"$head\" and .user.login==\"$who\")|\"\(.id) \(.state)\"" 2>/dev/null); then
-      echo "  $who — reviews query FAILED, coverage UNKNOWN"; verdict=UNKNOWN; continue
+      echo "  $who — reviews query FAILED, coverage UNKNOWN"; unknown=1; continue
     fi
 
     if [ -n "$rows" ]; then
       while read -r rid st; do
         [ -n "$rid" ] || continue
-        local cnt blen
-        cnt=$(gh api "repos/$REPO/pulls/$n/comments" --paginate \
-               --jq "[.[]|select(.pull_request_review_id==$rid)]|length" 2>/dev/null)
-        blen=$(gh api "repos/$REPO/pulls/$n/reviews/$rid" --jq '.body|length' 2>/dev/null)
-        echo "  $who review $rid [$st] — ${cnt:-?} inline, body ${blen:-0} chars"
-        [ "$st" = CHANGES_REQUESTED ] && verdict=BLOCKED
-        if [ "${cnt:-0}" -eq 0 ] && [ "${blen:-0}" -gt 0 ] && [ "$st" != APPROVED ]; then
-          echo "    ^ zero inline but a non-empty body — READ THE BODY; this is not a pass"
+        # Count only comments belonging to THIS review — GitHub re-anchors older
+        # inline comments onto new commits, so counting by commit over-counts.
+        if ! cnt=$(gh api "repos/$REPO/pulls/$n/comments" --paginate \
+              --jq "[.[]|select(.pull_request_review_id==$rid)]|length" 2>/dev/null); then
+          echo "  $who review $rid [$st] — inline-count query FAILED, UNKNOWN"; unknown=1; continue
         fi
+        if ! blen=$(gh api "repos/$REPO/pulls/$n/reviews/$rid" --jq '.body|length' 2>/dev/null); then
+          echo "  $who review $rid [$st] — body query FAILED, UNKNOWN"; unknown=1; continue
+        fi
+        echo "  $who review $rid [$st] — ${cnt:-0} inline, body ${blen:-0} chars"
+        case "$st" in
+          CHANGES_REQUESTED) blocked=1 ;;
+          APPROVED)
+            [ "${cnt:-0}" -gt 0 ] && echo "    ^ APPROVED yet ${cnt} inline comment(s) — read them before merging" ;;
+          *)
+            if [ "${cnt:-0}" -gt 0 ] || [ "${blen:-0}" -gt 0 ]; then
+              echo "    ^ $st carrying ${cnt:-0} inline / ${blen:-0}-char body — these are findings, not a pass"
+              findings=1
+            fi ;;
+        esac
       done <<<"$rows"
       continue
     fi
 
+    # codex records a CLEAN pass as an issue comment, not a review.
     if [ "$who" = "$CODEX" ] && gh api "repos/$REPO/issues/$n/comments" --paginate \
          --jq ".[]|select(.user.login==\"$CODEX\")|select(.body|contains(\"$short\"))|.body" 2>/dev/null \
-       | grep -qiE "didn.t find any major issues|no major issues"; then
+       | grep -qiE "$CLEAN"; then
       echo "  $who — CLEAN PASS (issue comment naming $short)"
       continue
     fi
 
     echo "  $who — NO REVIEW of this head"
-    [ "$verdict" = OK ] && verdict=UNREVIEWED
+    unreviewed=1
   done
 
   if gh api "repos/$REPO/issues/$n/comments" --paginate \
        --jq ".[]|select(.user.login==\"$RABBIT\")|.body" 2>/dev/null \
-     | grep -qiE "review limit|rate limit|review failed"; then
+     | grep -qiE "Review limit|rate limit|Review failed"; then
     echo "  NOTE $RABBIT posted a rate-limit or failure notice on this PR — silence is not approval"
   fi
 
+  if   [ "$blocked"    = 1 ]; then verdict=BLOCKED
+  elif [ "$unknown"    = 1 ]; then verdict=UNKNOWN
+  elif [ "$unreviewed" = 1 ]; then verdict=UNREVIEWED
+  elif [ "$findings"   = 1 ]; then verdict=FINDINGS
+  fi
   echo "  VERDICT: $verdict"
   [ "$verdict" = OK ]
 }
 ```
 
-Verdicts: `OK` (both reviewers covered this head, nothing blocking), `BLOCKED`
-(a `CHANGES_REQUESTED` on this head), `UNREVIEWED` (a required reviewer has not
-covered it), `UNKNOWN` (a query failed — decide nothing).
+| verdict | meaning |
+|---|---|
+| `OK` | both reviewers covered this head and neither left findings |
+| `BLOCKED` | a `CHANGES_REQUESTED` on this head |
+| `FINDINGS` | a review of this head carries inline comments or a body — unresolved work, even though its state is only `COMMENTED` |
+| `UNREVIEWED` | a required reviewer has not covered this head |
+| `UNKNOWN` | a query failed — decide nothing |
 
-It returns non-zero unless the verdict is `OK`, so it can gate a script. It is
-deliberately strict about requiring **both** reviewers: when one is rate-limited
-you still get to merge, but knowingly, rather than by mistaking silence for
-approval.
+It returns non-zero unless the verdict is `OK`, so it can gate a script. Note
+what `FINDINGS` implies about the loop: findings never disappear from the API, so
+the only way to reach `OK` is to push fixes — which changes the head, retires the
+old review, and earns a fresh round. That is the intended shape, not a nuisance.
+
+It is deliberately strict about requiring **both** reviewers: when one is
+rate-limited you still get to merge, but knowingly, rather than by mistaking
+silence for approval.
 
 ## Triggering a re-review
 
