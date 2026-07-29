@@ -544,6 +544,11 @@ export class EngineClient implements EngineTransport {
   private nextRequestId = 1;
   private readyState = false;
   private closed = false;
+  // WHY the client closed, kept for every request that arrives afterwards. A
+  // client whose transport died is a relaunching daemon (retriable); a client
+  // the caller closed is not. Reporting a bare "closed" for both made callers
+  // abandon a recoverable restart.
+  private closeCause: EngineClientError | null = null;
   private maxFrameBytes: number;
   private maxBlobChunkBytes: number;
   private readonly maxBlobChunkBytesCap: number;
@@ -636,7 +641,12 @@ export class EngineClient implements EngineTransport {
 
   async sendRequest(request: Request): Promise<Response> {
     if (this.closed) {
-      throw new EngineClientError("closed", "The engine client is closed.");
+      const cause = this.closeCause;
+      throw new EngineClientError(
+        cause?.code ?? "closed",
+        `The engine client is closed: ${cause?.message ?? "closed by the caller"}`,
+        cause ? { cause } : {},
+      );
     }
     if (!this.readyState) {
       throw new EngineClientError(
@@ -1208,6 +1218,7 @@ export class EngineClient implements EngineTransport {
   private fail(error: EngineClientError): void {
     if (this.closed) return;
     this.closed = true;
+    this.closeCause = error;
     this.readyState = false;
     if (this.connectTimer !== undefined) clearTimeout(this.connectTimer);
     this.connectTimer = undefined;

@@ -500,6 +500,12 @@ import {
 } from "./cli/cliServer";
 import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
 import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
+import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
+
+// Before anything can log: a launcher that exited leaves main's stdout/stderr a
+// pipe with no reader, and a pipe write throws synchronously. Diagnostics must
+// never be able to crash the app they are diagnosing.
+makeProcessDiagnosticsNonFatal();
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
 //   dohc-file://<workspaceId>/<relative/path>

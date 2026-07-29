@@ -1014,3 +1014,192 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
   await reopened.close({ settle: false });
   await capture.stop();
 });
+
+// AUDIT-KILLREC. A hard `taskkill /F` on the daemon takes the whole transport
+// with it: the generation's applyLocalUpdate fails AND the replacement open
+// fails, until the supervisor relaunches. This harness reproduces that window,
+// which is where the dogfood journey lost the text typed before the kill.
+async function daemonDeathCapture(prefix: string, workspaceId: string) {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), prefix));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const state = { daemonAlive: true, generation: 0 };
+  const generations: Y.Doc[] = [];
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: workspaceId } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => daemonClient },
+    { transportRebindAttempts: 1 },
+  );
+  const transportDeath = () =>
+    Object.assign(new Error("The engine client is closed: transport closed."), {
+      code: "transport-error",
+    });
+  const openProvider = async (
+    options: EngineYdocProviderSessionRustOptions,
+  ): Promise<EngineYdocProviderSessionRust> => {
+    if (!state.daemonAlive) throw transportDeath();
+    state.generation += 1;
+    const doc = new Y.Doc();
+    generations.push(doc);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      async applyLocalUpdate(update) {
+        if (!state.daemonAlive) throw transportDeath();
+        Y.applyUpdate(doc, update);
+      },
+      async settleNow() {
+        if (!state.daemonAlive) throw transportDeath();
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: `moment-${state.generation}`,
+          path: options.path,
+          markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "b".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        if (!state.daemonAlive) throw transportDeath();
+      },
+    };
+  };
+  return { rootPath, sessions, openProvider, state, generations };
+}
+
+function typeInto(
+  rendererDoc: Y.Doc,
+  session: { applyLocalUpdate: (update: Uint8Array) => void },
+  text: string,
+): void {
+  const before = Y.encodeStateVector(rendererDoc);
+  const body = rendererDoc.getText("plainText");
+  body.insert(body.length, text);
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+}
+
+it("keeps every keystroke typed while the daemon is dead and replays them into the replacement", async () => {
+  const { rootPath, sessions, openProvider, state, generations } =
+    await daemonDeathCapture("dohc-ydoc-daemon-death-", "ydoc-daemon-death");
+  const outcomes: boolean[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-daemon-death",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+  expect(generations[0]?.getText("plainText").toString()).toBe("alive ");
+
+  // taskkill /F: the generation's writes fail AND no replacement can open.
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL ");
+  typeInto(rendererDoc, session, "DURING_OUTAGE ");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect(state.generation).toBe(1);
+  expect(outcomes.at(-1)).toBe(false);
+
+  // The supervisor relaunches. The very next keystroke must heal the session
+  // and carry BOTH outage keystrokes into the replacement generation.
+  state.daemonAlive = true;
+  typeInto(rendererDoc, session, "AFTER_RESTART");
+  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+
+  const settled = await session.settleNow();
+  expect(settled.markdown).toBe("alive PRE_KILL DURING_OUTAGE AFTER_RESTART");
+  expect(generations[1]?.getText("plainText").toString()).toBe(
+    "alive PRE_KILL DURING_OUTAGE AFTER_RESTART",
+  );
+  // The canonical doc — the renderer's truth — never lost a keystroke either.
+  expect(session.doc.getText("plainText").toString()).toBe(
+    "alive PRE_KILL DURING_OUTAGE AFTER_RESTART",
+  );
+  // And the session is honestly live again, not still reported dead.
+  expect(outcomes.at(-1)).toBe(true);
+
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("a failure sink that throws cannot turn a daemon death into an unhandled rejection", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-loud-sink-",
+    "ydoc-death-loud-sink",
+  );
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-loud-sink",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    // Exactly the journey's shape: the capture's default sink is console.error,
+    // and on a broken stdio pipe console.error THROWS.
+    onError: () => {
+      throw new Error("EPIPE: broken pipe, write");
+    },
+  });
+  try {
+    const session = await capture.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+    });
+    const rendererDoc = new Y.Doc();
+    Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+    state.daemonAlive = false;
+    typeInto(rendererDoc, session, "PRE_KILL ");
+    typeInto(rendererDoc, session, "DURING_OUTAGE ");
+    await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+    // Let Node surface any rejection nobody handled.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(unhandled).toEqual([]);
+
+    // And the session still heals once the daemon is back.
+    state.daemonAlive = true;
+    typeInto(rendererDoc, session, "AFTER_RESTART");
+    await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+    expect((await session.settleNow()).markdown).toBe(
+      "PRE_KILL DURING_OUTAGE AFTER_RESTART",
+    );
+    await session.close({ settle: false });
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    await capture.stop();
+  }
+});

@@ -925,7 +925,7 @@ export function createWorkspaceEngineCapture(
   const { workspaceId, rootPath } = options;
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
-  const onError =
+  const reportError =
     options.onError ??
     ((context: string, error: unknown) => {
       console.error(
@@ -933,6 +933,16 @@ export function createWorkspaceEngineCapture(
         error,
       );
     });
+  // The diagnostic sink runs inside the catch handlers of the daemon-recovery
+  // path, where a throw becomes an unhandled rejection — in Electron main, a
+  // crash dialog. Reporting a failure must never be able to cause one.
+  const onError = (context: string, error: unknown): void => {
+    try {
+      reportError(context, error);
+    } catch {
+      // There is nothing left to report the reporting failure to.
+    }
+  };
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
 
   const useRustEngine =
@@ -1017,6 +1027,7 @@ export function createWorkspaceEngineCapture(
     path: string;
     contentKind?: YDocContentKind;
     onDead: () => void;
+    onAlive: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
     onSettled: (result: {
       sha256: string;
@@ -1059,6 +1070,16 @@ export function createWorkspaceEngineCapture(
       dead = true;
       deadYDocSessions.add(deadSessionToken);
       publishCaptureOutcome();
+    };
+
+    // A dead session that later rebuilds a generation is live again — leaving
+    // it marked dead would defer capture of the path forever and keep an honest
+    // workspace notice up about a session that recovered.
+    const markAlive = (): void => {
+      if (!dead) return;
+      dead = false;
+      clearDeadYDocSession(deadSessionToken);
+      input.onAlive();
     };
 
     const releaseGeneration = async (
@@ -1129,11 +1150,63 @@ export function createWorkspaceEngineCapture(
         { retryTransportErrors: true },
       );
 
+    // Reconcile a freshly opened generation against the canonical doc and
+    // install it: daemon-side edits land in the canonical doc first, then every
+    // renderer edit the replacement is missing is replayed into it. The exposed
+    // Y.Doc never changes identity across daemon generations.
+    const adoptGeneration = async (
+      doc: Y.Doc,
+      replacement: EngineYdocProviderSessionRust,
+    ): Promise<void> => {
+      try {
+        const opening = openingRemoteUpdates.get(replacement);
+        const updatesIncludedInRemoteDelta = opening?.updates.length ?? 0;
+
+        const remoteDelta = Y.encodeStateAsUpdate(
+          replacement.doc,
+          Y.encodeStateVector(doc),
+        );
+        if (remoteDelta.byteLength > 2) {
+          Y.applyUpdate(doc, remoteDelta);
+          input.onRemoteUpdate(remoteDelta);
+        }
+        const replay = Y.encodeStateAsUpdate(
+          doc,
+          Y.encodeStateVector(replacement.doc),
+        );
+        if (replay.byteLength > 2) {
+          await replacement.applyLocalUpdate(replay);
+        }
+        current = replacement;
+        if (opening) {
+          opening.installed = true;
+          openingRemoteUpdates.delete(replacement);
+          for (const update of opening.updates.slice(
+            updatesIncludedInRemoteDelta,
+          )) {
+            Y.applyUpdate(doc, update);
+            input.onRemoteUpdate(update);
+          }
+        }
+      } catch (error) {
+        openingRemoteUpdates.delete(replacement);
+        try {
+          await releaseGeneration(replacement);
+          markDead(null);
+        } catch {
+          markDead(replacement);
+        }
+        throw error;
+      }
+      markAlive();
+    };
+
     const rebind = async (
       failed: EngineYdocProviderSessionRust,
       options?: { releaseBeforeOpen?: boolean },
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
+      const doc = canonicalDoc;
       if (options?.releaseBeforeOpen) {
         try {
           await releaseGeneration(failed);
@@ -1151,53 +1224,23 @@ export function createWorkspaceEngineCapture(
         markDead(failed);
         throw error;
       }
-      try {
-        const opening = openingRemoteUpdates.get(replacement);
-        const updatesIncludedInRemoteDelta = opening?.updates.length ?? 0;
-
-        // Reconcile daemon-side edits into the stable renderer document first,
-        // then replay every renderer edit missing from the replacement. The
-        // exposed Y.Doc never changes identity across daemon generations.
-        const remoteDelta = Y.encodeStateAsUpdate(
-          replacement.doc,
-          Y.encodeStateVector(canonicalDoc),
-        );
-        if (remoteDelta.byteLength > 2) {
-          Y.applyUpdate(canonicalDoc, remoteDelta);
-          input.onRemoteUpdate(remoteDelta);
-        }
-        const replay = Y.encodeStateAsUpdate(
-          canonicalDoc,
-          Y.encodeStateVector(replacement.doc),
-        );
-        if (replay.byteLength > 2) {
-          await replacement.applyLocalUpdate(replay);
-        }
-        current = replacement;
-        if (opening) {
-          opening.installed = true;
-          openingRemoteUpdates.delete(replacement);
-          for (const update of opening.updates.slice(
-            updatesIncludedInRemoteDelta,
-          )) {
-            Y.applyUpdate(canonicalDoc, update);
-            input.onRemoteUpdate(update);
-          }
-        }
-      } catch (error) {
-        openingRemoteUpdates.delete(replacement);
-        try {
-          await releaseGeneration(replacement);
-          markDead(null);
-        } catch {
-          markDead(replacement);
-        }
-        throw error;
-      }
+      await adoptGeneration(doc, replacement);
       // A reconnect-class failure means the prior daemon/workspace binding is
       // gone. Opening the replacement first is the release boundary; sending a
       // close through the broken transport can only fail and must not turn a
       // recoverable daemon restart into a dead session.
+    };
+
+    // A session whose generation died leaves the canonical doc as the only
+    // holder of the renderer's text. Rebuild a generation around it so a dead
+    // session heals on the next keystroke instead of discarding every one.
+    // Opening is the only release boundary available here: a generation that
+    // died with its daemon took its lease with it, and one that died still
+    // holding a LIVE lease refuses the open and stays dead for close() to
+    // converge — the retained release obligation remains teardown's job.
+    const reviveDeadSession = async (doc: Y.Doc): Promise<void> => {
+      if (closed || current !== null) return;
+      await adoptGeneration(doc, await openGeneration());
     };
 
     const executeWithReconnect = async <T>(
@@ -1242,20 +1285,28 @@ export function createWorkspaceEngineCapture(
       path: sessionPath,
       applyLocalUpdate(update) {
         void append(async () => {
-          if (canonicalDoc === null || current === null || closed) {
+          if (canonicalDoc === null || closed) {
             throw new Error(`Y.Doc session for ${input.path} is closed.`);
+          }
+          const doc = canonicalDoc;
+          // The renderer has already accepted this update, so the canonical doc
+          // — the renderer's truth — records it before anything else may fail.
+          // A daemon generation is rebuilt AROUND that text, never instead of
+          // it: dropping the update here is exactly how visible typing vanished
+          // once a generation died.
+          if (current === null) {
+            Y.applyUpdate(doc, update);
+            await reviveDeadSession(doc);
+            return;
           }
           const generation = current;
           try {
             await generation.applyLocalUpdate(update);
-            Y.applyUpdate(canonicalDoc, update);
+            Y.applyUpdate(doc, update);
           } catch (error) {
-            // The renderer has already accepted this update. Preserve it in
-            // the stable canonical doc before rebuilding the daemon generation
-            // so rebind can replay it instead of silently dropping visible
-            // text. A live refusal still owns its lease and must close first;
-            // a transport restart opens first because the old daemon is gone.
-            Y.applyUpdate(canonicalDoc, update);
+            // A live refusal still owns its lease and must close first; a
+            // transport restart opens first because the old daemon is gone.
+            Y.applyUpdate(doc, update);
             await rebind(generation, {
               releaseBeforeOpen: !isEngineSessionReconnectError(error),
             });
@@ -2200,6 +2251,14 @@ export function createWorkspaceEngineCapture(
                 liveYDocSessions.get(input.path) === entry
               ) {
                 entry.status = "failing-close";
+              }
+            },
+            onAlive: () => {
+              if (
+                entry !== null &&
+                liveYDocSessions.get(input.path) === entry
+              ) {
+                entry.status = "live";
               }
             },
             onRemoteUpdate: input.onRemoteUpdate,
