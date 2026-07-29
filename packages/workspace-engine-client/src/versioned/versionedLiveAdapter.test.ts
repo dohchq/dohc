@@ -393,6 +393,87 @@ describe("VersionedLiveAdapter", () => {
     expect(blobHandlers.size).toBe(0);
   });
 
+  // Over-cap TEXT hydrates the same way over-cap binary already does: the
+  // blob store is content-addressed, so the digest a capped text read returns
+  // resolves its body. Without this, a text file past the cap is unreadable
+  // through the daemon at all.
+  it("hydrates an over-cap text read from its blob instead of refusing", async () => {
+    const body = "x".repeat(48 * 1024 + 10);
+    const bytes = new TextEncoder().encode(body);
+    const sha256 = "b".repeat(64);
+    const requests: Request[] = [];
+    const blobHandlers = new Set<
+      Parameters<NonNullable<MinimalDaemonClient["onBlob"]>>[0]
+    >();
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      helloAck: { capabilities: ["blobs"] },
+      onBlob(handler) {
+        blobHandlers.add(handler);
+        return () => blobHandlers.delete(handler);
+      },
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        if (request.method === VERSIONED_METHOD.textRead) {
+          return {
+            id: request.id,
+            result: {
+              workspaceId: WORKSPACE,
+              versionId: "main",
+              objectId: "object",
+              path: "big.md",
+              contentKind: "text",
+              text: null,
+              byteLength: bytes.byteLength,
+              blobSha256: sha256,
+              sha256,
+              updatedAtMs: 5,
+              latestMomentId: "moment",
+              metadataOrigin: "sync",
+              metadataSummary: null,
+              metadataCorrelationId: null,
+              inbandLimitBytes: 48 * 1024,
+            },
+          };
+        }
+        for (const handler of blobHandlers) {
+          handler({
+            requestId: request.id,
+            streamId: request.id,
+            totalBytes: bytes.byteLength,
+            sha256,
+            bytes,
+          });
+        }
+        return {
+          id: request.id,
+          result: {
+            bytesBase64: null,
+            byteLength: bytes.byteLength,
+            inbandLimitBytes: 48 * 1024,
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    const snapshot = await adapter.readTextFile({
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "big.md",
+    });
+
+    expect(snapshot?.text).toBe(body);
+    expect(snapshot?.inbandLimitBytes).toBeUndefined();
+    expect(requests.map((request) => request.method)).toEqual([
+      VERSIONED_METHOD.textRead,
+      VERSIONED_METHOD.binaryReadBlob,
+    ]);
+    expect(blobHandlers.size).toBe(0);
+  });
+
   it("writes an over-cap binary by digest instead of embedding its bytes", async () => {
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
