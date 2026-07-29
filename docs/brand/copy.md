@@ -93,7 +93,7 @@ says what is missing and what to do about it, per the `EmptyState` recipe in
 | --- | --- |
 | `No results` | `No files match "budget". Try a shorter search.` |
 | `Nothing here yet` | `This folder is empty. Add a file to start.` |
-| `No chats` | `No chats in this workspace yet. Start one from any file.` |
+| `No chats` | `No chats in this workspace yet. Open a text file to start one.` |
 
 ## Agent copy
 
@@ -110,7 +110,12 @@ Agent activity gets the olive `agent` voice visually. In words:
 ## Destructive and irreversible actions
 
 - Name the exact thing and the exact count. `Delete 12 files from Research?`
-- Say what cannot be undone, plainly. `This cannot be undone.`
+- **State the true recovery path.** dohc file deletes are always recoverable —
+  the OS trash, or `.dohc/trash` when the OS refuses. Write `They move to your
+  trash.`, not `This cannot be undone.`
+- Write `This cannot be undone` only where it is true, and verify before you
+  write it. Durability is a contract, not a tone — see the product invariants
+  in `AGENTS.md`.
 - Label the confirm button with the verb, not `OK`. `Delete files`.
 - Never use `Are you sure?` as the whole question. It states nothing.
 
@@ -120,9 +125,9 @@ Agent activity gets the olive `agent` voice visually. In words:
 | --- | --- | --- |
 | `Your changes have been successfully saved!` | `Saved` | Passive, padded, exclaimed. Six words for one fact. |
 | `Something went wrong. Please try again later.` | `dohc could not reach the sync relay. Check your connection.` — with a `Retry` action | Names the failing actor, one instruction per sentence, and the retry is a control rather than a second instruction. |
-| `Seamlessly sync your workspace across all your devices` | `Your workspace stays current on every machine you sign in to.` | Marketing word out; states the actual condition and its scope. |
+| `Seamlessly sync your workspace across all your devices` | `When you turn on sync, this workspace stays current on every machine you join it from.` | Marketing word out, and the opt-in stays visible — sync is off by default and signing in alone does not enable it. |
 | `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, glossary noun, shorter. |
-| `Are you sure you want to do this?` | `Delete 12 files from Research? This cannot be undone.` | States the stakes and the count. |
+| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to your trash.` | States the count and the true recovery path — dohc deletes are recoverable, so `This cannot be undone` would be false. |
 | `AI is analyzing your workspace…` | `Agent is reading 40 files.` | Concrete, countable, no magic. |
 
 ## Known violations in shipping copy

@@ -50,7 +50,8 @@ Error messages, empty states, button labels, procedures, runbooks, skills,
 agent instructions, product invariants, migration steps.
 
 A reader acts on this text and cannot ask a follow-up question. Ambiguity here
-becomes a real failure. Strict rules apply with no exceptions:
+becomes a real failure. These rules hold unless obeying one would make the text
+wrong or unclear — see the precedence rule under Orwell's six:
 
 - One instruction per sentence. 20 words or fewer.
 - Active voice, named actor. `The engine rejects the write`, not
@@ -121,9 +122,14 @@ and
 dohc resolves it by register. Editorial text welcomes fresh metaphor.
 Explanatory text allows it where it does real work. Executable text bans it.
 
-**Rule 6 is the anti-flattening clause and it outranks the rest.** Prose that
-obeys every rule and reads like a compliance document is a failure. If a rule
-is about to make a sentence worse, break it.
+**Rule 6 is the anti-flattening clause.** Prose that obeys every rule and reads
+like a compliance document is a failure. If a rule is about to make a sentence
+worse, break it.
+
+**Precedence, so this is decidable.** Being accurate outranks everything. In
+executable text, the strict rules then outrank Rule 6: break one only when
+obeying it would make the text wrong or ambiguous, never to make it sound
+better. In explanatory and editorial text, Rule 6 outranks the strict rules.
 
 ## Use one name for one thing
 
@@ -139,8 +145,9 @@ Rules:
 - Use the approved term. Do not swap in a synonym to avoid repetition.
   Repetition is correct.
 - One term, one meaning, per surface.
-- When a concept has no approved term yet, pick one, use it consistently, and
-  add it here.
+- When a concept has no approved term yet, pick one.
+- Use that term consistently from then on.
+- Add it to the table in the same change.
 
 ### Approved terms
 
@@ -174,7 +181,7 @@ their own meaning. Collapsing either one makes copy and technical docs wrong.
 | `dm` | A direct-message channel — `channelKind: "dm"`, with its own relay grants and navigation. | `channel`, which is named; `chat`, the whole surface |
 | `import` | The user-initiated operation that brings outside files in (`ImportWorkspaceFiles`, `ImportToDatabase`). | `capture`, which records workspace history |
 | `model` | The inference model an agent runs on (`AgentModel`), selectable independently of the agent. | `agent`, which is the actor |
-| `permission` | The agent tool-approval gate. `AgentPermissionRequestSchema` is a *pending request*; only an `AgentPermissionDecision` grants it. Never write copy implying the agent may act before the decision. | `share`, which grants access to another person |
+| `permission` | The agent tool-approval gate. `AgentPermissionRequestSchema` is a *pending request*. Only the `allow_once` and `allow_always` decisions grant it — `reject_once`, `reject_always`, and `cancel` do not. Never write copy implying the agent may act before an allow decision. | `share`, which grants access to another person |
 | `synced` | A replication state — whether copies agree. | `source-backed`, which is about provenance |
 
 ### Terms that mean different things in different layers
