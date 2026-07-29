@@ -119,7 +119,7 @@ async function open(
     path: "notes/solo.md",
     onRemoteUpdate: (u) => remoteForwards.push(u),
     onSettled: (r) => {
-      settled.push(r.markdown);
+      settled.push(r.markdown ?? "");
     },
     // Deterministic settle: fire synchronously so tests never wait wall-clock.
     scheduleSettle: (fn) => {

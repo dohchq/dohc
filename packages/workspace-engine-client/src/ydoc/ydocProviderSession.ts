@@ -49,6 +49,14 @@ export interface EngineYdocProviderSessionOptions {
   onLocalEditError?: (error: unknown) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
   onSessionError?: (error: unknown) => void;
+  // A settle is going to the engine now. Paired with onSettled/onSettleError,
+  // this is what lets a caller report a HONEST save state instead of guessing
+  // from a timer.
+  onSettleStart?: () => void;
+  // A settle FAILED. The debounced settle is the only path that writes the
+  // user's edits to the file, so a dropped failure here is silent data loss:
+  // the caller must surface it, not just retry-if-reconnectable.
+  onSettleError?: (error: unknown) => void;
   onSettled?: (result: YdocSettleResult) => void | Promise<void>;
   settleDebounceMs?: number;
   scheduleSettle?: (fn: () => void, ms: number) => () => void;
@@ -128,11 +136,22 @@ export async function openEngineYdocProviderSession(
     await journalChain;
     if (localEditError !== null) throw localEditError;
     const operation = settleChain.then(async () => {
-      const result = await session.settle(
-        summary !== undefined ? { summary } : undefined,
-      );
-      await options.onSettled?.(result);
-      return result;
+      try {
+        options.onSettleStart?.();
+      } catch {
+        // Observer boundary, like notifyError.
+      }
+      try {
+        const result = await session.settle(
+          summary !== undefined ? { summary } : undefined,
+        );
+        // onSettled is what lands the .md; its failure is a save failure too.
+        await options.onSettled?.(result);
+        return result;
+      } catch (error) {
+        notifyError(options.onSettleError, error);
+        throw error;
+      }
     });
     settleChain = operation.then(
       () => undefined,

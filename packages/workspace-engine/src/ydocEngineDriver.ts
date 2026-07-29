@@ -233,7 +233,11 @@ export interface YDocDocKey {
 export interface YDocSettleResult {
   momentId: VersionedTextMomentId;
   path: string;
-  markdown: string;
+  // null when the settled body is past the engine's in-band response cap: the
+  // settle committed and the engine wrote the file, but the body did not ride
+  // back. Consumers must read the file rather than treat null as empty — the
+  // in-process driver never returns null, the daemon can.
+  markdown: string | null;
   sha256: string;
 }
 

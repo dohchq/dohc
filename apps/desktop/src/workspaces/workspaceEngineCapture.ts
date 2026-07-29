@@ -278,6 +278,11 @@ export interface WorkspaceVersionConflictResolveOutcome {
   remaining: VersionedTextConflictRecord[];
 }
 
+// The save state of a live engine Y.Doc, derived from REAL settle outcomes.
+// "saved" means the projection committed and the .md landed — nothing else may
+// claim it.
+export type EngineYDocSaveState = "settling" | "saved" | "error";
+
 export interface WorkspaceEngineCapture {
   // Kicks the background startup reconciliation (closed-period edits — and,
   // after a mid-switch crash, the recovery pass). Runs on the capture chain,
@@ -309,6 +314,13 @@ export interface WorkspaceEngineCapture {
     path: string;
     onRemoteUpdate: (update: Uint8Array) => void;
     contentKind?: YDocContentKind;
+    // The HONEST save state for this document, reported on every settle:
+    // "settling" when one starts, "saved" only when the projection AND the
+    // .md actually landed, "error" when the settle failed and the file on
+    // disk is therefore behind the editor. A failed settle used to reach
+    // nothing at all — the doc kept reading "Saved" over a stale (or empty)
+    // file, which is silent data loss.
+    onSaveState?: (state: EngineYDocSaveState) => void;
   }): Promise<EngineYDocProviderSession>;
   // WS-G2-C-2 (gate fix 3): flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does NOT run through the capture chain
@@ -1034,8 +1046,10 @@ export function createWorkspaceEngineCapture(
     onRemoteUpdate: (update: Uint8Array) => void;
     onSettled: (result: {
       sha256: string;
-      markdown: string;
+      markdown: string | null;
     }) => void | Promise<void>;
+    onSettleStart: () => void;
+    onSettleError: (error: unknown) => void;
   }): Promise<EngineYDocProviderSession> {
     const sessions = options.rustEngineSessions!;
     const openProvider =
@@ -1157,7 +1171,12 @@ export function createWorkspaceEngineCapture(
               input.onRemoteUpdate(update);
             },
             onLocalEditError: requestReconnect,
+            // requestReconnect returns early for anything that is not a
+            // reconnect error, so it is NOT an error sink: every settle
+            // failure also goes to onSettleError, which reports it.
             onSessionError: requestReconnect,
+            onSettleStart: input.onSettleStart,
+            onSettleError: input.onSettleError,
             onSettled: input.onSettled,
           });
           openingRemoteUpdates.set(opened, opening);
@@ -2275,17 +2294,33 @@ export function createWorkspaceEngineCapture(
       // write connection and node:sqlite deadlocks.
       const engine = await engineStore();
       const versionId = await activeVersionIdOf(engine);
+      const reportSaveState = (state: EngineYDocSaveState): void => {
+        try {
+          input.onSaveState?.(state);
+        } catch {
+          // Observer boundary: a renderer-facing status hook must never
+          // re-enter the session or wedge the settle chain.
+        }
+      };
       const onSettled = async (result: {
         sha256: string;
-        markdown: string;
+        markdown: string | null;
       }) => {
-        // Register the settle's self-write (sha of the projected markdown) so
+        // Register the settle's self-write (sha of the settled markdown) so
         // even a watcher event that lands after the live-path guard lifts on
-        // close is recognized as our own; then write the on-disk .md the
-        // user/agent sees, through the contained disk writer.
+        // close is recognized as our own. The ENGINE materializes the .md
+        // itself; this write is the desktop's mirror of the same bytes.
         const cancel = registerExpectedEngineEvents([
           { path: input.path, operation: "write", sha256: result.sha256 },
         ]);
+        // markdown === null: the body is past the engine's in-band response
+        // cap, so it did not ride back over the wire. The engine already
+        // materialized it — writing result.markdown here would truncate the
+        // user's file, which is exactly the loss this path must prevent.
+        if (result.markdown === null) {
+          reportSaveState("saved");
+          return;
+        }
         try {
           await diskWriter.writeTextFile(
             join(rootPath, input.path),
@@ -2294,7 +2329,19 @@ export function createWorkspaceEngineCapture(
         } catch (error) {
           cancel();
           onError(`ydoc settle disk write of ${input.path}`, error);
+          reportSaveState("error");
+          return;
         }
+        reportSaveState("saved");
+      };
+      const onSettleStart = () => reportSaveState("settling");
+      // The one place a background settle failure is observable. Log it with
+      // the path and the wire error, and tell the editor the file on disk is
+      // behind — a settle that never lands is the user's content going
+      // nowhere.
+      const onSettleError = (error: unknown) => {
+        onError(`ydoc settle of ${input.path}`, error);
+        reportSaveState("error");
       };
       let entry: LiveYDocSession | null = null;
       const session = useRustEngine
@@ -2324,6 +2371,8 @@ export function createWorkspaceEngineCapture(
             },
             onRemoteUpdate: input.onRemoteUpdate,
             onSettled,
+            onSettleStart,
+            onSettleError,
           })
         : await openEngineYDocProviderSession({
             store: engine,
@@ -2334,6 +2383,8 @@ export function createWorkspaceEngineCapture(
             ...(input.contentKind ? { contentKind: input.contentKind } : {}),
             onRemoteUpdate: input.onRemoteUpdate,
             onSettled,
+            onSettleStart,
+            onSettleError,
           });
       // Register the live session only after the open succeeds (a secret/
       // not-found/already-live rejection propagates to the caller and never

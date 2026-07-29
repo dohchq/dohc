@@ -410,7 +410,7 @@ describe("YdocLiveAdapter", () => {
     expect(session.doc.getText("plainText").toString()).toBe(content);
     expect(engine.sessionText(session.sessionId)).toBe(content);
     expect(settled.markdown).toBe(content);
-    expect([...settled.markdown]).toEqual([...content]);
+    expect([...(settled.markdown ?? "")]).toEqual([...content]);
 
     await session.close({ settle: false });
     adapter.dispose();
@@ -593,6 +593,69 @@ describe("YdocLiveAdapter", () => {
 
     await session.close({ settle: false });
     adapter.dispose();
+  });
+
+  it("reports a DEBOUNCED settle failure to onSettleError, not only to onSessionError", async () => {
+    // AUDIT-SILENTSAVE. The debounced settle is the only path that writes the
+    // user's edits to their file. Its failure used to go to onSessionError
+    // alone, and the desktop wires that to a reconnect handler which returns
+    // early for anything that is not a reconnect error — so a refusal was
+    // dropped with no log and no UI, and the doc kept reading "Saved" over a
+    // file that never received a byte.
+    const engine = seedPlaintextEngine();
+    const settleFailure = new Error("injected settle refusal");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle) throw settleFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const settleErrors: unknown[] = [];
+    const settleStarts: number[] = [];
+    const settled: unknown[] = [];
+    let fireDebouncedSettle: (() => void) | null = null;
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleStart: () => settleStarts.push(settleStarts.length),
+      onSettleError: (error) => settleErrors.push(error),
+      onSettled: (result) => {
+        settled.push(result);
+      },
+      // Capture the debounced callback so the test drives the REAL debounced
+      // path (the one that swallowed the failure) rather than settleNow.
+      scheduleSettle: (fn) => {
+        fireDebouncedSettle = fn;
+        return () => {
+          fireDebouncedSettle = null;
+        };
+      },
+    });
+
+    const update = plaintextUpdate(provider.initialUpdate, (text) => {
+      text.insert(0, "typed but never saved");
+    });
+    await provider.applyLocalUpdate(update);
+
+    expect(fireDebouncedSettle).not.toBeNull();
+    fireDebouncedSettle!();
+    // The debounced settle rejects internally; let the chain drain.
+    for (let tick = 0; tick < 50 && settleErrors.length === 0; tick += 1) {
+      await Promise.resolve();
+    }
+
+    expect(settleErrors[0]).toBe(settleFailure);
+    // A settle STARTED, so a caller can show "saving" honestly...
+    expect(settleStarts).toHaveLength(1);
+    // ...and it never reported success, so nothing may claim the file is saved.
+    expect(settled).toEqual([]);
+
+    await provider.close({ settle: false });
   });
 
   it("surfaces an unrecoverable journal update and still closes the provider", async () => {

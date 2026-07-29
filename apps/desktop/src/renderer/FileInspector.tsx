@@ -1177,9 +1177,20 @@ function MarkdownView(props: {
               <span
                 data-testid="markdown-save-state"
                 data-state={engine.saveState}
-                className="font-mono text-[11px] text-subtle"
+                title={
+                  engine.saveState === "error"
+                    ? "Your edits are still here, but the file on disk is behind them. Keep this document open and try another edit."
+                    : undefined
+                }
+                className={`font-mono text-[11px] ${
+                  engine.saveState === "error" ? "text-danger" : "text-subtle"
+                }`}
               >
-                {engine.saveState === "saved" ? "Saved" : "Saving…"}
+                {engine.saveState === "saved"
+                  ? "Saved"
+                  : engine.saveState === "saving"
+                    ? "Saving…"
+                    : "Couldn't save"}
               </span>
               <button
                 type="button"

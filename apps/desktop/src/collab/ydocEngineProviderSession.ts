@@ -69,6 +69,12 @@ export interface EngineYDocProviderSessionOptions {
   // layer can also write the on-disk .md (the engine.db store is a disk MIRROR
   // in the desktop; disk is where the file the user/agent sees actually lives).
   onSettled?: (result: YDocSettleResult) => void | Promise<void>;
+  // A settle is going to the engine now — paired with onSettled/onSettleError
+  // so the caller can report an HONEST save state rather than a timer's guess.
+  onSettleStart?: () => void;
+  // A settle FAILED. The debounced settle is the only path that writes the
+  // user's edits to the file, so a dropped failure here is silent data loss.
+  onSettleError?: (error: unknown) => void;
   // Debounce a settle this long after the last update. Matches the local
   // autosave cadence (FileInspector scheduleSave, 800ms) so the editor feel is
   // unchanged.
@@ -126,6 +132,8 @@ export async function openEngineYDocProviderSession(
     contentKind,
     onRemoteUpdate,
     onSettled,
+    onSettleStart,
+    onSettleError,
   } = options;
   const settleDebounceMs = options.settleDebounceMs ?? DEFAULT_SETTLE_DEBOUNCE_MS;
   const scheduleSettle =
@@ -206,11 +214,25 @@ export async function openEngineYDocProviderSession(
     let settleError: unknown;
     settleChain = settleChain
       .then(async () => {
+        try {
+          onSettleStart?.();
+        } catch {
+          // Observer boundary: never re-enter the driver from a status hook.
+        }
         result = await session.settle(summary !== undefined ? { summary } : undefined);
+        // onSettled is what lands the .md; its failure is a save failure too.
         await onSettled?.(result);
       })
       .catch((error) => {
         settleError = error;
+        // The DEBOUNCED trigger below discards this rejection, so this is the
+        // only place a background settle failure can be observed. Dropping it
+        // is silent data loss — the file never got the user's edits.
+        try {
+          onSettleError?.(error);
+        } catch {
+          // Observer boundary.
+        }
       });
     await settleChain;
     if (settleError !== undefined) throw settleError;

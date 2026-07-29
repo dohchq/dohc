@@ -28,7 +28,9 @@ import {
   UPDATE_CHANNELS,
   UPDATE_STATUSES,
   WORKBENCH_MENU_COMMANDS,
+  ENGINE_YDOC_SAVE_STATES,
   type EngineYDocRemoteUpdateEvent,
+  type EngineYDocSaveStateEvent,
   type SearchResultsEvent,
 } from "./channels";
 import { isLoopbackHostname } from "../security/loopback";
@@ -2819,6 +2821,10 @@ export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionRe
 export const ApplyEngineYDocUpdatePayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
+  // Monotonic per-session local-edit counter. Main echoes the seq a settle
+  // STARTED at back on the save-state channel so the renderer never shows
+  // "Saved" for a settle that predates the user's latest keystroke.
+  seq: z.number().int().nonnegative(),
 });
 export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
 
@@ -2830,6 +2836,12 @@ export type CloseEngineYDocSessionPayload = z.infer<typeof CloseEngineYDocSessio
 export const EngineYDocRemoteUpdateEventSchema = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
+});
+
+export const EngineYDocSaveStateEventSchema = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  state: z.enum(ENGINE_YDOC_SAVE_STATES),
+  seq: z.number().int().nonnegative(),
 });
 export type EngineYDocRemoteUpdateEventSchema = z.infer<
   typeof EngineYDocRemoteUpdateEventSchema
@@ -3161,5 +3173,11 @@ export interface DohcDesktopBridge {
   // session currently bound. Returns an unsubscribe function.
   onEngineYDocRemoteUpdate(
     listener: (event: EngineYDocRemoteUpdateEvent) => void,
+  ): () => void;
+  // The document's REAL save state, pushed on every settle outcome. The editor
+  // must never claim "Saved" from anything else: a settle can fail (and used to
+  // fail silently) while the renderer's own timer said the doc was safe.
+  onEngineYDocSaveState(
+    listener: (event: EngineYDocSaveStateEvent) => void,
   ): () => void;
 }

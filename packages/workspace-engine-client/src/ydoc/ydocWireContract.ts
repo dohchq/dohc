@@ -56,7 +56,10 @@ export type YdocProjectionProvenance = JsonObject & {
 export type YdocSettleResult = JsonObject & {
   momentId: string;
   path: string;
-  markdown: string;
+  // null once the settled body is past the engine's in-band response cap. The
+  // settle still committed and the engine wrote the file — read it from disk
+  // rather than echoing it back over the wire.
+  markdown: string | null;
   sha256: string;
   projection: YdocProjectionProvenance;
 };
@@ -103,6 +106,24 @@ function stringValue(object: JsonObject, key: string, label: string): string {
   const value = object[key];
   if (typeof value !== "string") {
     throw new YdocProtocolShapeError(`${label}.${key} must be a string.`);
+  }
+  return value;
+}
+
+// A field the engine answers with the value OR with an explicit null (never
+// absent, never an empty-string stand-in): null MEANS something, so an absent
+// key is still a protocol violation.
+function nullableStringValue(
+  object: JsonObject,
+  key: string,
+  label: string,
+): string | null {
+  const value = object[key];
+  if (value === null) return null;
+  if (typeof value !== "string") {
+    throw new YdocProtocolShapeError(
+      `${label}.${key} must be a string or null.`,
+    );
   }
   return value;
 }
@@ -166,7 +187,7 @@ export function decodeYdocSettleResult(value: JsonValue): YdocSettleResult {
   return {
     momentId: stringValue(object, "momentId", "ydoc.settle result"),
     path: stringValue(object, "path", "ydoc.settle result"),
-    markdown: stringValue(object, "markdown", "ydoc.settle result"),
+    markdown: nullableStringValue(object, "markdown", "ydoc.settle result"),
     sha256: stringValue(object, "sha256", "ydoc.settle result"),
     projection: {
       contentKind: contentKindValue(

@@ -229,6 +229,7 @@ import {
   ApplyEngineYDocUpdatePayload,
   CloseEngineYDocSessionPayload,
   EngineYDocRemoteUpdateEventSchema,
+  EngineYDocSaveStateEventSchema,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
@@ -2344,6 +2345,12 @@ interface EngineYDocSessionEntry {
   session: EngineYDocProviderSession;
   senderId: number;
   workspaceId: string;
+  // The newest local-edit seq the renderer has shipped, and the seq the
+  // in-flight settle started at. A settle only vouches for edits journaled
+  // before it began, so "saved" is reported against settlingSeq — never
+  // against edits typed while it was running.
+  dirtySeq: number;
+  settlingSeq: number;
 }
 const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
 const pendingEngineYDocOpensBySender = new Map<number, Set<Promise<void>>>();
@@ -7084,6 +7091,34 @@ function registerIpcHandlers(
           // the body fragment — the doc opens empty and every typed edit
           // settles back to the pre-edit file while the UI shows "Saved".
           contentKind: "richdoc",
+          // The document's REAL save state. A settle failure used to reach
+          // nothing at all while the editor's own timer kept saying "Saved" —
+          // three dogfood journeys watched a doc report Saved over a
+          // zero-byte .md. Report every outcome to the renderer that owns it.
+          onSaveState: (state) => {
+            const entry = engineYDocSessions.get(input.sessionId);
+            if (state === "settling" && entry) {
+              entry.settlingSeq = entry.dirtySeq;
+            }
+            if (
+              sender.isDestroyed() ||
+              rendererGeneration(sender.id) !== generation
+            ) {
+              return;
+            }
+            try {
+              sender.send(
+                CHANNELS.engineYDocSaveState,
+                EngineYDocSaveStateEventSchema.parse({
+                  sessionId: input.sessionId,
+                  state,
+                  seq: entry?.settlingSeq ?? 0,
+                }),
+              );
+            } catch {
+              // Never throw through a session status hook (it would wedge main).
+            }
+          },
           onRemoteUpdate: (update) => {
             // Forward a co-editor's delta only to the renderer generation that
             // opened this session. A crash reload reuses the WebContents id.
@@ -7148,6 +7183,8 @@ function registerIpcHandlers(
         session,
         senderId: sender.id,
         workspaceId: workspace.workspaceId,
+        dirtySeq: 0,
+        settlingSeq: 0,
       });
       return OpenEngineYDocSessionResult.parse({
         available: true,
@@ -7170,6 +7207,9 @@ function registerIpcHandlers(
     // an update must never write into a shared view. Refuse silently (matches
     // the unknown-session no-op above).
     if (sharedViewOf(entry.workspaceId)) return;
+    // Record the edit BEFORE handing it over: applyLocalUpdate arms the
+    // debounced settle, whose onSettleStart snapshots dirtySeq.
+    entry.dirtySeq = input.seq;
     entry.session.applyLocalUpdate(input.update);
   });
 

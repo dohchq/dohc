@@ -304,6 +304,55 @@ it("resumes the rich content on reopen (replicated lineage, no relay)", async ()
   await capture.stop();
 });
 
+it("a FAILING settle is logged and reported as an error save-state — the doc never reads Saved", async () => {
+  // AUDIT-SILENTSAVE. This is the seam the bug lived in: a settle failure went
+  // to onSessionError, which the capture wires to a reconnect handler that
+  // returns early for anything that is not a reconnect error. The refusal was
+  // dropped with no log and no UI, and the editor kept reading "Saved" while
+  // the .md never received a byte. Three dogfood journeys watched exactly this.
+  const refusal = new Error("engine refused the projection");
+  const failingStore: VersionedTextStore = {
+    ...store,
+    writeProjectedTextFile: async () => {
+      throw refusal;
+    },
+  };
+  const logged: Array<{ context: string; error: unknown }> = [];
+  const states: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: WS,
+    rootPath: root,
+    store: failingStore,
+    onError: (context, error) => logged.push({ context, error }),
+  });
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => {},
+    onSaveState: (state) => states.push(state),
+  });
+
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed into a doc that cannot save.");
+  await expect(session.settleNow()).rejects.toBe(refusal);
+
+  // (a) The failure is LOGGED with the path and the underlying error.
+  const entry = logged.find((item) => item.error === refusal);
+  expect(entry).toBeDefined();
+  expect(entry?.context).toContain(PATH);
+
+  // (b) It reaches the UI as an error — and "saved" is never claimed.
+  expect(states).toContain("settling");
+  expect(states).toContain("error");
+  expect(states).not.toContain("saved");
+
+  // The file on disk really is behind: it still holds only the seeded text.
+  const onDisk = await readFile(join(root, PATH), "utf8");
+  expect(onDisk).not.toContain("Typed into a doc that cannot save.");
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop().catch(() => undefined);
+});
+
 it("refuses a secret-classified path (surfaced, not crashed) and never guards it", async () => {
   const capture = makeCapture();
   await expect(

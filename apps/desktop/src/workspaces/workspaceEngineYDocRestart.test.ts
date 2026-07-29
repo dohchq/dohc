@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import {
@@ -928,6 +928,106 @@ it("treats typed session-not-found during release-first rebind as already releas
   });
   expect(generation).toBe(2);
   expect(closeCount).toBe(1);
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("an over-cap settle (markdown omitted from the response) leaves the engine's file on disk intact", async () => {
+  // AUDIT-SILENTSAVE, fix 2. Past the engine's in-band response cap the settle
+  // still commits and the DAEMON materializes the .md — the response just
+  // cannot carry the body as one wire string, so it answers markdown: null.
+  // The capture must recognize that and stand down. Mirroring null onto disk
+  // would truncate the user's file to zero bytes, which is the very loss this
+  // whole change exists to stop.
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-overcap-"));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "ydoc-overcap" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+
+  // What the engine already wrote to disk when it materialized the settle.
+  const materialized = "pasted load-test paragraph.\n".repeat(4_000);
+  await writeFile(join(rootPath, "load.md"), materialized);
+
+  const seed = new Y.Doc();
+  seed.getText("plainText").insert(0, "seed");
+  const seedUpdate = Y.encodeStateAsUpdate(seed);
+  const openProvider = async (
+    options: EngineYdocProviderSessionRustOptions,
+  ): Promise<EngineYdocProviderSessionRust> => {
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, seedUpdate);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      async applyLocalUpdate(update) {
+        Y.applyUpdate(doc, update);
+      },
+      async settleNow() {
+        const result = {
+          momentId: "moment-overcap",
+          path: options.path,
+          // The engine's over-cap answer.
+          markdown: null,
+          sha256: createHash("sha256").update(materialized).digest("hex"),
+          projection: {
+            contentKind: "plaintext" as const,
+            sourceStateVectorSha256: "b".repeat(64),
+            destructive: false,
+          },
+        };
+        await options.onSettled?.(result);
+        return result;
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const onError = vi.fn();
+  const states: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-overcap",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError,
+  });
+  const session = await capture.openYDocSession({
+    path: "load.md",
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  await session.settleNow();
+
+  // THE load-bearing assertion: the engine's file is untouched, not truncated.
+  const onDisk = await readFile(join(rootPath, "load.md"), "utf8");
+  expect(onDisk).toBe(materialized);
+  expect(onDisk.length).toBeGreaterThan(48 * 1024);
+  // And it IS saved — the settle committed; nothing about this is an error.
+  expect(states).toContain("saved");
+  expect(states).not.toContain("error");
+  expect(onError).not.toHaveBeenCalled();
+
   await session.close({ settle: false });
   await capture.stop();
 });

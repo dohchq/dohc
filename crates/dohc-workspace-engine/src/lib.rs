@@ -8580,7 +8580,10 @@ struct YdocProjectionProvenance {
 struct YdocSettleResult {
     moment_id: String,
     path: String,
-    markdown: String,
+    /// `null` once the settled markdown is past the in-band cap. The settle
+    /// still committed and the daemon wrote the file — the client reads it
+    /// from disk rather than echoing it back over the wire.
+    markdown: Option<String>,
     sha256: String,
     projection: YdocProjectionProvenance,
 }

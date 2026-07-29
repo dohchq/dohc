@@ -80,4 +80,25 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     expect(onSaveStateChange).toHaveBeenLastCalledWith("saved");
     expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved");
   });
+
+  it("says the save failed instead of Saved when the engine reports an error", async () => {
+    // AUDIT-SILENTSAVE: the visible half of the fix. A failed settle means the
+    // file on disk is behind the editor — the header must say so, and the tab
+    // dot must stay dirty.
+    engineDocState.saveState = "error";
+    const onSaveStateChange = vi.fn();
+    render(
+      <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
+    );
+
+    const header = await screen.findByTestId("markdown-save-state");
+    expect(header.getAttribute("data-state")).toBe("error");
+    expect(header.textContent).not.toContain("Saved");
+    expect(header.textContent).toContain("Couldn't save");
+    // Honest, non-alarming, and it names what actually happened.
+    expect(header.getAttribute("title")).toContain("file on disk is behind");
+    await waitFor(() =>
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("error"),
+    );
+  });
 });

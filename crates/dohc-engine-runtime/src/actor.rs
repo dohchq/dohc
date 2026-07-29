@@ -230,9 +230,18 @@ pub struct YdocOpenState {
 pub struct YdocSettlement {
     pub moment_id: String,
     pub path: String,
-    pub markdown: String,
+    /// The settled markdown, or `None` when it is larger than the in-band
+    /// response cap. The cap bounds the RESPONSE, never durability: the file
+    /// is written to disk and the moment committed either way.
+    pub markdown: Option<String>,
     pub sha256: String,
     pub projection: Projection,
+}
+
+/// The settled markdown as the response may carry it: `None` once past the
+/// in-band cap, where the caller reads the artifact from disk instead.
+fn inband_settled_markdown(markdown: String) -> Option<String> {
+    (markdown.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES).then_some(markdown)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -8950,16 +8959,13 @@ fn ydoc_settle_on_store(
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
     let projection = doc.project(content_kind)?;
-    // A successful settle must be REPORTABLE: the response carries the
-    // markdown as one wire string, so a projection past the in-band cap
-    // refuses BEFORE anything commits (a committed-but-undecodable settle
-    // would strand the client). Blob streaming lifts this at RPC-D.
-    if projection.markdown.len() > dohc_engine_domain::INBAND_CONTENT_CAP_BYTES {
-        return Err(dohc_engine_domain::DomainError::InvalidText {
-            reason: "ydoc-settle-exceeds-inband-cap",
-        }
-        .into());
-    }
+    // The in-band cap bounds only what the RESPONSE can carry as one wire
+    // string — it must never gate the settle itself. Materialization writes
+    // the file from `projection.markdown` down here, so an over-cap doc
+    // settles and lands on disk exactly like any other; the response reports
+    // `markdown: None` and the caller reads the file. (Refusing here instead
+    // left the user's content in the CRDT and the .md at zero bytes.)
+    //
     // The stale-head guard runs BEFORE the idempotent no-op: an external
     // capture ingest (or any same-object writer) must surface as
     // ConflictStaleTarget even when the projection itself is unchanged —
@@ -9081,7 +9087,7 @@ fn ydoc_settle_on_store(
         return Ok(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
-            markdown: current.text,
+            markdown: inband_settled_markdown(current.text),
             sha256: current.blob_sha256,
             projection,
         });
@@ -9311,7 +9317,7 @@ fn ydoc_settle_on_store(
     Ok(YdocSettlement {
         moment_id: write.moment.moment_id,
         path: write.snapshot.path,
-        markdown: write.snapshot.text,
+        markdown: inband_settled_markdown(write.snapshot.text),
         sha256: write.snapshot.blob_sha256,
         projection,
     })
