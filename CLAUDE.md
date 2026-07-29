@@ -39,7 +39,7 @@ and copy.
 | model       | cost | intelligence | taste |
 | ----------- | ---- | ------------ | ----- |
 | gpt-5.6-sol | 9    | 8            | 6     |
-| opus-5      | 8    | 8            | 8     |
+| opus-5      | 8    | 6            | 8     |
 | fable-5     | 2    | 9            | 9     |
 
 How to apply:
