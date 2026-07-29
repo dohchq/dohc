@@ -4,7 +4,10 @@ import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { pullShareView } from "@dohc/workspace-engine";
+import {
+  createVersionedTextStore,
+  pullShareView,
+} from "@dohc/workspace-engine";
 import {
   assertMountableSelector,
   createMountDirectory,
@@ -38,10 +41,14 @@ async function tempHostRoot(): Promise<string> {
 function refreshShareMountOnce(
   input: Omit<
     Parameters<typeof refreshShareMountOnceWithPull>[0],
-    "pull"
+    "openStore" | "pull"
   >,
 ) {
-  return refreshShareMountOnceWithPull({ ...input, pull: pullShareView });
+  return refreshShareMountOnceWithPull({
+    ...input,
+    pull: pullShareView,
+    openStore: ({ rootPath }) => createVersionedTextStore(rootPath),
+  });
 }
 
 function sha256(content: string): string {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -32,6 +32,18 @@ import {
 } from "./shareMounts";
 import { syncJoinedSharedChannels } from "./sharedChannels";
 import { refreshSharedViewOnce } from "./sharedView";
+import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+
+const legacyStoreSpy = vi.hoisted(() =>
+  vi.fn(() => {
+    throw new Error("legacy TypeScript store constructed");
+  }),
+);
+
+vi.mock("@dohc/workspace-engine", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@dohc/workspace-engine")>();
+  return { ...actual, createVersionedTextStore: legacyStoreSpy };
+});
 
 class MockDaemon implements EngineDaemonClient {
   readonly requests: Request[] = [];
@@ -127,6 +139,16 @@ class MockDaemon implements EngineDaemonClient {
             changedPaths: [],
             pendingCursor: { kind: "shareView", token: "share-cursor-13" },
           };
+        case "versions.ensureMain":
+          return {
+            id: "main",
+            workspaceId: "workspace-a",
+            kind: "main",
+            name: "Main",
+            createdAtMs: 1,
+          };
+        case "versionedText.list":
+          return { files: [], nextAfterPath: null };
         default:
           throw new Error(`Unexpected mock daemon method: ${request.method}`);
       }
@@ -319,11 +341,16 @@ describe("EngineRelayClient", () => {
 
   it("refreshes a share view and commits its opaque daemon cursor", async () => {
     const { rootPath, daemon, sessions, client, relay } = await harness();
+    const store = createCaptureLiveStores(
+      { workspaceId: "workspace-a", rootPath },
+      sessions,
+    ).store;
     const outcome = await refreshSharedViewOnce({
       rootDir: rootPath,
       workspaceId: "workspace-a",
       relay,
       shareId: "share-view",
+      store,
       pull: async (input) =>
         await client.pullShareView({ shareId: input.shareId }),
     });
@@ -354,6 +381,77 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("materializes a share view through the injected daemon store", async () => {
+    const body = "read from daemon";
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "share.view.pull") {
+        return {
+          fetched: 1,
+          applied: 1,
+          skipped: 0,
+          hasMore: false,
+          nextCursor: 14,
+          changedPaths: [
+            { path: "notes/daemon.md", operation: "write", contentKind: "text" },
+          ],
+          pendingCursor: { kind: "shareView", token: "share-cursor-14" },
+        };
+      }
+      if (request.method === "versions.ensureMain") {
+        return {
+          id: "main",
+          workspaceId: "workspace-a",
+          kind: "main",
+          name: "Main",
+          createdAtMs: 1,
+        };
+      }
+      if (request.method === "versionedText.read") {
+        return {
+          workspaceId: "workspace-a",
+          versionId: "main",
+          objectId: "object-daemon",
+          path: "notes/daemon.md",
+          contentKind: "text",
+          text: body,
+          byteLength: Buffer.byteLength(body),
+          blobSha256: "0".repeat(64),
+          sha256: "0".repeat(64),
+          updatedAtMs: 2,
+          latestMomentId: "moment-daemon",
+          metadataOrigin: "sync",
+          metadataSummary: null,
+          metadataCorrelationId: null,
+        };
+      }
+      return undefined;
+    });
+    const { rootPath, sessions, client, relay } = await harness(daemon);
+    const store = createCaptureLiveStores(
+      { workspaceId: "workspace-a", rootPath },
+      sessions,
+    ).store;
+
+    await expect(
+      refreshSharedViewOnce({
+        rootDir: rootPath,
+        workspaceId: "workspace-a",
+        relay,
+        shareId: "share-view",
+        store,
+        pull: async (input) =>
+          await client.pullShareView({ shareId: input.shareId }),
+      }),
+    ).resolves.toEqual({ status: "updated", changedPaths: 1 });
+
+    expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(body);
+    expect(legacyStoreSpy).not.toHaveBeenCalled();
+    expect(daemon.requests.map((request) => request.method)).toContain(
+      "versionedText.read",
+    );
+    await sessions.closeAll();
+  });
+
   it("opens a share mount's nested store and pulls it through the daemon", async () => {
     const { rootPath, daemon, routes, sessions, live, relay } = await harness();
     const mount = { shareId: "share-mounted", label: "alex" };
@@ -366,6 +464,8 @@ describe("EngineRelayClient", () => {
         hostRoot: rootPath,
         mount,
         relay,
+        openStore: (workspace) =>
+          createCaptureLiveStores(workspace, sessions).store,
         pull: async (input) =>
           await mountRelay.pullShareView({ shareId: input.shareId }),
       }),
@@ -393,6 +493,9 @@ describe("EngineRelayClient", () => {
       workspaceId: target.workspaceId,
       shareId: mount.shareId,
     });
+    expect(
+      daemon.requests.some((request) => request.method === "workspace.close"),
+    ).toBe(true);
     await sessions.closeAll();
   });
 
@@ -411,6 +514,10 @@ describe("EngineRelayClient", () => {
       return undefined;
     });
     const { rootPath, client, relay, sessions } = await harness(daemon);
+    const store = createCaptureLiveStores(
+      { workspaceId: "workspace-a", rootPath },
+      sessions,
+    ).store;
 
     await expect(
       client.pullShareView({ shareId: "share-revoked" }),
@@ -421,6 +528,7 @@ describe("EngineRelayClient", () => {
         workspaceId: "workspace-a",
         relay,
         shareId: "share-revoked",
+        store,
         pull: async (input) =>
           await client.pullShareView({ shareId: input.shareId }),
       }),

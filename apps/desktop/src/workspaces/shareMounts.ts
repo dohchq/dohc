@@ -13,6 +13,7 @@ import {
   repairSharedViewProjection,
   type RefreshSharedViewOutcome,
 } from "./sharedView";
+import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // Share mounts: the receive side of a relay share materialized INSIDE a host
 // workspace as shared-with-me/<label>/ — ordinary read-only files the user's
@@ -169,10 +170,19 @@ export async function refreshShareMountOnce(input: {
   mount: Pick<ShareMountRecord, "shareId" | "label">;
   relay: SyncRelayConnection;
   pull: Parameters<typeof refreshSharedViewOnce>[0]["pull"];
+  openStore: (workspace: {
+    workspaceId: string;
+    rootPath: string;
+  }) => CaptureVersionedTextStore;
 }): Promise<RefreshSharedViewOutcome> {
   const rootDir = mountRootFor(input.hostRoot, input.mount.label);
   await assertRealMountRoot(input.hostRoot, input.mount.label);
   const storeWorkspaceId = mountStoreWorkspaceIdFor(input.mount.shareId);
+  // A mount's store is a workspace of its own (synthetic id, nested root), so
+  // this refresh owns it and closes it below. The standalone shared-view
+  // callers deliberately do NOT close theirs: there the store is the user's
+  // live workspace session, and closing it would tear down capture mid-use.
+  const store = input.openStore({ workspaceId: storeWorkspaceId, rootPath: rootDir });
   // Repair BEFORE pulling: the pull only replays deltas, so a file tampered
   // on disk (rogue tool — every dohc surface refuses these writes) must be
   // re-projected from the mount's store or refreshes would report
@@ -180,19 +190,28 @@ export async function refreshShareMountOnce(input: {
   // self-heals a tampered directory chain (planted symlinks removed and the
   // real tree rebuilt) so the pull materializes onto a healthy projection
   // instead of wedging on its containment guards.
-  const repaired = await repairSharedViewProjection(rootDir, storeWorkspaceId);
-  const outcome = await refreshSharedViewOnce({
-    rootDir,
-    workspaceId: storeWorkspaceId,
-    relay: input.relay,
-    shareId: input.mount.shareId,
-    pull: input.pull,
-  });
-  if (repaired === 0) return outcome;
-  return {
-    status: outcome.status === "ended" ? "ended" : "updated",
-    changedPaths: outcome.changedPaths + repaired,
-  };
+  try {
+    const repaired = await repairSharedViewProjection(
+      rootDir,
+      storeWorkspaceId,
+      store,
+    );
+    const outcome = await refreshSharedViewOnce({
+      rootDir,
+      workspaceId: storeWorkspaceId,
+      relay: input.relay,
+      shareId: input.mount.shareId,
+      pull: input.pull,
+      store,
+    });
+    if (repaired === 0) return outcome;
+    return {
+      status: outcome.status === "ended" ? "ended" : "updated",
+      changedPaths: outcome.changedPaths + repaired,
+    };
+  } finally {
+    await store.close();
+  }
 }
 
 // Unmount: delete the projection folder (nested engine store included). The

@@ -4,11 +4,11 @@ import { dirname, resolve, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
 import {
   ShareUnavailableError,
-  createVersionedTextStore,
   type pullShareView,
   type ShareViewChangedPath,
   type SyncRelayConnection,
 } from "@dohc/workspace-engine";
+import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // The receive side of a relay share (PR 18): a shared view is a local
 // engine store fed EXCLUSIVELY by the share's filtered op log — no watcher,
@@ -38,9 +38,9 @@ export async function materializeSharedViewPaths(
   rootDir: string,
   workspaceId: string,
   changedPaths: readonly ShareViewChangedPath[],
+  store: CaptureVersionedTextStore,
 ): Promise<void> {
   if (changedPaths.length === 0) return;
-  const store = createVersionedTextStore(rootDir);
   const realRoot = await realpath(rootDir);
   // REAL containment for the write, not just the lexical check above: a
   // symlink planted inside the materialized tree (a linked directory or a
@@ -65,45 +65,41 @@ export async function materializeSharedViewPaths(
     await rm(target, { recursive: true, force: true });
     return target;
   }
-  try {
-    const main = await store.ensureMainVersion({ workspaceId });
-    for (const change of changedPaths) {
-      const target = containedTarget(rootDir, change.path);
-      if (change.operation === "delete") {
-        // Deletes get the same REAL-parent containment as writes: a planted
-        // directory symlink must not route the unlink outside the root. The
-        // final component is safe either way — rm without `recursive`
-        // removes a link as a link, never through it.
-        const realParent = await realpath(dirname(target)).catch(() => null);
-        if (realParent === null) continue; // parent gone — nothing to delete
-        if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
-          throw new Error(`Shared view parent escapes the workspace: ${target}`);
-        }
-        // recursive: a locally tampered DIRECTORY at the target must not
-        // wedge the refresh with EISDIR. Node's rm removes a symlink as a
-        // link either way — it never recurses through one.
-        await rm(target, { recursive: true, force: true });
-        continue;
+  const main = await store.ensureMainVersion({ workspaceId });
+  for (const change of changedPaths) {
+    const target = containedTarget(rootDir, change.path);
+    if (change.operation === "delete") {
+      // Deletes get the same REAL-parent containment as writes: a planted
+      // directory symlink must not route the unlink outside the root. The
+      // final component is safe either way — rm without `recursive`
+      // removes a link as a link, never through it.
+      const realParent = await realpath(dirname(target)).catch(() => null);
+      if (realParent === null) continue; // parent gone — nothing to delete
+      if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
+        throw new Error(`Shared view parent escapes the workspace: ${target}`);
       }
-      await preparedTarget(target);
-      if (change.contentKind === "binary") {
-        const bytes = await store.readBinaryFile({
-          workspaceId,
-          versionId: main.id,
-          path: change.path,
-        });
-        if (bytes) await writeFile(target, bytes, { flag: "wx" });
-        continue;
-      }
-      const snapshot = await store.readTextFile({
+      // recursive: a locally tampered DIRECTORY at the target must not
+      // wedge the refresh with EISDIR. Node's rm removes a symlink as a
+      // link either way — it never recurses through one.
+      await rm(target, { recursive: true, force: true });
+      continue;
+    }
+    await preparedTarget(target);
+    if (change.contentKind === "binary") {
+      const bytes = await store.readBinaryFile({
         workspaceId,
         versionId: main.id,
         path: change.path,
       });
-      if (snapshot) await writeFile(target, snapshot.text, { encoding: "utf8", flag: "wx" });
+      if (bytes) await writeFile(target, bytes, { flag: "wx" });
+      continue;
     }
-  } finally {
-    await store.close();
+    const snapshot = await store.readTextFile({
+      workspaceId,
+      versionId: main.id,
+      path: change.path,
+    });
+    if (snapshot) await writeFile(target, snapshot.text, { encoding: "utf8", flag: "wx" });
   }
 }
 
@@ -117,13 +113,13 @@ export async function materializeSharedViewPaths(
 export async function repairSharedViewProjection(
   rootDir: string,
   workspaceId: string,
+  store: CaptureVersionedTextStore,
 ): Promise<number> {
   // A root that doesn't exist yet (first refresh materializes it) has
   // nothing to repair.
   const maybeRealRoot = await realpath(rootDir).catch(() => null);
   if (maybeRealRoot === null) return 0;
   const realRoot: string = maybeRealRoot;
-  const store = createVersionedTextStore(rootDir);
   const containsReal = (candidate: string) =>
     candidate === realRoot || candidate.startsWith(`${realRoot}${sep}`);
   // Self-heal a tampered tree: remove the first symlinked component on the
@@ -153,47 +149,43 @@ export async function repairSharedViewProjection(
     }
   }
   const damaged: ShareViewChangedPath[] = [];
-  try {
-    const main = await store.ensureMainVersion({ workspaceId });
-    const snapshots = await store.listTextFiles({
-      workspaceId,
-      versionId: main.id,
-    });
-    for (const snapshot of snapshots) {
-      const target = containedTarget(rootDir, snapshot.path);
-      const contentKind = snapshot.contentKind === "binary" ? "binary" : "text";
-      let intact = false;
-      try {
-        // REAL-parent containment before trusting anything on disk: a
-        // symlinked ancestor would redirect the read to attacker-controlled
-        // bytes that could pass the hash compare (CodeRabbit). Then lstat
-        // the leaf: a symlink is damage regardless of what it points at.
-        const realParent = await realpath(dirname(target));
-        if (containsReal(realParent)) {
-          const stat = await lstat(target);
-          if (stat.isFile()) {
-            const bytes = await readFile(target);
-            if (typeof snapshot.sha256 === "string" && snapshot.sha256.length > 0) {
-              intact =
-                createHash("sha256").update(bytes).digest("hex") === snapshot.sha256;
-            } else {
-              intact = bytes.toString("utf8") === snapshot.text;
-            }
+  const main = await store.ensureMainVersion({ workspaceId });
+  const snapshots = await store.listTextFiles({
+    workspaceId,
+    versionId: main.id,
+  });
+  for (const snapshot of snapshots) {
+    const target = containedTarget(rootDir, snapshot.path);
+    const contentKind = snapshot.contentKind === "binary" ? "binary" : "text";
+    let intact = false;
+    try {
+      // REAL-parent containment before trusting anything on disk: a
+      // symlinked ancestor would redirect the read to attacker-controlled
+      // bytes that could pass the hash compare (CodeRabbit). Then lstat
+      // the leaf: a symlink is damage regardless of what it points at.
+      const realParent = await realpath(dirname(target));
+      if (containsReal(realParent)) {
+        const stat = await lstat(target);
+        if (stat.isFile()) {
+          const bytes = await readFile(target);
+          if (typeof snapshot.sha256 === "string" && snapshot.sha256.length > 0) {
+            intact =
+              createHash("sha256").update(bytes).digest("hex") === snapshot.sha256;
+          } else {
+            intact = bytes.toString("utf8") === snapshot.text;
           }
         }
-      } catch {
-        intact = false; // missing or unreadable — re-materialize
       }
-      if (!intact) {
-        await healTamperedAncestors(snapshot.path);
-        damaged.push({ path: snapshot.path, operation: "write", contentKind });
-      }
+    } catch {
+      intact = false; // missing or unreadable — re-materialize
     }
-  } finally {
-    await store.close();
+    if (!intact) {
+      await healTamperedAncestors(snapshot.path);
+      damaged.push({ path: snapshot.path, operation: "write", contentKind });
+    }
   }
   if (damaged.length > 0) {
-    await materializeSharedViewPaths(rootDir, workspaceId, damaged);
+    await materializeSharedViewPaths(rootDir, workspaceId, damaged, store);
   }
   return damaged.length;
 }
@@ -211,6 +203,9 @@ export async function refreshSharedViewOnce(input: {
   // select its relay implementation, so no call can drift back to the legacy
   // TypeScript SQLite path.
   pull: typeof pullShareView;
+  // Required at the factory boundary for the same reason: every rooted caller
+  // must explicitly select its store implementation.
+  store: CaptureVersionedTextStore;
 }): Promise<RefreshSharedViewOutcome> {
   let pull;
   try {
@@ -226,7 +221,12 @@ export async function refreshSharedViewOnce(input: {
     }
     throw error;
   }
-  await materializeSharedViewPaths(input.rootDir, input.workspaceId, pull.changedPaths);
+  await materializeSharedViewPaths(
+    input.rootDir,
+    input.workspaceId,
+    pull.changedPaths,
+    input.store,
+  );
   await pull.commitCursor();
   return {
     status: pull.changedPaths.length > 0 ? "updated" : "unchanged",

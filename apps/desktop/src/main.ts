@@ -376,6 +376,7 @@ import {
 } from "./ipc/engineHistoryIpc";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
+import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
@@ -2611,6 +2612,16 @@ let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
 let rustEngineRelayClient: EngineRelayClient | null = null;
 const relayTransportRoutes = new RelayTransportRouteGuard();
 
+function sharedViewStoreFor(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}) {
+  if (!rustEngineWorkspaceSessions) {
+    throw new Error("Rust engine workspace sessions are unavailable.");
+  }
+  return createCaptureLiveStores(workspace, rustEngineWorkspaceSessions).store;
+}
+
 async function closeRelayTransportWorkspace(workspaceId: string): Promise<void> {
   if (rustEngineRelayClient) {
     await rustEngineRelayClient.closeWorkspace(workspaceId);
@@ -4210,6 +4221,7 @@ function registerIpcHandlers(
         workspaceId: created.workspaceId,
         relay,
         shareId: parsed.shareId,
+        store: sharedViewStoreFor(created),
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
@@ -4277,6 +4289,7 @@ function registerIpcHandlers(
       workspaceId: workspace.workspaceId,
       relay,
       shareId: shareView.shareId,
+      store: sharedViewStoreFor(workspace),
       pull: async (input) =>
         await daemonRelay.pullShareView({
           shareId: input.shareId,
@@ -4400,6 +4413,7 @@ function registerIpcHandlers(
         hostRoot: workspace.rootPath,
         mount,
         relay,
+        openStore: sharedViewStoreFor,
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
@@ -4501,6 +4515,7 @@ function registerIpcHandlers(
           hostRoot: workspace.rootPath,
           mount,
           relay,
+          openStore: sharedViewStoreFor,
           pull: async (input) =>
             await daemonRelay.pullShareView({
               shareId: input.shareId,
