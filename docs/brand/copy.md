@@ -40,8 +40,10 @@ new became usable, it is a Change.
   hide a *failing* actor: write `dohc could not reach the relay`, not
   `the relay could not be reached`.
 - **Name the thing the user names it.** Use the glossary in the writing skill:
-  `file`, `folder`, `workspace`, `chat`, `share`, `capture`, `agent`. Never
-  `atom`, `entity`, `item`, or `object` in UI copy.
+  `file`, `folder`, `workspace`, `chat`, `share`, `history`, `agent`. Never
+  `atom`, `entity`, `capture`, `item`, or `object` in UI copy — `capture` is
+  the engine's name for the recorder; the user's word for the feature is
+  `history`.
 - **Same word every time.** If it is a `file` in the sidebar it is a `file` in
   the error. Do not vary wording to avoid repetition.
 - **No figurative language, no jokes, no irony.** Not because dohc is humorless

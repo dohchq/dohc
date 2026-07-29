@@ -150,11 +150,12 @@ different live concepts — see the next section before assuming.
 
 | Term | Means | Not a synonym for it |
 | --- | --- | --- |
-| `workspace` | The top-level scope that owns everything. Every other noun is scoped to one. | vault, space, org, tenant |
+| `workspace` | The top-level scope. Workspace-owned resources are each scoped to one; provider driver and model inventory is global and is not. | vault, space, org, tenant |
 | `file` | A user-visible item of workspace content. Contract type `WorkspaceFile`; its `kind` is `atom`, `asset`, or `database`. | page, note, document, item |
-| `asset` | A binary file kind — image, audio, video, pdf, sqlite (`AssetKind`). In UI copy say `file` unless the kind matters. | attachment, media, upload |
+| `asset` | A file kind alongside `atom` and `database`. `AssetKind` is the full enum: image, audio, video, pdf, csv, json, sqlite, file. In UI copy say `file` unless the kind matters. | attachment, media, upload |
 | `folder` | A container of files. | directory (in UI copy), collection |
-| `chat` | The conversation surface as a whole. | conversation |
+| `chat` | A conversation the user opens. Read the conflict note below before writing a count. | conversation |
+| `history` | The user-facing name for the versioned record of workspace changes. `capture` is the engine's name for the recorder that produces it. | versions, backups, timeline |
 | `channel` | A named division of the chat surface. Durable rows key on `channel_id`; load-bearing in sharing and authorization. | room, group, space |
 | `thread` | A message sequence with exactly one owner — a linked file or a channel, never both and never neither. | topic, reply chain |
 | `capture` | The engine's history recorder. It records settled workspace file changes into versioned history, and is a workspace's only history. | snapshot, backup |
@@ -173,7 +174,7 @@ their own meaning. Collapsing either one makes copy and technical docs wrong.
 | `dm` | A direct-message channel — `channelKind: "dm"`, with its own relay grants and navigation. | `channel`, which is named; `chat`, the whole surface |
 | `import` | The user-initiated operation that brings outside files in (`ImportWorkspaceFiles`, `ImportToDatabase`). | `capture`, which records workspace history |
 | `model` | The inference model an agent runs on (`AgentModel`), selectable independently of the agent. | `agent`, which is the actor |
-| `permission` | An authorization grant, including agent tool approval (`AgentPermissionRequestSchema`). | `share`, which grants access to another person |
+| `permission` | The agent tool-approval gate. `AgentPermissionRequestSchema` is a *pending request*; only an `AgentPermissionDecision` grants it. Never write copy implying the agent may act before the decision. | `share`, which grants access to another person |
 | `synced` | A replication state — whether copies agree. | `source-backed`, which is about provenance |
 
 ### Terms that mean different things in different layers
@@ -196,6 +197,11 @@ their own meaning. Collapsing either one makes copy and technical docs wrong.
   a `Y.Doc`, or prose under `docs/`, depending on where you stand. In new
   writing say `file` for content, `Y.Doc` for the CRDT, and `docs` only for
   the directory.
+- **`chat`** is not settled between the UI and the engine. The engine models
+  `channel` and `thread` as separate things. The UI counts threads and labels
+  the count `chats` — `ChatsView` renders `${channel.threadCount} chats`. Copy
+  that says "3 chats" is counting threads. Do not build a new distinction on
+  `chat` until this resolves.
 - **`entity`** is effectively dead in source — 4 occurrences, none of them a
   domain type. It survives in older plans and specs, and in the product
   invariants in `AGENTS.md`. Do not build new copy or new types on it.
