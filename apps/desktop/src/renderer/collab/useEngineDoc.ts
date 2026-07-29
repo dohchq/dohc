@@ -132,6 +132,7 @@ export function useEngineDoc(input: {
     let cancelled = false;
     let binding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
+    let unsubscribeSaveState: (() => void) | null = null;
 
     setAvailable(false);
     setDoc(null);
@@ -140,25 +141,6 @@ export function useEngineDoc(input: {
     const sessionId = nextSessionId();
     const localSeq = { current: 0 };
     const transport = makeTransport(workspaceId, path, sessionId, localSeq);
-
-    // Subscribe BEFORE opening so no settle outcome can be missed. Guarded by
-    // the per-open token AND the per-open sessionId (the async-state
-    // invariant): a settle report for a superseded open never repaints.
-    const unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
-      if (cancelled || token !== openTokenRef.current) return;
-      if (event.sessionId !== sessionId) return;
-      if (event.state === "error") {
-        setSaveState("error");
-        return;
-      }
-      if (event.state === "settling") {
-        setSaveState("saving");
-        return;
-      }
-      // "saved" vouches only for edits journaled before that settle began.
-      // Anything typed since is still unsaved — keep showing "Saving…".
-      if (event.seq >= localSeq.current) setSaveState("saved");
-    });
 
     void bindEngineYDoc(transport)
       .then((bound) => {
@@ -183,6 +165,29 @@ export function useEngineDoc(input: {
         };
         bound.doc.on("update", onUpdate);
         detachSaveObserver = () => bound.doc?.off("update", onUpdate);
+        // Subscribe only once the session is CONFIRMED live. Nothing can be
+        // missed by waiting: a settle needs an edit, and an edit needs this
+        // bound doc. Doing it here also keeps every bridge call inside the
+        // caught region — a synchronous call in the effect body turned a
+        // bridge without this method (an older preload, a test double) from
+        // graceful "not engine-backed" into a blanked editor.
+        // Guarded by the per-open token AND the per-open sessionId (the
+        // async-state invariant): another document's settle never repaints.
+        unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
+          if (cancelled || token !== openTokenRef.current) return;
+          if (event.sessionId !== sessionId) return;
+          if (event.state === "error") {
+            setSaveState("error");
+            return;
+          }
+          if (event.state === "settling") {
+            setSaveState("saving");
+            return;
+          }
+          // "saved" vouches only for edits journaled before that settle began.
+          // Anything typed since is still unsaved — keep showing "Saving…".
+          if (event.seq >= localSeq.current) setSaveState("saved");
+        });
         setDoc(bound.doc);
         setAvailable(true);
       })
@@ -194,7 +199,7 @@ export function useEngineDoc(input: {
 
     return () => {
       cancelled = true;
-      unsubscribeSaveState();
+      unsubscribeSaveState?.();
       detachSaveObserver?.();
       // Settle + close the engine session in main (releases the single-canonical
       // reservation so a version/file switch can reopen the same object), then

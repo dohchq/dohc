@@ -658,6 +658,44 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
+  it("reports a JOURNAL failure to onSettleError too — the edit never reached the engine", async () => {
+    // Round 2 (D2b). runSettle aborts on a journal failure BEFORE the settle
+    // chain, so onSettleStart/onSettleError never fired and the error routed
+    // only to onSessionError — the same reconnect-only sink this PR exists to
+    // stop relying on. A recordUpdate that failed is worse than a settle that
+    // failed: the edit is not even in the engine.
+    const engine = seedPlaintextEngine();
+    const recordFailure = new Error("injected record failure");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const settleErrors: unknown[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleError: (error) => settleErrors.push(error),
+      scheduleSettle: () => () => undefined,
+    });
+
+    const update = plaintextUpdate(provider.initialUpdate, (text) => {
+      text.insert(0, "never journaled");
+    });
+    await provider.applyLocalUpdate(update).catch(() => undefined);
+    await provider.settleNow().catch(() => undefined);
+
+    expect(settleErrors.length).toBeGreaterThan(0);
+    expect(settleErrors.some((error) => error === settleErrors[0])).toBe(true);
+    await provider.close({ settle: false }).catch(() => undefined);
+  });
+
   it("surfaces an unrecoverable journal update and still closes the provider", async () => {
     const engine = seedPlaintextEngine();
     const recordFailure = new Error("injected record failure");

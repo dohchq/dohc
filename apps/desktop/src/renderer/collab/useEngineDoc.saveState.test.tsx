@@ -158,6 +158,24 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
   expect(screen.getByTestId("state").textContent).toBe("saved");
 });
 
+it("degrades to not-engine-backed on a bridge without the save-state channel, instead of blanking the editor", async () => {
+  // Round-2 regression. Subscribing synchronously in the effect body turned a
+  // bridge that lacks this method (an older preload, a narrower host) from
+  // "not engine-backed, fall back to the local editor" into an uncaught
+  // TypeError that unmounted the whole document view. Every bridge call must
+  // stay inside the caught region.
+  const { onEngineYDocSaveState: _omitted, ...withoutSaveState } = harness.api;
+  vi.stubGlobal("dohcDesktop", withoutSaveState);
+
+  render(<Harness workspaceId="ws-1" path="notes/big.md" />);
+
+  // The document view survives; it simply reports no engine session.
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("false"),
+  );
+  expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
 it("ignores a save-state report addressed to a different session", async () => {
   await mountBound();
 

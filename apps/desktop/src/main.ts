@@ -234,7 +234,11 @@ import {
   UpdateCheckResult,
   UpdateStateEvent,
 } from "./ipc/bridgeContract";
-import { CHANNELS, SEARCH_EVENT_MAX_ENTRIES } from "./ipc/channels";
+import {
+  CHANNELS,
+  SEARCH_EVENT_MAX_ENTRIES,
+  type EngineYDocSaveStateName,
+} from "./ipc/channels";
 // The relay presence transport is a dependency-free module (no DOM/React): main
 // reuses it so the presence wire contract (routes, publish/leave/poll) lives in
 // ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
@@ -2345,6 +2349,11 @@ interface EngineYDocSessionEntry {
   session: EngineYDocProviderSession;
   senderId: number;
   workspaceId: string;
+  // The renderer that owns this session, and the generation it was opened
+  // under: a crash-reload reuses the WebContents id, so both are required
+  // before pushing a save state back.
+  sender: Electron.WebContents;
+  generation: number;
   // The newest local-edit seq the renderer has shipped, and the seq the
   // in-flight settle started at. A settle only vouches for edits journaled
   // before it began, so "saved" is reported against settlingSeq — never
@@ -2353,6 +2362,27 @@ interface EngineYDocSessionEntry {
   settlingSeq: number;
 }
 const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
+
+// Push a document's REAL save state to the renderer that owns its session.
+// Never throws: this is called from session status hooks and from the IPC
+// no-op boundaries, neither of which may fail.
+function sendEngineYDocSaveState(
+  sender: Electron.WebContents,
+  generation: number,
+  sessionId: string,
+  state: EngineYDocSaveStateName,
+  seq: number,
+): void {
+  if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) return;
+  try {
+    sender.send(
+      CHANNELS.engineYDocSaveState,
+      EngineYDocSaveStateEventSchema.parse({ sessionId, state, seq }),
+    );
+  } catch {
+    // A malformed status is DROPPED, never thrown through a status hook.
+  }
+}
 const pendingEngineYDocOpensBySender = new Map<number, Set<Promise<void>>>();
 // Senders whose engine-ydoc 'destroyed' cleanup hook is already attached.
 const engineYDocCleanupHooked = new WeakSet<Electron.WebContents>();
@@ -7100,24 +7130,13 @@ function registerIpcHandlers(
             if (state === "settling" && entry) {
               entry.settlingSeq = entry.dirtySeq;
             }
-            if (
-              sender.isDestroyed() ||
-              rendererGeneration(sender.id) !== generation
-            ) {
-              return;
-            }
-            try {
-              sender.send(
-                CHANNELS.engineYDocSaveState,
-                EngineYDocSaveStateEventSchema.parse({
-                  sessionId: input.sessionId,
-                  state,
-                  seq: entry?.settlingSeq ?? 0,
-                }),
-              );
-            } catch {
-              // Never throw through a session status hook (it would wedge main).
-            }
+            sendEngineYDocSaveState(
+              sender,
+              generation,
+              input.sessionId,
+              state,
+              entry?.settlingSeq ?? 0,
+            );
           },
           onRemoteUpdate: (update) => {
             // Forward a co-editor's delta only to the renderer generation that
@@ -7183,6 +7202,8 @@ function registerIpcHandlers(
         session,
         senderId: sender.id,
         workspaceId: workspace.workspaceId,
+        sender,
+        generation,
         dirtySeq: 0,
         settlingSeq: 0,
       });
@@ -7204,11 +7225,21 @@ function registerIpcHandlers(
     if (!entry || entry.senderId !== event.sender.id) return;
     // WS-G2-C-2 (gate fix 4): RE-CHECK the shared-view guard before applying — a
     // workspace can become a read-only shared view after a session opened, and
-    // an update must never write into a shared view. Refuse silently (matches
-    // the unknown-session no-op above).
-    if (sharedViewOf(entry.workspaceId)) return;
+    // an update must never write into a shared view. The IPC answer stays an
+    // inert no-op (it must never throw), but the edit IS being discarded, so
+    // the document must not be left implying it is still on its way to disk.
+    if (sharedViewOf(entry.workspaceId)) {
+      sendEngineYDocSaveState(
+        entry.sender,
+        entry.generation,
+        input.sessionId,
+        "error",
+        input.seq,
+      );
+      return;
+    }
     // Record the edit BEFORE handing it over: applyLocalUpdate arms the
-    // debounced settle, whose onSettleStart snapshots dirtySeq.
+    // debounced settle, whose onSettleStart snapshots the journaled seq.
     entry.dirtySeq = input.seq;
     entry.session.applyLocalUpdate(input.update);
   });

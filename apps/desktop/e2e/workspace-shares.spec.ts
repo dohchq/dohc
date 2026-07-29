@@ -317,7 +317,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
           applyEngineYDocUpdate(payload: {
             sessionId: string;
             update: Uint8Array;
-            seq: number;
           }): Promise<void>;
         };
       }).dohcDesktop;
@@ -344,16 +343,8 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         sessionId: "shared-view-bypass",
         path: "docs/shared.md",
       });
-      // The seq is required by the payload schema (it drives the honest save
-      // indicator). It must be VALID here, or Zod rejects the call before the
-      // unknown-session no-op and this security check silently stops testing
-      // the guard it exists for.
       const engineYDocApply = await capture(() =>
-        api.applyEngineYDocUpdate({
-          sessionId: "shared-view-bypass",
-          update: new Uint8Array([1, 2, 3]),
-          seq: 1,
-        }),
+        api.applyEngineYDocUpdate({ sessionId: "shared-view-bypass", update: new Uint8Array([1, 2, 3]) }),
       );
       return {
         agent,

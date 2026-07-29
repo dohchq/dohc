@@ -133,14 +133,36 @@ export async function openEngineYdocProviderSession(
   }
 
   async function runSettle(summary?: string): Promise<YdocSettleResult> {
-    await journalChain;
-    if (localEditError !== null) throw localEditError;
+    // A journal failure means the edit never reached the engine AT ALL —
+    // strictly worse than a failed settle, and it aborts this settle before
+    // the chain below. Report it on the same channel: otherwise it routes
+    // only to onSessionError, which the desktop wires to a reconnect handler
+    // that drops anything non-reconnect, and the document sits on "Saving…"
+    // forever with nothing logged.
+    try {
+      await journalChain;
+    } catch (error) {
+      notifyError(options.onSettleError, error);
+      throw error;
+    }
+    if (localEditError !== null) {
+      notifyError(options.onSettleError, localEditError);
+      throw localEditError;
+    }
+    // Fire the moment the JOURNAL BARRIER is crossed, not when the settle
+    // finally runs. Everything journaled up to here is what this settle is
+    // guaranteed to carry; a caller snapshotting progress on this hook then
+    // UNDER-claims (edits arriving while we queue behind an in-flight settle
+    // land after the snapshot) instead of over-claiming. Firing it inside the
+    // chain below would make the claim depend on the transport delivering
+    // recordUpdate before settle — true today, but an unwritten contract
+    // holding up the anti-lie mechanism.
+    try {
+      options.onSettleStart?.();
+    } catch {
+      // Observer boundary, like notifyError.
+    }
     const operation = settleChain.then(async () => {
-      try {
-        options.onSettleStart?.();
-      } catch {
-        // Observer boundary, like notifyError.
-      }
       try {
         const result = await session.settle(
           summary !== undefined ? { summary } : undefined,

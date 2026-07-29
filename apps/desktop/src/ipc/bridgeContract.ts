@@ -2824,7 +2824,12 @@ export const ApplyEngineYDocUpdatePayload = z.object({
   // Monotonic per-session local-edit counter. Main echoes the seq a settle
   // STARTED at back on the save-state channel so the renderer never shows
   // "Saved" for a settle that predates the user's latest keystroke.
-  seq: z.number().int().nonnegative(),
+  //
+  // DEFAULTED, never required: this handler is a hardened boundary whose
+  // contract is an inert no-op for an unknown/foreign/read-only session — it
+  // must never throw. A required field would reject at the schema, BEFORE the
+  // session lookup, converting that silent refusal into an exception.
+  seq: z.number().int().nonnegative().default(0),
 });
 export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
 
