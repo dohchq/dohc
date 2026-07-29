@@ -1056,6 +1056,73 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
 }
 
 #[test]
+fn snapshot_metadata_reports_which_paths_the_ydoc_editor_owns() {
+    // AUDIT-SILENTSAVE round 4 (D3). `has_ydoc_marker` is what stops the
+    // desktop capture layer from retiring a settled Y.Doc for exceeding a cap
+    // a Y.Doc is not bound by. The whole daemon half of that fix rests on this
+    // EXISTS subquery, so it is asserted BOTH ways here rather than only
+    // through the e2e.
+    let (_scratch, mut store) = open_store();
+
+    // An ordinary captured text file: no Y.Doc lineage.
+    VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("notes/plain.md", "plain body", 10), &NO_FAULTS)
+        .expect("plain ingest");
+
+    // A materialized Y.Doc head plus its marker, exactly as a settle leaves
+    // them (the marker is what ydoc.open/close key off; the snapshot alone is
+    // just text).
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "obj-ydoc-marker".to_owned(),
+                    path: "notes/settled.md".to_owned(),
+                    text: "settled body".to_owned(),
+                    moment_id: "m-ydoc-marker".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 20,
+                    request_id: None,
+                },
+            )?;
+            tx.execute(
+                "INSERT INTO ydoc_docs \
+                 (workspace_id, version_id, object_id, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![WS, VERSION, "obj-ydoc-marker", 20i64],
+            )
+            .expect("ydoc marker insert");
+            Ok::<(), DomainError>(())
+        })
+        .expect("ydoc marker");
+
+    let rows = VersionedTextStore::new(&mut store)
+        .list_snapshot_metadata(WS, VERSION, None, 50)
+        .expect("list metadata");
+    let marker_for = |path: &str| {
+        rows.iter()
+            .find(|row| row.path == path)
+            .unwrap_or_else(|| panic!("no row for {path}"))
+            .has_ydoc_marker
+    };
+
+    assert!(
+        marker_for("notes/settled.md"),
+        "a path with a ydoc_docs marker must report has_ydoc_marker"
+    );
+    assert!(
+        !marker_for("notes/plain.md"),
+        "an ordinary captured file must NOT report has_ydoc_marker"
+    );
+}
+
+#[test]
 fn capture_ingest_persists_the_supplied_summary_and_correlation() {
     // MUTATION: reverting either plumb-through in capture_ingest_in_tx /
     // capture_ingest_binary_in_tx (back to hardcoded None) fails this test —
