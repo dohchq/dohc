@@ -960,7 +960,15 @@ function MarkdownView(props: {
   // so without lifting the engine state the tab dot would be dead while the
   // engine Y.Doc is still settling.
   useEffect(() => {
-    onSaveStateChange?.(engine.available ? engine.saveState : saveState);
+    if (!engine.available) {
+      onSaveStateChange?.(saveState);
+      return;
+    }
+    // The shell's dot has three states; a read-only refusal is an unsaved
+    // document as far as the tab is concerned.
+    onSaveStateChange?.(
+      engine.saveState === "read-only" ? "error" : engine.saveState,
+    );
   }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
 
   useEffect(() => {
@@ -1177,9 +1185,26 @@ function MarkdownView(props: {
               <span
                 data-testid="markdown-save-state"
                 data-state={engine.saveState}
-                className="font-mono text-[11px] text-subtle"
+                title={
+                  engine.saveState === "error"
+                    ? "Your edits are still here, but the file on disk is behind them. Keep this document open and try another edit."
+                    : engine.saveState === "read-only"
+                      ? "This document is shared with you to read. Your changes stay on screen but are not saved."
+                      : undefined
+                }
+                className={`font-mono text-[11px] ${
+                  engine.saveState === "error" || engine.saveState === "read-only"
+                    ? "text-danger"
+                    : "text-subtle"
+                }`}
               >
-                {engine.saveState === "saved" ? "Saved" : "Saving…"}
+                {engine.saveState === "saved"
+                  ? "Saved"
+                  : engine.saveState === "saving"
+                    ? "Saving…"
+                    : engine.saveState === "read-only"
+                      ? "Read-only"
+                      : "Couldn't save"}
               </span>
               <button
                 type="button"

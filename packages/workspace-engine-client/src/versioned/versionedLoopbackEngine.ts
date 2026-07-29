@@ -971,6 +971,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
         updatedAtMs: file.updatedAtMs,
         latestMomentId: file.latestMomentId,
         metadataOrigin: file.metadataOrigin,
+        // The loopback has no Y.Doc lineage of its own; a settle-owned path
+        // is modelled by the ydoc loopback engine, not this one.
+        hasYdocMarker: false,
       })),
       nextAfterPath: files.length > page.length ? page.at(-1)?.[0] ?? null : null,
     };

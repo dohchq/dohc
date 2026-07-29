@@ -3605,6 +3605,7 @@ impl EngineService {
                     "metadataOrigin": row.metadata_origin,
                     "metadataSummary": row.metadata_summary,
                     "metadataCorrelationId": row.metadata_correlation_id,
+                    "hasYdocMarker": row.has_ydoc_marker,
                 })
             })
             .collect();
@@ -7052,6 +7053,7 @@ impl EngineService {
             path: settled.path,
             markdown: settled.markdown,
             sha256: settled.sha256,
+            materialized: settled.materialized,
             projection: YdocProjectionProvenance {
                 content_kind: ydoc_content_kind_name(settled.projection.content_kind),
                 source_state_vector_sha256: settled.projection.source_state_vector_sha256,
@@ -8580,8 +8582,15 @@ struct YdocProjectionProvenance {
 struct YdocSettleResult {
     moment_id: String,
     path: String,
-    markdown: String,
+    /// `null` once the settled markdown is past the in-band cap. The settle
+    /// still committed and the daemon wrote the file — the client reads it
+    /// from disk rather than echoing it back over the wire.
+    markdown: Option<String>,
     sha256: String,
+    /// `false` when the settle committed but materialization was blocked by
+    /// containment: the file on disk is still the OLD artifact and the write
+    /// is pending a retry. Nothing may report the document as saved on this.
+    materialized: bool,
     projection: YdocProjectionProvenance,
 }
 

@@ -717,6 +717,7 @@ describe("createCaptureLiveStores", () => {
               updatedAtMs: 2,
               latestMomentId: "moment",
               metadataOrigin: "capture",
+              hasYdocMarker: false,
               metadataSummary: null,
               metadataCorrelationId: null,
             },

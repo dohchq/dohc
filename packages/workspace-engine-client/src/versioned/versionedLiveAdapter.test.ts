@@ -970,6 +970,7 @@ describe("VersionedLiveAdapter", () => {
             updatedAtMs: 1,
             latestMomentId: "moment",
             metadataOrigin: "api",
+            hasYdocMarker: false,
           },
         ],
         nextAfterPath: null,
@@ -1055,6 +1056,7 @@ describe("VersionedLiveAdapter", () => {
       updatedAtMs: index,
       latestMomentId: `moment-${index}`,
       metadataOrigin: "api",
+      hasYdocMarker: false,
     }));
     let inFlight = 0;
     let maxInFlight = 0;

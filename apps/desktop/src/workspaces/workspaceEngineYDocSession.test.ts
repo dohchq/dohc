@@ -304,6 +304,169 @@ it("resumes the rich content on reopen (replicated lineage, no relay)", async ()
   await capture.stop();
 });
 
+it("a settle past the 128 KiB CAPTURE cap keeps the engine record — the watcher must not retire our own write", async () => {
+  // AUDIT-SILENTSAVE round 2 (codex P1). A Y.Doc is not bounded by
+  // MAX_ENGINE_CAPTURE_TEXT_BYTES (128 KiB), but the capture reader is: a
+  // settle that materializes a bigger file comes back `untracked-content`,
+  // and that branch retired the path WITHOUT checking the expected-event
+  // registry — deleting the document's engine record while the editor
+  // reported "Saved". The dogfood journey's repro was 131,442 bytes, i.e.
+  // exactly here.
+  const capture = makeCapture();
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });
+
+  // Past 128 KiB, like the journey.
+  const huge = "Oversized settled paragraph for the capture cap.\n".repeat(3_000);
+  expect(Buffer.byteLength(huge, "utf8")).toBeGreaterThan(128 * 1024);
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, huge);
+  await session.settleNow();
+
+  const momentsAfterSettle = momentCountForPath(PATH);
+  expect(momentsAfterSettle).toBeGreaterThan(0);
+  const onDisk = await readFile(join(root, PATH), "utf8");
+  expect(Buffer.byteLength(onDisk, "utf8")).toBeGreaterThan(128 * 1024);
+
+  // The watcher now observes the settle's OWN oversized write.
+  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  await capture.flush();
+
+  // THE load-bearing assertion: the record survives. Before the fix this
+  // path ran deleteIfTracked and the document vanished from the engine.
+  const projected = await store.readTextFile({ workspaceId: WS, versionId, path: PATH });
+  expect(projected).not.toBeNull();
+  expect(projected?.text).toContain("Oversized settled paragraph for the capture cap.");
+  // And it was not retired-then-recreated: no new moment was journaled for
+  // our own write.
+  expect(momentCountForPath(PATH)).toBe(momentsAfterSettle);
+
+  await session.close();
+  await capture.stop();
+});
+
+it("a settled over-cap doc SURVIVES an app restart — the startup reconcile must not retire it", async () => {
+  // AUDIT-SILENTSAVE round 3. Guarding only the live watcher path was not
+  // enough: the STARTUP RECONCILE retires by the same "not engine-ownable
+  // text" rule, and it cannot use the expected-event registry at all — those
+  // entries expire in seconds while reconcile runs at launch. Without an
+  // ownership check the user pastes 131 KB, sees an honest "Saved" with the
+  // bytes on disk, quits, reopens — and the engine record is gone, the
+  // document silently demoted out of the engine editor, on every launch.
+  const capture = makeCapture();
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });
+  const huge = "Oversized settled paragraph that must survive a restart.\n".repeat(3_500);
+  expect(Buffer.byteLength(huge, "utf8")).toBeGreaterThan(128 * 1024);
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, huge);
+  await session.settleNow();
+  await session.close();
+  await capture.stop();
+
+  const beforeRestart = await store.readTextFile({ workspaceId: WS, versionId, path: PATH });
+  expect(beforeRestart?.text).toContain("Oversized settled paragraph");
+
+  // THE RESTART: a brand-new capture over the same store + root, started
+  // exactly as the app does at launch.
+  const relaunched = createWorkspaceEngineCapture({
+    workspaceId: WS,
+    rootPath: root,
+    store,
+  });
+  relaunched.start();
+  await relaunched.flush();
+
+  const afterRestart = await store.readTextFile({ workspaceId: WS, versionId, path: PATH });
+  expect(
+    afterRestart,
+    "the startup reconcile retired the engine record for the over-cap Y.Doc",
+  ).not.toBeNull();
+  expect(afterRestart?.text).toContain("Oversized settled paragraph");
+  // The file itself was never in danger — only the engine record.
+  expect(await readFile(join(root, PATH), "utf8")).toContain(
+    "Oversized settled paragraph",
+  );
+
+  await relaunched.stop();
+});
+
+it("an EXTERNAL oversized write to a CLOSED Y.Doc-owned doc keeps the record too", async () => {
+  // AUDIT-SILENTSAVE round 4 (D2). The watcher path deferred only to a LIVE
+  // session while the startup reconcile defers to ownership, so the two
+  // disagreed: a Y.Doc-owned doc that is not open, rewritten on disk by an
+  // agent / sync client / git checkout / formatter, got retired on evidence
+  // the reconcile would have kept. Agents writing files directly is a
+  // first-class dohc flow, so ownership has to decide in both places.
+  const capture = makeCapture();
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Owned by the Y.Doc editor.");
+  await session.settleNow();
+  // CLOSED: no live session guards this path any more.
+  await session.close();
+
+  // Somebody else rewrites the file, past the capture text cap.
+  await seedDiskFile(PATH, "x".repeat(140 * 1024));
+  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  await capture.flush();
+
+  const projected = await store.readTextFile({ workspaceId: WS, versionId, path: PATH });
+  expect(
+    projected,
+    "an external oversized write retired a Y.Doc-owned record the reconcile would keep",
+  ).not.toBeNull();
+
+  await capture.stop();
+});
+
+it("a FAILING settle is logged and reported as an error save-state — the doc never reads Saved", async () => {
+  // AUDIT-SILENTSAVE. This is the seam the bug lived in: a settle failure went
+  // to onSessionError, which the capture wires to a reconnect handler that
+  // returns early for anything that is not a reconnect error. The refusal was
+  // dropped with no log and no UI, and the editor kept reading "Saved" while
+  // the .md never received a byte. Three dogfood journeys watched exactly this.
+  const refusal = new Error("engine refused the projection");
+  const failingStore: VersionedTextStore = {
+    ...store,
+    writeProjectedTextFile: async () => {
+      throw refusal;
+    },
+  };
+  const logged: Array<{ context: string; error: unknown }> = [];
+  const states: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: WS,
+    rootPath: root,
+    store: failingStore,
+    onError: (context, error) => logged.push({ context, error }),
+  });
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => {},
+    onSaveState: (state) => states.push(state),
+  });
+
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed into a doc that cannot save.");
+  await expect(session.settleNow()).rejects.toBe(refusal);
+
+  // (a) The failure is LOGGED with the path and the underlying error.
+  const entry = logged.find((item) => item.error === refusal);
+  expect(entry).toBeDefined();
+  expect(entry?.context).toContain(PATH);
+
+  // (b) It reaches the UI as an error — and "saved" is never claimed.
+  expect(states).toContain("settling");
+  expect(states).toContain("error");
+  expect(states).not.toContain("saved");
+
+  // The file on disk really is behind: it still holds only the seeded text.
+  const onDisk = await readFile(join(root, PATH), "utf8");
+  expect(onDisk).not.toContain("Typed into a doc that cannot save.");
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop().catch(() => undefined);
+});
+
 it("refuses a secret-classified path (surfaced, not crashed) and never guards it", async () => {
   const capture = makeCapture();
   await expect(

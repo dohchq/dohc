@@ -45,6 +45,10 @@ export interface CaptureTextFileMetadata {
   sha256: string | null;
   updatedAtMs: number;
   latestMomentId: string;
+  // Is this path owned by the Y.Doc editor? Reconciliation must not retire a
+  // Y.Doc-owned record for being un-ownable content: a settled Y.Doc is
+  // bounded by nothing, while ordinary captured text is capped.
+  hasYdocMarker: boolean;
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
@@ -507,6 +511,7 @@ export function createCaptureLiveStores(
         sha256: row.sha256,
         updatedAtMs: row.updatedAtMs,
         latestMomentId: row.latestMomentId,
+        hasYdocMarker: row.hasYdocMarker,
       }));
     },
 

@@ -409,6 +409,11 @@ export type VersionedTextListEntry = JsonObject & {
   updatedAtMs: number;
   latestMomentId: string;
   metadataOrigin: string;
+  // Is this path owned by the Y.Doc editor (a ydoc_docs marker exists)? A
+  // settled Y.Doc is bounded by nothing, so callers that hold size limits for
+  // ordinary captured content must not mistake the engine's own artifact for
+  // content it cannot own.
+  hasYdocMarker: boolean;
   metadataSummary?: string | null;
   metadataCorrelationId?: string | null;
 };
@@ -1598,6 +1603,7 @@ export function decodeVersionedTextListResult(
       "updatedAtMs",
       "latestMomentId",
       "metadataOrigin",
+      "hasYdocMarker",
       "metadataSummary",
       "metadataCorrelationId",
     ]);
@@ -1611,6 +1617,7 @@ export function decodeVersionedTextListResult(
       updatedAtMs: numberValue(row, "updatedAtMs", entryLabel),
       latestMomentId: stringValue(row, "latestMomentId", entryLabel),
       metadataOrigin: stringValue(row, "metadataOrigin", entryLabel),
+      hasYdocMarker: booleanValue(row, "hasYdocMarker", entryLabel),
     };
     if (row.metadataSummary !== undefined) {
       decoded.metadataSummary = nullableStringValue(

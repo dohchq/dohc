@@ -387,6 +387,51 @@ export function parseEngineYDocRemoteUpdateEvent(
   return { sessionId, update };
 }
 
+// The editor's save indicator, pushed from main on every real settle outcome.
+// It replaced a renderer-side timer that flipped to "saved" on a timeout no
+// matter what the engine did — a doc could read "Saved" over a zero-byte file.
+// "read-only" is a SEPARATE refusal from "error": the workspace became a
+// read-only shared view, so this edit and every edit after it is discarded.
+// Advice that suits a transient failure ("try another edit") is futile there,
+// so the two must not share a string.
+export const ENGINE_YDOC_SAVE_STATES = [
+  "settling",
+  "saved",
+  "error",
+  "read-only",
+] as const;
+export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];
+
+export interface EngineYDocSaveStateEvent {
+  sessionId: string;
+  state: EngineYDocSaveStateName;
+  // The highest applyLocalUpdate seq main had journaled when this settle
+  // STARTED. The renderer clears to "saved" only once this covers its latest
+  // local edit — otherwise an in-flight settle's success would claim edits it
+  // never carried.
+  seq: number;
+}
+
+export function parseEngineYDocSaveStateEvent(
+  value: unknown,
+): EngineYDocSaveStateEvent | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { sessionId, state, seq } = value as {
+    sessionId?: unknown;
+    state?: unknown;
+    seq?: unknown;
+  };
+  if (!isBoundedString(sessionId, ENGINE_YDOC_SESSION_ID_MAX_CHARS)) return null;
+  if (
+    typeof state !== "string" ||
+    !(ENGINE_YDOC_SAVE_STATES as readonly string[]).includes(state)
+  ) {
+    return null;
+  }
+  if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) return null;
+  return { sessionId, state: state as EngineYDocSaveStateName, seq };
+}
+
 export interface WorkspaceActivatedEvent {
   workspaceId: string;
   rootPath: string;
@@ -567,6 +612,7 @@ export const CHANNELS = {
   engineYDocApplyUpdate: "desktop:engine-ydoc-apply-update",
   engineYDocClose: "desktop:engine-ydoc-close",
   engineYDocRemoteUpdate: "desktop:engine-ydoc-remote-update",
+  engineYDocSaveState: "desktop:engine-ydoc-save-state",
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",
   updateState: "desktop:update-state",

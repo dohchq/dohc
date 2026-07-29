@@ -818,6 +818,13 @@ describe("engine markdown source view", () => {
     const remoteListeners = new Set<
       (event: { sessionId: string; update: Uint8Array }) => void
     >();
+    const saveStateListeners = new Set<
+      (event: {
+        sessionId: string;
+        state: "settling" | "saved" | "error";
+        seq: number;
+      }) => void
+    >();
     let sessionId = "";
     const bridgeMock = {
       readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false })),
@@ -841,6 +848,22 @@ describe("engine markdown source view", () => {
         (listener: (event: { sessionId: string; update: Uint8Array }) => void) => {
           remoteListeners.add(listener);
           return () => remoteListeners.delete(listener);
+        },
+      ),
+      // The engine editor subscribes to real settle outcomes on mount (the
+      // save indicator is no longer a timer). Without this the hook throws
+      // "onEngineYDocSaveState is not a function" the moment an enabled
+      // engine document renders.
+      onEngineYDocSaveState: vi.fn(
+        (
+          listener: (event: {
+            sessionId: string;
+            state: "settling" | "saved" | "error";
+            seq: number;
+          }) => void,
+        ) => {
+          saveStateListeners.add(listener);
+          return () => saveStateListeners.delete(listener);
         },
       ),
     };

@@ -410,7 +410,7 @@ describe("YdocLiveAdapter", () => {
     expect(session.doc.getText("plainText").toString()).toBe(content);
     expect(engine.sessionText(session.sessionId)).toBe(content);
     expect(settled.markdown).toBe(content);
-    expect([...settled.markdown]).toEqual([...content]);
+    expect([...(settled.markdown ?? "")]).toEqual([...content]);
 
     await session.close({ settle: false });
     adapter.dispose();
@@ -593,6 +593,170 @@ describe("YdocLiveAdapter", () => {
 
     await session.close({ settle: false });
     adapter.dispose();
+  });
+
+  it("reports a DEBOUNCED settle failure to onSettleError, not only to onSessionError", async () => {
+    // AUDIT-SILENTSAVE. The debounced settle is the only path that writes the
+    // user's edits to their file. Its failure used to go to onSessionError
+    // alone, and the desktop wires that to a reconnect handler which returns
+    // early for anything that is not a reconnect error — so a refusal was
+    // dropped with no log and no UI, and the doc kept reading "Saved" over a
+    // file that never received a byte.
+    const engine = seedPlaintextEngine();
+    const settleFailure = new Error("injected settle refusal");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle) throw settleFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const settleErrors: unknown[] = [];
+    const settleStarts: number[] = [];
+    const settled: unknown[] = [];
+    let fireDebouncedSettle: (() => void) | null = null;
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleStart: () => settleStarts.push(settleStarts.length),
+      onSettleError: (error) => settleErrors.push(error),
+      onSettled: (result) => {
+        settled.push(result);
+      },
+      // Capture the debounced callback so the test drives the REAL debounced
+      // path (the one that swallowed the failure) rather than settleNow.
+      scheduleSettle: (fn) => {
+        fireDebouncedSettle = fn;
+        return () => {
+          fireDebouncedSettle = null;
+        };
+      },
+    });
+
+    const update = plaintextUpdate(provider.initialUpdate, (text) => {
+      text.insert(0, "typed but never saved");
+    });
+    await provider.applyLocalUpdate(update);
+
+    expect(fireDebouncedSettle).not.toBeNull();
+    fireDebouncedSettle!();
+    // The debounced settle rejects internally; let the chain drain.
+    for (let tick = 0; tick < 50 && settleErrors.length === 0; tick += 1) {
+      await Promise.resolve();
+    }
+
+    expect(settleErrors[0]).toBe(settleFailure);
+    // A settle STARTED, so a caller can show "saving" honestly...
+    expect(settleStarts).toHaveLength(1);
+    // ...and it never reported success, so nothing may claim the file is saved.
+    expect(settled).toEqual([]);
+
+    await provider.close({ settle: false });
+  });
+
+  it("announces a settle at the JOURNAL BARRIER, not when it finally runs", async () => {
+    // Round 3 (D5). onSettleStart used to fire inside the settle chain, so a
+    // settle QUEUED behind an in-flight one announced itself only once the
+    // first finished. A caller snapshotting edit progress on that hook then
+    // captured a counter that had already advanced past what the settle
+    // would carry, and the later success over-claimed those keystrokes.
+    // Firing at the barrier makes the snapshot conservative instead.
+    const engine = seedPlaintextEngine();
+    let releaseFirstSettle!: () => void;
+    const firstSettleGate = new Promise<void>((resolve) => {
+      releaseFirstSettle = resolve;
+    });
+    let settles = 0;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle) {
+          settles += 1;
+          if (settles === 1) await firstSettleGate;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const events: string[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleStart: () => events.push("settling"),
+      onSettled: () => {
+        events.push("settled");
+      },
+      scheduleSettle: () => () => undefined,
+    });
+
+    const first = provider.settleNow();
+    const second = provider.settleNow();
+    // Drain microtasks: both settles reach their barrier, but neither can
+    // COMPLETE while the first is held at the transport.
+    for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+
+    expect(events.filter((event) => event === "settling")).toHaveLength(2);
+    expect(events).not.toContain("settled");
+
+    releaseFirstSettle();
+    await first;
+    await second;
+    expect(events.filter((event) => event === "settled")).toHaveLength(2);
+
+    await provider.close({ settle: false });
+  });
+
+  it("reports a JOURNAL failure to onSettleError too — the edit never reached the engine", async () => {
+    // Round 2 (D2b). runSettle aborts on a journal failure BEFORE the settle
+    // chain, so onSettleStart/onSettleError never fired and the error routed
+    // only to onSessionError — the same reconnect-only sink this PR exists to
+    // stop relying on. A recordUpdate that failed is worse than a settle that
+    // failed: the edit is not even in the engine.
+    const engine = seedPlaintextEngine();
+    const recordFailure = new Error("injected record failure");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const settleErrors: unknown[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleError: (error) => settleErrors.push(error),
+      scheduleSettle: () => () => undefined,
+    });
+
+    const update = plaintextUpdate(provider.initialUpdate, (text) => {
+      text.insert(0, "never journaled");
+    });
+    await provider.applyLocalUpdate(update).catch(() => undefined);
+    await provider.settleNow().catch(() => undefined);
+
+    // The failure that reaches the save-state channel is the REAL cause —
+    // the refused recordUpdate — not some generic wrapper.
+    expect(settleErrors.length).toBeGreaterThan(0);
+    expect(
+      settleErrors.some(
+        (error) =>
+          error === recordFailure ||
+          (error instanceof Error && error.cause === recordFailure),
+      ),
+    ).toBe(true);
+    await provider.close({ settle: false }).catch(() => undefined);
   });
 
   it("surfaces an unrecoverable journal update and still closes the provider", async () => {

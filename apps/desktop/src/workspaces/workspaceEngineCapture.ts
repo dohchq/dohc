@@ -278,6 +278,11 @@ export interface WorkspaceVersionConflictResolveOutcome {
   remaining: VersionedTextConflictRecord[];
 }
 
+// The save state of a live engine Y.Doc, derived from REAL settle outcomes.
+// "saved" means the projection committed and the .md landed — nothing else may
+// claim it.
+export type EngineYDocSaveState = "settling" | "saved" | "error";
+
 export interface WorkspaceEngineCapture {
   // Kicks the background startup reconciliation (closed-period edits — and,
   // after a mid-switch crash, the recovery pass). Runs on the capture chain,
@@ -309,6 +314,13 @@ export interface WorkspaceEngineCapture {
     path: string;
     onRemoteUpdate: (update: Uint8Array) => void;
     contentKind?: YDocContentKind;
+    // The HONEST save state for this document, reported on every settle:
+    // "settling" when one starts, "saved" only when the projection AND the
+    // .md actually landed, "error" when the settle failed and the file on
+    // disk is therefore behind the editor. A failed settle used to reach
+    // nothing at all — the doc kept reading "Saved" over a stale (or empty)
+    // file, which is silent data loss.
+    onSaveState?: (state: EngineYDocSaveState, token: number) => void;
   }): Promise<EngineYDocProviderSession>;
   // WS-G2-C-2 (gate fix 3): flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does NOT run through the capture chain
@@ -562,7 +574,11 @@ type DiskTextState =
   // Engine-ownable binary content within the binary cap.
   | { kind: "binary"; bytes: Buffer; sha256: string; byteLength: number }
   // Present but not engine-ownable (binary, oversized, or non-UTF-8 text).
-  | { kind: "untracked-content" }
+  // `sha256` is carried ONLY for genuine UTF-8 text that is merely over the
+  // text cap: a Y.Doc settle is not bounded by that cap, so its own
+  // materialization can land here, and the self-write check needs the same
+  // sha-precise identity every other branch uses.
+  | { kind: "untracked-content"; sha256?: string }
   // Transiently unreadable (EACCES/EBUSY/...): leave engine state alone.
   | { kind: "unreadable" };
 
@@ -629,7 +645,13 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
     // (round-trips through UTF-8) is held to the smaller text cap.
     if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
     const bytes = await readFile(absolute);
-    if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
+    if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
+      // Bytes in hand: carry the sha so a settle's own materialization past
+      // even the BINARY cap is recognizable as our write, exactly like the
+      // text-cap case below. (The size-only early-out above cannot — it
+      // deliberately refuses to load the file to find out.)
+      return { kind: "untracked-content", sha256: sha256Bytes(bytes) };
+    }
     const text = bytes.toString("utf8");
     // The engine only stores text that round-trips through UTF-8; anything
     // else is binary in disguise, not engine-ownable as text.
@@ -637,8 +659,12 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
       return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
     }
     // Genuine text over the text cap stays untracked (established behavior —
-    // oversized text is neither snapshotted nor demoted to bytes).
-    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    // oversized text is neither snapshotted nor demoted to bytes). The sha
+    // rides along so a settle's own oversized materialization is still
+    // recognizable as OUR write rather than a reason to retire the record.
+    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+      return { kind: "untracked-content", sha256: sha256Utf8(text) };
+    }
     return { kind: "text", text, sha256: sha256Utf8(text) };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -1032,10 +1058,15 @@ export function createWorkspaceEngineCapture(
     onDead: () => void;
     onAlive: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
-    onSettled: (result: {
-      sha256: string;
-      markdown: string;
-    }) => void | Promise<void>;
+    onSettled: (
+      result: {
+        sha256: string;
+        markdown: string | null;
+      },
+      token: number,
+    ) => void | Promise<void>;
+    onSettleStart: (token: number) => void;
+    onSettleError: (error: unknown, token: number) => void;
   }): Promise<EngineYDocProviderSession> {
     const sessions = options.rustEngineSessions!;
     const openProvider =
@@ -1157,7 +1188,12 @@ export function createWorkspaceEngineCapture(
               input.onRemoteUpdate(update);
             },
             onLocalEditError: requestReconnect,
+            // requestReconnect returns early for anything that is not a
+            // reconnect error, so it is NOT an error sink: every settle
+            // failure also goes to onSettleError, which reports it.
             onSessionError: requestReconnect,
+            onSettleStart: input.onSettleStart,
+            onSettleError: input.onSettleError,
             onSettled: input.onSettled,
           });
           openingRemoteUpdates.set(opened, opening);
@@ -1574,6 +1610,24 @@ export function createWorkspaceEngineCapture(
     return active?.id ?? ENGINE_MAIN_VERSION_ID;
   }
 
+  // "Which paths does the Y.Doc editor own?", memoized for one task. Only a
+  // RETIREMENT decision needs it, so a task that retires nothing never builds
+  // it; a task that retires many pays for one listing, not one per path.
+  function makeYdocOwnedPathsLookup(
+    engine: VersionedTextStore,
+    versionId: string,
+  ): () => Promise<Set<string>> {
+    let cache: Set<string> | null = null;
+    return async () => {
+      cache ??= new Set(
+        (await listTextFileMetadata(engine, versionId))
+          .filter((file) => file.hasYdocMarker)
+          .map((file) => file.path),
+      );
+      return cache;
+    };
+  }
+
   async function listTextFileMetadata(
     engine: VersionedTextStore,
     versionId: string,
@@ -1583,6 +1637,12 @@ export function createWorkspaceEngineCapture(
       return await captureEngine.listTextFileMetadata({ workspaceId, versionId });
     }
     const snapshots = await engine.listTextFiles({ workspaceId, versionId });
+    // The in-process store has no metadata listing, so the Y.Doc marker is
+    // read straight from engine.db through the write lane it owns. An engine
+    // without the lane answers "no marker", which only costs the oversized
+    // Y.Doc protection the daemon path gets — it never retires anything the
+    // old code would have kept.
+    const ydocObjectIds = await ydocMarkedObjectIds(engine, versionId);
     return snapshots.map((snapshot) => ({
       path: snapshot.path,
       objectId: snapshot.objectId,
@@ -1595,7 +1655,35 @@ export function createWorkspaceEngineCapture(
           : sha256Utf8(snapshot.text)),
       updatedAtMs: snapshot.updatedAtMs,
       latestMomentId: snapshot.latestMomentId,
+      hasYdocMarker: ydocObjectIds.has(snapshot.objectId),
     }));
+  }
+
+  // Object ids carrying a ydoc_docs marker in this version. MARKER-EXISTS,
+  // not durable-state: a default local close prunes updates and snapshots but
+  // KEEPS the marker, and such a file is still Y.Doc-owned.
+  async function ydocMarkedObjectIds(
+    engine: VersionedTextStore,
+    versionId: string,
+  ): Promise<Set<string>> {
+    const runInLane = engine.runInEngineWriteLane?.bind(engine);
+    if (!runInLane) return new Set();
+    try {
+      const ids = await runInLane((connection) => {
+        const rows = connection
+          .prepare(
+            "SELECT object_id AS objectId FROM ydoc_docs WHERE workspace_id = ? AND version_id = ?",
+          )
+          .all(workspaceId, versionId) as Array<{ objectId: string }>;
+        return rows.map((row) => row.objectId);
+      });
+      return new Set(ids);
+    } catch (error) {
+      // A store without the table (or a read failure) must not take the
+      // reconcile pass down; fall back to "no markers".
+      onError("ydoc marker lookup", error);
+      return new Set();
+    }
   }
 
   function consumeExpectedEvent(
@@ -1750,6 +1838,7 @@ export function createWorkspaceEngineCapture(
     event: WatcherEvent,
     policy: WorkspaceEnginePolicySnapshot,
     metadata: ActorNeutralWriteMetadata,
+    ydocOwnedPaths: () => Promise<Set<string>>,
     author?: MomentAuthor,
   ): Promise<void> {
     // The secret floor outranks policy: secret paths route to the encrypted
@@ -1792,6 +1881,37 @@ export function createWorkspaceEngineCapture(
       return;
     }
     if (disk.kind === "untracked-content") {
+      // OUR OWN settle materialization can land here. A Y.Doc is not bounded
+      // by MAX_ENGINE_CAPTURE_TEXT_BYTES (128 KiB), so a document grown past
+      // it materializes a file this reader classifies as un-ownable — and
+      // retiring the record would DELETE the document's engine history while
+      // the editor reports "Saved". (The dogfood journey's repro was 131,442
+      // bytes, right into this trap.) Every other branch here checks the
+      // expected-event registry first; this one must too, with the same
+      // sha-precise identity so a genuine external oversized write still
+      // retires the path as designed.
+      if (
+        disk.sha256 !== undefined &&
+        consumeExpectedEvent("write", event.path, disk.sha256)
+      ) {
+        return;
+      }
+      // OWNERSHIP decides, exactly as the startup reconcile decides. A Y.Doc
+      // is bounded by nothing, so its settled artifact routinely reads as
+      // un-ownable here — and that is true whoever wrote the bytes and
+      // whether or not the doc is open. An agent writing the .md directly is
+      // a first-class dohc flow, so keying this on a LIVE session would
+      // retire records the reconcile keeps. This is not the blanket
+      // live-path skip gate fix 1 removed: ordinary capture of a live path is
+      // untouched; only the retirement decision defers to ownership.
+      // Two checks, and BOTH are load-bearing. The marker lookup is memoized
+      // once per batch, but openYDocSession does NOT run on the capture
+      // chain — a document opened partway through a batch is absent from a
+      // memo built earlier in that same batch. The live-session check covers
+      // exactly that window; deleting it would reopen the race for a doc the
+      // user just opened.
+      if (liveYDocSessions.has(event.path)) return;
+      if ((await ydocOwnedPaths()).has(event.path)) return;
       // The path stopped being engine-ownable text: retire it from engine
       // state rather than leaving a stale snapshot behind. The batch author
       // rides along — the run's write is what retired it.
@@ -1833,6 +1953,7 @@ export function createWorkspaceEngineCapture(
       );
     }
     const diskPaths = new Set<string>();
+    const ydocOwnedPaths = makeYdocOwnedPathsLookup(engine, versionId);
     // Secret paths reconcile into the ENCRYPTED store (PR 08): capture the
     // current disk plaintext (metadata-only moments), and retire entries
     // whose files vanished. Transiently unreadable secrets are left alone.
@@ -1877,6 +1998,22 @@ export function createWorkspaceEngineCapture(
       if (disk.kind === "unreadable") continue;
       if (disk.kind === "text" || disk.kind === "binary") {
         await writeIfChanged(engine, versionId, file.path, disk, metadata);
+      } else if (
+        disk.kind === "untracked-content" &&
+        (await ydocOwnedPaths()).has(file.path)
+      ) {
+        // A path the Y.Doc EDITOR owns. Its content is whatever the CRDT
+        // projects — a settle is bounded by nothing, so it routinely exceeds
+        // the caps ordinary captured text is held to, and the reader then
+        // reports it as un-ownable. Retiring here would journal a "Stopped
+        // tracking" delete for a document the user is actively editing, on
+        // every single launch, and drop it back to the plain editor.
+        //
+        // The expected-event registry cannot help at this layer: those
+        // entries expire in seconds and reconciliation runs at startup, long
+        // after the write. Ownership is the durable fact, so ownership is
+        // what this asks.
+        continue;
       } else {
         // absent (raced a delete) or no longer engine-ownable text.
         await deleteIfTracked(engine, versionId, file.path, metadata);
@@ -2232,10 +2369,19 @@ export function createWorkspaceEngineCapture(
           const engine = await engineStore();
           const versionId = await activeVersionIdOf(engine);
           const metadata: ActorNeutralWriteMetadata = { origin: "local-file" };
+          const ydocOwnedPaths = makeYdocOwnedPathsLookup(engine, versionId);
           let pathFailures = 0;
           for (const event of batch) {
             try {
-              await captureOnePath(engine, versionId, event, policy, metadata, author);
+              await captureOnePath(
+                engine,
+                versionId,
+                event,
+                policy,
+                metadata,
+                ydocOwnedPaths,
+                author,
+              );
             } catch (error) {
               // One bad path must not drop the rest of the batch.
               pathFailures += 1;
@@ -2275,17 +2421,61 @@ export function createWorkspaceEngineCapture(
       // write connection and node:sqlite deadlocks.
       const engine = await engineStore();
       const versionId = await activeVersionIdOf(engine);
-      const onSettled = async (result: {
+      const reportSaveState = (
+        state: EngineYDocSaveState,
+        token: number,
+      ): void => {
+        try {
+          input.onSaveState?.(state, token);
+        } catch {
+          // Observer boundary: a renderer-facing status hook must never
+          // re-enter the session or wedge the settle chain.
+        }
+      };
+      const onSettled = async (
+        result: {
         sha256: string;
-        markdown: string;
-      }) => {
-        // Register the settle's self-write (sha of the projected markdown) so
+        markdown: string | null;
+        // OPTIONAL here on purpose, though the daemon wire decoder REQUIRES
+        // it: the in-process driver (packages/workspace-engine) has no
+        // materialization job and never sets it. Absent therefore means "no
+        // separate materialization step to fail", which is the safe reading
+        // for that driver — only an explicit `false` suppresses the save.
+        materialized?: boolean;
+        },
+        token: number,
+      ) => {
+        // The settle committed, but the engine says the FILE did not move
+        // (materialization blocked by containment — a symlinked target — with
+        // the write pending a retry). Nothing below would notice: the
+        // over-cap path does not write, and the mirror write cannot rescue a
+        // target the engine already refused. Say so rather than report a save
+        // the disk never received.
+        if (result.materialized === false) {
+          onError(
+            `ydoc settle of ${input.path}`,
+            new Error(
+              "the engine committed the settle but could not write the file (blocked target); the write is pending a retry",
+            ),
+          );
+          reportSaveState("error", token);
+          return;
+        }
+        // Register the settle's self-write (sha of the settled markdown) so
         // even a watcher event that lands after the live-path guard lifts on
-        // close is recognized as our own; then write the on-disk .md the
-        // user/agent sees, through the contained disk writer.
+        // close is recognized as our own. The ENGINE materializes the .md
+        // itself; this write is the desktop's mirror of the same bytes.
         const cancel = registerExpectedEngineEvents([
           { path: input.path, operation: "write", sha256: result.sha256 },
         ]);
+        // markdown === null: the body is past the engine's in-band response
+        // cap, so it did not ride back over the wire. The engine already
+        // materialized it — writing result.markdown here would truncate the
+        // user's file, which is exactly the loss this path must prevent.
+        if (result.markdown === null) {
+          reportSaveState("saved", token);
+          return;
+        }
         try {
           await diskWriter.writeTextFile(
             join(rootPath, input.path),
@@ -2294,7 +2484,19 @@ export function createWorkspaceEngineCapture(
         } catch (error) {
           cancel();
           onError(`ydoc settle disk write of ${input.path}`, error);
+          reportSaveState("error", token);
+          return;
         }
+        reportSaveState("saved", token);
+      };
+      const onSettleStart = (token: number) => reportSaveState("settling", token);
+      // The one place a background settle failure is observable. Log it with
+      // the path and the wire error, and tell the editor the file on disk is
+      // behind — a settle that never lands is the user's content going
+      // nowhere.
+      const onSettleError = (error: unknown, token: number) => {
+        onError(`ydoc settle of ${input.path}`, error);
+        reportSaveState("error", token);
       };
       let entry: LiveYDocSession | null = null;
       const session = useRustEngine
@@ -2324,6 +2526,8 @@ export function createWorkspaceEngineCapture(
             },
             onRemoteUpdate: input.onRemoteUpdate,
             onSettled,
+            onSettleStart,
+            onSettleError,
           })
         : await openEngineYDocProviderSession({
             store: engine,
@@ -2334,6 +2538,8 @@ export function createWorkspaceEngineCapture(
             ...(input.contentKind ? { contentKind: input.contentKind } : {}),
             onRemoteUpdate: input.onRemoteUpdate,
             onSettled,
+            onSettleStart,
+            onSettleError,
           });
       // Register the live session only after the open succeeds (a secret/
       // not-found/already-live rejection propagates to the caller and never

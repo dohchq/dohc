@@ -120,6 +120,15 @@ pub struct SnapshotMetadata {
     /// "text" | "binary" (the stored discriminant).
     pub content_kind: String,
     pub binary_sha256: Option<String>,
+    /// Does a `ydoc_docs` marker exist for this object — i.e. is this path
+    /// owned by the Y.Doc editor? MARKER-EXISTS, deliberately not
+    /// durable-state: a default local close prunes updates and snapshots but
+    /// KEEPS the marker, and such a file is still Y.Doc-owned.
+    ///
+    /// Callers use this to avoid mistaking the engine's own artifacts for
+    /// content it cannot own. A settled Y.Doc is bounded by nothing, so it
+    /// can exceed limits that ordinary captured text is held to.
+    pub has_ydoc_marker: bool,
 }
 
 /// The materialized current state of an object within a version.
@@ -423,6 +432,19 @@ pub struct CaptureRetire {
     /// have no disk counterpart — can never be deleted by a disk-driven
     /// retire. A foreign-origin head is a no-op, not an error.
     pub only_if_capture_origin: bool,
+    /// May this retire destroy a MATERIALIZED Y.DOC head?
+    ///
+    /// True for the DELETE reasons: a file removed while the daemon was down
+    /// must retire its head rather than leave a stale snapshot readable
+    /// forever — which is why `only_if_capture_origin` admits Y.Doc heads at
+    /// all.
+    ///
+    /// False for the "no longer engine-ownable" reason. A Y.Doc is bounded by
+    /// nothing, so its own settled artifact routinely exceeds the capture
+    /// caps; treating that as "stopped being ownable" retires a document the
+    /// user is actively editing, on every reconcile, while the file itself is
+    /// perfectly intact.
+    pub allow_ydoc_origin: bool,
 }
 
 /// Inputs to [`crate::VersionedTextStore::delete_text_file`].

@@ -26,7 +26,11 @@ import {
 // flag). A slow open for workspace/path A can never bind or repaint after the
 // user has switched to B — the stale response is dropped and its session closed.
 
-export type EngineDocSaveState = "saved" | "saving";
+// "error" = a settle FAILED, so the file on disk is behind what the editor
+// shows. "read-only" = the workspace is a read-only shared view and the edit
+// was discarded outright; retrying cannot help, so it gets its own copy.
+// Neither is ever inferred — main pushes both from real outcomes.
+export type EngineDocSaveState = "saved" | "saving" | "error" | "read-only";
 
 export type UseEngineDoc = {
   // True once the engine session is open and the mirror doc is bound. false =>
@@ -34,16 +38,13 @@ export type UseEngineDoc = {
   available: boolean;
   // The mirror Y.Doc Tiptap binds to; null until bound / when unavailable.
   doc: Y.Doc | null;
-  // Approximated settle indicator so the editing feel matches local autosave:
-  // "saving" while a keystroke burst is in flight, "saved" once the main-side
-  // debounced settle has projected it (the engine.db + .md are the authority —
-  // this is a cosmetic cue, not the durability contract).
+  // The document's REAL save state. "saving" the moment an edit is made,
+  // "saved" ONLY when main reports a settle that covered that edit actually
+  // committed and wrote the .md, "error" when a settle failed. This used to be
+  // a 1s timer that flipped to "saved" regardless of what the engine did —
+  // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
   saveState: EngineDocSaveState;
 };
-
-// A hair longer than the main-side settle debounce (800ms) so "Saved" only shows
-// once main has had time to project + write the .md.
-const SETTLE_INDICATOR_MS = 1000;
 
 let engineDocSessionCounter = 0;
 function nextSessionId(): string {
@@ -56,6 +57,10 @@ function makeTransport(
   workspaceId: string,
   path: string,
   sessionId: string,
+  // Monotonic local-edit counter, shared with the save-state listener: main
+  // echoes back the seq each settle STARTED at, and only a settle that covers
+  // the newest edit may be reported as "Saved".
+  localSeq: { current: number },
 ): EngineYDocTransport {
   return {
     async open() {
@@ -72,8 +77,14 @@ function makeTransport(
     applyLocalUpdate(update) {
       // Fire-and-forget: main journals + settles. A transient IPC error never
       // tears the editor down; the mirror doc keeps the edit and the next update
-      // (or close) re-converges.
-      void bridge().applyEngineYDocUpdate({ sessionId, update }).catch(() => undefined);
+      // (or close) re-converges. The seq is NOT rolled back on that failure —
+      // the edit is genuinely unsaved until a later settle covers it, and the
+      // indicator must keep saying so.
+      localSeq.current += 1;
+      const seq = localSeq.current;
+      void bridge()
+        .applyEngineYDocUpdate({ sessionId, update, seq })
+        .catch(() => undefined);
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
@@ -123,14 +134,15 @@ export function useEngineDoc(input: {
     let cancelled = false;
     let binding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
-    let saveTimer: ReturnType<typeof setTimeout> | null = null;
+    let unsubscribeSaveState: (() => void) | null = null;
 
     setAvailable(false);
     setDoc(null);
     setSaveState("saved");
 
     const sessionId = nextSessionId();
-    const transport = makeTransport(workspaceId, path, sessionId);
+    const localSeq = { current: 0 };
+    const transport = makeTransport(workspaceId, path, sessionId, localSeq);
 
     void bindEngineYDoc(transport)
       .then((bound) => {
@@ -146,20 +158,38 @@ export function useEngineDoc(input: {
           setDoc(null);
           return;
         }
-        // Approximate the settle indicator from mirror-doc activity: any update
-        // (a local keystroke burst) flips to "saving"; after a debounce past the
-        // main-side settle, back to "saved". The seed apply happened before this
-        // observer attached, so it never shows a spurious "saving".
+        // An edit is unsaved the instant it happens. Only main's settle report
+        // may clear it — nothing here guesses "saved". The seed apply happened
+        // before this observer attached, so it never shows a spurious "saving".
         const onUpdate = () => {
           if (cancelled) return;
           setSaveState("saving");
-          if (saveTimer) clearTimeout(saveTimer);
-          saveTimer = setTimeout(() => {
-            if (!cancelled) setSaveState("saved");
-          }, SETTLE_INDICATOR_MS);
         };
         bound.doc.on("update", onUpdate);
         detachSaveObserver = () => bound.doc?.off("update", onUpdate);
+        // Subscribe only once the session is CONFIRMED live. Nothing can be
+        // missed by waiting: a settle needs an edit, and an edit needs this
+        // bound doc. Doing it here also keeps every bridge call inside the
+        // caught region — a synchronous call in the effect body turned a
+        // bridge without this method (an older preload, a test double) from
+        // graceful "not engine-backed" into a blanked editor.
+        // Guarded by the per-open token AND the per-open sessionId (the
+        // async-state invariant): another document's settle never repaints.
+        unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
+          if (cancelled || token !== openTokenRef.current) return;
+          if (event.sessionId !== sessionId) return;
+          if (event.state === "error" || event.state === "read-only") {
+            setSaveState(event.state);
+            return;
+          }
+          if (event.state === "settling") {
+            setSaveState("saving");
+            return;
+          }
+          // "saved" vouches only for edits journaled before that settle began.
+          // Anything typed since is still unsaved — keep showing "Saving…".
+          if (event.seq >= localSeq.current) setSaveState("saved");
+        });
         setDoc(bound.doc);
         setAvailable(true);
       })
@@ -171,7 +201,7 @@ export function useEngineDoc(input: {
 
     return () => {
       cancelled = true;
-      if (saveTimer) clearTimeout(saveTimer);
+      unsubscribeSaveState?.();
       detachSaveObserver?.();
       // Settle + close the engine session in main (releases the single-canonical
       // reservation so a version/file switch can reopen the same object), then

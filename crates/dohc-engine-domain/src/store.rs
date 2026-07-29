@@ -1365,7 +1365,11 @@ impl<'a> VersionedTextStore<'a> {
                        ELSE LENGTH(CAST(b.text AS BLOB)) END, \
                      s.updated_at_ms, s.latest_moment_id, s.metadata_origin, \
                      s.metadata_summary, s.metadata_correlation_id, \
-                     COALESCE(s.content_kind, 'text'), bb.sha256 FROM snapshots s \
+                     COALESCE(s.content_kind, 'text'), bb.sha256, \
+                     EXISTS (SELECT 1 FROM ydoc_docs d \
+                       WHERE d.workspace_id = s.workspace_id \
+                         AND d.version_id = s.version_id \
+                         AND d.object_id = s.object_id) FROM snapshots s \
                      LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
                      LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
                      WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path > ?3 \
@@ -1393,6 +1397,7 @@ impl<'a> VersionedTextStore<'a> {
                             metadata_correlation_id: row.get(8)?,
                             content_kind: row.get(9)?,
                             binary_sha256: row.get(10)?,
+                            has_ydoc_marker: row.get(11)?,
                         })
                     },
                 )
@@ -2122,7 +2127,7 @@ pub fn capture_retire_in_tx(
         // rather than leave a stale snapshot readable forever.
         if input.only_if_capture_origin
             && head.metadata_origin != CAPTURE_ORIGIN
-            && head.metadata_origin != YDOC_ORIGIN
+            && !(input.allow_ydoc_origin && head.metadata_origin == YDOC_ORIGIN)
         {
             record_request(
                 tx,

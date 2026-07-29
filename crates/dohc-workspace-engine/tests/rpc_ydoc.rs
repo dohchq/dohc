@@ -771,6 +771,286 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_markdown() {
+    // AUDIT-SILENTSAVE. Three dogfood journeys watched a doc read "Saved" in
+    // the editor while its .md sat at ZERO BYTES: the settle refused
+    // pre-commit on every debounce because the RESPONSE could not carry the
+    // markdown as one wire string. The cap belongs to the wire, not to
+    // durability — the daemon materializes from the projection it already
+    // holds, so the file must land and the response must say `markdown: null`.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-overcap", 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "load/big.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    // Past BOTH the 48 KiB in-band response cap and the desktop capture
+    // layer's 128 KiB text cap — the size journey 1 actually pasted into
+    // load-test.md was 131,442 bytes, and both limits sit under it.
+    let huge = "pasted load-test paragraph.\n".repeat(5_000);
+    assert!(
+        huge.len() > 128 * 1024,
+        "fixture must exceed both the in-band cap and the capture text cap"
+    );
+
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update(&huge)
+        }),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "paste" }),
+    )
+    .await;
+
+    // The response omits the body (it cannot cross as one string) but the
+    // settle COMMITTED: a moment id, a sha, and the real bytes on disk.
+    assert_eq!(settled["markdown"], Value::Null);
+    assert!(
+        settled["momentId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "an over-cap settle must still mint a moment: {settled}"
+    );
+    let on_disk = std::fs::read_to_string(scratch.path().join("load/big.md"))
+        .expect("the over-cap settle must write the .md");
+    assert_eq!(on_disk, huge, "disk must hold every byte the CRDT holds");
+
+    // Not a one-shot: a further edit settles and reaches disk too (the bug
+    // refused on EVERY debounced settle, so one green write proves little).
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update("APPENDED TAIL\n")
+        }),
+    )
+    .await;
+    let resettled = call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "paste again" }),
+    )
+    .await;
+    assert_eq!(resettled["markdown"], Value::Null);
+    let on_disk = std::fs::read_to_string(scratch.path().join("load/big.md"))
+        .expect("the second over-cap settle must write the .md");
+    assert!(
+        on_disk.contains("APPENDED TAIL"),
+        "the second settle must reach disk as well"
+    );
+
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 8, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_must_not_retire_the_settled_head_of_an_over_cap_ydoc() {
+    // AUDIT-SILENTSAVE round 5. This is the race that made
+    // `a_settle_past_the_inband_cap…` fail under `cargo test --workspace`
+    // while passing in isolation — the capture pass only gets scheduled
+    // between the settle and the close under load.
+    //
+    // A settled Y.Doc past MAX_CAPTURE_TEXT_BYTES (128 KiB) reads as
+    // "no longer engine-ownable" to the capture sink, which retires the head.
+    // Self-write suppression cannot help: it matches a WRITE by sha, and this
+    // is a retire taken on a size classification. The next settle — including
+    // the one ydoc.close performs by default — then sees a changed target and
+    // fails ConflictStaleTarget.
+    //
+    // Driven deterministically here (sleep past the debounce + capture.flush)
+    // rather than by hoping the scheduler interleaves.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-capture", 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "load/big.md", "contentKind": "plaintext" }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    // Past the capture text cap, like the dogfood journey's 131,442 bytes.
+    let huge = "pasted load-test paragraph.\n".repeat(5_000);
+    assert!(
+        huge.len() > 128 * 1024,
+        "fixture must exceed the capture cap"
+    );
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "paste" }),
+    )
+    .await;
+
+    // Let the watcher observe the settle's own materialized write and settle
+    // its batch — exactly what happens under load between settle and close.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let flushed = call(&transport, &handle, 5, "capture.flush", json!({})).await;
+    assert_eq!(flushed["settled"], json!(true));
+
+    // THE load-bearing assertion: the head survived, still owned by the
+    // Y.Doc. Before the fix this listing came back EMPTY — capture had
+    // retired the record for a document the user had just saved.
+    let listed = call(
+        &transport,
+        &handle,
+        6,
+        "versionedText.list",
+        json!({ "versionId": "main" }),
+    )
+    .await;
+    let head = listed["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .find(|file| file["path"] == json!("load/big.md"));
+    assert!(
+        head.is_some(),
+        "capture retired the settled over-cap head: {}",
+        listed["files"]
+    );
+    let head = head.expect("head");
+    assert_eq!(head["metadataOrigin"], json!("ydoc"));
+    assert_eq!(head["byteLength"], json!(140_000));
+
+    // And the close — which settles by default — succeeds instead of failing
+    // ConflictStaleTarget against a head capture moved underneath it.
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 8, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
+    // The shape the desktop's New File IPC actually leaves behind, which no
+    // test covered: a ZERO-BYTE file already on disk, with no engine head and
+    // no lineage. `creating_a_new_file_through_a_ydoc_session_settles_to_disk`
+    // below covers the file-absent-everywhere shape the app never produces.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "baseline/alpha.md", b"");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-zero", 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "baseline/alpha.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    // The empty file IS the seed: the lineage is absent and seeds from "".
+    assert_eq!(opened["lineage"], json!("absent"));
+    assert_eq!(opened["seedMarkdown"], json!(""));
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    let typed = "Baseline alpha persisted normally.";
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update(typed)
+        }),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "type" }),
+    )
+    .await;
+    assert_eq!(settled["markdown"], json!(typed));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("baseline/alpha.md")).expect("settled"),
+        typed,
+        "the first typed edit over a zero-byte file must replace it on disk"
+    );
+
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");

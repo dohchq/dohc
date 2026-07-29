@@ -298,6 +298,8 @@ export class YdocLoopbackEngine implements EngineTransport {
       path: session.path,
       markdown,
       sha256: sha256(markdown),
+      // The loopback always "materializes": it has no containment to block.
+      materialized: true,
       projection: {
         contentKind: session.contentKind,
         sourceStateVectorSha256: sha256(Y.encodeStateVector(session.doc)),

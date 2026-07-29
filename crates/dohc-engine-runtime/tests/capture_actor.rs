@@ -46,6 +46,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 request_id: Some("actor-retire-request".to_owned()),
                 only_if_text_head: false,
                 only_if_capture_origin: false,
+                allow_ydoc_origin: true,
             },
             Arc::new(NoFaults),
         )
@@ -95,6 +96,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 request_id: Some("actor-async-retire-request".to_owned()),
                 only_if_text_head: false,
                 only_if_capture_origin: false,
+                allow_ydoc_origin: true,
             },
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -173,6 +175,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 request_id: None,
                 only_if_text_head: false,
                 only_if_capture_origin: false,
+                allow_ydoc_origin: true,
             },
             Arc::new(NoFaults),
             cancelled,

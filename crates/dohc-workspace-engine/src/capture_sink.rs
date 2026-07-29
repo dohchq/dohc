@@ -652,6 +652,16 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
     ) -> Result<(), CaptureError> {
+        self.retire_head_with(path, only_if_text_head, summary, true)
+    }
+
+    fn retire_head_with(
+        &self,
+        path: &str,
+        only_if_text_head: bool,
+        summary: Option<String>,
+        allow_ydoc_origin: bool,
+    ) -> Result<(), CaptureError> {
         match self.actor.capture_retire_blocking(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
@@ -663,6 +673,7 @@ impl StoreCaptureSink {
                 request_id: None,
                 only_if_text_head,
                 only_if_capture_origin: true,
+                allow_ydoc_origin,
             },
             Arc::new(NoFaults),
         ) {
@@ -817,10 +828,29 @@ impl CaptureSink for StoreCaptureSink {
                 // non-file, over cap): retire with the honest TS label so no
                 // stale snapshot remains, and report NotOwned so the manifest
                 // forgets the path instead of recording the planned ingest.
-                self.retire_head(
+                //
+                // A MATERIALIZED Y.DOC head is exempt. A Y.Doc is bounded by
+                // nothing, so its own settled artifact routinely lands past
+                // the capture caps and arrives here as "non-ownable" — but it
+                // is the engine's own output, not content that stopped being
+                // ownable. Retiring it drops a document the user is actively
+                // editing out of the engine on every reconcile.
+                //
+                // NOTE: the desktop capture layer answers the same question
+                // with a DIFFERENT instrument — a `ydoc_docs` marker
+                // (`hasYdocMarker`) rather than the head's origin. That is
+                // deliberate, not drift. Origin is what this layer already
+                // has in hand (the retire executor reads the head anyway);
+                // the marker is what the TS layer already has (it lists file
+                // metadata anyway). Origin is the stricter of the two — it
+                // stops protecting as soon as an ordinary capture claims the
+                // head — so this layer protects a SUBSET of what TS protects
+                // and self-heals rather than latching.
+                self.retire_head_with(
                     path,
                     false,
                     Some("Stopped tracking non-text content".to_owned()),
+                    false,
                 )?;
                 Ok(IngestOutcome::NotOwned)
             }
@@ -2166,5 +2196,83 @@ mod tests {
         writes.record("ws", "a.md", "sha2");
         dohc_engine_runtime::SelfWriteRecorder::retract(&writes, "ws", "a.md", "sha1");
         assert!(writes.consume("ws", "a.md", "sha2"), "newer entry survives");
+    }
+
+    #[test]
+    fn non_ownable_ingest_spares_a_ydoc_head_but_retires_a_capture_head() {
+        // AUDIT-SILENTSAVE. Pins the sink WIRING directly: that the
+        // NonOwnable branch passes allow_ydoc_origin=false. The rpc test
+        // covers the same rule end to end, but only while the driver keeps
+        // offering that path — this does not depend on the driver at all.
+        //
+        // A settled Y.Doc past MAX_CAPTURE_TEXT_BYTES arrives here as
+        // NonOwnable. Retiring it destroys a document the user just saved.
+        // An ordinary CAPTURE head of the same shape must still retire.
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("db");
+        let mut store = EngineStore::open(&db, 1).expect("store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &FilesNoFaults)
+            .expect("main");
+
+        // A materialized Y.Doc head, exactly as a settle leaves it.
+        store
+            .write_with(&FilesNoFaults, |tx| {
+                dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        version_id: VERSION_ID.to_owned(),
+                        object_id: "obj-sink-ydoc".to_owned(),
+                        path: "notes/settled.md".to_owned(),
+                        text: "settled body".to_owned(),
+                        moment_id: "m-sink-ydoc".to_owned(),
+                        metadata_origin: "ydoc".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                )?;
+                Ok::<(), dohc_engine_domain::DomainError>(())
+            })
+            .expect("ydoc head");
+        drop(store);
+
+        // An ordinary captured head at another path, via the sink itself.
+        let supervisor = WorkspaceSupervisor::new();
+        let (_db, mut seed_sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "notes/plain.md", b"plain body");
+        assert!(matches!(
+            ingest(&mut seed_sink, "notes/plain.md").expect("seed ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        assert!(snapshot(&db, "notes/plain.md").is_some());
+
+        // Both files are now NON-OWNABLE on disk: past the text cap.
+        let over_cap = vec![b'x'; (MAX_CAPTURE_TEXT_BYTES + 1) as usize];
+        write_file(scratch.path(), "notes/settled.md", &over_cap);
+        write_file(scratch.path(), "notes/plain.md", &over_cap);
+
+        let (_db2, mut sink) = sink_for(&scratch, &supervisor);
+        assert!(matches!(
+            ingest(&mut sink, "notes/settled.md").expect("ydoc ingest"),
+            IngestOutcome::NotOwned
+        ));
+        assert!(matches!(
+            ingest(&mut sink, "notes/plain.md").expect("capture ingest"),
+            IngestOutcome::NotOwned
+        ));
+
+        // THE assertion: ownership decided, not the classification alone.
+        assert!(
+            snapshot(&db, "notes/settled.md").is_some(),
+            "a settled Y.Doc head must survive a not-engine-ownable ingest"
+        );
+        assert!(
+            snapshot(&db, "notes/plain.md").is_none(),
+            "an ordinary capture head must still retire when it stops being ownable"
+        );
     }
 }
