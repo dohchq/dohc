@@ -156,13 +156,24 @@ review applies to a COMMIT, not to a PR.** Before merging anything, compare each
 review's `commit_id` against the PR's `headRefOid`:
 
 ```
-gh pr view <N> --json headRefOid --jq .headRefOid
-gh api repos/dohc-ai/dohc/pulls/<N>/reviews --jq '.[]|"\(.user.login) \(.state) \(.commit_id[0:10])"'
+HEAD=$(gh pr view <N> --json headRefOid --jq .headRefOid); SHORT=${HEAD:0:10}
+
+# 1. formal reviews of THIS head (codex when it HAS findings; CodeRabbit always)
+gh api repos/dohc-ai/dohc/pulls/<N>/reviews --paginate   --jq ".[]|select(.commit_id==\"$HEAD\")|\"\(.user.login) \(.state)\""
+
+# 2. a codex CLEAN pass is an ISSUE comment, not a review — check it too
+gh api repos/dohc-ai/dohc/issues/<N>/comments --paginate   --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|contains(\"$SHORT\"))|.body"   | grep -iE "didn.t find any major issues|no major issues"
 ```
 
-If no review's `commit_id` matches the head, the current code is **unreviewed**
+If **neither** returns anything for the head, the current code is **unreviewed**
 however many reviews the PR has collected. Reviews of superseded commits look
-identical to current ones in the GitHub UI.
+identical to current ones in the GitHub UI. Checking only (1) reports a
+reviewed-and-passed PR as unreviewed, because a clean codex pass never creates a
+review object.
+
+Note `gh api --jq` does **not** accept `--arg` (that is a standalone-`jq` flag,
+and `jq` is not installed here) — it exits 1 and prints nothing, which reads
+exactly like "no matches". Embed values in the program string as above.
 
 Two adjacent traps that have both cost real cycles: CodeRabbit announces a rate
 limit in a comment body rather than failing, so its silence is not approval; and

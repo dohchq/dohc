@@ -97,67 +97,138 @@ Run via `Monitor` with `persistent: true`. It discovers open PRs itself.
 ```bash
 REPO=dohc-ai/dohc
 DEADLINE_MIN=25
+CODEX="chatgpt-codex-connector[bot]"
+RABBIT="coderabbitai[bot]"
+REQUIRED="$CODEX $RABBIT"
 
-declare -A seen high
+declare -A seen high watched
+fails=0
+
 while true; do
-  prs=$(gh pr list --repo "$REPO" --state open --json number --jq '.[].number' 2>/dev/null)
-  [ -n "$prs" ] || { echo "No open PRs — watcher exiting"; break; }
+  # Discovery must distinguish "no open PRs" from "the query failed", or a
+  # transient error permanently kills a persistent watcher.
+  if ! prs=$(gh pr list --repo "$REPO" --state open --json number --jq '.[].number' 2>/dev/null); then
+    fails=$((fails+1))
+    [ "$fails" = 3 ] && echo "DISCOVERY FAILING — gh pr list errored 3x; watcher alive but results may be stale"
+    sleep 120; continue
+  fi
+  fails=0
+
+  # Anything we were watching that left the open list gets a closure event.
+  for n in "${!watched[@]}"; do
+    case " $prs " in *" $n "*) continue ;; esac
+    st=$(gh pr view "$n" --repo "$REPO" --json state --jq .state 2>/dev/null) || st="GONE"
+    echo "PR #$n is $st — stopped watching"
+    unset "watched[$n]"
+  done
+
   for n in $prs; do
+    watched[$n]=1
     head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null) || continue
     short=${head:0:10}
 
-    # CATCH-ALL: any new bot activity at all, whatever shape it takes.
-    latest=$( { gh api "repos/$REPO/pulls/$n/reviews" --jq '.[]|select(.user.type=="Bot")|.submitted_at' 2>/dev/null
-                gh api "repos/$REPO/pulls/$n/comments" --paginate --jq '.[]|select(.user.type=="Bot")|.created_at' 2>/dev/null
-                gh api "repos/$REPO/issues/$n/comments" --paginate --jq '.[]|select(.user.type=="Bot")|.created_at' 2>/dev/null
+    # CATCH-ALL: any advance in bot activity, whatever shape it takes.
+    latest=$( { gh api "repos/$REPO/pulls/$n/reviews"  --paginate --jq '.[]|select(.user.type=="Bot")|.submitted_at' 2>/dev/null
+                gh api "repos/$REPO/pulls/$n/comments" --paginate --jq '.[]|select(.user.type=="Bot")|.created_at'   2>/dev/null
+                gh api "repos/$REPO/issues/$n/comments" --paginate --jq '.[]|select(.user.type=="Bot")|.created_at'  2>/dev/null
               } | sort | tail -1 )
     if [ -n "$latest" ] && [ "$latest" != "${high[$n]:-}" ]; then
-      high[$n]=$latest; echo "BOT ACTIVITY #$n @$short — newest bot event $latest"
+      high[$n]=$latest; echo "BOT ACTIVITY #$n @$short — newest event $latest"
     fi
 
-    reviewed_head=0
-
-    # Formal reviews of THIS head (codex when it HAS findings; CodeRabbit always).
-    while read -r who st; do
-      [ -n "$who" ] || continue
-      reviewed_head=1
-      k="rev-$n-$short-$who-$st"; [ "${seen[$k]:-}" = "1" ] && continue; seen[$k]=1
-      inline=$(gh api "repos/$REPO/pulls/$n/comments" --paginate \
-        --jq "[.[]|select(.original_commit_id==\"$head\" or .commit_id==\"$head\")]|length" 2>/dev/null)
-      echo "REVIEW #$n @$short — $who [$st] — ${inline:-0} inline finding(s)"
-    done < <(gh api "repos/$REPO/pulls/$n/reviews" \
-              --jq ".[]|select(.commit_id==\"$head\")|\"\(.user.login) \(.state)\"" 2>/dev/null | sort -u)
-
-    # codex CLEAN pass: an ISSUE comment naming the short sha, not a review.
-    if gh api "repos/$REPO/issues/$n/comments" --paginate \
-         --jq ".[]|select(.body|test(\"Reviewed commit\"))|select(.body|contains(\"$short\"))|.body" 2>/dev/null \
-       | grep -qiE "didn.t find any major issues|no major issues"; then
-      reviewed_head=1
-      k="clean-$n-$short"
-      [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "REVIEWED CLEAN #$n @$short — codex found no major issues on THIS head"; }
-    fi
-
-    # CodeRabbit degraded states — both masquerade as "no findings".
-    bodies=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
-              --jq '.[]|select(.user.login=="coderabbitai[bot]")|.body' 2>/dev/null)
-    case "$bodies" in *"Review limit"*|*"rate limit"*)
-      k="rl-$n"; [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "RATE LIMIT #$n — CodeRabbit hit a review limit; its silence is NOT approval"; };; esac
-    case "$bodies" in *"Review failed"*)
-      k="rf-$n"; [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "REVIEW FAILED #$n — CodeRabbit errored; re-request with '@coderabbitai review'"; };; esac
-
-    # A trigger that never took.
+    # Round baseline = later of (head pushed) and (newest review trigger).
+    # ISO-8601 UTC sorts lexicographically, so string max is correct.
     pushed=$(gh api "repos/$REPO/commits/$head" --jq '.commit.committer.date' 2>/dev/null)
-    if [ "$reviewed_head" -eq 0 ] && [ -n "$pushed" ]; then
-      age=$(( ( $(date -u +%s) - $(date -u -d "$pushed" +%s) ) / 60 ))
-      if [ "$age" -ge "$DEADLINE_MIN" ]; then
-        k="to-$n-$short"
-        [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "NO REVIEW #$n @$short after ${age}m — re-post the bare comment '@codex review'"; }
+    trig=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
+            --jq '.[]|select(.body|test("@codex review|@coderabbitai review"))|.created_at' 2>/dev/null | sort | tail -1)
+    base=$(printf '%s\n%s\n' "$pushed" "$trig" | grep -v '^$' | sort | tail -1)
+
+    for who in $REQUIRED; do
+      covered=0
+
+      # Formal reviews of THIS head by THIS reviewer, keyed by review id so a
+      # repeat round with the same state is still reported.
+      while read -r rid st; do
+        [ -n "$rid" ] || continue
+        covered=1
+        k="rev-$n-$rid"; [ "${seen[$k]:-}" = "1" ] && continue; seen[$k]=1
+        inline=$(gh api "repos/$REPO/pulls/$n/comments" --paginate \
+          --jq "[.[]|select((.original_commit_id==\"$head\" or .commit_id==\"$head\") and .user.login==\"$who\")]|length" 2>/dev/null)
+        echo "REVIEW #$n @$short — $who [$st] — ${inline:-0} inline finding(s)"
+      done < <(gh api "repos/$REPO/pulls/$n/reviews" --paginate \
+                --jq ".[]|select(.commit_id==\"$head\" and .user.login==\"$who\")|\"\(.id) \(.state)\"" 2>/dev/null)
+
+      # codex files a CLEAN pass as an issue comment, not a review. Author-checked.
+      if [ "$who" = "$CODEX" ] && gh api "repos/$REPO/issues/$n/comments" --paginate \
+           --jq ".[]|select(.user.login==\"$CODEX\")|select(.body|test(\"Reviewed commit\"))|select(.body|contains(\"$short\"))|.body" 2>/dev/null \
+         | grep -qiE "didn.t find any major issues|no major issues"; then
+        covered=1
+        k="clean-$n-$short"
+        [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "REVIEWED CLEAN #$n @$short — $CODEX found no major issues on THIS head"; }
       fi
-    fi
+
+      # Degraded CodeRabbit states, scoped to THIS round so a historical notice
+      # does not shadow a later successful review.
+      if [ "$who" = "$RABBIT" ] && [ -n "$base" ]; then
+        recent=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
+                  --jq ".[]|select(.user.login==\"$RABBIT\")|select(.created_at>=\"$base\")|.body" 2>/dev/null)
+        case "$recent" in *"Review limit"*|*"rate limit"*)
+          covered=1; k="rl-$n-$short"
+          [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "RATE LIMIT #$n @$short — $RABBIT hit a review limit THIS round; its silence is NOT approval"; } ;;
+        esac
+        case "$recent" in *"Review failed"*)
+          covered=1; k="rf-$n-$short"
+          [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "REVIEW FAILED #$n @$short — $RABBIT errored THIS round; re-request with '@coderabbitai review'"; } ;;
+        esac
+      fi
+
+      # Independent per-reviewer timeout: one reviewer answering must never mask
+      # another reviewer's trigger silently failing.
+      if [ "$covered" -eq 0 ] && [ -n "$base" ]; then
+        age=$(( ( $(date -u +%s) - $(date -u -d "$base" +%s) ) / 60 ))
+        if [ "$age" -ge "$DEADLINE_MIN" ]; then
+          k="to-$n-$short-$who"
+          [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "NO REVIEW #$n @$short from $who after ${age}m — re-post the bare trigger comment"; }
+        fi
+      fi
+    done
   done
   sleep 120
 done
 ```
+
+### Why it is shaped this way
+
+Each of these was a real defect in an earlier version of this script, found in
+review. They are the reasons the code looks more careful than a poller "should".
+
+- **Discovery failure is not emptiness.** `gh pr list` failing with stderr
+  discarded yields an empty list, which a naive watcher reads as "no open PRs"
+  and exits — permanently. The anti-stall tool stalls. Check the exit status.
+- **Per-reviewer coverage, per-reviewer timeout.** A shared "was this head
+  reviewed" flag lets one reviewer answering mask another's trigger silently
+  failing. Since CodeRabbit normally reviews every head, a shared flag disables
+  the codex timeout almost always.
+- **Key by review id, not by (reviewer, state).** A second `COMMENTED` round on
+  an unchanged head has an identical (reviewer, state) key and would be
+  suppressed; `sort -u` collapses them before the loop even sees them.
+- **Attribute inline findings to the reviewer being reported.** Counting every
+  inline comment on the commit prints the same aggregate beside each reviewer, so
+  a clean reviewer appears to own another's findings.
+- **Scope degraded notices to the current round.** A rate-limit or failure
+  comment matches forever otherwise, so it keeps firing after CodeRabbit later
+  reviews the head successfully — a false alarm that teaches you to ignore a real
+  one.
+- **Measure the deadline from the trigger, not the commit.** A PR opened, or a
+  re-request posted, well after the commit was authored would otherwise be
+  declared failed before the bot had any time to answer.
+- **Author-check the clean-pass comment.** Anyone quoting an earlier review can
+  contain `Reviewed commit`, the short SHA and "no major issues"; unfiltered, that
+  quote is accepted as a passing review gate.
+- **Paginate every review query.** `gh api` defaults to 30 per page, so on a busy
+  PR the current head's review can fall off page one and be invisible.
+- **Track watched PRs to report closure.** `gh pr list --state open` simply omits
+  a merged PR, so without its own set the watcher never emits the terminal event.
 
 ## Reading the output
 
