@@ -116,26 +116,28 @@ describe("CloudLogin", () => {
     );
   });
 
-  it("clears stale sync errors when switching workspaces", async () => {
+  it("gates workspace sync rather than badging an unsynced workspace as synced", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: true,
       email: "ice@dohc.dev",
       workspaceSynced: false,
     });
-    bridgeMock.cloudEnableSync.mockRejectedValueOnce(
-      new Error("already claimed by another workspace"),
+
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    const button = (await screen.findByTestId(
+      "cloud-enable-sync",
+    )) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(screen.getByTestId("cloud-sync-unavailable").textContent).toContain(
+      "isn't ready yet",
     );
 
-    const { rerender } = render(<CloudLogin workspaceId="old" />);
-    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
-    await screen.findByTestId("cloud-sync-error");
-
-    rerender(<CloudLogin workspaceId="new" />);
-
-    await waitFor(() => expect(screen.queryByTestId("cloud-sync-error")).toBeNull());
-    expect(
-      (screen.getByTestId("cloud-enable-sync") as HTMLButtonElement).disabled,
-    ).toBe(false);
+    // enableSync runs its IPC call synchronously, so a gated click that still
+    // enrolled would be visible here.
+    fireEvent.click(button);
+    expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
   });
 
   it("shows the copyable sync code for a synced workspace (0P-C join handle)", async () => {
@@ -172,66 +174,6 @@ describe("CloudLogin", () => {
     render(<CloudLogin workspaceId="ws-1" />);
     await screen.findByTestId("cloud-workspace-synced");
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
-  });
-
-  it("does not let a stale enable-sync result mark the next workspace as synced", async () => {
-    const oldEnable = deferred<void>();
-    bridgeMock.cloudStatus.mockResolvedValue({
-      connected: true,
-      email: "ice@dohc.dev",
-      workspaceSynced: false,
-    });
-    bridgeMock.cloudEnableSync.mockReturnValueOnce(oldEnable.promise);
-
-    const { rerender } = render(<CloudLogin workspaceId="old" />);
-    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
-    await waitFor(() =>
-      expect(screen.getByTestId("cloud-enable-sync").textContent).toBe(
-        "Enabling sync…",
-      ),
-    );
-
-    rerender(<CloudLogin workspaceId="new" />);
-
-    await waitFor(() => {
-      const button = screen.getByTestId("cloud-enable-sync") as HTMLButtonElement;
-      expect(button.disabled).toBe(false);
-      expect(button.textContent).toBe("Sync this workspace");
-    });
-    await act(async () => {
-      oldEnable.resolve();
-    });
-
-    expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
-  });
-
-  it("prompts for a passphrase when synced secrets need protection", async () => {
-    bridgeMock.cloudStatus.mockResolvedValue({
-      connected: true,
-      email: "ice@dohc.dev",
-      workspaceSynced: false,
-    });
-    bridgeMock.cloudEnableSync
-      .mockRejectedValueOnce(new Error("Passphrase required to protect synced secrets."))
-      .mockResolvedValueOnce(undefined);
-
-    render(<CloudLogin workspaceId="ws-1" />);
-    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
-
-    const input = await screen.findByTestId("cloud-sync-passphrase");
-    expect(screen.getByTestId("cloud-sync-error").textContent).toContain("passphrase");
-    expect((screen.getByTestId("cloud-enable-sync") as HTMLButtonElement).disabled).toBe(true);
-
-    fireEvent.change(input, { target: { value: "shared passphrase" } });
-    fireEvent.click(screen.getByTestId("cloud-enable-sync"));
-
-    await waitFor(() =>
-      expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({
-        workspaceId: "ws-1",
-        passphrase: "shared passphrase",
-      }),
-    );
-    await screen.findByTestId("cloud-workspace-synced");
   });
 
   it("protects an already-synced workspace with a passphrase when the local key is present", async () => {
