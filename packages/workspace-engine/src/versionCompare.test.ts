@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { engineContractReExportCompileCheck } from "./engineContracts.compile";
 import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
-import { compareVersionFiles } from "./versionCompare";
+import { compareVersionFiles } from "@dohc/workspace-core/versionCompare";
 import { createVersionedTextStore } from "./versionedTextStore";
 
 void engineContractReExportCompileCheck;

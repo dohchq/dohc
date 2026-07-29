@@ -4,21 +4,23 @@ import {
   validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
+import {
+  compareVersionFiles,
+  type VersionFileChange,
+} from "@dohc/workspace-core/versionCompare";
+import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy";
 // The path floor is a cross-process security contract with a Rust twin, not
 // engine state — the same reason workspaceFiles/workspaceGraph/workspaceSearch
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
-  compareVersionFiles,
   createSecretFileStore,
   createVersionedTextStore,
   MAX_VERSIONED_BINARY_FILE_BYTES,
-  resolveEffectivePolicy,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type SecretFileMoment,
   type SecretFileStore,
-  type VersionFileChange,
   type VersionRecord,
   type VersionedTextConflictRecord,
   type VersionedTextMoment,

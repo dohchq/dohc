@@ -14,7 +14,7 @@ import {
   type FilesPolicyRule,
   type PolicyParseResult,
   type VisibilityPolicyRule,
-} from "./effectivePolicy";
+} from "@dohc/security-contract/effective-policy";
 import type { EngineSqliteDb } from "./engineDbSchema";
 import { threadDisplayTitle } from "./chatThreadTitle";
 

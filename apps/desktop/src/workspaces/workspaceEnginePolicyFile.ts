@@ -4,9 +4,11 @@ import {
   resolveEffectivePolicy,
   type FilesPolicyRule,
   type PolicyParseResult,
+  type VisibilityPolicyRule,
+} from "@dohc/security-contract/effective-policy";
+import {
   type SearchVisibility,
   type TextFileSnapshot,
-  type VisibilityPolicyRule,
 } from "@dohc/workspace-engine";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";

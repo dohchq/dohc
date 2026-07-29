@@ -5,7 +5,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./paths": "./src/paths.ts",
-    "./mergeMarkdown": "./src/mergeMarkdown.ts"
+    "./mergeMarkdown": "./src/mergeMarkdown.ts",
+    "./versionCompare": "./src/versionCompare.ts"
   },
   "dependencies": {
     "@dohc/workspace-contracts": "workspace:*"

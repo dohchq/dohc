@@ -7,6 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  unwrapWorkspaceDataKey,
+  wrapWorkspaceDataKey,
+} from "@dohc/security-contract/secret-key-envelope";
+import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
@@ -24,9 +28,7 @@ import {
   pushSharedChannel,
   pushWorkspaceToRelay,
   readWorkspaceDataKeyForEnrollment,
-  unwrapWorkspaceDataKey,
   uploadKeyEnvelope,
-  wrapWorkspaceDataKey,
   type SyncReplicationEnvelope,
 } from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
