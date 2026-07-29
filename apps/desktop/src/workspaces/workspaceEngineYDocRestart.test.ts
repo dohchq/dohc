@@ -1059,6 +1059,7 @@ async function daemonDeathCapture(
     releasedGenerations: number[];
   };
   generations: Y.Doc[];
+  backoff: { real: boolean };
   loseDurableLineage: () => void;
   applyDaemonSideEdit: (text: string) => void;
 }> {
@@ -1098,9 +1099,17 @@ async function daemonDeathCapture(
       return await loopback.sendRequest(request);
     },
   };
+  // Backoff is stubbed by default so the LOGIC tests do not pay for it, and
+  // switchable so a test can price a path against production wall time.
+  const backoff = { real: false };
   const sessions = new EngineWorkspaceSessions(
     { currentClient: () => daemonClient },
-    { sleep: async () => undefined },
+    {
+      sleep: async (delayMs) => {
+        if (!backoff.real) return;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      },
+    },
   );
   const replayLineage = (doc: Y.Doc): void => {
     for (const update of state.durableUpdates) Y.applyUpdate(doc, update);
@@ -1173,6 +1182,7 @@ async function daemonDeathCapture(
     openProvider,
     state,
     generations,
+    backoff,
     // A crash that took the durable CRDT lineage with it; only the .md survives.
     loseDurableLineage: () => {
       state.lineage = "absent";
@@ -1574,5 +1584,84 @@ it("a recovered session does not leave a stale release obligation behind", async
   await session.close({ settle: false });
 
   expect(state.releasedGenerations).toContain(2);
+  await capture.stop();
+});
+
+// AUDIT-KILLREC N1. `will-quit` races the WHOLE shutdown chain against one 3s
+// timer and then calls app.exit(0); the Y.Doc session closes are its first
+// link, with the SQLite/WAL closes and the daemon stop chained behind them. A
+// recovery attempt on the close/settle path must therefore be BOUNDED: against
+// a daemon that is still down it cannot succeed anyway, and burning the
+// transport retry ladder (100+200+400+800+1000ms) would starve the cleanup
+// that still can. This test prices the path with production backoff.
+const QUIT_BUDGET_MS = 3_000;
+const CLOSE_PATH_BOUND_MS = 1_000;
+
+it("a settling close against a down daemon stays well inside the quit budget", async () => {
+  const { rootPath, sessions, openProvider, state, backoff } =
+    await daemonDeathCapture("dohc-ydoc-death-budget-", "ydoc-death-budget");
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-budget",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+
+  // Drive the session dead while backoff is still stubbed: only the close is
+  // being priced here, not the set-up.
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  // The user quits before the supervisor's replacement is up.
+  backoff.real = true;
+  const startedAt = Date.now();
+  await session.close().catch(() => undefined);
+  const elapsedMs = Date.now() - startedAt;
+
+  expect(elapsedMs).toBeLessThan(CLOSE_PATH_BOUND_MS);
+  expect(CLOSE_PATH_BOUND_MS).toBeLessThan(QUIT_BUDGET_MS);
+  // And it never opened a generation it could not have reached.
+  expect(state.generation).toBe(1);
+});
+
+it("an explicit settle against a down daemon fails fast instead of blocking", async () => {
+  const { rootPath, sessions, openProvider, state, backoff } =
+    await daemonDeathCapture("dohc-ydoc-death-settle-cost-", "ydoc-death-settle-cost");
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-settle-cost",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  backoff.real = true;
+  const startedAt = Date.now();
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect(Date.now() - startedAt).toBeLessThan(CLOSE_PATH_BOUND_MS);
+
+  await session.close({ settle: false }).catch(() => undefined);
   await capture.stop();
 });

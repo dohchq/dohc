@@ -1112,6 +1112,7 @@ export function createWorkspaceEngineCapture(
     // starts empty and the replay re-establishes it.
     const openGeneration = async (
       seedAbsentLineage: boolean,
+      openOptions?: { retryTransportErrors?: boolean },
     ): Promise<EngineYdocProviderSessionRust> =>
       await sessions.run(
         workspace,
@@ -1162,7 +1163,9 @@ export function createWorkspaceEngineCapture(
           openingRemoteUpdates.set(opened, opening);
           return opened;
         },
-        { retryTransportErrors: true },
+        {
+          retryTransportErrors: openOptions?.retryTransportErrors ?? true,
+        },
       );
 
     // Reconcile a freshly opened generation against the canonical doc and
@@ -1248,14 +1251,25 @@ export function createWorkspaceEngineCapture(
 
     // A session whose generation died leaves the canonical doc as the only
     // holder of the renderer's text. Rebuild a generation around it so a dead
-    // session heals on the next keystroke instead of discarding every one.
+    // session heals instead of discarding every keystroke.
+    //
+    // The open does NOT retry the transport ladder. This runs on the settle and
+    // close paths, and `will-quit` races the entire shutdown chain — engine
+    // stores, relay workspaces, the daemon stop — against one 3s timer with
+    // these closes first in line. A revive that needs seconds to wait a daemon
+    // back up cannot help at quit anyway, and must not starve the cleanup that
+    // still can. A daemon that is already back answers on the first attempt.
+    //
     // Opening is the only release boundary available here: a generation that
     // died with its daemon took its lease with it, and one that died still
     // holding a LIVE lease refuses the open and stays dead for close() to
     // converge — the retained release obligation remains teardown's job.
     const reviveDeadSession = async (doc: Y.Doc): Promise<void> => {
       if (closed || current !== null) return;
-      await adoptGeneration(doc, await openGeneration(false));
+      await adoptGeneration(
+        doc,
+        await openGeneration(false, { retryTransportErrors: false }),
+      );
     };
 
     const closedError = (cause?: unknown): Error =>
