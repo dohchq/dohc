@@ -391,9 +391,15 @@ review_status() {
         echo "  $who — CLEAN PASS (issue comment naming $short)"
         continue
       fi
-      if printf '%s' "$cbody" | grep -qiE "create an environment for this repo"; then
-        echo "  $who — CANNOT RUN on this repo (needs an environment); re-posting the trigger will not help"
-        unreviewed=1; continue
+      # The "cannot run" reply names NO sha, so it can never appear in the
+      # sha-scoped body above — query it separately or the branch is dead code.
+      # It is intermittent: the same PR got three of these interleaved with five
+      # successful reviews, so report it with its timestamp as a reason a trigger
+      # may not have taken, never as a verdict.
+      if envt=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
+            --jq ".[]|select(.user.login==\"$CODEX\")|select(.body|test(\"create an environment for this repo\"))|.created_at" 2>/dev/null) \
+         && [ -n "$envt" ]; then
+        echo "  $who — note: it replied \"create an environment for this repo\" on this PR (latest $(printf '%s' "$envt" | sort | tail -1)); some triggers here silently do not take"
       fi
     fi
 
