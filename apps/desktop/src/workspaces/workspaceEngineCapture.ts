@@ -1901,6 +1901,12 @@ export function createWorkspaceEngineCapture(
       // retire records the reconcile keeps. This is not the blanket
       // live-path skip gate fix 1 removed: ordinary capture of a live path is
       // untouched; only the retirement decision defers to ownership.
+      // Two checks, and BOTH are load-bearing. The marker lookup is memoized
+      // once per batch, but openYDocSession does NOT run on the capture
+      // chain — a document opened partway through a batch is absent from a
+      // memo built earlier in that same batch. The live-session check covers
+      // exactly that window; deleting it would reopen the race for a doc the
+      // user just opened.
       if (liveYDocSessions.has(event.path)) return;
       if ((await ydocOwnedPaths()).has(event.path)) return;
       // The path stopped being engine-ownable text: retire it from engine

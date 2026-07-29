@@ -133,6 +133,18 @@ export async function openEngineYdocProviderSession(
   }
 
   async function runSettle(summary?: string): Promise<YdocSettleResult> {
+    // Announce BEFORE any abort path, so every outcome this function can
+    // produce — including the two pre-barrier aborts below — has a matching
+    // start. A caller pairing starts to outcomes by order then never drifts.
+    // The value it snapshots here is at most the post-barrier one, i.e. an
+    // UNDER-claim, which is the safe direction. (Still outside settleChain:
+    // firing inside it would let a queued settle vouch for keystrokes typed
+    // while it waited.)
+    try {
+      options.onSettleStart?.();
+    } catch {
+      // Observer boundary, like notifyError.
+    }
     // A journal failure means the edit never reached the engine AT ALL —
     // strictly worse than a failed settle, and it aborts this settle before
     // the chain below. Report it on the same channel: otherwise it routes
@@ -145,30 +157,11 @@ export async function openEngineYdocProviderSession(
       notifyError(options.onSettleError, error);
       throw error;
     }
-    // Reachable ONLY when session.applyLocalUpdate threw SYNCHRONOUSLY: that
-    // path records the error without ever attaching it to journalChain, so
-    // the await above resolves. After an async rejection journalChain stays
-    // rejected and the branch above always wins first — which is why a
-    // mutation of this line alone does not fail a test, and why the covering
-    // test (`reports a JOURNAL failure to onSettleError too`) exercises the
-    // rejected-chain branch instead. Kept because the synchronous throw is a
-    // real transport failure mode and must not go to onSessionError alone.
+    // A SYNCHRONOUS applyLocalUpdate throw records the error without ever
+    // attaching it to journalChain, so the await above resolves clean.
     if (localEditError !== null) {
       notifyError(options.onSettleError, localEditError);
       throw localEditError;
-    }
-    // Fire the moment the JOURNAL BARRIER is crossed, not when the settle
-    // finally runs. Everything journaled up to here is what this settle is
-    // guaranteed to carry; a caller snapshotting progress on this hook then
-    // UNDER-claims (edits arriving while we queue behind an in-flight settle
-    // land after the snapshot) instead of over-claiming. Firing it inside the
-    // chain below would make the claim depend on the transport delivering
-    // recordUpdate before settle — true today, but an unwritten contract
-    // holding up the anti-lie mechanism.
-    try {
-      options.onSettleStart?.();
-    } catch {
-      // Observer boundary, like notifyError.
     }
     const operation = settleChain.then(async () => {
       try {

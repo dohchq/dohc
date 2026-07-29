@@ -17,9 +17,21 @@ export interface EngineYDocSaveSeqState {
   /** Highest local-edit seq main has received from the renderer. */
   dirtySeq: number;
   /**
-   * The seq each IN-FLIGHT settle started at, oldest first. Both providers
-   * complete settles in start order (each queues on `settleChain`), so
-   * shifting on completion pairs every outcome with its own start.
+   * The seq each IN-FLIGHT settle started at, oldest first.
+   *
+   * Pairing is by ORDER, which holds because a provider announces every
+   * settle before any of its abort paths (so starts and outcomes come in
+   * matched pairs) and completes settles within one generation in start order
+   * (each queues on `settleChain`).
+   *
+   * It is NOT guaranteed ACROSS generations: `settleChain` is per-generation
+   * while this queue is per-session, so a daemon revive can leave the old
+   * generation holding an in-flight settle while the new one completes its
+   * own. That drifts pairing by one position — see the follow-up issue on
+   * making the pairing explicit with a token instead of relying on order.
+   * The renderer absorbs a one-position drift (it only clears to "Saved" when
+   * the reported seq covers its newest local edit), so this is a latent
+   * imprecision, not a live lie.
    */
   inFlight: number[];
 }
