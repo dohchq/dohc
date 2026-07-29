@@ -116,8 +116,12 @@ newest_bot_event() {
   local out="" part ep
   ACTIVITY_OK=0
   for ep in "pulls/$1/reviews" "pulls/$1/comments" "issues/$1/comments"; do
+    # updated_at before created_at: CodeRabbit can complete a whole round by
+    # EDITING its status comment, whose created_at never moves. Reading created_at
+    # means ACTIVITY_LATEST never advances, so the watcher emits neither
+    # BOT ACTIVITY nor (once the edit satisfies coverage) NO REVIEW — silence.
     if part=$(gh api "repos/$REPO/$ep" --paginate \
-                --jq '.[]|select(.user.type=="Bot")|(.submitted_at // .created_at)' 2>/dev/null); then
+                --jq '.[]|select(.user.type=="Bot")|(.submitted_at // .updated_at // .created_at)' 2>/dev/null); then
       ACTIVITY_OK=$((ACTIVITY_OK+1))
       out=$(printf '%s\n%s\n' "$out" "$part")
     fi
@@ -153,7 +157,14 @@ while true; do
 
   for n in $prs; do
     watched[$n]=1
-    head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null) || continue
+    # A failing head query must not silently drop the PR: other PRs keep printing
+    # normal output, which conceals that this one has no coverage checked at all.
+    if ! head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null); then
+      k="hq-$n"
+      [ "${seen[$k]:-}" = "1" ] || { seen[$k]=1; echo "HEAD QUERY FAILING #$n — cannot resolve its head; this PR is UNCHECKED, not clear"; }
+      continue
+    fi
+    unset "seen[hq-$n]"
     short=${head:0:10}
 
     newest_bot_event "$n"
@@ -180,8 +191,12 @@ while true; do
       case "$who" in
         "$CODEX") pat="@codex review"
                   ans="(.body|contains(\"$short\")) and (.body|test(\"$CLEAN\";\"i\"))" ;;
+        # "Review finished" is CodeRabbit's answer to a trigger on a head it has
+        # already reviewed — it means coverage exists from an earlier round, so it
+        # must count, or re-posting a trigger produces a false NO REVIEW that
+        # invites re-posting the same useless trigger.
         *)        pat="@coderabbitai review"
-                  ans="(.body|contains(\"$head\")) or (.body|test(\"$DEGRADED\";\"i\"))" ;;
+                  ans="(.body|contains(\"$head\")) or (.body|test(\"$DEGRADED|Review finished|Action performed\";\"i\"))" ;;
       esac
 
       # Each reviewer's round starts at ITS OWN newest trigger, and the trigger
@@ -251,7 +266,7 @@ review_status() {
   local CODEX="chatgpt-codex-connector[bot]" RABBIT="coderabbitai[bot]"
   local CLEAN="didn.t find any major issues|no major issues"
   local DEGRADED="Review limit|rate limit|Review failed"
-  local head short rows lines rid st cnt blen who body verdict=OK
+  local head short rows lines rid st cnt blen who body covered verdict=OK
   local blocked=0 findings=0 unknown=0 unreviewed=0 pending=0
 
   head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid) \
@@ -266,6 +281,9 @@ review_status() {
     fi
 
     if [ -n "$rows" ]; then
+      # Decide coverage per REVIEWER, not per row. A dismissed review alongside a
+      # later approval for the same commit must not leave the reviewer uncovered.
+      covered=0
       while read -r rid st; do
         [ -n "$rid" ] || continue
         # Count only comments belonging to THIS review — GitHub re-anchors older
@@ -282,22 +300,29 @@ review_status() {
         fi
         echo "  $who review $rid [$st] — ${cnt:-0} inline, body ${blen:-0} chars"
         case "$st" in
-          CHANGES_REQUESTED) blocked=1 ;;
+          CHANGES_REQUESTED) covered=1; blocked=1 ;;
           APPROVED)
-            [ "${cnt:-0}" -gt 0 ] && echo "    ^ APPROVED yet ${cnt} inline comment(s) — read them before merging" ;;
+            covered=1
+            # Not just a warning: the function is usable as a scripted gate, so an
+            # approval carrying inline comments must still fail it.
+            if [ "${cnt:-0}" -gt 0 ]; then
+              echo "    ^ APPROVED yet ${cnt} inline comment(s) — read them; this is not a clean pass"
+              findings=1
+            fi ;;
           COMMENTED)
+            covered=1
             if [ "${cnt:-0}" -gt 0 ] || [ "${blen:-0}" -gt 0 ]; then
               echo "    ^ COMMENTED carrying ${cnt:-0} inline / ${blen:-0}-char body — these are findings, not a pass"
               findings=1
             fi ;;
           *)
-            # DISMISSED, PENDING, or a state GitHub adds later. None of them is a
-            # statement of approval, so none may count as coverage.
-            echo "    ^ state $st is not a terminal approval — this head stays uncovered by $who"
-            unreviewed=1 ;;
+            # DISMISSED, PENDING, or a state GitHub adds later: not a statement
+            # about the code, so it contributes no coverage either way.
+            echo "    ^ state $st is not a terminal review — ignored as coverage" ;;
         esac
       done <<<"$rows"
-      continue
+      # Only fall through to the comment-shaped paths if no row covered the head.
+      [ "$covered" = 1 ] && continue
     fi
 
     # codex records a CLEAN pass as an issue comment, not a review.

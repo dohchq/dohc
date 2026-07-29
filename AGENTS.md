@@ -162,22 +162,32 @@ and otherwise reads exactly like "nobody reviewed":
 
 ```
 PR=371
-HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid) || { echo "head query failed"; return 2; }
+HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
 SHORT=${HEAD:0:10}
+# Guard everything on this. An empty HEAD turns the filters below into
+# contains("") and grep "", which match EVERY historical comment and make an
+# unknown head look reviewed.
+[ -n "$HEAD" ] || echo "HEAD LOOKUP FAILED — stop here, decide nothing"
 
-# 1. formal reviews of THIS head (codex when it HAS findings; CodeRabbit usually)
-gh api "repos/dohc-ai/dohc/pulls/$PR/reviews" --paginate \
-  --jq ".[]|select(.commit_id==\"$HEAD\")|\"\(.user.login) \(.state)\"" || echo "reviews query FAILED — unknown, not empty"
+# 1. formal reviews of THIS head (codex when it HAS findings; CodeRabbit usually).
+#    Note codex files findings as COMMENTED, never CHANGES_REQUESTED.
+[ -n "$HEAD" ] && { gh api "repos/dohc-ai/dohc/pulls/$PR/reviews" --paginate \
+  --jq ".[]|select(.commit_id==\"$HEAD\")|\"\(.user.login) \(.state)\"" \
+  || echo "reviews query FAILED — unknown, not empty"; }
 
 # 2. a codex CLEAN pass is an ISSUE comment, not a review — check it too
-gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+[ -n "$SHORT" ] && gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
   --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|contains(\"$SHORT\"))|.body" \
   | grep -iE "didn.t find any major issues|no major issues"
 
 # 3. CodeRabbit may create NO review object at all; its status comment, which it
-#    edits in place, names the range it covered using the FULL sha
-gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
-  --jq ".[]|select(.user.login==\"coderabbitai[bot]\")|.body" | grep -c "$HEAD"
+#    EDITS IN PLACE, names the range it covered using the FULL sha. Print the
+#    status lines rather than counting the sha — the sha is present even when the
+#    body says the review is still processing, rate-limited, or failed.
+[ -n "$HEAD" ] && gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+  --jq ".[]|select(.user.login==\"coderabbitai[bot]\")|select(.body|contains(\"$HEAD\"))|.body" \
+  | grep -iE "currently processing|review limit|rate limit|review failed" \
+  && echo "^ CodeRabbit named the head but did NOT review it — not approval"
 ```
 
 If **none** of the three shows the head, the current code is **unreviewed** however
