@@ -172,11 +172,17 @@ SHORT=${HEAD:0:10}
 [ -n "$HEAD" ] || echo "HEAD LOOKUP FAILED — stop here, decide nothing"
 
 # 1. formal reviews of THIS head (codex when it HAS findings; CodeRabbit usually).
-#    Note codex files findings as COMMENTED, never CHANGES_REQUESTED.
+#    codex files findings as COMMENTED, never CHANGES_REQUESTED. Only APPROVED /
+#    CHANGES_REQUESTED / COMMENTED are coverage — a DISMISSED or PENDING review says
+#    nothing about the code, so R1T (used to gate step 3) excludes them while R1
+#    still shows them, labelled.
+TERM='.state=="APPROVED" or .state=="CHANGES_REQUESTED" or .state=="COMMENTED"'
 [ -n "$HEAD" ] && { R1=$(gh api "repos/dohc-ai/dohc/pulls/$PR/reviews" --paginate \
-  --jq ".[]|select(.commit_id==\"$HEAD\")|\"\(.user.login) \(.state)\"") \
+  --jq ".[]|select(.commit_id==\"$HEAD\")|if ($TERM) then \"\(.user.login) \(.state)\" else \"\(.user.login) \(.state)   <- NOT coverage\" end") \
   || echo "reviews query FAILED — unknown, not empty"
-printf '%s\n' "$R1"; }
+printf '%s\n' "$R1"
+R1T=$(gh api "repos/dohc-ai/dohc/pulls/$PR/reviews" --paginate \
+  --jq ".[]|select(.commit_id==\"$HEAD\")|select($TERM)|.user.login"); }
 
 # 2. a codex CLEAN pass is an ISSUE comment, not a review — check it too.
 #    Guarded on HEAD: with SHORT empty, contains("") matches every historical
@@ -197,7 +203,7 @@ gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
 #    ONLY consult it when (1) shows no CodeRabbit review: the rate-limit wrapper
 #    NEVER leaves the comment, so on a head CodeRabbit approved this would
 #    otherwise contradict (1) and reject a reviewed PR forever (see #317).
-[ -n "$HEAD" ] && ! printf '%s' "$R1" | grep -q coderabbitai && {
+[ -n "$HEAD" ] && ! printf '%s' "$R1T" | grep -q coderabbitai && {
 CR=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
   --jq ".[]|select(.user.login==\"coderabbitai[bot]\")|select(.body|contains(\"$HEAD\"))|.body") \
   || echo "CodeRabbit comment query FAILED — unknown, not empty"

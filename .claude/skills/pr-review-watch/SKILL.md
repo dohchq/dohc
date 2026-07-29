@@ -122,11 +122,13 @@ while looking armed:
 
 ```
 S=.claude/skills/pr-review-watch/SKILL.md
-awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==1{print}' "$S" > /tmp/live-watcher.sh
-[ -s /tmp/live-watcher.sh ] || { echo "WATCHER CANNOT START — empty extraction from $S"; exit 1; }
-bash -n /tmp/live-watcher.sh || { echo "WATCHER CANNOT START — extracted script does not parse"; exit 1; }
-echo "WATCHER ARMED from $S ($(wc -l < /tmp/live-watcher.sh) lines)"
-bash /tmp/live-watcher.sh
+W=$(mktemp -t live-watcher.XXXXXX)   # NOT a fixed name: two sessions launching at
+trap 'rm -f "$W"' EXIT               # once would overwrite each other's script
+awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==1{print}' "$S" > "$W"
+[ -s "$W" ] || { echo "WATCHER CANNOT START — empty extraction from $S"; exit 1; }
+bash -n "$W" || { echo "WATCHER CANNOT START — extracted script does not parse"; exit 1; }
+echo "WATCHER ARMED from $S ($(wc -l < "$W") lines)"
+bash "$W"
 echo "WATCHER EXITED unexpectedly (rc=$?) — no longer watching"
 ```
 
@@ -370,7 +372,7 @@ review_status() {
   local CODEX="chatgpt-codex-connector[bot]" RABBIT="coderabbitai[bot]"
   local CLEAN="didn.t find any major issues|no major issues"
   local DEGRADED="Review limit|rate limit|Review failed"
-  local head short rows lines rid st cnt blen who body cbody envt newest verdict=OK
+  local head short rows lines rid st cnt blen who body cbody envt newest now verdict=OK
   local blocked=0 findings=0 unknown=0 unreviewed=0 pending=0
 
   [ -n "$n" ] || { echo "review_status: no PR number given"; return 2; }
@@ -490,6 +492,15 @@ review_status() {
     echo "  $who — NO REVIEW of this head"
     unreviewed=1
   done
+
+  # The head can move while these queries run — this repo has concurrent sessions,
+  # and this function is the synchronous pre-merge gate, so a stale OK is the one
+  # answer that must never happen. Re-read the head and void the result if it moved.
+  now=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null)
+  if [ -n "$now" ] && [ "$now" != "$head" ]; then
+    echo "  HEAD MOVED during the check ($short -> ${now:0:10}) — verdict VOID, run it again"
+    return 2
+  fi
 
   if   [ "$blocked"    = 1 ]; then verdict=BLOCKED
   elif [ "$unknown"    = 1 ]; then verdict=UNKNOWN
