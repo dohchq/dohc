@@ -73,6 +73,7 @@ async function reconnectFailureCapture(prefix: string) {
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: "present" as const,
       async applyLocalUpdate() {
         throw Object.assign(new Error("control frame encoding failed"), {
           code: "transport-error",
@@ -244,6 +245,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: "present" as const,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
         if (generation === 2 && secondGenerationApplyCount++ === 0) {
@@ -500,6 +502,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: "present" as const,
       async applyLocalUpdate(update) {
         if (openedGeneration === 1) throw refusal;
         Y.applyUpdate(doc, update);
@@ -597,6 +600,7 @@ it("releases a close-latched failed generation with settle true before the next 
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: "present" as const,
       async applyLocalUpdate(update) {
         // Models the round-1 provider latch: once close starts, another apply
         // resolves without journaling. Capture must never leave this provider
@@ -723,6 +727,7 @@ it("defers a version switch behind a dead generation until release converges", a
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: "present" as const,
       async applyLocalUpdate() {
         applyCount += 1;
         throw refusal;
@@ -874,6 +879,7 @@ it("treats typed session-not-found during release-first rebind as already releas
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: "present" as const,
       async applyLocalUpdate(update) {
         if (openedGeneration === 1) throw new Error("record refusal");
         Y.applyUpdate(doc, update);
@@ -966,6 +972,7 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: "present" as const,
       async applyLocalUpdate() {
         throw refusal;
       },
@@ -1004,13 +1011,17 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
     "Y.Doc local update of note.md",
     refusal,
   );
-  expect(closedGenerations).toEqual([1, 2]);
+  // Generations 1 and 2 die to the refusal; the settle then makes ONE more
+  // recovery attempt (a settle must try to persist what the canonical doc
+  // holds), which refuses too. The bar is that every opened lease is released.
+  expect(closedGenerations).toEqual([1, 2, 3]);
+  expect(leaseActive).toBe(false);
   await expect(session.close({ settle: false })).resolves.toBeUndefined();
   const reopened = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
   });
-  expect(generation).toBe(3);
+  expect(generation).toBe(4);
   await reopened.close({ settle: false });
   await capture.stop();
 });
@@ -1019,16 +1030,65 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
 // with it: the generation's applyLocalUpdate fails AND the replacement open
 // fails, until the supervisor relaunches. This harness reproduces that window,
 // which is where the dogfood journey lost the text typed before the kill.
-async function daemonDeathCapture(prefix: string, workspaceId: string) {
+//
+// It models the daemon's DURABLE state, not an empty stand-in: a replacement
+// generation replays the journaled updates, so the reconcile-then-replay merge
+// in adoptGeneration is genuinely exercised. `lineage: "absent"` models a crash
+// that lost the durable lineage, where the client would otherwise seed a fresh
+// doc from the .md. Retry counts are production's; only the backoff sleep is
+// stubbed, so the transport-retry path runs for real without wall time.
+async function daemonDeathCapture(
+  prefix: string,
+  workspaceId: string,
+): Promise<{
+  rootPath: string;
+  sessions: EngineWorkspaceSessions;
+  openProvider: (
+    options: EngineYdocProviderSessionRustOptions,
+  ) => Promise<EngineYdocProviderSessionRust>;
+  state: {
+    daemonAlive: boolean;
+    generation: number;
+    lineage: "present" | "absent";
+    durableUpdates: Uint8Array[];
+    diskMarkdown: string;
+    settled: string[];
+    seedRequests: boolean[];
+    refuseApply: boolean;
+    failRelease: boolean;
+    releasedGenerations: number[];
+  };
+  generations: Y.Doc[];
+  loseDurableLineage: () => void;
+  applyDaemonSideEdit: (text: string) => void;
+}> {
   const rootPath = await mkdtemp(join(nativeTmpdir(), prefix));
   roots.push(rootPath);
   const loopback = new VersionedLoopbackEngine();
-  const state = { daemonAlive: true, generation: 0 };
+  const state = {
+    daemonAlive: true,
+    generation: 0,
+    lineage: "present" as "present" | "absent",
+    durableUpdates: [] as Uint8Array[],
+    diskMarkdown: "",
+    settled: [] as string[],
+    seedRequests: [] as boolean[],
+    // A LIVE daemon refusing the write (not a transport death): the generation
+    // still owns its lease, so recovery must release before reopening.
+    refuseApply: false,
+    failRelease: false,
+    releasedGenerations: [] as number[],
+  };
   const generations: Y.Doc[] = [];
+  const transportDeath = () =>
+    Object.assign(new Error("The engine client is closed: transport closed."), {
+      code: "transport-error",
+    });
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
     onEvent: () => () => undefined,
     async sendRequest(request: Request): Promise<Response> {
+      if (!state.daemonAlive) throw transportDeath();
       if (request.method === "workspace.open") {
         return { id: request.id, result: { workspace: workspaceId } };
       }
@@ -1040,33 +1100,52 @@ async function daemonDeathCapture(prefix: string, workspaceId: string) {
   };
   const sessions = new EngineWorkspaceSessions(
     { currentClient: () => daemonClient },
-    { transportRebindAttempts: 1 },
+    { sleep: async () => undefined },
   );
-  const transportDeath = () =>
-    Object.assign(new Error("The engine client is closed: transport closed."), {
-      code: "transport-error",
-    });
+  const replayLineage = (doc: Y.Doc): void => {
+    for (const update of state.durableUpdates) Y.applyUpdate(doc, update);
+  };
   const openProvider = async (
     options: EngineYdocProviderSessionRustOptions,
   ): Promise<EngineYdocProviderSessionRust> => {
     if (!state.daemonAlive) throw transportDeath();
-    state.generation += 1;
+    const openedGeneration = ++state.generation;
+    const seeds = options.seedAbsentLineage !== false;
+    state.seedRequests.push(seeds);
     const doc = new Y.Doc();
+    if (state.lineage === "present") {
+      replayLineage(doc);
+    } else if (seeds) {
+      // The client's absent-lineage seed: a FRESH doc built from the markdown,
+      // carrying a client id that overlaps nothing already in the canonical doc.
+      const seed = new Y.Doc();
+      seed.getText("plainText").insert(0, state.diskMarkdown);
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(seed));
+    }
     generations.push(doc);
+    const settle = (): string => {
+      const markdown = doc.getText("plainText").toString();
+      state.settled.push(markdown);
+      state.diskMarkdown = markdown;
+      return markdown;
+    };
     return {
       doc,
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: state.lineage,
       async applyLocalUpdate(update) {
         if (!state.daemonAlive) throw transportDeath();
+        if (state.refuseApply) throw new Error("record-update-refused");
         Y.applyUpdate(doc, update);
+        state.durableUpdates.push(update);
       },
       async settleNow() {
         if (!state.daemonAlive) throw transportDeath();
-        const markdown = doc.getText("plainText").toString();
+        const markdown = settle();
         return {
-          momentId: `moment-${state.generation}`,
+          momentId: `moment-${openedGeneration}`,
           path: options.path,
           markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
@@ -1080,12 +1159,36 @@ async function daemonDeathCapture(prefix: string, workspaceId: string) {
       async applyExternalMarkdownEdit(markdown) {
         return { kind: "merged", markdown } as const;
       },
-      async close() {
+      async close(closeOptions) {
         if (!state.daemonAlive) throw transportDeath();
+        if (state.failRelease) throw new Error("release-refused");
+        if (closeOptions?.settle !== false) settle();
+        state.releasedGenerations.push(openedGeneration);
       },
     };
   };
-  return { rootPath, sessions, openProvider, state, generations };
+  return {
+    rootPath,
+    sessions,
+    openProvider,
+    state,
+    generations,
+    // A crash that took the durable CRDT lineage with it; only the .md survives.
+    loseDurableLineage: () => {
+      state.lineage = "absent";
+      state.durableUpdates = [];
+    },
+    // An agent/CLI edit landing on the daemon while the editor session is dead:
+    // a different client id, so it is genuinely absent from the canonical doc.
+    applyDaemonSideEdit: (text: string) => {
+      const scratch = new Y.Doc();
+      replayLineage(scratch);
+      const before = Y.encodeStateVector(scratch);
+      const body = scratch.getText("plainText");
+      body.insert(body.length, text);
+      state.durableUpdates.push(Y.encodeStateAsUpdate(scratch, before));
+    },
+  };
 }
 
 function typeInto(
@@ -1202,4 +1305,274 @@ it("a failure sink that throws cannot turn a daemon death into an unhandled reje
     process.off("unhandledRejection", onUnhandled);
     await capture.stop();
   }
+});
+
+// The journey's ACTUAL scenario: the user stopped typing before the app went
+// away. Recovery that only runs on the next keystroke never runs at all, and
+// the quit path's settling close is the last chance to persist the text.
+it("a settling close persists outage text when the user never types again", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-quit-",
+    "ydoc-death-quit",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-quit",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+  expect(state.settled).toEqual(["alive "]);
+
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  expect(state.generation).toBe(1);
+
+  // The supervisor relaunches and the user quits without touching the keyboard.
+  state.daemonAlive = true;
+  await session.close();
+
+  expect(state.settled.at(-1)).toBe("alive PRE_KILL");
+  expect(state.diskMarkdown).toBe("alive PRE_KILL");
+  expect(state.generation).toBe(2);
+  await capture.stop();
+});
+
+// The reconcile half of adoptGeneration: a replacement generation carrying
+// daemon-side work the canonical doc never saw must be merged in, exactly once.
+it("merges a daemon-side edit made during the outage into the canonical doc once", async () => {
+  const { rootPath, sessions, openProvider, state, applyDaemonSideEdit } =
+    await daemonDeathCapture("dohc-ydoc-death-merge-", "ydoc-death-merge");
+  const remoteUpdates: Uint8Array[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-merge",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: (update) => remoteUpdates.push(update),
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "TYPED_IN_OUTAGE ");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  // An agent writes through the daemon while the editor session is dead.
+  state.daemonAlive = true;
+  applyDaemonSideEdit("AGENT_EDIT ");
+
+  await session.close();
+
+  const merged = state.settled.at(-1) ?? "";
+  expect(merged).toContain("TYPED_IN_OUTAGE");
+  expect(merged).toContain("AGENT_EDIT");
+  expect(merged.match(/AGENT_EDIT/g)).toHaveLength(1);
+  expect(merged.match(/TYPED_IN_OUTAGE/g)).toHaveLength(1);
+  expect(merged.match(/alive/g)).toHaveLength(1);
+  // The renderer is told about the daemon-side work rather than silently
+  // diverging from the canonical doc.
+  expect(remoteUpdates.length).toBeGreaterThan(0);
+  await capture.stop();
+});
+
+// A hard kill can take the object's durable CRDT lineage with it. The client
+// normally seeds an absent lineage from the .md — a FRESH client id whose state
+// does not overlap the canonical doc, so merging it would append a second copy
+// of the whole file. Every generation after the first must therefore open
+// without seeding and let the replay re-establish the content.
+it("does not duplicate the document when the reopen finds no durable lineage", async () => {
+  const {
+    rootPath,
+    sessions,
+    openProvider,
+    state,
+    loseDurableLineage,
+  } = await daemonDeathCapture("dohc-ydoc-death-absent-", "ydoc-death-absent");
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-absent",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  typeInto(rendererDoc, session, "Anchor paragraph. ");
+  await session.settleNow();
+  expect(state.diskMarkdown).toBe("Anchor paragraph. ");
+
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  // The crash lost the lineage; only the .md survived.
+  loseDurableLineage();
+  state.daemonAlive = true;
+  await session.close();
+
+  expect(state.settled.at(-1)).toBe("Anchor paragraph. PRE_KILL");
+  expect(state.settled.at(-1)?.match(/Anchor paragraph\./g)).toHaveLength(1);
+  // The first open seeds; every replacement declines, because the canonical doc
+  // already holds the document and will replay it.
+  expect(state.seedRequests).toEqual([true, false]);
+  await capture.stop();
+});
+
+// settleNow is its own persistence entry point (the renderer's explicit save
+// and the version-op flush both reach it), so recovery cannot live only in the
+// keystroke path.
+it("a settle after the daemon returns recovers the session on its own", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-settle-",
+    "ydoc-death-settle",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-settle",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  state.daemonAlive = true;
+  const settled = await session.settleNow();
+
+  expect(settled.markdown).toBe("alive PRE_KILL");
+  expect(state.generation).toBe(2);
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+// "failing-close" and "dead generation" are different conditions on the same
+// registry entry. A recovering generation may lift only the guard it set: a
+// teardown that failed leaves the reservation possibly held and the on-disk
+// state indeterminate, and capture must stay deferred until teardown converges.
+it("a recovered generation does not lift a failed teardown's guard", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-guard-",
+    "ydoc-death-guard",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-guard",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  await capture.createVersion("Draft");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+
+  // A teardown that fails: the entry is guarded as failing-close.
+  state.failRelease = true;
+  await expect(session.close({ settle: false })).rejects.toThrow(
+    /release-refused/,
+  );
+  state.failRelease = false;
+
+  // The daemon then dies and comes back, and the session recovers.
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  state.daemonAlive = true;
+  typeInto(rendererDoc, session, " AFTER");
+  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+
+  // A version op must still SKIP the settle for a guarded entry and go straight
+  // to release — lifting the guard would settle over an indeterminate teardown.
+  const settledBefore = state.settled.length;
+  await capture.switchVersion("main");
+  expect(state.settled).toHaveLength(settledBefore);
+  await capture.stop();
+});
+
+// markDead records the dead generation's unreleased lease with `??=`, so a
+// STALE obligation left over from an earlier death would shadow the real one
+// and leak the live lease at teardown. A successful recovery discharges it.
+it("a recovered session does not leave a stale release obligation behind", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-obligation-",
+    "ydoc-death-obligation",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-obligation",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+
+  // Death 1 (transport): generation 1 is recorded as the release obligation.
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL ");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  // Recovery into generation 2 discharges it.
+  state.daemonAlive = true;
+  typeInto(rendererDoc, session, "AFTER ");
+  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+
+  // Death 2 on a LIVE daemon: generation 2 refuses the write AND its release,
+  // so IT is the lease that teardown still owes.
+  state.refuseApply = true;
+  state.failRelease = true;
+  typeInto(rendererDoc, session, "REFUSED");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  state.refuseApply = false;
+  state.failRelease = false;
+  await session.close({ settle: false });
+
+  expect(state.releasedGenerations).toContain(2);
+  await capture.stop();
 });

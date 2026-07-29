@@ -41,6 +41,9 @@ export interface EngineYdocProviderSessionOptions {
   versionId: string;
   path: string;
   contentKind?: YdocContentKind;
+  // Forwarded to the adapter: false when the caller already holds the
+  // document's canonical state and will replay it into this generation.
+  seedAbsentLineage?: boolean;
   onRemoteUpdate: (update: Uint8Array) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
@@ -56,6 +59,8 @@ export interface EngineYdocProviderSession {
   readonly initialUpdate: Uint8Array;
   readonly contentKind: YdocContentKind;
   readonly path: string;
+  // "absent" means the daemon found no durable CRDT lineage for this object.
+  readonly lineage: "present" | "absent";
   applyLocalUpdate(update: Uint8Array): Promise<void>;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
   applyExternalMarkdownEdit(
@@ -76,6 +81,9 @@ export async function openEngineYdocProviderSession(
       versionId: options.versionId,
       path: options.path,
       ...(options.contentKind ? { contentKind: options.contentKind } : {}),
+      ...(options.seedAbsentLineage !== undefined
+        ? { seedAbsentLineage: options.seedAbsentLineage }
+        : {}),
     });
   } catch (error) {
     if (ownsAdapter) adapter.dispose();
@@ -163,6 +171,7 @@ export async function openEngineYdocProviderSession(
     initialUpdate: session.initialUpdate,
     contentKind: session.contentKind,
     path: session.path,
+    lineage: session.lineage,
 
     applyLocalUpdate(update) {
       if (closed) {

@@ -1010,9 +1010,12 @@ export function createWorkspaceEngineCapture(
     versionId: string;
     session: EngineYDocProviderSession;
     // "live": healthy; sha-precise suppression, external edits captured.
-    // "failing-close": close/settle threw during teardown; capture is
-    // blanket-deferred for the path until a retry/force-close completes it.
-    status: "live" | "failing-close";
+    // "dead-generation": the daemon generation died; the canonical doc still
+    // holds the user's text and a later op can rebuild a generation around it.
+    // "failing-close": close/settle threw during TEARDOWN; the reservation may
+    // still be held and the on-disk state is indeterminate. Only teardown
+    // clears this — a recovering generation must never lift it.
+    status: "live" | "dead-generation" | "failing-close";
     // Flush + tear down, releasing the reservation, then drop the registry
     // entry — ONLY on success. On failure the entry is retained as
     // failing-close and the error propagates (never swallowed on this
@@ -1074,8 +1077,11 @@ export function createWorkspaceEngineCapture(
 
     // A dead session that later rebuilds a generation is live again — leaving
     // it marked dead would defer capture of the path forever and keep an honest
-    // workspace notice up about a session that recovered.
+    // workspace notice up about a session that recovered. The dead generation's
+    // lease went with it (a live one would have made this open refuse), so the
+    // release obligation it left behind is discharged too.
     const markAlive = (): void => {
+      releaseObligation = null;
       if (!dead) return;
       dead = false;
       clearDeadYDocSession(deadSessionToken);
@@ -1098,7 +1104,15 @@ export function createWorkspaceEngineCapture(
       }
     };
 
-    const openGeneration = async (): Promise<EngineYdocProviderSessionRust> =>
+    // `seedAbsentLineage: false` for every generation after the first. A hard
+    // daemon kill can lose the object's durable lineage, and a reopen would
+    // then seed a fresh doc from the .md — a new client id whose state does not
+    // overlap the canonical doc, so merging it would append a SECOND copy of
+    // the file. The canonical doc is the renderer's truth; the replacement
+    // starts empty and the replay re-establishes it.
+    const openGeneration = async (
+      seedAbsentLineage: boolean,
+    ): Promise<EngineYdocProviderSessionRust> =>
       await sessions.run(
         workspace,
         async (binding) => {
@@ -1129,6 +1143,7 @@ export function createWorkspaceEngineCapture(
             workspace: binding.workspace,
             versionId: input.versionId,
             path: input.path,
+            seedAbsentLineage,
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
@@ -1219,7 +1234,7 @@ export function createWorkspaceEngineCapture(
       }
       let replacement: EngineYdocProviderSessionRust;
       try {
-        replacement = await openGeneration();
+        replacement = await openGeneration(false);
       } catch (error) {
         markDead(failed);
         throw error;
@@ -1240,14 +1255,30 @@ export function createWorkspaceEngineCapture(
     // converge — the retained release obligation remains teardown's job.
     const reviveDeadSession = async (doc: Y.Doc): Promise<void> => {
       if (closed || current !== null) return;
-      await adoptGeneration(doc, await openGeneration());
+      await adoptGeneration(doc, await openGeneration(false));
     };
+
+    const closedError = (cause?: unknown): Error =>
+      new Error(
+        `Y.Doc session for ${input.path} is closed.`,
+        cause === undefined ? {} : { cause },
+      );
 
     const executeWithReconnect = async <T>(
       operation: (session: EngineYdocProviderSessionRust) => Promise<T>,
     ): Promise<T> => {
-      if (closed || current === null) {
-        throw new Error(`Y.Doc session for ${input.path} is closed.`);
+      if (closed) throw closedError();
+      // Settling and closing are the paths that PERSIST. A dead session still
+      // holds the user's text in the canonical doc, so rebuild a generation for
+      // it to land in rather than reporting closed and dropping it.
+      if (current === null) {
+        if (canonicalDoc === null) throw closedError();
+        try {
+          await reviveDeadSession(canonicalDoc);
+        } catch (error) {
+          throw closedError(error);
+        }
+        if (current === null) throw closedError();
       }
       const generation = current;
       try {
@@ -1260,7 +1291,7 @@ export function createWorkspaceEngineCapture(
       }
     };
 
-    current = await openGeneration();
+    current = await openGeneration(true);
     canonicalDoc = current.doc;
     const initialOpening = openingRemoteUpdates.get(current);
     if (initialOpening) {
@@ -1285,9 +1316,7 @@ export function createWorkspaceEngineCapture(
       path: sessionPath,
       applyLocalUpdate(update) {
         void append(async () => {
-          if (canonicalDoc === null || closed) {
-            throw new Error(`Y.Doc session for ${input.path} is closed.`);
-          }
+          if (canonicalDoc === null || closed) throw closedError();
           const doc = canonicalDoc;
           // The renderer has already accepted this update, so the canonical doc
           // — the renderer's truth — records it before anything else may fail.
@@ -1333,6 +1362,20 @@ export function createWorkspaceEngineCapture(
       close(closeOptions) {
         return append(async () => {
           if (closed) return;
+          // The quit path closes with a settle and nobody types again, so this
+          // is the last chance to persist text the canonical doc has been
+          // holding since the daemon died.
+          if (
+            current === null &&
+            canonicalDoc !== null &&
+            closeOptions?.settle !== false
+          ) {
+            try {
+              await reviveDeadSession(canonicalDoc);
+            } catch (error) {
+              onError(`Y.Doc close recovery of ${input.path}`, error);
+            }
+          }
           if (current === null) {
             if (releaseObligation !== null) {
               await releaseGeneration(releaseObligation);
@@ -1712,10 +1755,12 @@ export function createWorkspaceEngineCapture(
     // correct, NOT silent loss). Folding an external edit into the live doc as
     // CRDT deltas is G2-C-3; here the bar is simply not-dropping.
     //
-    // The ONLY blanket defer is a session whose teardown is FAILING: its
-    // reservation may still be held and the on-disk state is indeterminate, so a
-    // partial write must not be journaled until a retry/force-close resolves it.
-    if (liveYDocSessions.get(event.path)?.status === "failing-close") return;
+    // The blanket defer covers any session that is not healthy: a FAILING
+    // teardown may still hold the reservation with the on-disk state
+    // indeterminate, and a dead generation still owns the path through its
+    // canonical doc. Neither may have a partial write journaled under it.
+    const liveSessionStatus = liveYDocSessions.get(event.path)?.status;
+    if (liveSessionStatus !== undefined && liveSessionStatus !== "live") return;
     if (!policyTracksPath(event.path, policy)) return;
     // Deletes trust the watcher's confirmed-absent check; updates re-read the
     // CURRENT disk state so rapid successive writes coalesce to the final
@@ -2248,15 +2293,17 @@ export function createWorkspaceEngineCapture(
             onDead: () => {
               if (
                 entry !== null &&
-                liveYDocSessions.get(input.path) === entry
+                liveYDocSessions.get(input.path) === entry &&
+                entry.status === "live"
               ) {
-                entry.status = "failing-close";
+                entry.status = "dead-generation";
               }
             },
             onAlive: () => {
               if (
                 entry !== null &&
-                liveYDocSessions.get(input.path) === entry
+                liveYDocSessions.get(input.path) === entry &&
+                entry.status === "dead-generation"
               ) {
                 entry.status = "live";
               }
