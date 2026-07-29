@@ -2921,3 +2921,127 @@ Codex's GitHub review bot degraded through the afternoon (tags served with
 40-120 min latency, then not at all); the compensating control was local
 fable-5 adversarial reviewers with falsification briefs, whose findings are
 dispositioned on the PRs and whose deferred items are recorded above.
+
+## 2026-07-29 — The manual dogfood window, replaced by machine verification
+
+Ice declined the program's "use it daily for ~2 weeks" phase. This campaign ran in
+its place: the full automated suites, a full-suite Playwright e2e baseline (the
+first complete run in the project's history), a 60-minute cutoverBlocking soak,
+and five gpt-5.6-sol computer-use journeys driving the REAL app through scripted
+user days — with every finding triaged by fan-out agents and every fix carried
+through the audit campaign's method (mutation proof + layered adversarial review
++ gate). Base `6eec9d08`; final `0c78d3b6` after eight merged PRs.
+
+### Evidence
+
+Canonical gate on final main, every row:
+
+    2026-07-28T21:27:07.862Z | run-rust-checks | win32/x64 | PASS | fixture drift=PASS
+    fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS
+    test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
+
+60-minute cutoverBlocking soak (evidence banked beside this entry as
+`soak-evidence/windows-2026-07-28T21-28-34Z-cutoverBlocking.json`):
+
+    2026-07-28T22:30:47Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=17164
+    crashes=83 durationSecs=3732 rssDisposition=PASS rssSlopeWholeB/s=2024.4
+    rssSlopeTailB/s=1978.8 warmupDominatedWholeRunFit=false drain=RETAINED
+    rssDrain 27303936->27217920 min=27217920 drop=86016 (0.5% of run growth)
+    handles 110->110 threads 38->34 handleThreadSlackCalibration=CALIBRATED
+    workingSetBounded=true userFileGrowth=25 durableGrowthBytes=126857781
+
+Desktop e2e went **28 passed / 30 failed** at campaign start to **49 passed /
+8 failed** on final main. The suite had never run to completion anywhere: CI runs
+only the vitest daemon e2e, and a fresh worktree cannot launch the app at all
+without a debug daemon staged at `apps/desktop/target/debug/` — the first full run
+was 100% invalid for that reason alone.
+
+### What the suites found, and what shipped
+
+**The engine editor had never worked in the shipped app** (#327). Three defects
+stacked: `RelayConfiguredDaemonClient` implemented only `sendRequest`/`close`, so
+the wrapper main.ts puts around every daemon client silently dropped `onEvent` —
+the Y.Doc open path gates on it, threw, and a bare `catch` turned that into
+`available:false`, permanently pinning every rich doc to the legacy editor. With
+that unblocked, the desktop never passed `contentKind`, and the daemon defaults an
+unspecified session to PLAINTEXT: docs opened EMPTY, typed edits journaled into a
+root the projection never read, and each settle wrote the pre-edit file back while
+the UI said "Saved". Beneath that, a stale C1-era guard refused richdoc settle in
+`ydoc.settle`, `ydoc.close`'s default, and the version fence — a residue of the
+era before #238 landed the full-fidelity projection *so that* richdoc could settle.
+Review round two added: settled local richdocs prune at close like plaintext (a
+persisted CRDT shadowed external .md edits and wedged later settles on
+`ConflictStaleTarget`); bare markers no longer let a remembered default override an
+explicit kind (~3 weeks of the dead path minted plaintext markers for rich .md
+paths); and a close whose settle failed but whose release SUCCEEDED no longer
+leaves the path's capture deferred forever.
+
+Also fixed: opted-out workspaces grew engine stores through an ungated dispatch
+scan (#326, a graded invariant; eligibility now snapshots at open); the Rust
+bootstrap named the main version `main` while TS, replication, and every UI
+fallback said `Main` — seven specs died at step zero and locally-bootstrapped
+state genuinely diverged from replication-bootstrapped state (#325, with an
+ordinal-25 backfill and a collision guard); the conflict panel — #317's surface,
+getting its first e2e coverage — died on a two-field wire-decode gap (#332, panel
+and resolution now green end to end); daemon capture stamped no moment metadata and
+never told the renderer a moment landed (#331); agent-sandbox was broken on Windows
+by a `split(":")` on PATH (#324).
+
+Five e2e specs were rot, not product: they seeded `engine.db` through TS stores
+that the daemon now refuses. They were converted to seed through the real daemon
+over RPC (#332's `daemonSeed.ts`), including the switch-race spec's full
+1,000-moment corpus.
+
+### The journeys
+
+Five scripted user days. The soak and the suites say the engine is sound; the
+journeys are what a person would actually hit, and they found what the suites
+could not:
+
+- **A document over 48 KiB never reaches disk, silently.** `INBAND_CONTENT_CAP_BYTES`
+  is 48 KiB; the settle refuses `ydoc-settle-exceeds-inband-cap` on every debounce;
+  the provider routes that to `onSessionError`, which the desktop wires to
+  `requestReconnect`, which ignores non-reconnect errors — no log, no UI. The editor
+  shows the full document and "Saved" while the .md is 0 bytes. Three independent
+  journeys reproduced it.
+- Hard-killing the daemon mid-typing surfaced an uncaught EPIPE dialog and a dead
+  editor on the first kill, and content typed before the third kill was lost from
+  both app and disk. Whole-app kills, by contrast, lost nothing — even at ~0.5 s.
+- A rolled-back binary left a stale Open Editors tab across restart, and reopening a
+  bulk merge after a binary rollback fails `binary-head-not-text` — the same
+  unimplemented WS-G1 binary-conflict contract the e2e suite hits.
+- After a workspace switch the accessibility tree kept exposing the previous
+  workspace's document for ~4 s. The visible surface was correct (the capture
+  records "no WS-A document pixels visible"), so this is stale retained DOM, not the
+  repaint invariant — but it is the other workspace's content, still readable.
+
+What held: adversarial pastes (control characters, a fence whose info string carries
+a backtick, astral emoji) never broke saving; restart persistence; rapid version
+switching with no cross-version leak (12 switches, 225–251 ms); binary rollbacks
+byte-correct on disk; 30 conflicts paging without killing the daemon; junction
+containment with the outside tree byte-identical and the write queue still live for
+unrelated paths (#320's point, confirmed under a real hostile filesystem); a
+watcher storm of 200 external files indexed and settled; double-launch
+focus-existing.
+
+### The cloud surface
+
+Every remaining e2e failure is the opt-in cloud surface, and the triage found why:
+file writes never replicate at all (the daemon fills `replication_journal`; nothing
+drains it into `replication_log`, so only chat ops and replicated ydoc lineages
+reach the relay); a second machine cannot join a synced workspace because no
+identity-adoption path exists anywhere; `cloudEnableSync` and share materialization
+still open the v2 daemon store with the v1-only TS `secretFileStore` and fail
+`state-corrupt`; the owner's sync in the multiuser flow is terminally refused
+`relay-origin-diverged`. These are design-level gaps in an unfinished surface, not
+regressions from the rewrite — and note they mean those flows are *already* broken
+against daemon stores today, so R16 does not make them worse.
+
+### Verdict
+
+For the local-first product — the thing AGENTS.md says dohc IS — the rewrite is
+verified well past what one person's fortnight would have covered, and the campaign
+found and fixed defects a human dogfood would likely have suffered silently
+(an editor that never engaged; typing that settled back to the pre-edit file while
+claiming "Saved"). R16 is GO for the local core once the journeys' open P1s land.
+The cloud punch-list above is Ice's to sequence; it is tracked, not silent.
