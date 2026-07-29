@@ -144,6 +144,33 @@ For codex, you have to tag the bot (In a pull request comment, mention @codex re
 
 Claude is not setup to review PRs automatically (not part of my subscription), so you have to invoke this review locally (ideally after the PR is created and in parallel with coderabbit and codex reviews). So you have to manually ask claude via the local cli to review the PR and manually go back and forth with it until no issues remain. Everytime claude finishes a review please update the PR via commenting what claude reviewed, then address them. So basically we're trying to do a pseudo claude PR review bot we orchestrate ourselves. Use fable-5 and fallback to opus-5 if fable is unavailable or rate limited.
 
+## How we write
+
+dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified
+Technical English, applied by register. It lives in
+[`.claude/skills/dohc-writing/SKILL.md`](.claude/skills/dohc-writing/SKILL.md)
+and covers UI copy, errors, docs, plans, specs, PR bodies, commit messages, and
+skills. UI copy has its own concrete rules in
+[`docs/brand/copy.md`](docs/brand/copy.md).
+
+The one idea worth carrying even without the skill: **the register decides the
+rules.** Text a reader *executes* (an error, a button, a procedure, an agent
+instruction) gets strict STE — one instruction per sentence, active voice,
+named actor, no figurative language, one approved term per concept. Text a
+reader *thinks about* (docs, plans) gets the same discipline, loosened. Text
+that *persuades* (the letter above, commit subjects) keeps its voice; Orwell
+applies, STE does not. Flattening editorial prose into compliance-speak is a
+failure, not compliance.
+
+The evidence for doing this at all: across Claude and GPT, a writing *system*
+cut slop by 50–74%, while a banned-words list cut it by 3–40%. Do not let this
+turn into a list of forbidden words.
+
+Term drift is the failure mode that actually costs us. One name for one thing —
+`file`, `folder`, `workspace`, `chat`, `share`, `capture`, `agent`. The skill
+holds the glossary, including the terms that are currently in conflict
+(`atom`, `doc`, `entity`) and must not be built on until they are resolved.
+
 ## Regarding long code comments
 
 If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong -- fix the code
