@@ -155,10 +155,12 @@ The rule the skill enforces, and the one worth remembering even without it: **a
 review applies to a COMMIT, not to a PR.** Before merging anything, compare each
 review's `commit_id` against the PR's `headRefOid`:
 
-Prefer `review_status <PR>` from the skill, which handles every shape below. This
-is the copy-pasteable minimum if you are checking by hand — set `PR` and note that
-each query's exit status is checked, because a **failed** `gh api` prints nothing
-and otherwise reads exactly like "nobody reviewed":
+Prefer `review_status <PR>` from the skill, which handles every shape below (the
+skill shows how to extract it — it is a function inside a Markdown file, so it
+cannot be sourced directly). This is the copy-pasteable minimum if you are checking
+by hand. Set `PR`, and treat a **failed** `gh api` as unknown rather than as "nobody
+reviewed" — piping it straight into `grep` hides its exit status, which is why the
+commands below capture first:
 
 ```
 PR=371
@@ -176,24 +178,30 @@ SHORT=${HEAD:0:10}
   || echo "reviews query FAILED — unknown, not empty"; }
 
 # 2. a codex CLEAN pass is an ISSUE comment, not a review — check it too
-[ -n "$SHORT" ] && gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
-  --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|contains(\"$SHORT\"))|.body" \
-  | grep -iE "didn.t find any major issues|no major issues"
+CB=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+  --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|contains(\"$SHORT\"))|.body") \
+  || echo "codex comment query FAILED — unknown, not empty"
+printf '%s' "$CB" | grep -iE "didn.t find any major issues|no major issues|create an environment for this repo"
 
-# 3. CodeRabbit may create NO review object at all; its status comment, which it
-#    EDITS IN PLACE, names the range it covered using the FULL sha. Print the
-#    status lines rather than counting the sha — the sha is present even when the
-#    body says the review is still processing, rate-limited, or failed.
-[ -n "$HEAD" ] && gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
-  --jq ".[]|select(.user.login==\"coderabbitai[bot]\")|select(.body|contains(\"$HEAD\"))|.body" \
-  | grep -iE "currently processing|review limit|rate limit|review failed" \
-  && echo "^ CodeRabbit named the head but did NOT review it — not approval"
+# 3. CodeRabbit's status comment, which it EDITS IN PLACE, names the head it
+#    RECEIVED — it is NOT proof it reviewed. Only (1) proves that. Read this to
+#    learn WHY a review is missing.
+CR=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+  --jq ".[]|select(.user.login==\"coderabbitai[bot]\")|select(.body|contains(\"$HEAD\"))|.body") \
+  || echo "CodeRabbit comment query FAILED — unknown, not empty"
+printf '%s' "$CR" | grep -iE "currently processing|review limit|rate limit|review failed" \
+  && echo "^ CodeRabbit received this head but did NOT review it — not approval"
 ```
 
-If **none** of the three shows the head, the current code is **unreviewed** however
-many reviews the PR has collected — reviews of superseded commits look identical to
-current ones in the GitHub UI. Checking only (1) reports a reviewed-and-passed PR as
-unreviewed, because a clean codex pass never creates a review object.
+CodeRabbit coverage means **a review object in (1)**. Its status comment is written
+when it receives a head, before doing any work, so a comment naming the head proves
+nothing — two PRs had exactly that with zero reviews ever produced. codex is the
+opposite: a clean pass leaves (1) empty and lives only in (2), so checking only (1)
+reports a reviewed-and-passed PR as unreviewed.
+
+If neither (1) nor a clean pass in (2) shows the head, the code is **unreviewed**
+however many reviews the PR has collected — reviews of superseded commits look
+identical to current ones in the GitHub UI.
 
 Two more shapes that decide merges: codex files real findings under state
 **`COMMENTED`**, never `CHANGES_REQUESTED`, so a populated review is not a pass;
