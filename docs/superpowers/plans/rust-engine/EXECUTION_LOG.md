@@ -2950,6 +2950,18 @@ Canonical gate on final main, every row:
     handles 110->110 threads 38->34 handleThreadSlackCalibration=CALIBRATED
     workingSetBounded=true userFileGrowth=25 durableGrowthBytes=126857781
 
+The JS side of final main is green too — `pnpm run typecheck` clean and
+`pnpm run test` at **3,666 tests across 268 files, zero failures**. Getting
+that number honestly took three fixes, because the suite had several tests
+whose green depended on a quiet machine: a FileInspector test invoked a toggle
+through an optional chain that silently no-ops until the component registers it
+(#339); the sync-relay integration suite spawned a real relay whose own port
+wait allows 15s inside vitest's stock 5s per-test ceiling (#340); and a
+lifecycle test slept 30ms hoping an internal 20ms reset timer — scheduled after
+the launch it follows — had already fired (#341). Each failed under the
+parallel run and passed alone, which is precisely the shape this program treats
+as evidence in neither direction until it is root-caused.
+
 Desktop e2e went **28 passed / 30 failed** at campaign start to **49 passed /
 8 failed** on final main. The suite had never run to completion anywhere: CI runs
 only the vitest daemon e2e, and a fresh worktree cannot launch the app at all
