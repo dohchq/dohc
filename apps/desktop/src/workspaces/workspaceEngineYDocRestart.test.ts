@@ -981,6 +981,7 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: "present",
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
       },
@@ -1081,6 +1082,7 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
+      lineage: "present",
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
       },
@@ -1363,6 +1365,7 @@ async function daemonDeathCapture(
           path: options.path,
           markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
           projection: {
             contentKind: "plaintext",
             sourceStateVectorSha256: "b".repeat(64),
