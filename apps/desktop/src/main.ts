@@ -7259,8 +7259,23 @@ function registerIpcHandlers(
 if (process.platform === "win32") app.setAppUserModelId("app.dohc.desktop");
 if (process.platform === "linux") app.setDesktopName("dohc.desktop");
 
+// Test-only daemon restart seam (hermetic E2E: the daemon-kill spec needs the
+// outage to outlive the transport retry window, which production restarts far
+// too fast to reach). Ignored outside DOHC_DESKTOP_TEST like every other
+// DOHC_TEST_* seam.
+function testEngineRestartOverrides(): {
+  initialBackoffMs?: number;
+  maxBackoffMs?: number;
+} {
+  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return {};
+  const backoff = Number(process.env.DOHC_TEST_ENGINE_RESTART_BACKOFF_MS);
+  if (!Number.isFinite(backoff) || backoff <= 0) return {};
+  return { initialBackoffMs: backoff, maxBackoffMs: backoff };
+}
+
 async function startRustEngineDaemon(): Promise<boolean> {
   rustEngineDaemon = createRustEngineDaemon({
+    ...testEngineRestartOverrides(),
     command: defaultEngineBinaryPath({
       isPackaged: app.isPackaged,
       appPath: app.getAppPath(),

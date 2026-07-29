@@ -70,9 +70,25 @@ interface KilledSession {
 // and waits for the supervisor's replacement. Returns with the app still open.
 async function killDaemonMidTyping(
   temp: Awaited<ReturnType<typeof createTempWorkspace>>,
-  input: { docPath: string; preKill: string; postKill: string },
+  input: {
+    docPath: string;
+    preKill: string;
+    postKill: string;
+    // Delays the supervisor's relaunch so the outage outlives the transport
+    // retry window and the session is genuinely stranded dead.
+    restartBackoffMs?: number;
+  },
 ): Promise<KilledSession> {
-  const desktop = await launchDesktopApp({ workspace: temp });
+  const desktop = await launchDesktopApp({
+    workspace: temp,
+    ...(input.restartBackoffMs !== undefined
+      ? {
+          env: {
+            DOHC_TEST_ENGINE_RESTART_BACKOFF_MS: String(input.restartBackoffMs),
+          },
+        }
+      : {}),
+  });
   const { page, app } = desktop;
   const appPid = app.process().pid;
   if (appPid === undefined) throw new Error("Electron app has no pid.");
@@ -110,7 +126,11 @@ async function killDaemonMidTyping(
   // Keep typing through the outage, exactly like the journey's user did.
   await page.keyboard.type(` ${input.postKill}`);
 
-  const replacement = await waitForFreshEngineDaemon(appPid, victims);
+  const replacement = await waitForFreshEngineDaemon(
+    appPid,
+    victims,
+    (input.restartBackoffMs ?? 0) + 30_000,
+  );
   expect(victims).not.toContain(replacement);
 
   // A daemon death must never become a user-facing main-process crash. This
@@ -211,6 +231,66 @@ test("a hard daemon kill leaves the editor writable and lands the outage text", 
     const onDisk = await readFile(join(temp.rootPath, docPath), "utf8");
     expect(onDisk).toContain(postKill);
     expect(onDisk).toContain("KILLREC_AFTER_RESTART");
+    expect(onDisk.match(/Anchor paragraph\./g)).toHaveLength(1);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// D1's end-to-end discrimination. A production restart lands in ~100ms, well
+// inside the transport retry window, so the rebind normally absorbs a kill and
+// the session is never stranded dead. Delaying the supervisor's relaunch past
+// that window (DOHC_TEST_ENGINE_RESTART_BACKOFF_MS, a DOHC_DESKTOP_TEST-only
+// seam) reaches the state the journey ended in: a dead session whose text lives
+// only in the canonical doc, and a user who quits without typing again.
+test("an outage longer than the retry window still persists the text at quit", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const preKill = "KILLREC_PRE_2b4d6f";
+  const postKill = "KILLREC_POST_8a0c2e";
+  const docPath = "abuse/kill.md";
+  // Longer than the ~2.5s transport retry ladder, so the rebind gives up and
+  // the session is marked dead — but back before the quit, so recovery can run.
+  const restartBackoffMs = 4_000;
+
+  try {
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    await writeWorkspaceFiles(temp, [
+      { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
+    ]);
+
+    const killed = await killDaemonMidTyping(temp, {
+      docPath,
+      preKill,
+      postKill,
+      restartBackoffMs,
+    });
+    desktop = killed.desktop;
+
+    // The session went dead during the outage: main reported the refused edits.
+    // Precondition, not decoration: the outage really did outlive the retry
+    // ladder, so the rebind was EXHAUSTED and the session marked dead. Without
+    // this the spec could silently degrade into the fast-restart case it exists
+    // to go beyond. Deliberately keyed on the rebind's own error type rather
+    // than on how many failures recovery goes on to log, so the precondition
+    // cannot shift meaning under a mutation of the recovery code.
+    const refusedEdits = desktop.logs.filter(
+      (entry) =>
+        entry.source === "main" &&
+        /Y\.Doc local update of .* failed/.test(entry.text),
+    );
+    expect(refusedEdits.length).toBeGreaterThan(0);
+    expect(refusedEdits[0]?.text).toContain("EngineWorkspaceRebindError");
+
+    // Quit with no further typing. Only the settling close can save this text.
+    await desktop.close();
+    desktop = null;
+
+    const onDisk = await readFile(join(temp.rootPath, docPath), "utf8");
+    expect(onDisk).toContain(preKill);
+    expect(onDisk).toContain(postKill);
     expect(onDisk.match(/Anchor paragraph\./g)).toHaveLength(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
