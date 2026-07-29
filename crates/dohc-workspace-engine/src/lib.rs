@@ -727,6 +727,15 @@ impl EngineService {
                 blob_egress,
             });
         }
+        if request.method == "versionedText.readBlob" {
+            let (result, blob_egress) = self
+                .versioned_text_read_blob(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress,
+            });
+        }
         let result = match request.method.as_str() {
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
             "workspace.close" => self.workspace_close(request.workspace).await?,
@@ -3753,6 +3762,95 @@ impl EngineService {
                 }),
             ));
         };
+        Ok((
+            json!({
+                "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }),
+            None,
+        ))
+    }
+
+    async fn versioned_text_read_blob(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let params: VersionedTextReadBlobParams = parse(params)?;
+        if params.sha256.len() != 64 || !params.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+        }
+        let sha256 = params.sha256.to_ascii_lowercase();
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let read = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.readBlob",
+            open.actor
+                .read_text_blob(open.workspace_id.clone(), sha256.clone()),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
+        let Some(text) = read.text else {
+            if !ctx.has_capability("blobs") {
+                return Ok((
+                    json!({
+                        "bytesBase64": Value::Null,
+                        "byteLength": read.byte_length,
+                        "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                    }),
+                    None,
+                ));
+            }
+            let byte_permit = self
+                .blob_egress_budget
+                .reserve(read.byte_length, &cancellation)
+                .await?;
+            let hydrated = Self::read_under_ctx(
+                &cancellation,
+                "versionedText.readBlob",
+                open.actor
+                    .read_text_blob_for_egress(open.workspace_id, sha256.clone()),
+            )
+            .await?
+            .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            if hydrated.byte_length != read.byte_length {
+                return Err(wire(ErrorCode::Internal, "state-corrupt"));
+            }
+            let bytes = hydrated
+                .text
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?
+                .into_bytes();
+            if bytes.len() as i64 != read.byte_length
+                || dohc_engine_storage::hex_sha256(&bytes) != sha256
+            {
+                return Err(wire(ErrorCode::Internal, "state-corrupt"));
+            }
+            return Ok((
+                json!({
+                    "bytesBase64": Value::Null,
+                    "byteLength": read.byte_length,
+                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                }),
+                Some(BlobEgress {
+                    stream_id: request_id,
+                    sha256,
+                    bytes,
+                    cancel: ctx.cancel.clone(),
+                    deadline: ctx.deadline,
+                    byte_permit: Some(byte_permit),
+                }),
+            ));
+        };
+        let bytes = text.into_bytes();
+        if bytes.len() as i64 != read.byte_length
+            || dohc_engine_storage::hex_sha256(&bytes) != sha256
+        {
+            return Err(wire(ErrorCode::Internal, "state-corrupt"));
+        }
         Ok((
             json!({
                 "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -8512,6 +8610,13 @@ struct VersionPathParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedBinaryReadBlobParams {
+    workspace_id: String,
+    sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextReadBlobParams {
     workspace_id: String,
     sha256: String,
 }

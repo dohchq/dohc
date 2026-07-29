@@ -959,6 +959,16 @@ enum Command {
         sha256: String,
         reply: oneshot::Sender<Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError>>,
     },
+    ReadTextBlob {
+        workspace_id: String,
+        sha256: String,
+        reply: oneshot::Sender<Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError>>,
+    },
+    ReadTextBlobForEgress {
+        workspace_id: String,
+        sha256: String,
+        reply: oneshot::Sender<Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError>>,
+    },
     ReadTextInband {
         workspace_id: String,
         version_id: String,
@@ -2574,6 +2584,40 @@ impl ActorHandle {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ReadBinaryBlobForEgress {
+                workspace_id,
+                sha256,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn read_text_blob(
+        &self,
+        workspace_id: String,
+        sha256: String,
+    ) -> Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadTextBlob {
+                workspace_id,
+                sha256,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn read_text_blob_for_egress(
+        &self,
+        workspace_id: String,
+        sha256: String,
+    ) -> Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadTextBlobForEgress {
                 workspace_id,
                 sha256,
                 reply,
@@ -6737,6 +6781,26 @@ fn worker_main(
             } => {
                 let outcome = VersionedTextStore::new(&mut store)
                     .read_binary_blob_for_egress(&workspace_id, &sha256)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadTextBlob {
+                workspace_id,
+                sha256,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_text_blob(&workspace_id, &sha256)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadTextBlobForEgress {
+                workspace_id,
+                sha256,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_text_blob_for_egress(&workspace_id, &sha256)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

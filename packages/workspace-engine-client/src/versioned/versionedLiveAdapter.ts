@@ -421,6 +421,62 @@ export class VersionedLiveAdapter {
     return new Uint8Array(delivery.blob.bytes);
   }
 
+  async readTextBlob(input: {
+    workspaceId: string;
+    sha256: string;
+  }): Promise<Uint8Array | null> {
+    this.assertWorkspace(input.workspaceId);
+    let delivery: Awaited<
+      ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>
+    >;
+    try {
+      delivery = await this.requester.requestWithBlob(
+        VERSIONED_METHOD.textReadBlob,
+        input,
+        (raw) =>
+          decodeVersionedResult(VERSIONED_METHOD.textReadBlob, raw)
+            .bytesBase64 === null,
+        { workspace: this.workspace },
+      );
+    } catch (error) {
+      if (
+        error instanceof DaemonRefusalError &&
+        error.wireCode === "INVALID_PARAMS" &&
+        error.message === "file-not-found"
+      ) {
+        return null;
+      }
+      if (error instanceof DaemonClientCapabilityError) {
+        throw new VersionedAdapterCapabilityError(error.message);
+      }
+      throw error;
+    }
+    const result = decodeVersionedResult(
+      VERSIONED_METHOD.textReadBlob,
+      delivery.result,
+    );
+    if (result.bytesBase64 !== null) {
+      return this.decodeBase64(result.bytesBase64);
+    }
+    if (delivery.blob === null) {
+      throw new DaemonProtocolError(
+        "The daemon returned out-of-band text blob metadata without a completed blob.",
+      );
+    }
+    const expectedSha256 = input.sha256.toLowerCase();
+    if (delivery.blob.sha256 !== expectedSha256) {
+      throw new DaemonProtocolError(
+        "The completed blob digest does not match the requested text digest.",
+      );
+    }
+    if (delivery.blob.bytes.byteLength !== result.byteLength) {
+      throw new DaemonProtocolError(
+        "The completed blob length does not match the text metadata.",
+      );
+    }
+    return new Uint8Array(delivery.blob.bytes);
+  }
+
   async readTextFile(input: {
     workspaceId: string;
     versionId: string;
@@ -432,9 +488,20 @@ export class VersionedLiveAdapter {
       path: input.path,
     });
     if (result?.contentKind === "text" && result.text === null) {
-      throw new VersionedAdapterCapabilityError(
-        "The text body exceeds the daemon's in-band response limit.",
-      );
+      const bytes = await this.readTextBlob({
+        workspaceId: input.workspaceId,
+        sha256: result.blobSha256,
+      });
+      if (bytes === null) {
+        throw new DaemonProtocolError(
+          "The daemon could not hydrate the referenced text blob.",
+        );
+      }
+      const { inbandLimitBytes: _inbandLimitBytes, ...metadata } = result;
+      return {
+        ...metadata,
+        text: new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes),
+      };
     }
     return result;
   }

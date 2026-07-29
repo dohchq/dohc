@@ -3,6 +3,7 @@ import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 export const VERSIONED_METHOD = {
   textWrite: "versionedText.write",
   textRead: "versionedText.read",
+  textReadBlob: "versionedText.readBlob",
   textRename: "versionedText.rename",
   textDelete: "versionedText.delete",
   textRollback: "versionedText.rollback",
@@ -79,6 +80,11 @@ export type VersionedTextWriteParams = MutationMetadata & {
 export type VersionedTextReadParams = JsonObject & {
   versionId: string;
   path: string;
+};
+
+export type VersionedTextReadBlobParams = JsonObject & {
+  workspaceId: string;
+  sha256: string;
 };
 
 export type VersionedBinaryWriteParams = MutationMetadata & {
@@ -442,6 +448,14 @@ export type VersionedBinaryReadBlobResult =
       inbandLimitBytes: number;
     });
 
+export type VersionedTextReadBlobResult =
+  | (JsonObject & { bytesBase64: string })
+  | (JsonObject & {
+      bytesBase64: null;
+      byteLength: number;
+      inbandLimitBytes: number;
+    });
+
 export type ForkPoint = JsonObject & {
   versionId: string;
   momentId?: string;
@@ -610,6 +624,7 @@ export type SearchEnsureIndexResult = JsonObject;
 export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.textWrite]: VersionedTextWriteParams;
   [VERSIONED_METHOD.textRead]: VersionedTextReadParams;
+  [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobParams;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameParams;
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteParams;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackParams;
@@ -645,6 +660,7 @@ export type VersionedMethodParamsMap = {
 export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.textWrite]: VersionedTextWriteResult;
   [VERSIONED_METHOD.textRead]: VersionedTextReadResult;
+  [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobResult;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameResult;
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteResult;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackResult;
@@ -1436,6 +1452,23 @@ export function decodeVersionedBinaryReadBlobResult(value: JsonValue): Versioned
   return { bytesBase64: stringValue(object, "bytesBase64", label) };
 }
 
+export function decodeVersionedTextReadBlobResult(value: JsonValue): VersionedTextReadBlobResult {
+  const label = "versionedText.readBlob result";
+  const object = strictObjectValue(value, label, [
+    "bytesBase64",
+    "byteLength",
+    "inbandLimitBytes",
+  ]);
+  if (object.bytesBase64 === null) {
+    return {
+      bytesBase64: null,
+      byteLength: numberValue(object, "byteLength", label),
+      inbandLimitBytes: numberValue(object, "inbandLimitBytes", label),
+    };
+  }
+  return { bytesBase64: stringValue(object, "bytesBase64", label) };
+}
+
 export function decodeSecretWriteResult(value: JsonValue): SecretWriteResult {
   const label = "secrets.write result";
   const object = strictObjectValue(value, label, ["changed", "moment"]);
@@ -1714,6 +1747,9 @@ export function decodeVersionedResult<M extends VersionedMethod>(
       break;
     case VERSIONED_METHOD.textRead:
       result = decodeVersionedTextReadResult(value);
+      break;
+    case VERSIONED_METHOD.textReadBlob:
+      result = decodeVersionedTextReadBlobResult(value);
       break;
     case VERSIONED_METHOD.textRename:
       result = decodeVersionedTextRenameResult(value);

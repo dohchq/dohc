@@ -85,7 +85,8 @@ pub use records::{
     CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
     InbandBinary, InbandSecret, InbandText, ListMomentsQuery, MomentOp, MomentPage, MomentRecord,
     RenameResult, RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotMetadata,
-    SnapshotView, TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
+    SnapshotView, TextBlobRead, TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult,
+    WriteText,
 };
 pub use secrets::{
     CaptureSecret, CaptureSecretRetire, SecretCompareEntry, SecretComparePage, SecretDelete,

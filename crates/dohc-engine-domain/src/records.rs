@@ -582,3 +582,11 @@ pub struct BinaryBlobRead {
     pub byte_length: i64,
     pub bytes: Option<Vec<u8>>,
 }
+
+/// A workspace-referenced text blob read under the in-band cap: over-cap
+/// answers carry the recorded length only, text stays unhydrated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextBlobRead {
+    pub byte_length: i64,
+    pub text: Option<String>,
+}
