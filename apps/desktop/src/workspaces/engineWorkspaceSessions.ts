@@ -18,6 +18,7 @@ import {
 export interface EngineWorkspace {
   workspaceId: string;
   rootPath: string;
+  shareMount?: true;
 }
 
 export interface EngineWorkspaceBinding {
@@ -129,6 +130,7 @@ export class EngineWorkspaceSessions {
   private readonly entries = new Map<string, SessionEntry>();
   private readonly preparations = new Map<string, Promise<void>>();
   private readonly captureAuthors = new Map<string, AgentAuthor | null>();
+  private readonly shareMounts = new Set<string>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private acceptingRuns = true;
@@ -196,8 +198,13 @@ export class EngineWorkspaceSessions {
     this.captureAuthors.set(workspaceId, author);
   }
 
+  rememberShareMount(workspaceId: string): void {
+    this.shareMounts.add(workspaceId);
+  }
+
   async closeWorkspace(workspaceId: string): Promise<void> {
     this.captureAuthors.delete(workspaceId);
+    this.shareMounts.delete(workspaceId);
     const entry = this.entries.get(workspaceId);
     if (!entry) return;
     if (entry.closing) {
@@ -352,6 +359,8 @@ export class EngineWorkspaceSessions {
     await this.prepareWorkspace(workspace.rootPath);
     const requester = new WorkspaceDaemonRequester(client);
     const hasCaptureAuthor = this.captureAuthors.has(workspace.workspaceId);
+    const shareMount =
+      workspace.shareMount === true || this.shareMounts.has(workspace.workspaceId);
     const raw = await requester.request(
       WORKSPACE_METHOD.open,
       {
@@ -361,7 +370,8 @@ export class EngineWorkspaceSessions {
         // A daemon-side open must therefore preserve running claims on both a
         // fresh desktop boot and a sidecar-only rebind.
         recoverRunningDispatches: false,
-        ...(hasCaptureAuthor
+        ...(shareMount ? { captureMode: "none" as const } : {}),
+        ...(!shareMount && hasCaptureAuthor
           ? {
               captureAuthor:
                 this.captureAuthors.get(workspace.workspaceId) ?? null,

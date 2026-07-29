@@ -379,6 +379,7 @@ import {
 } from "./ipc/engineHistoryIpc";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
+import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
@@ -1501,6 +1502,7 @@ function testSyncTimingOverrides(): {
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
+  shareMount?: true;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient {
   if (!rustEngineRelayClient) {
@@ -2613,6 +2615,16 @@ let rustEngineDaemon: EngineDaemonLifecycle | null = null;
 let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
 let rustEngineRelayClient: EngineRelayClient | null = null;
 const relayTransportRoutes = new RelayTransportRouteGuard();
+
+function sharedViewStoreFor(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}) {
+  if (!rustEngineWorkspaceSessions) {
+    throw new Error("Rust engine workspace sessions are unavailable.");
+  }
+  return createCaptureLiveStores(workspace, rustEngineWorkspaceSessions).store;
+}
 
 async function closeRelayTransportWorkspace(workspaceId: string): Promise<void> {
   if (rustEngineRelayClient) {
@@ -4223,6 +4235,7 @@ function registerIpcHandlers(
         workspaceId: created.workspaceId,
         relay,
         shareId: parsed.shareId,
+        store: sharedViewStoreFor(created),
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
@@ -4290,6 +4303,7 @@ function registerIpcHandlers(
       workspaceId: workspace.workspaceId,
       relay,
       shareId: shareView.shareId,
+      store: sharedViewStoreFor(workspace),
       pull: async (input) =>
         await daemonRelay.pullShareView({
           shareId: input.shareId,
@@ -4395,7 +4409,11 @@ function registerIpcHandlers(
       recipientEmail: credentials.email ?? null,
     };
     await createMountDirectory(workspace.rootPath, mount.label);
-    const mountRelayTarget = relayTargetForShareMount(workspace.rootPath, mount);
+    const mountRelayTarget = relayTargetForShareMount(
+      workspace.workspaceId,
+      workspace.rootPath,
+      mount,
+    );
     try {
       // Inside the rollback scope: a failed registry write (ENOSPC, perms)
       // must also remove the just-created folder — the app deliberately
@@ -4410,9 +4428,11 @@ function registerIpcHandlers(
         relay,
       });
       const outcome = await refreshShareMountOnce({
+        hostWorkspaceId: workspace.workspaceId,
         hostRoot: workspace.rootPath,
         mount,
         relay,
+        openStore: sharedViewStoreFor,
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
@@ -4503,6 +4523,7 @@ function registerIpcHandlers(
           token: credentials.token,
         };
         const mountRelayTarget = relayTargetForShareMount(
+          workspace.workspaceId,
           workspace.rootPath,
           mount,
         );
@@ -4511,9 +4532,11 @@ function registerIpcHandlers(
           relay,
         });
         const outcome = await refreshShareMountOnce({
+          hostWorkspaceId: workspace.workspaceId,
           hostRoot: workspace.rootPath,
           mount,
           relay,
+          openStore: sharedViewStoreFor,
           pull: async (input) =>
             await daemonRelay.pullShareView({
               shareId: input.shareId,
@@ -4570,7 +4593,7 @@ function registerIpcHandlers(
     // record removal filters the CURRENT set (the lock serializes mount
     // operations, so no writer can interleave here anyway).
     await closeRelayTransportWorkspace(
-      mountStoreWorkspaceIdFor(mount.shareId),
+      mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
     );
     await removeMountFolder(workspace.rootPath, mount.label);
     const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];

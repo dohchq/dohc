@@ -4,12 +4,16 @@ import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { pullShareView } from "@dohc/workspace-engine";
+import {
+  createVersionedTextStore,
+  pullShareView,
+} from "@dohc/workspace-engine";
 import {
   assertMountableSelector,
   createMountDirectory,
   mountLabelFor,
   mountRootFor,
+  mountStoreWorkspaceIdFor,
   refreshShareMountOnce as refreshShareMountOnceWithPull,
   removeMountFolder,
   validMountLabel,
@@ -17,6 +21,7 @@ import {
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 
 const SHARE_ID = "share-1";
+const HOST_WORKSPACE = "host-workspace-1";
 const TOKEN = "test:recipient";
 
 let roots: string[] = [];
@@ -38,10 +43,15 @@ async function tempHostRoot(): Promise<string> {
 function refreshShareMountOnce(
   input: Omit<
     Parameters<typeof refreshShareMountOnceWithPull>[0],
-    "pull"
+    "openStore" | "pull" | "hostWorkspaceId"
   >,
 ) {
-  return refreshShareMountOnceWithPull({ ...input, pull: pullShareView });
+  return refreshShareMountOnceWithPull({
+    hostWorkspaceId: HOST_WORKSPACE,
+    ...input,
+    pull: pullShareView,
+    openStore: ({ rootPath }) => createVersionedTextStore(rootPath),
+  });
 }
 
 function sha256(content: string): string {
@@ -164,6 +174,30 @@ describe("mount labels", () => {
     expect(validMountLabel("prod-env")).toBe(true);
   });
 
+  // Daemon sessions and relay routes are keyed by workspace id ALONE, and the
+  // session cache returns a binding without comparing rootPath. So two host
+  // workspaces mounting the same share must not derive the same id, or the
+  // second refresh reuses a connection bound to the first host's folder and
+  // can read one host's store while writing into the other's tree.
+  it("gives the same share a different store identity in each host workspace", () => {
+    const a = mountStoreWorkspaceIdFor("host-a", SHARE_ID);
+    const b = mountStoreWorkspaceIdFor("host-b", SHARE_ID);
+    expect(a).not.toBe(b);
+
+    // Same host + same share is stable, so a refresh reuses its own session
+    // rather than leaking a new daemon workspace every pass.
+    expect(mountStoreWorkspaceIdFor("host-a", SHARE_ID)).toBe(a);
+
+    // The host is a fixed-width digest, not a raw id: concatenating two opaque
+    // ids with a separator would let these two distinct pairs collide.
+    expect(mountStoreWorkspaceIdFor("host-a", "s")).not.toBe(
+      mountStoreWorkspaceIdFor("host", "a-s"),
+    );
+
+    // Two different shares in ONE host stay distinct too.
+    expect(mountStoreWorkspaceIdFor("host-a", "share-2")).not.toBe(a);
+  });
+
   it("mountRootFor refuses labels that escape shared-with-me", async () => {
     const host = await tempHostRoot();
     expect(() => mountRootFor(host, "../outside")).toThrow(/Invalid share mount label/);
@@ -214,6 +248,41 @@ describe("refreshShareMountOnce", () => {
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe(
       "the brief v2",
     );
+  });
+
+  // The mount closes its own store, and that close is now an RPC that can
+  // fail. It must stay best-effort: mountShare treats a rejection here as a
+  // failed mount and DELETES the folder, so a dying sidecar after a committed
+  // cursor would destroy files that had already materialized.
+  it("keeps a successful refresh when closing the mount's store fails", async () => {
+    const host = await tempHostRoot();
+    const relay = new FakeShareRelay();
+    relay.addWrite("docs/brief.md", "the brief");
+
+    const outcome = await refreshShareMountOnceWithPull({
+      hostWorkspaceId: HOST_WORKSPACE,
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+      pull: pullShareView,
+      openStore: ({ rootPath }) => {
+        const store = createVersionedTextStore(rootPath);
+        // Release the real handle first (Windows refuses to remove an open
+        // db in afterEach), then fail the way a dying daemon would.
+        const realClose = store.close.bind(store);
+        return Object.assign(store, {
+          close: async () => {
+            await realClose();
+            throw new Error("daemon went away during close");
+          },
+        });
+      },
+    });
+
+    expect(outcome).toEqual({ status: "updated", changedPaths: 1 });
+    expect(
+      await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex/docs/brief.md"), "utf8"),
+    ).toBe("the brief");
   });
 
   it("reports ended on revocation and leaves the files untouched", async () => {

@@ -509,8 +509,12 @@ export class EngineRelayClient {
   bind(input: {
     workspaceId: string;
     rootPath: string;
+    shareMount?: true;
     relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
   }): EngineRelayWorkspaceClient {
+    if (input.shareMount === true) {
+      this.sessions.rememberShareMount(input.workspaceId);
+    }
     this.routes.bind({
       ...input,
       mode: "daemon",
@@ -521,6 +525,7 @@ export class EngineRelayClient {
     const workspace = {
       workspaceId: input.workspaceId,
       rootPath: input.rootPath,
+      ...(input.shareMount === true ? { shareMount: true as const } : {}),
     };
     const connectionKey = `${input.rootPath}\u0000${input.relay.token}`;
     const request = async (

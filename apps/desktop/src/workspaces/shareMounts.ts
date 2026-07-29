@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, mkdir, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
@@ -13,6 +14,7 @@ import {
   repairSharedViewProjection,
   type RefreshSharedViewOutcome,
 } from "./sharedView";
+import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // Share mounts: the receive side of a relay share materialized INSIDE a host
 // workspace as shared-with-me/<label>/ — ordinary read-only files the user's
@@ -145,17 +147,36 @@ export function assertMountableSelector(selector: {
 
 // The store-scoping workspace id inside the mount's own nested engine.db.
 // Purely local and deterministic; it never leaves the machine.
-export function mountStoreWorkspaceIdFor(shareId: string): string {
-  return `share-mount-${shareId}`;
+//
+// It MUST include the host: daemon sessions and relay routes are keyed by
+// workspace id alone, and `EngineWorkspaceSessions` hands back a cached
+// binding without comparing rootPath. Two host workspaces mounting the SAME
+// share would otherwise collide on one session and one route — the second
+// refresh reusing a connection bound to the first host's mount folder.
+//
+// The host is a fixed-width digest rather than a raw id, so the pair is
+// unambiguous: concatenating two opaque ids with a separator lets
+// ("host-a", "s") and ("host", "a-s") produce the same string.
+function hostDigest(hostWorkspaceId: string): string {
+  return createHash("sha256").update(hostWorkspaceId).digest("hex").slice(0, 16);
+}
+
+export function mountStoreWorkspaceIdFor(
+  hostWorkspaceId: string,
+  shareId: string,
+): string {
+  return `share-mount-${shareId}-${hostDigest(hostWorkspaceId)}`;
 }
 
 export function relayTargetForShareMount(
+  hostWorkspaceId: string,
   hostRoot: string,
   mount: Pick<ShareMountRecord, "shareId" | "label">,
-): { workspaceId: string; rootPath: string } {
+): { workspaceId: string; rootPath: string; shareMount: true } {
   return {
-    workspaceId: mountStoreWorkspaceIdFor(mount.shareId),
+    workspaceId: mountStoreWorkspaceIdFor(hostWorkspaceId, mount.shareId),
     rootPath: mountRootFor(hostRoot, mount.label),
+    shareMount: true,
   };
 }
 
@@ -165,14 +186,27 @@ export function relayTargetForShareMount(
 // (materialize before commit; re-replay is idempotent). Revocation comes
 // back as status "ended" with the files left exactly as they were.
 export async function refreshShareMountOnce(input: {
+  hostWorkspaceId: string;
   hostRoot: string;
   mount: Pick<ShareMountRecord, "shareId" | "label">;
   relay: SyncRelayConnection;
   pull: Parameters<typeof refreshSharedViewOnce>[0]["pull"];
+  openStore: (workspace: {
+    workspaceId: string;
+    rootPath: string;
+  }) => CaptureVersionedTextStore;
 }): Promise<RefreshSharedViewOutcome> {
   const rootDir = mountRootFor(input.hostRoot, input.mount.label);
   await assertRealMountRoot(input.hostRoot, input.mount.label);
-  const storeWorkspaceId = mountStoreWorkspaceIdFor(input.mount.shareId);
+  const storeWorkspaceId = mountStoreWorkspaceIdFor(
+    input.hostWorkspaceId,
+    input.mount.shareId,
+  );
+  // A mount's store is a workspace of its own (synthetic id, nested root), so
+  // this refresh owns it and closes it below. The standalone shared-view
+  // callers deliberately do NOT close theirs: there the store is the user's
+  // live workspace session, and closing it would tear down capture mid-use.
+  const store = input.openStore({ workspaceId: storeWorkspaceId, rootPath: rootDir });
   // Repair BEFORE pulling: the pull only replays deltas, so a file tampered
   // on disk (rogue tool — every dohc surface refuses these writes) must be
   // re-projected from the mount's store or refreshes would report
@@ -180,19 +214,32 @@ export async function refreshShareMountOnce(input: {
   // self-heals a tampered directory chain (planted symlinks removed and the
   // real tree rebuilt) so the pull materializes onto a healthy projection
   // instead of wedging on its containment guards.
-  const repaired = await repairSharedViewProjection(rootDir, storeWorkspaceId);
-  const outcome = await refreshSharedViewOnce({
-    rootDir,
-    workspaceId: storeWorkspaceId,
-    relay: input.relay,
-    shareId: input.mount.shareId,
-    pull: input.pull,
-  });
-  if (repaired === 0) return outcome;
-  return {
-    status: outcome.status === "ended" ? "ended" : "updated",
-    changedPaths: outcome.changedPaths + repaired,
-  };
+  try {
+    const repaired = await repairSharedViewProjection(
+      rootDir,
+      storeWorkspaceId,
+      store,
+    );
+    const outcome = await refreshSharedViewOnce({
+      rootDir,
+      workspaceId: storeWorkspaceId,
+      relay: input.relay,
+      shareId: input.mount.shareId,
+      pull: input.pull,
+      store,
+    });
+    if (repaired === 0) return outcome;
+    return {
+      status: outcome.status === "ended" ? "ended" : "updated",
+      changedPaths: outcome.changedPaths + repaired,
+    };
+  } finally {
+    // Best-effort, like every other session teardown in this flow: a failing
+    // close must not discard a refresh that already materialized and committed
+    // its cursor, or mountShare would roll back and delete the folder it just
+    // wrote.
+    await store.close().catch(() => undefined);
+  }
 }
 
 // Unmount: delete the projection folder (nested engine store included). The

@@ -31,6 +31,7 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
         agentRunId?: string;
       })
     | null;
+  captureMode?: "none";
   recoverRunningDispatches?: boolean;
 };
 export type WorkspaceEmptyParams = WorkspaceJsonObject;

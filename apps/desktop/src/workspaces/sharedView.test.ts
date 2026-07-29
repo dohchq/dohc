@@ -3,7 +3,10 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { pullShareView } from "@dohc/workspace-engine";
+import {
+  createVersionedTextStore,
+  pullShareView,
+} from "@dohc/workspace-engine";
 import {
   materializeSharedViewPaths,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
@@ -29,13 +32,22 @@ async function tempRoot(): Promise<string> {
   return root;
 }
 
-function refreshSharedViewOnce(
+async function refreshSharedViewOnce(
   input: Omit<
     Parameters<typeof refreshSharedViewOnceWithPull>[0],
-    "pull"
+    "pull" | "store"
   >,
 ) {
-  return refreshSharedViewOnceWithPull({ ...input, pull: pullShareView });
+  const store = createVersionedTextStore(input.rootDir);
+  try {
+    return await refreshSharedViewOnceWithPull({
+      ...input,
+      pull: pullShareView,
+      store,
+    });
+  } finally {
+    await store.close();
+  }
 }
 
 function sha256(content: string): string {
@@ -187,12 +199,58 @@ describe("shared view refresh", () => {
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("updated body");
   });
 
+  // A read that fails must not cost the user the file they already had.
+  // preparedTarget removes the existing projection, so reading afterwards
+  // would leave a hole — and because the cursor is only committed after a
+  // clean pass, every later refresh would replay into the same hole.
+  it("leaves the existing projection intact when the content read fails", async () => {
+    const rootDir = await tempRoot();
+    const store = createVersionedTextStore(rootDir);
+    const target = join(rootDir, "docs/a.md");
+    try {
+      await materializeSharedViewPaths(
+        rootDir,
+        WORKSPACE,
+        [{ path: "docs/a.md", operation: "write", contentKind: "text" }],
+        Object.assign(store, {
+          readTextFile: async () => ({ text: "good body" }),
+        }) as unknown as Parameters<typeof materializeSharedViewPaths>[3],
+      );
+      expect(await readFile(target, "utf8")).toBe("good body");
+
+      await expect(
+        materializeSharedViewPaths(
+          rootDir,
+          WORKSPACE,
+          [{ path: "docs/a.md", operation: "write", contentKind: "text" }],
+          Object.assign(store, {
+            readTextFile: async () => {
+              throw new Error("over-cap text body");
+            },
+          }) as unknown as Parameters<typeof materializeSharedViewPaths>[3],
+        ),
+      ).rejects.toThrow(/over-cap text body/);
+
+      expect(await readFile(target, "utf8")).toBe("good body");
+    } finally {
+      await store.close();
+    }
+  });
+
   it("refuses to materialize a path that escapes the workspace root", async () => {
     const rootDir = await tempRoot();
-    await expect(
-      materializeSharedViewPaths(rootDir, WORKSPACE, [
-        { path: "../escape.md", operation: "write", contentKind: "text" },
-      ]),
-    ).rejects.toThrow(/escapes the workspace/);
+    const store = createVersionedTextStore(rootDir);
+    try {
+      await expect(
+        materializeSharedViewPaths(
+          rootDir,
+          WORKSPACE,
+          [{ path: "../escape.md", operation: "write", contentKind: "text" }],
+          store,
+        ),
+      ).rejects.toThrow(/escapes the workspace/);
+    } finally {
+      await store.close();
+    }
   });
 });
