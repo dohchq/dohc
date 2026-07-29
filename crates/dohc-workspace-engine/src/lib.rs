@@ -915,6 +915,10 @@ impl EngineService {
                 self.secrets_list(&ctx, request.workspace, request.params)
                     .await?
             }
+            "secrets.stateExists" => {
+                self.secrets_state_exists(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "secrets.write" => {
                 self.secrets_write(&ctx, request.workspace, request.params)
                     .await?
@@ -3916,6 +3920,25 @@ impl EngineService {
             "secrets": row_values[..included].to_vec(),
             "nextAfterPath": next_after_path,
         }))
+    }
+
+    async fn secrets_state_exists(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: WorkspaceOnlyParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let exists = Self::read_under_ctx(
+            &cancellation,
+            "secrets.stateExists",
+            open.actor.secret_state_exists(open.workspace_id),
+        )
+        .await?;
+        Ok(json!(exists))
     }
 
     async fn load_or_create_secret_key(

@@ -21,6 +21,7 @@ export const VERSIONED_METHOD = {
   versionsCompareFiles: "versions.compareFiles",
   secretsWrite: "secrets.write",
   secretsList: "secrets.list",
+  secretsStateExists: "secrets.stateExists",
   secretsMaterialize: "secrets.materialize",
   secretsDelete: "secrets.delete",
   secretsFork: "secrets.fork",
@@ -627,6 +628,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesParams;
   [VERSIONED_METHOD.secretsWrite]: SecretsWriteParams;
   [VERSIONED_METHOD.secretsList]: SecretsListParams;
+  [VERSIONED_METHOD.secretsStateExists]: WorkspaceOnlyParams;
   [VERSIONED_METHOD.secretsMaterialize]: SecretsMaterializeParams;
   [VERSIONED_METHOD.secretsDelete]: SecretsDeleteParams;
   [VERSIONED_METHOD.secretsFork]: SecretsForkParams;
@@ -661,6 +663,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesResult;
   [VERSIONED_METHOD.secretsWrite]: SecretWriteResult;
   [VERSIONED_METHOD.secretsList]: SecretsListResult;
+  [VERSIONED_METHOD.secretsStateExists]: boolean;
   [VERSIONED_METHOD.secretsMaterialize]: SecretsMaterializeResult;
   [VERSIONED_METHOD.secretsDelete]: SecretDeleteResult;
   [VERSIONED_METHOD.secretsFork]: SecretsForkResult;
@@ -1470,6 +1473,15 @@ export function decodeSecretsListResult(value: JsonValue): SecretsListResult {
   };
 }
 
+export function decodeSecretsStateExistsResult(value: JsonValue): boolean {
+  if (typeof value !== "boolean") {
+    throw new VersionedProtocolShapeError(
+      "secrets.stateExists result must be a boolean.",
+    );
+  }
+  return value;
+}
+
 export function decodeSecretsMaterializeResult(
   value: JsonValue,
 ): SecretsMaterializeResult {
@@ -1750,6 +1762,9 @@ export function decodeVersionedResult<M extends VersionedMethod>(
       break;
     case VERSIONED_METHOD.secretsList:
       result = decodeSecretsListResult(value);
+      break;
+    case VERSIONED_METHOD.secretsStateExists:
+      result = decodeSecretsStateExistsResult(value);
       break;
     case VERSIONED_METHOD.secretsMaterialize:
       result = decodeSecretsMaterializeResult(value);

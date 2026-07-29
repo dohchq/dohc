@@ -103,6 +103,10 @@ const VERSIONED_REQUEST_CASES: VersionedRequestCase[] = [
   },
   { method: VERSIONED_METHOD.secretsList, params: { versionId: "main" } },
   {
+    method: VERSIONED_METHOD.secretsStateExists,
+    params: { workspaceId: WORKSPACE },
+  },
+  {
     method: VERSIONED_METHOD.secretsMaterialize,
     params: { versionId: "main", path: ".env" },
   },
@@ -872,8 +876,8 @@ describe("VersionedLiveAdapter", () => {
     });
   });
 
-  it("encodes every one of the 31 versioned methods with exact params", async () => {
-    expect(VERSIONED_REQUEST_CASES).toHaveLength(31);
+  it("encodes every one of the 32 versioned methods with exact params", async () => {
+    expect(VERSIONED_REQUEST_CASES).toHaveLength(32);
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
       captureClient(requests),
@@ -1116,6 +1120,9 @@ describe("VersionedLiveAdapter", () => {
     );
 
     const main = await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+    await expect(
+      adapter.secretStateExists({ workspaceId: WORKSPACE }),
+    ).resolves.toBe(false);
     const write = await adapter.writeTextFile({
       workspaceId: WORKSPACE,
       versionId: main.id,
@@ -1128,8 +1135,18 @@ describe("VersionedLiveAdapter", () => {
       versionId: main.id,
       path: "a.md",
     });
+    await adapter.writeSecretFile({
+      workspaceId: WORKSPACE,
+      versionId: main.id,
+      path: ".env",
+      text: "TOKEN=loopback",
+      metadata: { origin: "api" },
+    });
 
     expect(write.snapshot.text).toBe("hello");
     expect(read?.text).toBe("hello");
+    await expect(
+      adapter.secretStateExists({ workspaceId: WORKSPACE }),
+    ).resolves.toBe(true);
   });
 });

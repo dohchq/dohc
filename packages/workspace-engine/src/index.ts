@@ -247,6 +247,7 @@ export {
   SecretFileStoreError,
   createSecretFileStore,
   installWorkspaceDataKey,
+  loadSecretDataKey,
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
   type WorkspaceSecretState,
