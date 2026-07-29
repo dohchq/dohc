@@ -21,6 +21,7 @@ import {
   decodeVersionedBinaryReadBlobResult,
   decodeVersionedBinaryReadResult,
   decodeVersionedBinaryWriteResult,
+  decodeVersionedTextReadBlobResult,
   decodeVersionedTextDeleteResult,
   decodeVersionedTextRenameResult,
   decodeVersionedTextRollbackResult,
@@ -52,6 +53,7 @@ import {
   type VersionedTextRenameParams,
   type VersionedTextRollbackParams,
   type VersionedTextReadParams,
+  type VersionedTextReadBlobParams,
   type VersionedTextWriteParams,
   type VersionsCompareFilesParams,
   type VersionsCompareParams,
@@ -1793,6 +1795,36 @@ describe("loopback contract enforcement", () => {
     ).toEqual({
       bytesBase64: null,
       byteLength: bytes.length,
+      inbandLimitBytes: 48 * 1024,
+    });
+  });
+
+  it("returns metadata-only text readBlob for a referenced over-cap body", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const text = "x".repeat(48 * 1024 + 1);
+    engine.seedTextFile({ workspace: WORKSPACE, path: "large.md", text });
+    const read = decodeVersionedTextReadResult(
+      await call(engine, 1, VERSIONED_METHOD.textRead, {
+        versionId: "main",
+        path: "large.md",
+      }),
+    );
+    expect(read).toMatchObject({
+      text: null,
+      byteLength: text.length,
+      inbandLimitBytes: 48 * 1024,
+    });
+    const blobParams: VersionedTextReadBlobParams = {
+      workspaceId: WORKSPACE,
+      sha256: (read?.blobSha256 ?? "").toUpperCase(),
+    };
+    expect(
+      decodeVersionedTextReadBlobResult(
+        await call(engine, 2, VERSIONED_METHOD.textReadBlob, blobParams),
+      ),
+    ).toEqual({
+      bytesBase64: null,
+      byteLength: text.length,
       inbandLimitBytes: 48 * 1024,
     });
   });

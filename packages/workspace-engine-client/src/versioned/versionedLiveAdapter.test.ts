@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Request } from "../ydoc/generated/Request";
 import type { Response } from "../ydoc/generated/Response";
@@ -40,6 +41,10 @@ const VERSIONED_REQUEST_CASES: VersionedRequestCase[] = [
     params: { versionId: "main", path: "a.md", text: "a" },
   },
   { method: VERSIONED_METHOD.textRead, params: { versionId: "main", path: "a.md" } },
+  {
+    method: VERSIONED_METHOD.textReadBlob,
+    params: { workspaceId: WORKSPACE, sha256: "a".repeat(64) },
+  },
   {
     method: VERSIONED_METHOD.textRename,
     params: { versionId: "main", fromPath: "a.md", toPath: "b.md" },
@@ -389,6 +394,85 @@ describe("VersionedLiveAdapter", () => {
     expect(requests.map((request) => request.method)).toEqual([
       VERSIONED_METHOD.binaryRead,
       VERSIONED_METHOD.binaryReadBlob,
+    ]);
+    expect(blobHandlers.size).toBe(0);
+  });
+
+  it("round-trips a BOM-prefixed over-cap text body exactly", async () => {
+    const text = `\uFEFF${"x".repeat(128 * 1024 + 1)}`;
+    const bytes = new TextEncoder().encode(text);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const requests: Request[] = [];
+    const blobHandlers = new Set<
+      Parameters<NonNullable<MinimalDaemonClient["onBlob"]>>[0]
+    >();
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      helloAck: { capabilities: ["blobs"] },
+      onBlob(handler) {
+        blobHandlers.add(handler);
+        return () => blobHandlers.delete(handler);
+      },
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        if (request.method === VERSIONED_METHOD.textRead) {
+          return {
+            id: request.id,
+            result: {
+              workspaceId: WORKSPACE,
+              versionId: "main",
+              objectId: "object",
+              path: "large.md",
+              contentKind: "text",
+              text: null,
+              sha256,
+              blobSha256: sha256,
+              byteLength: bytes.byteLength,
+              updatedAtMs: 1,
+              latestMomentId: "moment",
+              metadataOrigin: "api",
+              inbandLimitBytes: 128 * 1024,
+            },
+          };
+        }
+        for (const handler of blobHandlers) {
+          handler({
+            requestId: request.id,
+            streamId: request.id,
+            totalBytes: bytes.byteLength,
+            sha256,
+            bytes,
+          });
+        }
+        return {
+          id: request.id,
+          result: {
+            bytesBase64: null,
+            byteLength: bytes.byteLength,
+            inbandLimitBytes: 48 * 1024,
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    const read = await adapter.readTextFile({
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "large.md",
+    });
+    const hydratedText = read?.text;
+    expect(typeof hydratedText).toBe("string");
+    if (typeof hydratedText !== "string") throw new Error("missing hydrated text");
+
+    expect(hydratedText.charCodeAt(0)).toBe(0xfeff);
+    expect(createHash("sha256").update(hydratedText).digest("hex")).toBe(sha256);
+    expect(read).not.toHaveProperty("inbandLimitBytes");
+    expect(requests.map((request) => request.method)).toEqual([
+      VERSIONED_METHOD.textRead,
+      VERSIONED_METHOD.textReadBlob,
     ]);
     expect(blobHandlers.size).toBe(0);
   });
@@ -876,8 +960,8 @@ describe("VersionedLiveAdapter", () => {
     });
   });
 
-  it("encodes every one of the 32 versioned methods with exact params", async () => {
-    expect(VERSIONED_REQUEST_CASES).toHaveLength(32);
+  it("encodes every one of the 33 versioned methods with exact params", async () => {
+    expect(VERSIONED_REQUEST_CASES).toHaveLength(33);
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
       captureClient(requests),

@@ -5630,6 +5630,171 @@ async fn text_read_returns_binary_head_and_read_blob_reads_by_sha() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
+    // MUTATION: authorize text digests against binary columns -> the referenced
+    // body is refused as file-not-found instead of producing blob egress.
+    use dohc_engine_domain::{NoFaults, VersionedTextStore, WriteText};
+    use dohc_engine_storage::EngineStore;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let workspace = "ws-rpcd-text-blob";
+    let other_workspace = "ws-rpcd-text-blob-other";
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    std::fs::create_dir_all(db_path.parent().expect("engine dir")).expect("engine dir");
+    let text = "x".repeat(128 * 1024 + 1);
+    let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+    let other_text = "referenced only by the other workspace";
+    let other_sha = dohc_engine_storage::hex_sha256(other_text.as_bytes());
+    {
+        let mut store = EngineStore::open(&db_path, 1).expect("store");
+        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        let faults = NoFaults;
+        let mut versioned = VersionedTextStore::new(&mut store);
+        versioned
+            .ensure_main_version(workspace, "main", 1, &faults)
+            .expect("main");
+        versioned
+            .write_text(
+                &WriteText {
+                    workspace_id: workspace.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "large-text-object".to_owned(),
+                    path: "large.md".to_owned(),
+                    text: text.clone(),
+                    moment_id: "large-text-moment".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &faults,
+            )
+            .expect("normal text write");
+        versioned
+            .ensure_main_version(other_workspace, "main", 3, &faults)
+            .expect("other main");
+        versioned
+            .write_text(
+                &WriteText {
+                    workspace_id: other_workspace.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "other-text-object".to_owned(),
+                    path: "private.md".to_owned(),
+                    text: other_text.to_owned(),
+                    moment_id: "other-text-moment".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                    request_id: None,
+                },
+                &faults,
+            )
+            .expect("other workspace text write");
+    }
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    let capped = call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "large.md" }),
+    )
+    .await;
+    assert_eq!(capped["text"], Value::Null);
+    assert_eq!(capped["blobSha256"], sha256);
+
+    let output = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            3,
+            "versionedText.readBlob",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace, "sha256": sha256 }),
+        ),
+    )
+    .await
+    .expect("text blob egress");
+    assert_eq!(output.response.result["bytesBase64"], Value::Null);
+    let egress = output.blob_egress.expect("over-cap text egress");
+    assert_eq!(egress.sha256, sha256);
+    assert_eq!(egress.bytes, text.as_bytes());
+
+    let refused = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded(),
+        request(
+            4,
+            "versionedText.readBlob",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace, "sha256": other_sha }),
+        ),
+    )
+    .await
+    .expect_err("other workspace's text blob refuses");
+    assert_eq!(refused.message, "file-not-found");
+
+    // Overwrite the path so the original digest is no longer any snapshot's
+    // head: its ONLY remaining reference is the moment that wrote it. Reading
+    // over-cap text out of HISTORY is exactly what the moments branch of the
+    // authorization exists for, and without this the snapshots branch alone
+    // could carry the whole test.
+    // MUTATION: drop the moments branch from read_text_blob_with_hydration ->
+    // this read refuses with file-not-found.
+    call(
+        &transport,
+        &handle,
+        5,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "path": "large.md",
+            "text": "small now",
+            "origin": "api",
+        }),
+    )
+    .await;
+    let historical = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            6,
+            "versionedText.readBlob",
+            Some(handle),
+            json!({ "workspaceId": workspace, "sha256": sha256 }),
+        ),
+    )
+    .await
+    .expect("historical over-cap text stays readable");
+    let historical_egress = historical.blob_egress.expect("history egress");
+    assert_eq!(historical_egress.bytes, text.as_bytes());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn over_cap_blob_egress_announces_chunks_fin_and_reassembles_exactly() {
     // MUTATION: drop FIN, use the 64 KiB socket read size, omit raw egress, or
     // reorder/truncate a chunk -> the frame and exact-byte assertions fail.

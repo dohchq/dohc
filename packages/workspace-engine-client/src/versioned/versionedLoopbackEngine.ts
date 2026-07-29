@@ -436,6 +436,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.textWrite(state, workspace, params, request);
       case VERSIONED_METHOD.textRead:
         return this.textRead(state, workspace, params);
+      case VERSIONED_METHOD.textReadBlob:
+        return this.textReadBlob(state, params);
       case VERSIONED_METHOD.binaryWrite:
         return this.binaryWrite(state, workspace, params, request);
       case VERSIONED_METHOD.binaryWriteBlob:
@@ -617,6 +619,34 @@ export class VersionedLoopbackEngine implements EngineTransport {
       };
     }
     return { ...metadata, text, blobSha256: sha256(text) };
+  }
+
+  private textReadBlob(state: WorkspaceState, params: JsonObject): JsonValue {
+    const digest = requiredString(params, "sha256", "text readBlob").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error("invalid-input");
+    const candidates: string[] = [];
+    for (const version of state.versions.values()) {
+      for (const file of version.files.values()) {
+        if (file.contentKind === "text") candidates.push(file.text ?? "");
+      }
+      for (const file of version.textForkBase.values()) {
+        if (file.contentKind === "text") candidates.push(file.text ?? "");
+      }
+    }
+    for (const moment of state.moments.values()) {
+      if (moment.before?.contentKind === "text") candidates.push(moment.before.text ?? "");
+      if (moment.after?.contentKind === "text") candidates.push(moment.after.text ?? "");
+    }
+    const text = candidates.find((candidate) => sha256(candidate) === digest);
+    if (text === undefined) throw new Error("file-not-found");
+    const bytes = [...Buffer.from(text, "utf8")];
+    return bytes.length <= INBAND_LIMIT_BYTES
+      ? { bytesBase64: encodeBase64(bytes) }
+      : {
+          bytesBase64: null,
+          byteLength: bytes.length,
+          inbandLimitBytes: INBAND_LIMIT_BYTES,
+        };
   }
 
   private binaryWrite(

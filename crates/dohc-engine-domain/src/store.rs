@@ -25,7 +25,7 @@ use crate::records::{
     CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandText,
     ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
     RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotRecord, SnapshotView,
-    TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
+    TextBlobRead, TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -969,6 +969,104 @@ impl<'a> VersionedTextStore<'a> {
             Ok(Some(BinaryBlobRead {
                 byte_length,
                 bytes: Some(bytes),
+            }))
+        })
+    }
+
+    /// Read a text blob only when the caller's workspace has a durable head,
+    /// fork base, moment, or conflict-side reference to it.
+    pub fn read_text_blob(
+        &self,
+        workspace_id: &str,
+        sha256: &str,
+    ) -> Result<Option<TextBlobRead>, DomainError> {
+        self.read_text_blob_with_hydration(workspace_id, sha256, false)
+    }
+
+    /// Read a workspace-referenced text blob hydrated even above the in-band cap.
+    pub fn read_text_blob_for_egress(
+        &self,
+        workspace_id: &str,
+        sha256: &str,
+    ) -> Result<Option<TextBlobRead>, DomainError> {
+        self.read_text_blob_with_hydration(workspace_id, sha256, true)
+    }
+
+    fn read_text_blob_with_hydration(
+        &self,
+        workspace_id: &str,
+        sha256: &str,
+        hydrate_over_cap: bool,
+    ) -> Result<Option<TextBlobRead>, DomainError> {
+        non_empty(workspace_id, "workspace_id")?;
+        self.store.read_with(|conn| {
+            let referenced: bool = conn
+                .query_row(
+                    "SELECT EXISTS(\
+                         SELECT 1 FROM snapshots \
+                         WHERE workspace_id = ?1 AND blob_sha256 = ?2\
+                     ) OR EXISTS(\
+                         SELECT 1 FROM fork_base_snapshots \
+                         WHERE workspace_id = ?1 AND blob_sha256 = ?2\
+                     ) OR EXISTS(\
+                         SELECT 1 FROM moments \
+                         WHERE workspace_id = ?1 \
+                           AND (after_blob_sha256 = ?2 OR before_blob_sha256 = ?2)\
+                     ) OR EXISTS(\
+                         SELECT 1 FROM conflicts \
+                         WHERE workspace_id = ?1 \
+                           AND (base_blob_sha256 = ?2 \
+                                OR current_blob_sha256 = ?2 \
+                                OR incoming_blob_sha256 = ?2)\
+                     )",
+                    params![workspace_id, sha256],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if !referenced {
+                return Ok(None);
+            }
+            let lengths: Option<(i64, i64)> = conn
+                .query_row(
+                    "SELECT byte_length, LENGTH(CAST(text AS BLOB)) \
+                     FROM blobs WHERE sha256 = ?1",
+                    params![sha256],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let Some((byte_length, actual_length)) = lengths else {
+                return Err(DomainError::StateCorrupt {
+                    reason: "referenced text blob is missing",
+                });
+            };
+            if byte_length < 0 {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text blob has a negative recorded length",
+                });
+            }
+            if byte_length != actual_length {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text blob length does not match its text",
+                });
+            }
+            if byte_length as usize > INBAND_CONTENT_CAP_BYTES && !hydrate_over_cap {
+                return Ok(Some(TextBlobRead {
+                    byte_length,
+                    text: None,
+                }));
+            }
+            let text = blob_text(conn, sha256)?.ok_or(DomainError::StateCorrupt {
+                reason: "referenced text blob is missing",
+            })?;
+            if text_blob_sha256(&text) != sha256 {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text blob digest does not match its text",
+                });
+            }
+            Ok(Some(TextBlobRead {
+                byte_length,
+                text: Some(text),
             }))
         })
     }
