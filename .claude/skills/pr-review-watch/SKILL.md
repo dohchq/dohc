@@ -38,6 +38,15 @@ you to go look. `review_status` decides, at the moment you need the answer.
 | CodeRabbit | still working | that same comment reading "Currently processing new changes in this PR" |
 | CodeRabbit | rate-limited | that same comment containing "Review limit reached" |
 | CodeRabbit | internal error | that same comment containing "Review failed" |
+| CodeRabbit | **rate-limited** | **also a commit status of `state=success`**, description "Review rate limited" — a **green check** in the UI for a head it did not review |
+
+**That green check is the worst trap on this surface.** On a rate-limited head CodeRabbit
+reports `success` to the commit-status API with the description `Review rate limited`,
+so the PR page shows a passing CodeRabbit check next to zero reviews. Glance at the
+checks and you conclude it approved. Read the *description*, or read `pulls/N/reviews`,
+and you find it never looked. `review_status` prints that description whenever
+CodeRabbit has no review of the head, precisely so the green tick cannot stand
+unqualified.
 
 **The status comment proves receipt, not coverage — and I got this backwards once.**
 Watching a markdown-only PR through five heads that produced zero entries in
@@ -372,7 +381,7 @@ review_status() {
   local CODEX="chatgpt-codex-connector[bot]" RABBIT="coderabbitai[bot]"
   local CLEAN="didn.t find any major issues|no major issues"
   local DEGRADED="Review limit|rate limit|Review failed"
-  local head short rows lines rid st cnt blen who body cbody envt newest now verdict=OK
+  local head short rows lines rid st cnt blen who body cbody envt newest now crs verdict=OK
   local blocked=0 findings=0 unknown=0 unreviewed=0 pending=0
 
   [ -n "$n" ] || { echo "review_status: no PR number given"; return 2; }
@@ -471,6 +480,12 @@ review_status() {
             --jq ".[]|select(.user.login==\"$RABBIT\")|select(.body|contains(\"$head\"))|.body" 2>/dev/null); then
         echo "  $who — status-comment query FAILED, coverage UNKNOWN"; unknown=1; continue
       fi
+      # Surface CodeRabbit's COMMIT STATUS too: on a rate-limited head it reports
+      # state=success with description "Review rate limited", so the PR page shows a
+      # green CodeRabbit check for a head it never reviewed. Say so out loud.
+      crs=$(gh api "repos/$REPO/commits/$head/status" \
+              --jq '.statuses[]?|select(.context=="CodeRabbit")|"\(.state): \(.description)"' 2>/dev/null | tail -1)
+      [ -n "$crs" ] && echo "  $who — its commit status says \"$crs\" — a green check here does NOT mean it reviewed"
       if [ -n "$body" ]; then
         # DEGRADED is tested FIRST: the wrapper is permanent, so a rate-limited
         # comment often still carries processing text, and reporting "just wait"
