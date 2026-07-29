@@ -150,22 +150,14 @@ dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified
 Technical English, applied by register. The rules live in
 [`skills/dohc-writing/SKILL.md`](skills/dohc-writing/SKILL.md); UI copy has its
 own in [`docs/brand/copy.md`](docs/brand/copy.md). Read the skill before
-writing docs, specs, plans, UI copy, or another skill. It also governs how you
-talk to us: chat turns, status reports, commits, PR descriptions, and review
-comments.
+writing docs, specs, plans, PR bodies, UI copy, or another skill.
 
 The one idea worth carrying even without it: **the register decides the
-rules.** Ask what the reader will do with the text — execute it, think about
-it, remember it, or trust it. Executable text gets strict STE. Explanatory
-text gets it loosened. Editorial text keeps its voice, with STE only as a slop
-filter. Flattening editorial prose into compliance-speak is a failure, not
-compliance.
-
-Text you ask us to **trust** — a status report, a finding, "this works" — has
-its own rules, and none of them are about sentence length: lead with the
-answer, mark what you did not verify, and say "done" only with evidence. That
-register is deliberately not a box. Voice and humor are welcome there. The
-unmarked guess is the thing that actually costs us.
+rules.** Text a reader *executes* (an error, a button, a procedure, an agent
+instruction) gets strict STE. Text a reader *thinks about* (docs, plans) gets
+the same discipline, loosened. Text that *persuades* (the letter above, commit
+subjects) keeps its voice, and STE applies to it only as a slop filter.
+Flattening editorial prose into compliance-speak is a failure, not compliance.
 
 Term drift is the failure mode that costs us most, so: one name for one thing.
 The skill holds the glossary. Note that the product invariants above are
