@@ -84,22 +84,31 @@ export async function materializeSharedViewPaths(
       await rm(target, { recursive: true, force: true });
       continue;
     }
+    // Read the content BEFORE touching the projection. `preparedTarget`
+    // removes the existing file, so a read that throws after it would leave a
+    // hole where a good file was — and with the cursor uncommitted, every
+    // later refresh would replay into the same hole.
+    const content =
+      change.contentKind === "binary"
+        ? await store.readBinaryFile({
+            workspaceId,
+            versionId: main.id,
+            path: change.path,
+          })
+        : (
+            await store.readTextFile({
+              workspaceId,
+              versionId: main.id,
+              path: change.path,
+            })
+          )?.text ?? null;
     await preparedTarget(target);
-    if (change.contentKind === "binary") {
-      const bytes = await store.readBinaryFile({
-        workspaceId,
-        versionId: main.id,
-        path: change.path,
-      });
-      if (bytes) await writeFile(target, bytes, { flag: "wx" });
-      continue;
-    }
-    const snapshot = await store.readTextFile({
-      workspaceId,
-      versionId: main.id,
-      path: change.path,
-    });
-    if (snapshot) await writeFile(target, snapshot.text, { encoding: "utf8", flag: "wx" });
+    if (content === null) continue;
+    await writeFile(
+      target,
+      content,
+      typeof content === "string" ? { encoding: "utf8", flag: "wx" } : { flag: "wx" },
+    );
   }
 }
 

@@ -199,6 +199,44 @@ describe("shared view refresh", () => {
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("updated body");
   });
 
+  // A read that fails must not cost the user the file they already had.
+  // preparedTarget removes the existing projection, so reading afterwards
+  // would leave a hole — and because the cursor is only committed after a
+  // clean pass, every later refresh would replay into the same hole.
+  it("leaves the existing projection intact when the content read fails", async () => {
+    const rootDir = await tempRoot();
+    const store = createVersionedTextStore(rootDir);
+    const target = join(rootDir, "docs/a.md");
+    try {
+      await materializeSharedViewPaths(
+        rootDir,
+        WORKSPACE,
+        [{ path: "docs/a.md", operation: "write", contentKind: "text" }],
+        Object.assign(store, {
+          readTextFile: async () => ({ text: "good body" }),
+        }) as unknown as Parameters<typeof materializeSharedViewPaths>[3],
+      );
+      expect(await readFile(target, "utf8")).toBe("good body");
+
+      await expect(
+        materializeSharedViewPaths(
+          rootDir,
+          WORKSPACE,
+          [{ path: "docs/a.md", operation: "write", contentKind: "text" }],
+          Object.assign(store, {
+            readTextFile: async () => {
+              throw new Error("over-cap text body");
+            },
+          }) as unknown as Parameters<typeof materializeSharedViewPaths>[3],
+        ),
+      ).rejects.toThrow(/over-cap text body/);
+
+      expect(await readFile(target, "utf8")).toBe("good body");
+    } finally {
+      await store.close();
+    }
+  });
+
   it("refuses to materialize a path that escapes the workspace root", async () => {
     const rootDir = await tempRoot();
     const store = createVersionedTextStore(rootDir);

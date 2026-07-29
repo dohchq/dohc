@@ -432,9 +432,26 @@ export class VersionedLiveAdapter {
       path: input.path,
     });
     if (result?.contentKind === "text" && result.text === null) {
-      throw new VersionedAdapterCapabilityError(
-        "The text body exceeds the daemon's in-band response limit.",
-      );
+      // Over-cap text: hydrate the SAME way over-cap binary already does.
+      // The blob store is content-addressed, so the digest the capped read
+      // returned resolves a text body too — the cap bounds the response
+      // frame, not what the caller may read.
+      const bytes = await this.readBinaryBlob({
+        workspaceId: input.workspaceId,
+        sha256: result.blobSha256,
+      });
+      if (bytes === null) {
+        throw new VersionedAdapterCapabilityError(
+          "The over-cap text body has no stored blob to hydrate from.",
+        );
+      }
+      // The cap field belongs to the capped SHAPE, not to the hydrated value:
+      // callers must not see a limit alongside a body that already honours it.
+      return {
+        ...result,
+        text: new TextDecoder().decode(bytes),
+        inbandLimitBytes: undefined,
+      };
     }
     return result;
   }
