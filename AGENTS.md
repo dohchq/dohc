@@ -147,29 +147,23 @@ Claude is not setup to review PRs automatically (not part of my subscription), s
 ## How we write
 
 dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified
-Technical English, applied by register. It lives in
-[`skills/dohc-writing/SKILL.md`](skills/dohc-writing/SKILL.md)
-and covers UI copy, errors, docs, plans, specs, PR bodies, commit messages, and
-skills. UI copy has its own concrete rules in
-[`docs/brand/copy.md`](docs/brand/copy.md).
+Technical English, applied by register. The rules live in
+[`skills/dohc-writing/SKILL.md`](skills/dohc-writing/SKILL.md); UI copy has its
+own in [`docs/brand/copy.md`](docs/brand/copy.md). Read the skill before
+writing docs, specs, plans, PR bodies, UI copy, or another skill.
 
-The one idea worth carrying even without the skill: **the register decides the
+The one idea worth carrying even without it: **the register decides the
 rules.** Text a reader *executes* (an error, a button, a procedure, an agent
-instruction) gets strict STE — one instruction per sentence, active voice,
-named actor, no figurative language, one approved term per concept. Text a
-reader *thinks about* (docs, plans) gets the same discipline, loosened. Text
-that *persuades* (the letter above, commit subjects) keeps its voice; Orwell
-applies, STE does not. Flattening editorial prose into compliance-speak is a
-failure, not compliance.
+instruction) gets strict STE. Text a reader *thinks about* (docs, plans) gets
+the same discipline, loosened. Text that *persuades* (the letter above, commit
+subjects) keeps its voice, and STE applies to it only as a slop filter.
+Flattening editorial prose into compliance-speak is a failure, not compliance.
 
-The evidence for doing this at all: across Claude and GPT, a writing *system*
-cut slop by 50–74%, while a banned-words list cut it by 3–40%. Do not let this
-turn into a list of forbidden words.
-
-Term drift is the failure mode that actually costs us. One name for one thing —
-`file`, `folder`, `workspace`, `chat`, `share`, `capture`, `agent`. The skill
-holds the glossary, including the terms that are currently in conflict
-(`atom`, `doc`, `entity`) and must not be built on until they are resolved.
+Term drift is the failure mode that costs us most, so: one name for one thing.
+The skill holds the glossary. Note that the product invariants above are
+written in `atom` and `entity` — the glossary records those as layer-specific
+and near-dead respectively. Those invariants are binding as written, and will
+be restated when the terms settle.
 
 ## Regarding long code comments
 

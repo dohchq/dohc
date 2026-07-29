@@ -11,9 +11,23 @@ one kind of text.
 
 ## Why a system at all
 
-A controlled-language experiment across Claude and GPT measured three
-interventions against a baseline. A writing *system* cut slop by 50–74%. A
-banned-words list cut it by 3–40% — sometimes nearly nothing.
+A controlled-language experiment measured three interventions against a
+baseline, on two models
+([woosal1337/blog ep01](https://github.com/woosal1337/blog/tree/main/videos/ep01-the-cure-for-ai-slop)):
+
+| Intervention | Claude | GPT-5.5 |
+| --- | --- | --- |
+| STE skill | −74% | −50% |
+| Orwell's six rules | −43% | −52% |
+| Banned-words list | −3% | −40% |
+
+A writing *system* cut slop by 43–74%. A banned-words list managed 3–40%, and
+on Claude it did almost nothing.
+
+Treat this as directional, not settled. It is six tasks and two models, scored
+by a heuristic linter that counts the mechanical violations the STE prompt
+tells the model to avoid. The authors call it "directional, not proof." The
+ordering is the finding. The decimals are not.
 
 The lesson is the whole reason this file exists: **a list of forbidden words
 does not work. A system does.** If this skill ever decays into "never say
@@ -22,9 +36,8 @@ not by whether they contain a flagged token.
 
 ## The register decides the rules
 
-This is the part that is specific to dohc, and the part to get right first.
-Ask one question before writing: **will a reader execute this text, or think
-about it?**
+This part is dohc-specific. Get it right first. Ask one question before
+writing: **will a reader execute this text, or think about it?**
 
 ### 1. Executable text → strict STE
 
@@ -68,6 +81,16 @@ flattening it would be the wrong trade. `fix: the watcher was lying, and gh api
 Orwell's rules apply. STE applies only as a slop filter: cut padding, cut
 hedging, cut inherited phrasing.
 
+### Mixed documents
+
+Most real dohc documents mix registers. This file does — the argument above is
+editorial, the rules below are executable. A spec has a Rationale and a
+Contract. A PR body has an argument and a test plan.
+
+Section them. Then let **the strictest register present govern any sentence the
+reader will act on.** A rule, a step, or a warning obeys strict STE even when
+the prose around it is editorial.
+
 ## Orwell's six rules
 
 From "Politics and the English Language". They apply everywhere, at the
@@ -85,9 +108,13 @@ strength the register allows.
 **Rule 1 and STE genuinely conflict.** Orwell attacks *stale* metaphor and so
 invites fresh metaphor. STE bans figurative language outright, because a
 non-native reader executing a maintenance procedure cannot safely parse it.
-The source skills leave this unresolved. dohc resolves it by register: fresh
-metaphor is welcome in editorial text, allowed in explanatory text when it
-does real work, and banned in executable text.
+
+The two skills this one draws on leave that unresolved —
+[orwell-writing](https://github.com/tamdogood/builder-essential-skills/blob/main/skills/orwell-writing/SKILL.md)
+and
+[ste-plain-writing](https://github.com/Ryuketsukami/ste-plain-writing).
+dohc resolves it by register. Editorial text welcomes fresh metaphor.
+Explanatory text allows it where it does real work. Executable text bans it.
 
 **Rule 6 is the anti-flattening clause and it outranks the rest.** Prose that
 obeys every rule and reads like a compliance document is a failure. If a rule
@@ -95,10 +122,12 @@ is about to make a sentence worse, break it.
 
 ## Use one name for one thing
 
-STE's real teeth is not its sentence rules — it is its controlled dictionary.
-For dohc the equivalent is our own nouns. Term drift between UI, docs, and
-agent tools is what makes an agent misfire, because the agent cannot tell that
-two words mean the same thing, or that one word means two.
+STE's real power is not its sentence rules. It is the controlled dictionary.
+For dohc the equivalent is our own nouns.
+
+Term drift between UI, docs, and agent tools is what makes an agent misfire.
+The agent cannot tell that two words mean the same thing, or that one word
+means two.
 
 Rules:
 
@@ -113,34 +142,42 @@ Rules:
 | Term | Means | Do not use |
 | --- | --- | --- |
 | `workspace` | The top-level scope that owns everything. Every other noun is scoped to one. | vault, space, org, tenant |
-| `file` | A user-visible item of workspace content. The canonical contract type is `WorkspaceFile`. | page, note, document, item |
+| `file` | A user-visible item of workspace content. Contract type `WorkspaceFile`; its `kind` is `atom`, `asset`, or `database`. | page, note, document, item |
+| `asset` | A binary file kind — image, audio, video, pdf, sqlite (`AssetKind`). In UI copy say `file` unless the kind matters. | attachment, media, upload |
 | `folder` | A container of files. | directory (in UI copy), collection |
-| `chat` | A conversation surface in the workspace. | conversation, room, DM |
-| `thread` | A message sequence inside a chat. | topic, reply chain |
+| `chat` | The conversation surface as a whole. | conversation, DM |
+| `channel` | A named division of the chat surface. Durable rows key on `channel_id`; load-bearing in sharing and authorization. | room, group, space |
+| `thread` | A message sequence inside a channel. | topic, reply chain |
 | `capture` | Content brought in from outside the workspace. | import, clip, ingest |
 | `share` | An explicit grant of access beyond the owner. | permission, invite, ACL |
 | `skill` | A reusable process an agent can run. | playbook, macro, recipe |
 | `agent` | The non-human actor. Attribution uses the olive `agent` voice. | AI, assistant, bot, model |
 | `source-backed` | Derived from an inspectable source rather than hidden state. | synced, generated, smart |
 
-### Terms with an open conflict — resolve before reuse
+### Terms that mean different things in different layers
 
-- **`atom`** carries two meanings today. In the editor and CRDT layers it is
-  live and precise (`inlineAtom`, `AtomKind`): an atomic inline node. In
-  product vocabulary it is legacy — the user-facing surface moved to `file`
-  and `folder`, but `AGENTS.md` still lists "atom" among the product
-  invariant nouns. Do not introduce `atom` into new product copy or docs. Keep
-  it in editor and CRDT code, where it means the node.
-- **`doc` / `document`** appear widely but inconsistently, sometimes meaning a
-  `file`, sometimes a Y.Doc, sometimes prose in `docs/`. In new writing, say
-  `file` for content, `Y.Doc` for the CRDT, and `docs` only for the directory.
-- **`entity`** is nearly dead in the code (about 50 uses) yet still appears in
-  the product invariants. Do not build new copy on it until it means something
-  specific again.
+- **`atom`** is live in code. It is retired only from user-facing copy, and it
+  carries two distinct technical meanings. Neither is legacy.
+  - `WorkspaceFile.kind === "atom"` — a text-content file, as opposed to an
+    `asset` or a `database`. `AtomKind` is that file's content type
+    (`markdown`, `text`, `csv`, `json`, `html`), defined in
+    `packages/workspace-contracts/src/domain.ts`.
+  - `inlineAtom` in the editor — a ProseMirror **decoration**, deliberately
+    not a node or a mark, so the atom stays literal text in the document
+    model.
 
-Flagging these beats inventing a tidy answer. A glossary that quietly picks a
-winner for a term the codebase has not settled will be wrong in one direction
-or the other.
+  Use `atom` in contract and editor code, with that layer's meaning. Never put
+  it in UI copy. The user's word is `file`.
+- **`doc` / `document`** appear widely but inconsistently. They mean a `file`,
+  a `Y.Doc`, or prose under `docs/`, depending on where you stand. In new
+  writing say `file` for content, `Y.Doc` for the CRDT, and `docs` only for
+  the directory.
+- **`entity`** is effectively dead in source — 4 occurrences, none of them a
+  domain type. It survives in older plans and specs, and in the product
+  invariants in `AGENTS.md`. Do not build new copy or new types on it.
+
+Recording the real split beats inventing a tidy answer. A glossary that
+quietly picks a winner for an unsettled term is just wrong in a new direction.
 
 ## Workflow
 
@@ -172,7 +209,7 @@ Revising:
 - Do not add personality where neutral prose is correct. The reverse failure
   is just as real.
 - Do not claim strict ASD-STE100 conformance. We use its discipline, not its
-  certified dictionary, and we have not checked against the current issue.
+  certified dictionary, and we have not checked against the current edition.
 - Do not rewrite code, identifiers, commands, or quoted text.
 
 ## Final pass

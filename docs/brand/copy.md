@@ -1,11 +1,11 @@
 # dohc copy — the words
 
 `docs/brand/ui-language.md` covers controls. This file covers the words inside
-them. `docs/brand/design-system.md` states the voice in one line; this is that
-line made enforceable.
+them. `docs/brand/design-system.md` states the voice in its Voice section;
+this file makes it enforceable.
 
-The soul in one line: **say what is true, what changed, and what to do next —
-in that order, in as few plain words as carry it.**
+The rule in one line: **say what is true, what changed, and what to do next.**
+In that order, in the fewest plain words that carry it.
 
 The discipline behind this file is `skills/dohc-writing/SKILL.md`
 (Orwell + ASD-STE100 Simplified Technical English, applied by register). UI
@@ -20,17 +20,24 @@ Nearly every string in dohc is one of these. Know which one you are writing.
 | --- | --- | --- |
 | **State** | Say what is true now | `3 files changed on this machine` |
 | **Change** | Say what just happened | `Moved 4 files to Archived` |
-| **Ready** | Say something is available | `Share link copied` |
+| **Ready** | Say something is now usable | `Export ready to download` |
 | **Next** | Say what the user can do | `Choose which copy to keep` |
 
 An empty state and an error both owe the user a **Next**. A toast usually owes
 a **Change**. A status bar owes a **State**.
 
+**Change or Ready?** Change reports a finished action. Ready reports that
+something became usable. `Moved 4 files to Archived` is a Change. If nothing
+new became usable, it is a Change.
+
 ## Rules
 
 - **One instruction per sentence. 20 words or fewer.** If it needs two
   sentences, write two.
-- **Active voice, named actor.** `dohc could not reach the relay`, not
+- **Active voice, named actor** — unless the actor is dohc and the surface
+  makes that obvious. `Saved` and `Moved 4 files to Archived` are correct;
+  naming dohc there adds a word and no information. Never use the passive to
+  hide a *failing* actor: write `dohc could not reach the relay`, not
   `the relay could not be reached`.
 - **Name the thing the user names it.** Use the glossary in the writing skill:
   `file`, `folder`, `workspace`, `chat`, `share`, `capture`, `agent`. Never
@@ -90,12 +97,13 @@ says what is missing and what to do about it, per the `EmptyState` recipe in
 
 Agent activity gets the olive `agent` voice visually. In words:
 
-- Say what the agent **did**, in past tense, with the count. `Updated 3 files`.
+- Completed work: past tense, with the count. `Updated 3 files`.
+- Work in progress: name the concrete action, and the count when known.
+  `Reading 40 files`. Never `Working on it…`.
+- Work waiting on the user: state the gate. `Waiting for your review`.
 - Attribute plainly. `Edited by agent` — never a personality, never a name we
   invented, never first person unless the agent is genuinely speaking.
 - Never imply the agent understood, decided, or thought. It acted.
-- Pending agent work states the gate: `Waiting for your review`, not
-  `Working on it…`.
 
 ## Destructive and irreversible actions
 
@@ -108,12 +116,25 @@ Agent activity gets the olive `agent` voice visually. In words:
 
 | Before | After | Why |
 | --- | --- | --- |
-| `Your changes have been successfully saved!` | `Saved` | Passive, padded, exclaimed. The user does not need three words for one fact. |
+| `Your changes have been successfully saved!` | `Saved` | Passive, padded, exclaimed. Six words for one fact. |
 | `Something went wrong. Please try again later.` | `Could not reach the sync relay. Check your connection, then retry.` | Names the actor and the next action. |
-| `Seamlessly sync your workspace across all your devices` | `Your workspace stays current on every machine you sign in to.` | Marketing word out, mechanism in. |
+| `Seamlessly sync your workspace across all your devices` | `Your workspace stays current on every machine you sign in to.` | Marketing word out; states the actual condition and its scope. |
 | `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, glossary noun, shorter. |
 | `Are you sure you want to do this?` | `Delete 12 files from Research? This cannot be undone.` | States the stakes and the count. |
 | `AI is analyzing your workspace…` | `Agent is reading 40 files.` | Concrete, countable, no magic. |
+
+## Known violations in shipping copy
+
+This file is new and the app predates it. Existing strings are not
+automatically conformant. Two are confirmed:
+
+- `apps/desktop/src/renderer/editor/slashCommands.tsx:83` — `Link another page`
+  uses `page`, a banned synonym for `file`.
+- `apps/desktop/src/renderer/settings/SettingsDialog.tsx:487` — "without
+  changing document content" uses `document`, a banned synonym for `file`.
+
+Fix these when you next touch the surface. Do not read existing copy as an
+example of the rules.
 
 ## Checklist per string
 
