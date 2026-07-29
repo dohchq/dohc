@@ -476,3 +476,58 @@ sharing ships: **does an owner's epoch rotation sever a live read-write
 member's ability to append, or may the member keep appending against the old
 epoch?** Parked as an explicit prerequisite on any sharing milestone; do not
 resolve it implicitly in implementation again.
+
+### Native-suite evidence RETIRED (R16, 2026-07-29) — supersedes the R02 runner note above
+
+The "GitHub CI SKIPPED" entry above records that *native-suite evidence moves to
+R02's local runner scripts*. That runner is
+`tools/rust-engine-program/run-native-suite.mjs`, and what it actually runs is
+`pnpm --filter @dohc/workspace-engine typecheck|test` — the **legacy TypeScript
+engine's** suites. R16 deletes that package, so the runner's subject ceases to
+exist.
+
+**Decision (Ice, 2026-07-29): retire it, do not repoint it.** Repointing it at
+the Rust suite would only duplicate `run-rust-checks.mjs`, which is already the
+canonical gate. (CI is intentionally dispatch-only pre-launch, so "canonical"
+means it must be run LOCALLY before every merge with results reported in the PR,
+alongside the JS `typecheck` and `test` suites — not that it runs automatically.)
+
+And the value the native suite protected — TS-oracle-vs-Rust parity — **partly**
+survives the package's deletion, but less than I first claimed:
+
+- `packages/ydoc-projection` parity is *mostly* enforced. `check-fixture-drift.mjs`
+  regenerates `crates/dohc-engine-collab/tests/fixtures` from it and fails on
+  drift — **except** for fixtures listed in its `knownOracleFailures`
+  allowlist, which it filters out of BOTH the committed and generated sets
+  before comparing (`check-fixture-drift.mjs:176-196`). A case on that list
+  (e.g. `richdocProjection-code-language-backtick.json`) can drift freely
+  while the gate still passes. Mitigating: the same script FAILS if an
+  allowlisted case starts generating cleanly again, so the allowlist cannot
+  silently rot — but while an entry is live, that one case has no parity
+  guard at all.
+- `packages/security-contract` parity is **NOT** enforced. A generator exists
+  (`crates/dohc-engine-sync/tests/fixtures/gen-fixtures.mjs` reads that package)
+  but `check-fixture-drift.mjs` only ever regenerates the collab directory, so
+  the sync fixtures can go stale and the gate still passes while the Rust path
+  floor diverges from its TypeScript twin. That is a pre-existing hole in the
+  gate, not something R16 introduces, and it is tracked separately — but it means
+  "parity survives" must not be used as the whole justification here.
+
+Consequences, all owned by R16:
+
+- delete the two filter steps in `run-native-suite.mjs` (and the runner itself if
+  nothing else remains in it)
+- delete the two `pnpm --filter @dohc/workspace-engine test|typecheck` steps in
+  `.github/workflows/desktop-release.yml`
+- rewrite `tools/rust-engine-program/README.md`, which currently calls this "the
+  native evidence GATE0/TS-NATIVE-CI depends on" and a "mandatory pre-release
+  obligation"
+- mark the `TS-NATIVE-CI` row in `SHARDS.tsv` retired/superseded. It is currently
+  `gate passed` and owns `tools/rust-engine-program/run-native-suite*`, and
+  `GATE0` lists it as a dependency — deleting the runner while leaving that row
+  intact points the machine-readable program record at a gate that no longer
+  exists
+
+**What is NOT retired:** the macOS pre-release obligation from the entry above
+still stands on its own. It is about untested platforms, not about this runner,
+and R16 does not discharge it.
