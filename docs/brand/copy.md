@@ -117,7 +117,7 @@ Agent activity gets the olive `agent` voice visually. In words:
 | Before | After | Why |
 | --- | --- | --- |
 | `Your changes have been successfully saved!` | `Saved` | Passive, padded, exclaimed. Six words for one fact. |
-| `Something went wrong. Please try again later.` | `Could not reach the sync relay. Check your connection, then retry.` | Names the actor and the next action. |
+| `Something went wrong. Please try again later.` | `dohc could not reach the sync relay. Check your connection.` — with a `Retry` action | Names the failing actor, one instruction per sentence, and the retry is a control rather than a second instruction. |
 | `Seamlessly sync your workspace across all your devices` | `Your workspace stays current on every machine you sign in to.` | Marketing word out; states the actual condition and its scope. |
 | `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, glossary noun, shorter. |
 | `Are you sure you want to do this?` | `Delete 12 files from Research? This cannot be undone.` | States the stakes and the count. |

@@ -188,20 +188,37 @@ Rules:
 
 ### Approved terms
 
-| Term | Means | Do not use |
+The third column lists words that must not stand in **as a synonym for that
+term**. It does not ban the word. Several words that look like synonyms name
+different live concepts — see the next section before assuming.
+
+| Term | Means | Not a synonym for it |
 | --- | --- | --- |
 | `workspace` | The top-level scope that owns everything. Every other noun is scoped to one. | vault, space, org, tenant |
 | `file` | A user-visible item of workspace content. Contract type `WorkspaceFile`; its `kind` is `atom`, `asset`, or `database`. | page, note, document, item |
 | `asset` | A binary file kind — image, audio, video, pdf, sqlite (`AssetKind`). In UI copy say `file` unless the kind matters. | attachment, media, upload |
 | `folder` | A container of files. | directory (in UI copy), collection |
-| `chat` | The conversation surface as a whole. | conversation, DM |
+| `chat` | The conversation surface as a whole. | conversation |
 | `channel` | A named division of the chat surface. Durable rows key on `channel_id`; load-bearing in sharing and authorization. | room, group, space |
 | `thread` | A message sequence inside a channel. | topic, reply chain |
-| `capture` | Content brought in from outside the workspace. | import, clip, ingest |
-| `share` | An explicit grant of access beyond the owner. | permission, invite, ACL |
+| `capture` | Content the engine records from outside the workspace. | clip, ingest |
+| `share` | An explicit grant of access beyond the owner. | invite |
 | `skill` | A reusable process an agent can run. | playbook, macro, recipe |
-| `agent` | The non-human actor. Attribution uses the olive `agent` voice. | AI, assistant, bot, model |
-| `source-backed` | Derived from an inspectable source rather than hidden state. | synced, generated, smart |
+| `agent` | The non-human actor. Attribution uses the olive `agent` voice. | AI, assistant, bot |
+| `source-backed` | Derived from an inspectable source rather than hidden state. | generated, smart |
+
+### Near-neighbours that are not synonyms
+
+Each pair below looks interchangeable and is not. Both terms are approved, for
+their own meaning. Collapsing either one makes copy and technical docs wrong.
+
+| Term | Means | Not the same as |
+| --- | --- | --- |
+| `dm` | A direct-message channel — `channelKind: "dm"`, with its own relay grants and navigation. | `channel`, which is named; `chat`, the whole surface |
+| `import` | The user-initiated operation that brings outside files in (`ImportWorkspaceFiles`, `ImportToDatabase`). | `capture`, which is the engine recording content |
+| `model` | The inference model an agent runs on (`AgentModel`), selectable independently of the agent. | `agent`, which is the actor |
+| `permission` | An authorization grant, including agent tool approval (`AgentPermissionRequestSchema`). | `share`, which grants access to another person |
+| `synced` | A replication state — whether copies agree. | `source-backed`, which is about provenance |
 
 ### Terms that mean different things in different layers
 
