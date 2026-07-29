@@ -10,20 +10,29 @@
 >   module top level with no skip gate. Root `pnpm test` **and** `pnpm typecheck`
 >   both hard-fail on deletion, and they are real end-to-end relay coverage that
 >   needs porting, not muting.
-> - **13 desktop test files** instantiate legacy stores directly, and the **three
->   e2e specs** use the legacy store to seed the granter side. That is the bulk of
->   the work. The 13 (by `createVersionedTextStore` / `createSecretFileStore` /
->   `createLinkedChatStore` / `createAgentDispatchStore` / `createChangeSetStore` /
->   `createYDocEngineDriver`):
+> - **12 desktop test files** instantiate legacy stores directly (by
+>   `createVersionedTextStore` / `createSecretFileStore` / `createLinkedChatStore` /
+>   `createAgentDispatchStore` / `createChangeSetStore` / `createYDocEngineDriver`):
 >   `agents/chatDispatchService`, `agents/runnerThreadContext`, `cli/cliServer`,
->   `collab/ydocEngineProviderSession`, `main.chatSecurity`,
->   `workspaces/captureOracleGoldens`, `workspaces/dmChats`,
->   `workspaces/sharedChannels`, `workspaces/workspaceEngineCapture`,
->   `workspaces/workspaceEngineGeneratedText`,
+>   `collab/ydocEngineProviderSession`, `workspaces/captureOracleGoldens`,
+>   `workspaces/dmChats`, `workspaces/sharedChannels`,
+>   `workspaces/workspaceEngineCapture`, `workspaces/workspaceEngineGeneratedText`,
 >   `workspaces/workspaceEngineSecretCapture`,
 >   `workspaces/workspaceEngineYDocSession`, `workspaces/workspaceVersionOperations`.
->   Note `main.chatSecurity.test.ts` sits outside `workspaces/`, so a scan scoped
->   to that directory misses it — which is how the count kept coming out low.
+>   Four sit outside `workspaces/`, so a scan scoped to that directory misses them.
+>
+>   `main.chatSecurity.test.ts` is **NOT** one of them, despite matching the same
+>   grep: it reads `main.ts` as text and asserts
+>   `expect(factory).not.toContain("createLinkedChatStore(")`, so the searched
+>   string appears in an assertion, not an instantiation. This count went 10 → 12
+>   → 13 → 12 across three attempts, twice via loose grep — treat any number here
+>   as suspect until each file has been opened.
+> - **The three e2e specs** are not merely granter-side fixture seeding.
+>   `workspace-chat-multiuser.spec.ts:269-301` opens `memberStore` on the
+>   **recipient** workspace, sends the participant's reply and reaction through it,
+>   and pushes so the owner can verify convergence. That participant mutation path
+>   is what the spec exists to cover, so porting it is real work — muting or
+>   replacing it silently drops multiuser coverage.
 > - **CI/gate references**: `.github/workflows/desktop-release.yml:151,154` and
 >   `tools/rust-engine-program/run-native-suite.mjs:76,80` invoke
 >   `pnpm --filter @dohc/workspace-engine test|typecheck`.
@@ -57,9 +66,21 @@ specifier swaps, because the legacy package mostly re-exports these from
 versioned family via `versionedTextStore.ts:5-42`, agent-dispatch family via
 `agentDispatchStore.ts:3-20`).
 
-Four type names have **no other home** and die with the package:
-`SyncRelayConnection` (`syncRelay.ts:19`), and `YDocContentKind` /
-`YDocSettleResult` / `YDocSession` (`ydocEngineDriver.ts`).
+**But a substantial set of types has no other home** and dies with the package,
+so those are NOT specifier swaps — they need replacement homes. Defined only
+under `packages/workspace-engine/src` and imported by live code:
+
+- from `syncRelay.ts`: `SyncRelayConnection` (7 files), `RelayMaterializedPath`,
+  `ProbeRelayWorkspaceResult`, `PullWorkspaceFromRelayResult`,
+  `PushWorkspaceToRelayResult`, `RecoverRelayOriginResult`
+- from `syncShareView.ts`: `ShareViewChangedPath`, `PullShareViewResult`
+- from `syncSharedChannel.ts`: `PullSharedChannelResult`, `PushSharedChannelResult`
+- from `ydocEngineDriver.ts`: `YDocContentKind`, `YDocSettleResult`, `YDocSession`
+
+That is ~13 homeless types, most of them the relay/share result shapes
+`engineRelayClient.ts` depends on. An earlier draft of this warning claimed there
+were only four; verify with a definition search (`export interface|type <Name>`
+across `packages/`) rather than trusting the list.
 
 The raw file count (54 files import the package) still overstates the *runtime*
 work; that surface is **42 runtime symbols**.
