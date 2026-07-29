@@ -270,4 +270,65 @@ describe("engine Y.Doc provider session — contract heart", () => {
       code: "invalid-input",
     });
   });
+
+  it("announces a settle at the JOURNAL BARRIER, not when it finally runs", async () => {
+    // Round 3 (D5), the IN-PROCESS half. The daemon provider was fixed first
+    // and this one was left behind, so the over-claim window survived here:
+    // onSettleStart fired inside settleChain.then, meaning a settle queued
+    // behind an in-flight one announced itself only after the first finished
+    // — by which point a caller's edit counter had moved past what this
+    // settle actually carries.
+    const events: string[] = [];
+    // Hold the FIRST projection write open so the second settle is genuinely
+    // queued behind an in-flight one — the only situation the two placements
+    // differ in.
+    let releaseFirstProjection!: () => void;
+    const firstProjectionGate = new Promise<void>((resolve) => {
+      releaseFirstProjection = resolve;
+    });
+    let projections = 0;
+    const gated = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === "writeProjectedTextFile") {
+          return async (...args: unknown[]) => {
+            projections += 1;
+            if (projections === 1) await firstProjectionGate;
+            return (
+              target as unknown as {
+                writeProjectedTextFile: (...a: unknown[]) => unknown;
+              }
+            ).writeProjectedTextFile(...args);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as VersionedTextStore;
+
+    const { session } = await open({
+      store: gated,
+      onSettleStart: () => events.push("settling"),
+      onSettled: () => {
+        events.push("settled");
+      },
+      // Disarm the debounce so the only settles are the two explicit ones
+      // below (the shared harness fires it synchronously on every edit).
+      scheduleSettle: () => () => undefined,
+    });
+    const editor = mirrorEditor(session);
+    typeIntoBody(editor, "First burst.");
+
+    const first = session.settleNow();
+    const second = session.settleNow();
+    // Both cross their barrier while the first is still stuck in its write.
+    for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+    expect(events.filter((event) => event === "settling")).toHaveLength(2);
+    expect(events).not.toContain("settled");
+
+    releaseFirstProjection();
+    await first;
+    await second;
+    expect(events.filter((event) => event === "settled").length).toBeGreaterThan(0);
+    await session.close();
+  });
 });

@@ -658,6 +658,61 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
+  it("announces a settle at the JOURNAL BARRIER, not when it finally runs", async () => {
+    // Round 3 (D5). onSettleStart used to fire inside the settle chain, so a
+    // settle QUEUED behind an in-flight one announced itself only once the
+    // first finished. A caller snapshotting edit progress on that hook then
+    // captured a counter that had already advanced past what the settle
+    // would carry, and the later success over-claimed those keystrokes.
+    // Firing at the barrier makes the snapshot conservative instead.
+    const engine = seedPlaintextEngine();
+    let releaseFirstSettle!: () => void;
+    const firstSettleGate = new Promise<void>((resolve) => {
+      releaseFirstSettle = resolve;
+    });
+    let settles = 0;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle) {
+          settles += 1;
+          if (settles === 1) await firstSettleGate;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const events: string[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleStart: () => events.push("settling"),
+      onSettled: () => {
+        events.push("settled");
+      },
+      scheduleSettle: () => () => undefined,
+    });
+
+    const first = provider.settleNow();
+    const second = provider.settleNow();
+    // Drain microtasks: both settles reach their barrier, but neither can
+    // COMPLETE while the first is held at the transport.
+    for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+
+    expect(events.filter((event) => event === "settling")).toHaveLength(2);
+    expect(events).not.toContain("settled");
+
+    releaseFirstSettle();
+    await first;
+    await second;
+    expect(events.filter((event) => event === "settled")).toHaveLength(2);
+
+    await provider.close({ settle: false });
+  });
+
   it("reports a JOURNAL failure to onSettleError too — the edit never reached the engine", async () => {
     // Round 2 (D2b). runSettle aborts on a journal failure BEFORE the settle
     // chain, so onSettleStart/onSettleError never fired and the error routed
