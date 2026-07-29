@@ -250,8 +250,12 @@ while true; do
       # program once per page and concatenates, so an aggregate yields one number
       # per page. "0\n0" then makes `[ -eq 0 ]` fail with an integer-expression
       # error, which reads as "answered" and skips the timeout entirely.
+      # Only TERMINAL states count as coverage. A DISMISSED or PENDING review is
+      # not a statement about the code, and counting it would suppress the timeout
+      # for a round that never completed — and would make the watcher disagree with
+      # review_status, which rejects those states.
       if ! rows=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate \
-            --jq ".[]|select(.commit_id==\"$head\" and .user.login==\"$who\")|.id" 2>/dev/null); then
+            --jq ".[]|select(.commit_id==\"$head\" and .user.login==\"$who\" and (.state==\"APPROVED\" or .state==\"CHANGES_REQUESTED\" or .state==\"COMMENTED\"))|.id" 2>/dev/null); then
         qfail "$n" "$short" "$who" reviews; continue
       fi
       answered=$(printf '%s' "$rows" | grep -c .)

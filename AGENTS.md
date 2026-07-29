@@ -177,20 +177,22 @@ SHORT=${HEAD:0:10}
   --jq ".[]|select(.commit_id==\"$HEAD\")|\"\(.user.login) \(.state)\"" \
   || echo "reviews query FAILED — unknown, not empty"; }
 
-# 2. a codex CLEAN pass is an ISSUE comment, not a review — check it too
-CB=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+# 2. a codex CLEAN pass is an ISSUE comment, not a review — check it too.
+#    Guarded on HEAD: with SHORT empty, contains("") matches every historical
+#    comment and prints a stale clean pass as if it were this head's.
+[ -n "$HEAD" ] && { CB=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
   --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|contains(\"$SHORT\"))|.body") \
   || echo "codex comment query FAILED — unknown, not empty"
-printf '%s' "$CB" | grep -iE "didn.t find any major issues|no major issues|create an environment for this repo"
+printf '%s' "$CB" | grep -iE "didn.t find any major issues|no major issues|create an environment for this repo"; }
 
 # 3. CodeRabbit's status comment, which it EDITS IN PLACE, names the head it
 #    RECEIVED — it is NOT proof it reviewed. Only (1) proves that. Read this to
 #    learn WHY a review is missing.
-CR=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+[ -n "$HEAD" ] && { CR=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
   --jq ".[]|select(.user.login==\"coderabbitai[bot]\")|select(.body|contains(\"$HEAD\"))|.body") \
   || echo "CodeRabbit comment query FAILED — unknown, not empty"
 printf '%s' "$CR" | grep -iE "currently processing|review limit|rate limit|review failed" \
-  && echo "^ CodeRabbit received this head but did NOT review it — not approval"
+  && echo "^ CodeRabbit received this head but did NOT review it — not approval"; }
 ```
 
 CodeRabbit coverage means **a review object in (1)**. Its status comment is written
