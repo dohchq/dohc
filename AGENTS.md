@@ -155,21 +155,41 @@ The rule the skill enforces, and the one worth remembering even without it: **a
 review applies to a COMMIT, not to a PR.** Before merging anything, compare each
 review's `commit_id` against the PR's `headRefOid`:
 
-```
-HEAD=$(gh pr view <N> --json headRefOid --jq .headRefOid); SHORT=${HEAD:0:10}
+Prefer `review_status <PR>` from the skill, which handles every shape below. This
+is the copy-pasteable minimum if you are checking by hand — set `PR` and note that
+each query's exit status is checked, because a **failed** `gh api` prints nothing
+and otherwise reads exactly like "nobody reviewed":
 
-# 1. formal reviews of THIS head (codex when it HAS findings; CodeRabbit always)
-gh api repos/dohc-ai/dohc/pulls/<N>/reviews --paginate   --jq ".[]|select(.commit_id==\"$HEAD\")|\"\(.user.login) \(.state)\""
+```
+PR=371
+HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid) || { echo "head query failed"; return 2; }
+SHORT=${HEAD:0:10}
+
+# 1. formal reviews of THIS head (codex when it HAS findings; CodeRabbit usually)
+gh api "repos/dohc-ai/dohc/pulls/$PR/reviews" --paginate \
+  --jq ".[]|select(.commit_id==\"$HEAD\")|\"\(.user.login) \(.state)\"" || echo "reviews query FAILED — unknown, not empty"
 
 # 2. a codex CLEAN pass is an ISSUE comment, not a review — check it too
-gh api repos/dohc-ai/dohc/issues/<N>/comments --paginate   --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|contains(\"$SHORT\"))|.body"   | grep -iE "didn.t find any major issues|no major issues"
+gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+  --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|contains(\"$SHORT\"))|.body" \
+  | grep -iE "didn.t find any major issues|no major issues"
+
+# 3. CodeRabbit may create NO review object at all; its status comment, which it
+#    edits in place, names the range it covered using the FULL sha
+gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+  --jq ".[]|select(.user.login==\"coderabbitai[bot]\")|.body" | grep -c "$HEAD"
 ```
 
-If **neither** returns anything for the head, the current code is **unreviewed**
-however many reviews the PR has collected. Reviews of superseded commits look
-identical to current ones in the GitHub UI. Checking only (1) reports a
-reviewed-and-passed PR as unreviewed, because a clean codex pass never creates a
-review object.
+If **none** of the three shows the head, the current code is **unreviewed** however
+many reviews the PR has collected — reviews of superseded commits look identical to
+current ones in the GitHub UI. Checking only (1) reports a reviewed-and-passed PR as
+unreviewed, because a clean codex pass never creates a review object.
+
+Two more shapes that decide merges: codex files real findings under state
+**`COMMENTED`**, never `CHANGES_REQUESTED`, so a populated review is not a pass;
+and `--paginate` runs the `--jq` program **once per page**, so an aggregate like
+`[…]|length` returns one count per page and any arithmetic test on it silently
+misfires. Count lines instead.
 
 Note `gh api --jq` does **not** accept `--arg` (that is a standalone-`jq` flag,
 and `jq` is not installed here) — it exits 1 and prints nothing, which reads
