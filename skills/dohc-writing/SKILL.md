@@ -1,6 +1,6 @@
 ---
 name: dohc-writing
-description: dohc's writing discipline — Orwell's six rules plus ASD-STE100 Simplified Technical English, applied by register. Use when drafting or editing any prose in this repo: UI copy, error messages, empty states, docs, plans, specs, PR bodies, commit messages, AGENTS.md, and skills. Also use when asked to rewrite, tighten, simplify, or de-slop existing text.
+description: dohc's writing discipline — Orwell's six rules plus ASD-STE100 Simplified Technical English, applied by register. Use when drafting or editing any prose in this repo: UI copy, error messages, empty states, docs, plans, specs, and skills. Also governs how agents communicate during development — chat turns, status reports, commit messages, PR descriptions, and PR review comments. Use when asked to rewrite, tighten, simplify, or de-slop existing text.
 ---
 
 # Writing for dohc
@@ -36,8 +36,8 @@ not by whether they contain a flagged token.
 
 ## The register decides the rules
 
-This part is dohc-specific. Get it right first. Ask one question before
-writing: **will a reader execute this text, or think about it?**
+This part is dohc-specific. Get it right first. Ask what the reader will do
+with the text: **execute it, think about it, remember it, or trust it.**
 
 ### 1. Executable text → strict STE
 
@@ -80,6 +80,55 @@ flattening it would be the wrong trade. `fix: the watcher was lying, and gh api
 
 Orwell's rules apply. STE applies only as a slop filter: cut padding, cut
 hedging, cut inherited phrasing.
+
+### 4. Agent-to-human text → honesty rules, not sentence rules
+
+Agent chat turns, status reports, PR review comments, commit bodies, handoff
+notes — an agent talking to the person it works with.
+
+**Mechanical STE does the most damage here.** A chat turn written to a 20-word
+cap reads like a robot and communicates less, not more. Voice, humor, and a
+fresh image are all welcome. This register exists to make agent communication
+honest and dense, not to flatten it.
+
+The slop in agent communication is structural, not sentence-level. These are
+the rules that carry the weight:
+
+- **Lead with the answer.** The finding, the number, the failure. Reasoning
+  after, if it is needed at all.
+- **Mark what you did not verify.** State a fact, or say plainly that you are
+  guessing. An unmarked guess is the expensive failure, because the reader
+  builds on it.
+- **Report, do not summarize.** `Changed the retry to exponential backoff;
+  2353 tests pass` beats `I've made the requested improvements`.
+- **Say "done" only when it is done**, and say what proves it. If a step was
+  skipped, name the step.
+- **No preamble and no empty closer.** Restating the question, and
+  `Let me know if you need anything else`, are both pure cost.
+- **Do not narrate the work instead of doing it.** A plan is not a result.
+- **Correct in one sentence and move on.** A tour of the mistake wastes the
+  reader's attention and buries the fix.
+- **Name the tradeoff you chose and why**, rather than presenting a decision as
+  the only option.
+
+The one rule worth the most: **mark what you did not verify.** An earlier
+version of this file's glossary stated that `AtomKind` was an editor node,
+confidently and wrongly — it is a file's content type in `workspace-contracts`,
+and `atom` was live in a shipping contract the entry told agents to avoid. It
+read as fact because it was written as fact. A review caught it only by going
+to the code. Nothing about that sentence's *form* was sloppy; its
+**epistemics** were.
+
+### Where dev artifacts land
+
+| Artifact | Register |
+| --- | --- |
+| Commit subject | Editorial — make it memorable and true |
+| Commit body | Explanatory |
+| PR description | Mixed — argument plus test plan; section them |
+| PR review comment | Executable — the reader acts on it. Name the file, the defect, and the fix |
+| Agent chat turn, status report | Agent-to-human |
+| Handoff / execution log | Explanatory, with agent-to-human honesty rules on every claim |
 
 ### Mixed documents
 
@@ -222,6 +271,8 @@ Revising:
 - In executable text: is any sentence over 20 words, or carrying two
   instructions?
 - Did the rewrite keep every fact and constraint from the source?
+- In agent-to-human text: is the answer first, is every unverified claim
+  marked as unverified, and does any "done" have evidence behind it?
 - Read it aloud. Does it sound like a person who knows the subject?
 
 This skill improves the form of prose. It cannot make a weak idea true or an
