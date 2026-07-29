@@ -161,6 +161,69 @@ only in type position: `pullShareView`, `pullSharedChannel`, `pushSharedChannel`
 those as runtime work is the exact miscount the warning at the top of this file
 exists to prevent.
 
+## The runtime surface, regenerated on current `main`
+
+**31 distinct value-imported names across `apps/desktop/src` non-test.** Every
+entry below is a real `import { … } from "@dohc/workspace-engine"` value
+specifier at the stated file, verified by parsing the import statements.
+
+| symbol | imported by |
+|---|---|
+| `AgentDispatchStoreError` | `cli/cliServer.ts` |
+| `GENERAL_CHANNEL_WIRE_ID` | `main.ts` |
+| `LINKED_CHAT_STORE_RELATIVE_PATH` | `cli/cliServer.ts` |
+| `MAX_VERSIONED_BINARY_FILE_BYTES` | `workspaces/workspaceEngineCapture.ts` |
+| `REMOTE_YDOC_APPLY_ORIGIN` | `collab/ydocEngineProviderSession.ts` |
+| `RelayConflictError` | `workspaces/engineRelayClient.ts`, `workspaces/workspaceKeyEnvelopeEnrollment.ts` |
+| `RelayKeyEnvelopeMissingError` | `workspaces/engineRelayClient.ts`, `workspaces/workspaceKeyEnvelopeEnrollment.ts` |
+| `RelayOriginDivergedError` | `workspaces/engineRelayClient.ts`, `workspaces/relaySyncEngine.ts` |
+| `RelayUnauthorizedError` | `main.ts`, `workspaces/engineRelayClient.ts`, `workspaces/relaySyncEngine.ts` |
+| `RelayWorkspaceUnavailableError` | `main.ts`, `workspaces/engineRelayClient.ts`, `workspaces/workspaceKeyEnvelopeEnrollment.ts` |
+| `SECRET_FILE_STORE_RELATIVE_PATH` | `workspaces/workspaceSecretEnrollmentState.ts` |
+| `SECRET_KEY_RELATIVE_PATH` | `workspaces/workspaceSecretEnrollmentState.ts` |
+| `SecretKeyEnvelopeError` | `workspaces/workspaceKeyEnvelopeEnrollment.ts` |
+| `ShareUnavailableError` | `main.ts`, `workspaces/engineRelayClient.ts`, `workspaces/sharedChannels.ts`, `workspaces/sharedView.ts` |
+| `SharedChannelReadOnlyError` | `main.ts`, `workspaces/engineRelayClient.ts`, `workspaces/sharedChannels.ts` |
+| `VersionedTextStoreError` | `workspaces/workspaceEngineCaptureLiveStore.ts` |
+| `YDocEngineDriverError` | `collab/ydocEngineProviderSession.ts` |
+| `compareVersionFiles` | `workspaces/workspaceEngineCapture.ts` |
+| `createSecretFileStore` | `workspaces/workspaceEngineCapture.ts` |
+| `createVersionedTextStore` | `workspaces/sharedView.ts`, `workspaces/workspaceEngineCapture.ts` |
+| `createYDocEngineDriver` | `collab/ydocEngineProviderSession.ts` |
+| `fetchShareViewInfo` | `main.ts` |
+| `fetchSharedChannelInfo` | `main.ts` |
+| `installWorkspaceDataKey` | `main.ts` |
+| `loadSecretDataKey` | `workspaces/workspaceSecretEnrollmentState.ts` |
+| `parseFilesPolicy` | `workspaces/workspaceEnginePolicyFile.ts` |
+| `parseVisibilityPolicy` | `workspaces/workspaceEnginePolicyFile.ts` |
+| `probeRelayWorkspace` | `workspaces/engineRelayClient.ts` |
+| `resolveEffectivePolicy` | `workspaces/workspaceEngineCapture.ts`, `workspaces/workspaceEnginePolicyFile.ts` |
+| `unwrapWorkspaceDataKey` | `workspaces/workspaceKeyEnvelopeEnrollment.ts` |
+| `wrapWorkspaceDataKey` | `workspaces/workspaceKeyEnvelopeEnrollment.ts` |
+
+### Regenerate this, and do it on current `main`
+
+Every earlier count in this file was wrong, and the last one was wrong for a
+new reason: the scan ran on a branch cut before #364, which had already removed
+two of the entries it reported (`queryChatMessagesGranular`, dead in
+`cli/cliServer.ts`, and `classifyEngineFilePath`, repointed at
+`@dohc/security-contract/engine-path-floor`). A stale branch silently changes
+the answer. **Rebase onto `main` before scanning, and parse the import
+statements — never count files, names in prose, or grep hits.**
+
+The sequence of wrong answers, kept as a warning rather than tidied away:
+42 (original snapshot, counted type-position functions as runtime) → 36
+(arithmetic on a stale list) → 33 (correct method, stale tree) → **31**.
+
+---
+
+> **EVERYTHING BELOW IS THE ORIGINAL STALE SNAPSHOT.** It is kept for its
+> per-symbol notes, which are still useful reading, but its membership is
+> wrong in both directions: it lists symbols with no non-test import
+> (`createAgentDispatchStore`, `searchWorkspaceEngine`, `claimRelayWorkspace`)
+> and omits live ones (`RelayConflictError`, `SECRET_FILE_STORE_RELATIVE_PATH`,
+> `SECRET_KEY_RELATIVE_PATH`, `loadSecretDataKey`). Use the table above.
+
 ## Errors and constants — shared vocabulary, NOT engine implementation
 
 - `AgentDispatchStoreError` — cli/cliServer.ts

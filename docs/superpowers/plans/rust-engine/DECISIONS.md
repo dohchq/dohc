@@ -495,9 +495,16 @@ alongside the JS `typecheck` and `test` suites — not that it runs automaticall
 And the value the native suite protected — TS-oracle-vs-Rust parity — **partly**
 survives the package's deletion, but less than I first claimed:
 
-- `packages/ydoc-projection` parity IS enforced. `check-fixture-drift.mjs`
+- `packages/ydoc-projection` parity is *mostly* enforced. `check-fixture-drift.mjs`
   regenerates `crates/dohc-engine-collab/tests/fixtures` from it and fails on
-  drift.
+  drift — **except** for fixtures listed in its `knownOracleFailures`
+  allowlist, which it filters out of BOTH the committed and generated sets
+  before comparing (`check-fixture-drift.mjs:176-196`). A case on that list
+  (e.g. `richdocProjection-code-language-backtick.json`) can drift freely
+  while the gate still passes. Mitigating: the same script FAILS if an
+  allowlisted case starts generating cleanly again, so the allowlist cannot
+  silently rot — but while an entry is live, that one case has no parity
+  guard at all.
 - `packages/security-contract` parity is **NOT** enforced. A generator exists
   (`crates/dohc-engine-sync/tests/fixtures/gen-fixtures.mjs` reads that package)
   but `check-fixture-drift.mjs` only ever regenerates the collab directory, so
