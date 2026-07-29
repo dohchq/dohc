@@ -691,8 +691,16 @@ describe("YdocLiveAdapter", () => {
     await provider.applyLocalUpdate(update).catch(() => undefined);
     await provider.settleNow().catch(() => undefined);
 
+    // The failure that reaches the save-state channel is the REAL cause —
+    // the refused recordUpdate — not some generic wrapper.
     expect(settleErrors.length).toBeGreaterThan(0);
-    expect(settleErrors.some((error) => error === settleErrors[0])).toBe(true);
+    expect(
+      settleErrors.some(
+        (error) =>
+          error === recordFailure ||
+          (error instanceof Error && error.cause === recordFailure),
+      ),
+    ).toBe(true);
     await provider.close({ settle: false }).catch(() => undefined);
   });
 
