@@ -1597,7 +1597,10 @@ it("a recovered session does not leave a stale release obligation behind", async
 const QUIT_BUDGET_MS = 3_000;
 const CLOSE_PATH_BOUND_MS = 1_000;
 
-it("a settling close against a down daemon stays well inside the quit budget", async () => {
+// Prices the DEAD-session close only. A session still live when the daemon
+// dies takes rebind's full retry ladder at quit (~2.6s) — pre-existing on
+// main and tracked separately; do not read this as covering that path.
+it("a settling close of a DEAD session against a down daemon stays well inside the quit budget", async () => {
   const { rootPath, sessions, openProvider, state, backoff } =
     await daemonDeathCapture("dohc-ydoc-death-budget-", "ydoc-death-budget");
   const capture = createWorkspaceEngineCapture({
