@@ -24,6 +24,7 @@ import {
   decodeVersionedTextDeleteResult,
   decodeVersionedTextRenameResult,
   decodeVersionedTextRollbackResult,
+  decodeVersionedTextListResult,
   decodeVersionedTextReadResult,
   decodeVersionedTextWriteResult,
   decodeVersionsActiveResult,
@@ -2468,6 +2469,56 @@ describe("versioned result decoder rejection", () => {
       decodeVersionsCompareFilesResult({
         entries: [{ path: "x", status: "future" }],
         nextCursor: null,
+      }),
+    ).toThrow(VersionedProtocolShapeError);
+  });
+});
+
+describe("versionedText.list hasYdocMarker", () => {
+  // AUDIT-SILENTSAVE round 4 (D3). hasYdocMarker is what stops the desktop
+  // capture layer from retiring a settled Y.Doc for exceeding a cap a Y.Doc is
+  // not bound by. A row that silently DEFAULTED to false would re-open exactly
+  // that data-loss path, so an absent key must be a protocol violation — the
+  // same rule already applied to `materialized`.
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    path: "notes/settled.md",
+    objectId: "object-1",
+    contentKind: "text",
+    sha256: "a".repeat(64),
+    byteLength: 12,
+    binarySha256: null,
+    updatedAtMs: 1,
+    latestMomentId: "moment-1",
+    metadataOrigin: "ydoc",
+    hasYdocMarker: true,
+    ...overrides,
+  });
+
+  it("carries the flag through, both ways", () => {
+    expect(
+      decodeVersionedTextListResult({ files: [row()], nextAfterPath: null })
+        .files[0]!.hasYdocMarker,
+    ).toBe(true);
+    expect(
+      decodeVersionedTextListResult({
+        files: [row({ hasYdocMarker: false, metadataOrigin: "capture" })],
+        nextAfterPath: null,
+      }).files[0]!.hasYdocMarker,
+    ).toBe(false);
+  });
+
+  it("REJECTS a row with no hasYdocMarker instead of assuming unowned", () => {
+    const { hasYdocMarker: _omitted, ...withoutFlag } = row();
+    expect(() =>
+      decodeVersionedTextListResult({ files: [withoutFlag], nextAfterPath: null }),
+    ).toThrow(VersionedProtocolShapeError);
+  });
+
+  it("rejects a non-boolean hasYdocMarker", () => {
+    expect(() =>
+      decodeVersionedTextListResult({
+        files: [row({ hasYdocMarker: "yes" })],
+        nextAfterPath: null,
       }),
     ).toThrow(VersionedProtocolShapeError);
   });

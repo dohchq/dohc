@@ -27,8 +27,6 @@ import {
 // user has switched to B — the stale response is dropped and its session closed.
 
 // "error" = a settle FAILED, so the file on disk is behind what the editor
-// shows. It is never inferred; main pushes it from a real settle outcome.
-// "error" = a settle FAILED, so the file on disk is behind what the editor
 // shows. "read-only" = the workspace is a read-only shared view and the edit
 // was discarded outright; retrying cannot help, so it gets its own copy.
 // Neither is ever inferred — main pushes both from real outcomes.
