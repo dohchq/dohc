@@ -78,6 +78,75 @@ async fn flush_until(
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_state_probe_tracks_workspace_wide_protected_rows() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+
+    let empty = call(
+        &transport,
+        &handle,
+        2,
+        "secrets.stateExists",
+        json!({ "workspaceId": WORKSPACE_ID }),
+    )
+    .await;
+    assert_eq!(empty, json!(false));
+
+    call(
+        &transport,
+        &handle,
+        3,
+        "versions.ensureMain",
+        json!({ "workspaceId": WORKSPACE_ID }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "secrets.write",
+        json!({
+            "workspaceId": WORKSPACE_ID,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=rpc-probe",
+            "origin": "api",
+            "momentId": "rpc-probe-secret-moment",
+        }),
+    )
+    .await;
+
+    let populated = call(
+        &transport,
+        &handle,
+        5,
+        "secrets.stateExists",
+        json!({ "workspaceId": WORKSPACE_ID }),
+    )
+    .await;
+    // MUTATION: invert or hard-code either probe result and this pair fails.
+    assert_eq!(populated, json!(true));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     let scratch = ScratchDir::new().expect("scratch");

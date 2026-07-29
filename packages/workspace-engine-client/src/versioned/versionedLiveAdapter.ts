@@ -775,6 +775,11 @@ export class VersionedLiveAdapter {
     return rows;
   }
 
+  async secretStateExists(input: { workspaceId: string }): Promise<boolean> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.secretsStateExists, input);
+  }
+
   async listSecretMoments(input: {
     workspaceId: string;
     versionId?: string;

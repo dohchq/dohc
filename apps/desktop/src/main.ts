@@ -350,8 +350,6 @@ import {
 } from "./workspaces/shareMounts";
 import {
   installWorkspaceDataKey,
-  readWorkspaceDataKeyForEnrollment,
-  readWorkspaceSecretState,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
@@ -369,6 +367,11 @@ import {
   type VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
+import {
+  readWorkspaceDataKeyForEnrollment,
+  readWorkspaceSecretState,
+  type WorkspaceSecretState,
+} from "./workspaces/workspaceSecretEnrollmentState";
 import {
   engineMomentDetailForIpc,
   engineMomentForIpc,
@@ -3654,19 +3657,24 @@ function registerIpcHandlers(
     const input = CloudStatusPayload.parse(payload ?? {});
     const status = await cloudLogin().status();
     const workspace = input.workspaceId ? findWorkspace(input.workspaceId) : undefined;
+    let workspaceSecretState: WorkspaceSecretState | undefined;
+    if (workspace) {
+      const sessions = rustEngineWorkspaceSessions;
+      if (!sessions) {
+        throw new Error("Rust engine workspace sessions are unavailable.");
+      }
+      workspaceSecretState = await readWorkspaceSecretState(
+        workspace.rootPath,
+        workspace.workspaceId,
+        sessions,
+      );
+    }
     return CloudStatusResult.parse({
       ...status,
       ...(input.workspaceId
         ? {
             workspaceSynced: !!workspace?.remote,
-            ...(workspace
-              ? {
-                  workspaceSecretState: await readWorkspaceSecretState(
-                    workspace.rootPath,
-                    workspace.workspaceId,
-                  ),
-                }
-              : {}),
+            ...(workspaceSecretState ? { workspaceSecretState } : {}),
           }
         : {}),
     });
@@ -3719,9 +3727,14 @@ function registerIpcHandlers(
         }
         throw error;
       }
+      const sessions = rustEngineWorkspaceSessions;
+      if (!sessions) {
+        throw new Error("Rust engine workspace sessions are unavailable.");
+      }
       const dataKey = await readWorkspaceDataKeyForEnrollment(
         workspace.rootPath,
         workspace.workspaceId,
+        sessions,
       );
       await enrollWorkspaceKeyEnvelope({
         workspaceId: workspace.workspaceId,

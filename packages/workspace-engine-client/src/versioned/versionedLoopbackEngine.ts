@@ -474,6 +474,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.secretWrite(state, workspace, params);
       case VERSIONED_METHOD.secretsList:
         return this.secretList(state, params);
+      case VERSIONED_METHOD.secretsStateExists:
+        return (
+          state.secretMoments.size > 0 ||
+          [...state.versions.values()].some((version) => version.secrets.size > 0)
+        );
       case VERSIONED_METHOD.secretsMaterialize:
         return this.secretMaterialize(state, params);
       case VERSIONED_METHOD.secretsDelete:

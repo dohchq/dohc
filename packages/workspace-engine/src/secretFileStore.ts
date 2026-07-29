@@ -214,7 +214,7 @@ function parseKeyFile(content: string): Buffer {
   return key;
 }
 
-async function loadSecretDataKey(
+export async function loadSecretDataKey(
   rootDir: string,
   options: { createIfMissing: boolean },
 ): Promise<Buffer> {
