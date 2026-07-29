@@ -38,6 +38,25 @@
 >   `pnpm --filter @dohc/workspace-engine test|typecheck`.
 > - **`scripts/engine-sync-folder.ts:5`** imports by deep relative path, so it is
 >   invisible to any `@dohc/workspace-engine` grep.
+> - **Docs and guards that describe the package must move with it.** These are not
+>   import sites, so no code scan finds them:
+>   - `docs/security/authz-boundaries.md:4,39` names `packages/workspace-engine`
+>     as where per-workspace authorization state lives and
+>     `packages/workspace-engine/src/effectivePolicy.ts` as the effective-policy
+>     resolver. **A security boundary document pointing at a deleted package is
+>     worse than a stale reference** — it has to be repointed at wherever
+>     `effectivePolicy` lands, in the same PR.
+>   - `tools/rust-engine-program/README.md:14,39,63,69,74` documents
+>     `run-native-suite.mjs` as "the native evidence GATE0/TS-NATIVE-CI depends
+>     on" and a "mandatory pre-release obligation". Retiring that runner without
+>     rewriting these leaves the program's own docs describing a gate that no
+>     longer exists.
+>   - `packages/workspace-engine/src/engineContracts.compile.ts` is the
+>     contract-drift guard `packages/workspace-contracts/src/engine.ts:28` cites as
+>     what catches drift. It is imported by `versionCompare.test.ts` inside the
+>     package, so it dies with it — either relocate the check or accept the loss
+>     **explicitly**, rather than discovering later that nothing guards that
+>     contract.
 >
 > Read **#362** before planning this shard — it carries the full regenerated scan,
 > the revised ordering, and the two decisions R16 depends on. **#363** covers the
