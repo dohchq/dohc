@@ -4,6 +4,8 @@ This is the working spec for how dohc's desktop UI is built, at the level of
 concrete class recipes. It exists so every surface — human- or agent-built —
 composes the same language instead of re-inventing controls per file.
 `docs/brand/design-system.md` holds the brand story; this file holds the how.
+`docs/brand/copy.md` holds the words that go inside these controls — read it
+before writing any label, error, empty state, or toast.
 
 The soul in one line: **warm paper, quiet graphite, mono metadata, serif brand
 moments, color only for meaning.**
@@ -126,7 +128,8 @@ Agent attribution: olive voice — `text-agent` name/icon or a 6px `bg-agent` do
 3. Hierarchy readable squinting? Title → sections → rows → metadata.
 4. All interactive states present? (hover, active, focus-visible, disabled, empty, loading, error)
 5. Metadata in the mono voice, decorative text `text-subtle`, semantics the only color?
-6. Would Notion/Linear ship it? If not, it isn't done.
+6. Every string checked against `docs/brand/copy.md` — right noun, active voice, and a next action where one is owed?
+7. Would Notion/Linear ship it? If not, it isn't done.
 
 ## Hard invariants (breaking these breaks the product)
 

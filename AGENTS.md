@@ -236,6 +236,30 @@ limit in a comment body rather than failing, so its silence is not approval; and
 the canonical Rust gate can exit 0 while its own summary block says FAIL, so read
 `== summary ==` and never the exit code.
 
+## How we write
+
+dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified
+Technical English, applied by register. The rules live in
+[`skills/dohc-writing/SKILL.md`](skills/dohc-writing/SKILL.md); UI copy has its
+own in [`docs/brand/copy.md`](docs/brand/copy.md). Read the skill before
+writing docs, specs, plans, PR bodies, or another skill. For UI copy — any
+label, error, empty state, or toast — read the copy guide as well; the skill
+alone does not carry those rules.
+
+The one idea worth carrying even without it: **the register decides the
+rules.** Text a reader *executes* (an error, a button, a procedure, an agent
+instruction) gets strict STE. Text a reader *thinks about* (docs, plans) gets
+the same discipline, loosened. Text that *persuades* (the letter above, commit
+subjects) keeps its voice, and STE applies to it only as a slop filter.
+Flattening editorial prose into compliance-speak is a failure, not compliance.
+
+Term drift is the failure mode that costs us most, so: one name for one thing.
+Use the word the surrounding surface already uses, and check it against the
+code before asserting what it means — several dohc nouns mean different things
+in different layers. There is deliberately no term list yet; one was drafted
+and cut because it kept being wrong about a codebase that moves. Add it when
+the terms settle, next to the code it describes.
+
 ## Regarding long code comments
 
 If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong -- fix the code

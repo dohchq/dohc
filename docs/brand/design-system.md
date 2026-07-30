@@ -5,8 +5,8 @@ The full visual intent lives in the brand bible
 live in `apps/desktop/src/renderer/styles.css` (mirrored in `tokens.ts`,
 sync- and contrast-tested); `packages/brand/src/tokens.css` holds the
 brand-reference values they were derived from. Concrete control recipes
-for building UI live in `docs/brand/ui-language.md`. This is the working
-summary.
+for building UI live in `docs/brand/ui-language.md`, and the rules for the
+words inside them in `docs/brand/copy.md`. This is the working summary.
 
 ## Identity
 
@@ -72,4 +72,4 @@ controls, 220–280ms panels, ease out, no bounce. Visible focus rings.
 
 Plainspoken, precise, never magical. State what is, what changed, what is
 ready, and the next action. Empty states explain what is missing and what
-to do next.
+to do next. `docs/brand/copy.md` turns this into enforceable rules.
