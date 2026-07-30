@@ -841,6 +841,16 @@ export function createWorkspaceEngineCapture(
   // unreachable in exactly the tests that wanted it.
   const useRustEngine =
     options.useRustEngine ?? options.rustEngineSessions !== undefined;
+  // Daemon-owned capture quiesces through `flushCapture`, which the store we
+  // would create here does not implement — every call site is an optional-call
+  // no-op, so version operations would read state the daemon had not settled and
+  // report success. An injected store may implement it (some tests inject a
+  // legacy store augmented with one), so this only refuses the store we build.
+  if (options.daemonOwnsCapture && !useRustEngine && !options.store) {
+    throw new Error(
+      "daemonOwnsCapture requires the Rust engine: the legacy store cannot flush daemon capture.",
+    );
+  }
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
     if (!options.rustEngineSessions) {

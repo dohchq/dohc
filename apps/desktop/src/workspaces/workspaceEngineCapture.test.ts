@@ -2204,6 +2204,23 @@ describe("engine selection is stated, not inferred", () => {
     expect(providerOpened).toBe(1);
   });
 
+  it("refuses daemon-owned capture on a store it builds itself, rather than no-op flushing", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    // daemonOwnsCapture quiesces via `flushCapture`, which the legacy store this
+    // would construct does not implement — every call site is `?.()`, so the
+    // pairing would skip the flush silently and still report success. An
+    // INJECTED store may implement it, so the guard must not refuse that case:
+    // the health test above injects a legacy store augmented with flushCapture.
+    expect(() =>
+      capture(root, {
+        rustEngineSessions: mockLiveSessions(loopback),
+        useRustEngine: false,
+        daemonOwnsCapture: true,
+      }),
+    ).toThrow(/daemonOwnsCapture requires the Rust engine/);
+  });
+
   it("CONTROL: an explicit false selects the legacy engine and does NOT reach it", async () => {
     // Proves the flag is what decides, not the fixture. My first draft used the
     // absence of the flag as the control and it failed immediately — with sessions
