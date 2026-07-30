@@ -68,12 +68,6 @@ export {
   nextOriginSeq,
 } from "./syncReplication";
 export {
-  RelayBlobMissingError,
-  RelayConflictError,
-  RelayKeyEnvelopeMissingError,
-  RelayOriginDivergedError,
-  RelayUnauthorizedError,
-  RelayWorkspaceUnavailableError,
   claimRelayWorkspace,
   downloadKeyEnvelope,
   probeRelayWorkspace,
@@ -83,39 +77,25 @@ export {
   uploadKeyEnvelope,
 } from "./syncRelay";
 export type {
-  ProbeRelayWorkspaceResult,
-  PullWorkspaceFromRelayResult,
-  PushWorkspaceToRelayResult,
-  RecoverRelayOriginResult,
-  RelayMaterializedPath,
-  SyncRelayConnection,
   SyncRelayInput,
 } from "./syncRelay";
 export {
-  ShareUnavailableError,
   fetchShareViewInfo,
   pullShareView,
 } from "./syncShareView";
 export type {
-  PullShareViewResult,
-  ShareViewChangedPath,
   ShareViewInfo,
   ShareViewSelector,
 } from "./syncShareView";
 export {
-  SharedChannelAppendRejectedError,
-  SharedChannelReadOnlyError,
   fetchSharedChannelInfo,
   pullSharedChannel,
   pushSharedChannel,
 } from "./syncSharedChannel";
 export type {
-  PullSharedChannelResult,
-  PushSharedChannelResult,
   SharedChannelInfo,
 } from "./syncSharedChannel";
 export type {
-  PendingConflictResolve,
   SyncApplyResult,
   SyncReplicationEnvelope,
   SyncReplicationOpKind,

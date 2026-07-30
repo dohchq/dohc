@@ -7,7 +7,7 @@ import {
   RelayConflictError,
   RelayKeyEnvelopeMissingError,
   RelayWorkspaceUnavailableError,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/relay";
 import { validateSecretPassphrase } from "./secretPassphrase";
 import type { EngineRelayWorkspaceClient } from "./engineRelayClient";
 

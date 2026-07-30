@@ -2,13 +2,16 @@ import type {
   ActorNeutralWriteMetadata,
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
+import {
+  RelayUnauthorizedError,
+  ShareUnavailableError,
+  type PullShareViewResult,
+  type ShareViewChangedPath,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { createVersionedTextStore } from "./versionedTextStore";
 import { openEngineDb, sha256Hex } from "./syncApply";
-import {
-  RelayUnauthorizedError,
-  type SyncRelayConnection,
-} from "./syncRelay";
 
 // PR 18 — the RECIPIENT side of a share grant: a read-only "shared view".
 //
@@ -22,15 +25,6 @@ import {
 // ops' original actor-neutral metadata, and search/history/browsing all work
 // through the normal engine surfaces. The view never pushes anything back.
 
-export class ShareUnavailableError extends Error {
-  constructor(
-    message = "This share was ended, or the code does not match your account.",
-  ) {
-    super(message);
-    this.name = "ShareUnavailableError";
-  }
-}
-
 export interface ShareViewSelector {
   paths: string[];
   versionId: string | null;
@@ -42,24 +36,6 @@ export interface ShareViewInfo {
   granterEmail: string | null;
   selector: ShareViewSelector;
   createdAtMs: number;
-}
-
-export interface ShareViewChangedPath {
-  path: string;
-  operation: "write" | "delete";
-  contentKind: "text" | "binary";
-}
-
-export interface PullShareViewResult {
-  fetched: number;
-  applied: number;
-  changedPaths: ShareViewChangedPath[];
-  nextCursor: number;
-  // Persist the cursor only after the caller has materialized changedPaths
-  // to disk — the same contract as pullWorkspaceFromRelay. A crash before
-  // the commit re-fetches (and re-replays) the delta; replay is
-  // content-compared so an already-applied op is a no-op.
-  commitCursor: () => Promise<void>;
 }
 
 interface SharedLogPage {

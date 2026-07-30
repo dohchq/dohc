@@ -40,6 +40,7 @@ import type {
   WorkspaceId,
   WorkspaceObjectId,
 } from "@dohc/workspace-contracts/engine";
+import type { PendingConflictResolve } from "@dohc/workspace-contracts/relay";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 import * as Y from "yjs";
@@ -69,7 +70,6 @@ import {
   skippedApplyResult,
   type ConflictResolvePayload,
   type MomentAppendPayload,
-  type PendingConflictResolve,
   type VersionCreateForkSnapshot,
   type VersionCreatePayload,
 } from "./syncReplication";

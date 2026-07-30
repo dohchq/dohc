@@ -6,7 +6,6 @@ import {
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
-  probeRelayWorkspace,
   type PendingConflictResolve,
   type ProbeRelayWorkspaceResult,
   type PullSharedChannelResult,
@@ -16,7 +15,8 @@ import {
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
   type SyncRelayConnection,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/relay";
+import { probeRelayWorkspace } from "@dohc/workspace-engine";
 import {
   DaemonRefusalError,
   decodeKeyEnvelopeResult,

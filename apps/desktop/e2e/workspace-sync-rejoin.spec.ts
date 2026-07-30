@@ -2,13 +2,15 @@ import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  RelayConflictError,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
+import {
   claimRelayWorkspace,
   createLinkedChatStore,
   createVersionedTextStore,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
-  RelayConflictError,
-  type SyncRelayConnection,
 } from "@dohc/workspace-engine";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {

@@ -4,10 +4,10 @@ import { dirname, resolve, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
 import {
   ShareUnavailableError,
-  type pullShareView,
   type ShareViewChangedPath,
   type SyncRelayConnection,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/relay";
+import type { pullShareView } from "@dohc/workspace-engine";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // The receive side of a relay share (PR 18): a shared view is a local
