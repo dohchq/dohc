@@ -540,15 +540,21 @@ Consequences, all owned by R16:
   exists
 
 **One consequence this list missed, found while executing it:** the
-`--expect-arch=<x64|arm64>` pin — the thing that stops a cross-built or emulated
-run being recorded as native evidence — existed **only** in
-`run-native-suite.mjs`. `run-rust-checks.mjs` reports `platform()/arch()` in its
-evidence line but never asserted an expected value. Deleting the runner would
-therefore have quietly removed the guard, while the README kept claiming "every
-native run asserts the host architecture". Since `run-rust-checks.mjs` is now the
-native evidence, the pin moved there rather than being dropped. `GATE0`'s
-dependency list still names `TS-NATIVE-CI` and is left alone: it is a historical
-record of a gate that did pass, not a live dependency.
+`--expect-arch=<x64|arm64>` pin existed **only** in `run-native-suite.mjs`.
+`run-rust-checks.mjs` reports `platform()/arch()` in its evidence line but never
+asserted an expected value. Deleting the runner would therefore have quietly
+removed the guard, while the README kept claiming "every native run asserts the
+host architecture". Since `run-rust-checks.mjs` is now the native evidence, the
+pin moved there rather than being dropped. `GATE0`'s dependency list still names
+`TS-NATIVE-CI` and is left alone: it is a historical record of a gate that did
+pass, not a live dependency.
+
+What the pin does and does not guarantee, stated here because the README
+overclaimed it and I repeated the overclaim in this ledger: it aborts when the
+running Node's reported architecture does not match, so a **cross-built** run
+cannot be recorded as native evidence. It does **not** detect emulation —
+`os.arch()` is `process.arch`, the architecture Node itself was built for, so an
+emulated x64 Node on arm64 reports `x64` and satisfies `--expect-arch=x64`.
 
 **What is NOT retired:** the macOS pre-release obligation from the entry above
 still stands on its own. It is about untested platforms, not about this runner,
