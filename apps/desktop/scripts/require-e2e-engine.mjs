@@ -35,14 +35,6 @@ function stageBinary(from, to) {
   copyFileSync(from, to);
 }
 
-function mtimeMs(path) {
-  try {
-    return statSync(path).mtimeMs;
-  } catch {
-    return null;
-  }
-}
-
 // Kept as a literal rather than imported from src/testing/engineBinary.ts: this
 // script runs as plain node from a pnpm lifecycle hook, with no TS loader.
 const overrideEnvVar = "DOHC_TEST_ENGINE_BINARY";
@@ -77,26 +69,26 @@ export function requireE2eEngine({
 
   const built = join(cargoTargetDir, name);
 
-  // A staged copy that exists is not necessarily the one you just built.
-  // `cargo build` refreshes only the workspace-root binary, so leaving an older
-  // staged file in place makes Electron launch stale daemon code — while the
-  // seed helper, which picks the newest candidate, uses the fresh one. The
-  // specs would then seed with one daemon version and exercise another: skew
-  // that either fails for no reason or passes while testing the wrong artifact.
-  if (isFile(wanted)) {
-    const stagedAt = mtimeMs(wanted);
-    const builtAt = isFile(built) ? mtimeMs(built) : null;
-    if (stagedAt !== null && builtAt !== null && builtAt > stagedAt) {
-      stageBinary(built, wanted);
-      return { binary: wanted, copied: true, refreshed: true };
-    }
-    return { binary: wanted, copied: false, refreshed: false };
-  }
-
+  // The workspace-root build wins whenever it exists, with no mtime comparison.
+  // It is authoritative because `cargo build` is the only thing that refreshes
+  // it, and src/testing/engineBinary.ts now resolves it FIRST for the seed
+  // helper — so any branch that left a different file staged would have Electron
+  // launch one daemon while the seed used another. Keeping a "newer" staged copy
+  // is exactly that hole: a previous run's override can be newer than a fresh
+  // build. The deliberate-custom-artifact case is the override above, which is
+  // the supported way to say "use this one".
   if (isFile(built)) {
     mkdirSync(desktopTargetDir, { recursive: true });
+    const hadStaged = isFile(wanted);
     stageBinary(built, wanted);
-    return { binary: wanted, copied: true, refreshed: false };
+    return { binary: wanted, copied: true, refreshed: hadStaged };
+  }
+
+  // No build to stage. An existing staged copy is all there is, so the app can
+  // still launch — but the seed helper will resolve this same file, since the
+  // root candidate does not exist.
+  if (isFile(wanted)) {
+    return { binary: wanted, copied: false, refreshed: false };
   }
 
   throw new Error(

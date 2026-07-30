@@ -103,9 +103,12 @@ describe("requireE2eEngine", () => {
     expect(readFileSync(staged, "utf8")).toBe("fresh");
   });
 
-  it("keeps a staged daemon that is NEWER than the cargo-built one", () => {
-    // A developer who staged a deliberately-built artifact should not have it
-    // overwritten by an older workspace-root build.
+  it("stages the root build over an existing staged copy, regardless of mtime", () => {
+    // The root build is authoritative and engineBinary.ts resolves it FIRST, so
+    // leaving a different file staged would have Electron launch one daemon
+    // while the seed helper used another. A previous run's override can be
+    // NEWER than a fresh build, so mtime is the wrong test — the supported way
+    // to pin a custom artifact is the override, asserted below.
     const root = tempRoot();
     const cargoTargetDir = join(root, "cargo");
     const desktopTargetDir = join(root, "desktop");
@@ -113,9 +116,10 @@ describe("requireE2eEngine", () => {
     mkdirSync(desktopTargetDir, { recursive: true });
     const staged = join(desktopTargetDir, "dohc-workspace-engine");
     const built = join(cargoTargetDir, "dohc-workspace-engine");
-    writeFileSync(staged, "deliberate");
-    writeFileSync(built, "older");
-    utimesSync(staged, 1_800_000_000, 1_800_000_000);
+    writeFileSync(staged, "leftover");
+    writeFileSync(built, "root-build");
+    // Staged deliberately NEWER, which the previous revision would have kept.
+    utimesSync(staged, 1_900_000_000, 1_900_000_000);
     utimesSync(built, 1_700_000_000, 1_700_000_000);
 
     const result = requireE2eEngine({
@@ -125,8 +129,8 @@ describe("requireE2eEngine", () => {
       override: null,
     });
 
-    expect(result.refreshed).toBe(false);
-    expect(readFileSync(staged, "utf8")).toBe("deliberate");
+    expect(result.refreshed).toBe(true);
+    expect(readFileSync(staged, "utf8")).toBe("root-build");
   });
 
   it("stages an explicit override even when the cargo build is newer", () => {
