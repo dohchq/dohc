@@ -1555,7 +1555,7 @@ describe("loopback contract enforcement", () => {
         versionId: "main",
         path: "missing.md",
       }),
-    ).rejects.toThrow("version not found");
+    ).rejects.toThrow("version-not-found");
     expect(
       decodeVersionsActiveResult(
         await call(engine, 1, VERSIONED_METHOD.versionsActive, {

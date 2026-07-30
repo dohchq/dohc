@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import type { ErrorCode } from "../ydoc/generated/ErrorCode";
 import type { Event } from "../ydoc/generated/Event";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import type { Request } from "../ydoc/generated/Request";
 import type { Response } from "../ydoc/generated/Response";
+import type { WireError } from "../ydoc/generated/WireError";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
 import {
@@ -13,6 +15,31 @@ import {
   type VersionedContentKind,
   type VersionedOrigin,
 } from "./versionedWireContract";
+
+// A refusal the real engine reports as an internal failure rather than a
+// caller mistake (`map_runtime` in crates/dohc-workspace-engine/src/lib.rs).
+const INTERNAL_REFUSALS = new Set<string>(["state-corrupt", "persist-failed"]);
+
+/**
+ * Reject the way the real client rejects.
+ *
+ * `EngineClient` turns the engine's error envelope into an error carrying
+ * `wireError`, which `DaemonLiveAdapter` re-throws as `DaemonRefusalError`. A
+ * bare `Error` never reaches that path, so every caller that keys on a refusal
+ * was dead code under the loopback and live against the daemon.
+ *
+ * The engine puts the kebab-case domain code in the wire MESSAGE, so a thrown
+ * message is already the payload; only the envelope was missing.
+ */
+function refusalFrom(error: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  if ("wireError" in error) return error;
+  const code: ErrorCode = INTERNAL_REFUSALS.has(error.message)
+    ? "INTERNAL"
+    : "INVALID_PARAMS";
+  const wireError: WireError = { code, message: error.message, retry: "no" };
+  return Object.assign(error, { wireError });
+}
 
 const INBAND_LIMIT_BYTES = 48 * 1024;
 const COMPARE_PAGE_SIZE = 200;
@@ -420,7 +447,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
-    const result = this.handleRequest(request);
+    let result: JsonValue;
+    try {
+      result = this.handleRequest(request);
+    } catch (error) {
+      throw refusalFrom(error);
+    }
     const response: Response = { id: request.id, result };
     this.responses.push(response);
     return response;
@@ -1578,7 +1610,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const beforeMomentId = requiredString(params, "beforeMomentId", "secret restore");
     const momentId = requiredString(params, "momentId", "secret restore");
     const sourceMoment = state.secretMoments.get(beforeMomentId);
-    if (!sourceMoment) throw new Error("moment not found");
+    if (!sourceMoment) throw new Error("moment-not-found");
     if (sourceMoment.wire.path !== path) throw new Error("invalid-input");
     const version = this.version(state, sourceMoment.wire.versionId);
     const prior = version.secrets.get(path);
@@ -1714,7 +1746,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private version(state: WorkspaceState, id: string): LoopbackVersion {
     const version = state.versions.get(id);
-    if (!version) throw new Error("version not found");
+    // The engine's code, verbatim. A prose message here ("version not found")
+    // read as a refusal but matched no domain code, so it looked correct and
+    // translated to nothing.
+    if (!version) throw new Error("version-not-found");
     return version;
   }
 

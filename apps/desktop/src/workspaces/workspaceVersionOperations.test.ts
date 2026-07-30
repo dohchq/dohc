@@ -282,15 +282,9 @@ describe("createVersion", () => {
     expect(await readText(root, "plan.md")).toBe("v1 text with late edit\n");
   });
 
-  // LEGACY FIXTURE, and it has to be: the assertion is on the DOMAIN error code
-  // `version-name-conflict`, which only the in-process store raises. The daemon
-  // path surfaces an `EngineRequestError` carrying a wire code, and nothing
-  // between the daemon client and this API maps one to the other — so the code
-  // this asserts cannot appear there. Migrating it would mean deleting the
-  // `code` assertion, which is the whole test.
   it("rejects duplicate names without changing the active version", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const engine = daemonCapture(root, new VersionedLoopbackEngine());
     await engine.createVersion("Draft");
     await expect(engine.createVersion("Draft")).rejects.toMatchObject({
       code: "version-name-conflict",
@@ -409,12 +403,10 @@ describe("switchVersion", () => {
     await engine.stop();
   });
 
-  // LEGACY FIXTURE for the same reason as the duplicate-name test above: the
-  // `version-not-found` domain code exists only on the in-process store.
   it("fails closed on an unknown version id without touching disk or active version", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    const engine = capture(root);
+    const engine = daemonCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await expect(engine.switchVersion("no-such-version")).rejects.toMatchObject({

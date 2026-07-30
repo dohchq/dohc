@@ -1,4 +1,7 @@
-import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
+import {
+  VersionedTextStoreError,
+  type VersionedTextStoreErrorCode,
+} from "@dohc/workspace-contracts/engine";
 import type {
   ActorNeutralWriteMetadata,
   FileObjectRecord,
@@ -12,6 +15,7 @@ import type {
   VersionedTextStore,
 } from "@dohc/workspace-engine";
 import {
+  DaemonRefusalError,
   VersionedLiveAdapter,
   type AgentAuthor,
   type ConflictFileState,
@@ -36,6 +40,75 @@ import {
 // missing quiescence, and that must still surface as an error rather than hang.
 const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
+
+// Every `VersionedTextStoreErrorCode`. The engine writes its domain code
+// verbatim into the wire MESSAGE (`map_runtime`,
+// crates/dohc-workspace-engine/src/lib.rs), so recognising a refusal is a set
+// lookup, not a rename table.
+const VERSIONED_TEXT_STORE_ERROR_CODES = [
+  "conflict-not-found",
+  "conflict-stale-target",
+  "duplicate-id",
+  "file-too-large",
+  "file-not-found",
+  "fork-base-not-found",
+  "invalid-generated-id",
+  "invalid-input",
+  "invalid-metadata",
+  "invalid-object",
+  "invalid-path",
+  "invalid-root",
+  "invalid-version",
+  "invalid-text",
+  "invalid-timestamp",
+  "invalid-version-name",
+  "invalid-workspace",
+  "persist-failed",
+  "state-corrupt",
+  "target-path-exists",
+  "version-name-conflict",
+  "version-not-found",
+  "workspace-mismatch",
+  "write-lane-reentry",
+] as const satisfies readonly VersionedTextStoreErrorCode[];
+
+// A new domain code must be listed above, or this stops compiling.
+type AssertNever<T extends never> = T;
+type _AllDomainCodesRepresented = AssertNever<
+  Exclude<
+    VersionedTextStoreErrorCode,
+    (typeof VERSIONED_TEXT_STORE_ERROR_CODES)[number]
+  >
+>;
+
+const DOMAIN_ERROR_CODES: ReadonlySet<string> = new Set(
+  VERSIONED_TEXT_STORE_ERROR_CODES,
+);
+
+/**
+ * Present a daemon refusal as the domain error this store's contract promises.
+ *
+ * The in-process store raised `VersionedTextStoreError` with a domain code. The
+ * daemon reports the same failure as a `DaemonRefusalError` whose message is
+ * that same code, so a caller keying on `error.code` — the obvious way to write
+ * "that name is already taken" — matched nothing here (#418).
+ *
+ * A refusal the domain has no code for is rethrown untouched. Collapsing it
+ * into a generic code would lose exactly the information this translation
+ * exists to keep.
+ */
+function domainErrorFrom(error: unknown): VersionedTextStoreError | null {
+  if (!(error instanceof DaemonRefusalError)) return null;
+  if (!DOMAIN_ERROR_CODES.has(error.message)) return null;
+  const translated = new VersionedTextStoreError(
+    error.message as VersionedTextStoreErrorCode,
+    error.message,
+  );
+  // The wire code and retryability stay reachable; translation adds a domain
+  // code, it does not replace the refusal.
+  translated.cause = error;
+  return translated;
+}
 
 export interface CaptureTextFileMetadata {
   path: string;
@@ -451,7 +524,11 @@ export function createCaptureLiveStores(
     return adapter;
   }
 
-  async function runRead<T>(
+  // Untranslated. `sessions.run` reads a refusal's disposition to decide
+  // whether to reconnect, so translation has to happen outside it, and the
+  // secret surface has its own taxonomy (`SecretFileStoreErrorCode`) that this
+  // one must not answer for.
+  async function runRawRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
   ): Promise<T> {
     return await sessions.run(
@@ -461,13 +538,35 @@ export function createCaptureLiveStores(
     );
   }
 
-  async function runMutation<T>(
+  async function runRawMutation<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
   ): Promise<T> {
     return await sessions.run(
       workspace,
       async (binding) => await operation(adapterFor(binding)),
     );
+  }
+
+  async function withDomainErrors<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      const domainError = domainErrorFrom(error);
+      if (domainError !== null) throw domainError;
+      throw error;
+    }
+  }
+
+  async function runRead<T>(
+    operation: (adapter: VersionedLiveAdapter) => Promise<T>,
+  ): Promise<T> {
+    return await withDomainErrors(async () => await runRawRead(operation));
+  }
+
+  async function runMutation<T>(
+    operation: (adapter: VersionedLiveAdapter) => Promise<T>,
+  ): Promise<T> {
+    return await withDomainErrors(async () => await runRawMutation(operation));
   }
 
   const store = {
@@ -945,7 +1044,7 @@ export function createCaptureLiveStores(
 
   const secretStore = {
     async writeSecretFile(input: Parameters<SecretFileStore["writeSecretFile"]>[0]) {
-      return await runMutation(async (adapter) => {
+      return await runRawMutation(async (adapter) => {
         const result = await adapter.writeSecretFile({
           ...input,
           metadata: adapterMetadata(input.metadata),
@@ -959,7 +1058,7 @@ export function createCaptureLiveStores(
       });
     },
     async deleteSecretFile(input: Parameters<SecretFileStore["deleteSecretFile"]>[0]) {
-      return await runMutation(async (adapter) => {
+      return await runRawMutation(async (adapter) => {
         const result = await adapter.deleteSecretFile({
             ...input,
             metadata: adapterMetadata(input.metadata),
@@ -973,11 +1072,11 @@ export function createCaptureLiveStores(
       });
     },
     listSecretFiles: (input: Parameters<SecretFileStore["listSecretFiles"]>[0]) =>
-      runRead(async (adapter) => await adapter.listSecretFiles(input)),
+      runRawRead(async (adapter) => await adapter.listSecretFiles(input)),
     async listSecretMoments(
       input: Parameters<SecretFileStore["listSecretMoments"]>[0],
     ) {
-      const moments = await runRead(
+      const moments = await runRawRead(
         async (adapter) => await adapter.listSecretMoments(input),
       );
       return moments.map(secretMomentFromWire);
@@ -985,21 +1084,21 @@ export function createCaptureLiveStores(
     async getSecretMoment(
       input: Parameters<SecretFileStore["getSecretMoment"]>[0],
     ) {
-      const moment = await runRead(
+      const moment = await runRawRead(
         async (adapter) => await adapter.getSecretMoment(input),
       );
       return moment === null ? null : secretMomentFromWire(moment);
     },
     forkVersion: (input: Parameters<SecretFileStore["forkVersion"]>[0]) =>
-      runMutation(async (adapter) => await adapter.forkVersion(input)),
+      runRawMutation(async (adapter) => await adapter.forkVersion(input)),
     compareSecretFileVersions: (
       input: Parameters<SecretFileStore["compareSecretFileVersions"]>[0],
     ) =>
-      runRead(async (adapter) => await adapter.compareSecretFileVersions(input)),
+      runRawRead(async (adapter) => await adapter.compareSecretFileVersions(input)),
     applySecretFileFromVersion: (
       input: Parameters<SecretFileStore["applySecretFileFromVersion"]>[0],
     ) =>
-      runMutation(async (adapter) => {
+      runRawMutation(async (adapter) => {
         const result = await adapter.applySecretFileFromVersion(input);
         return {
           ...result,
@@ -1011,7 +1110,7 @@ export function createCaptureLiveStores(
     restoreSecretFileToBeforeMoment: (
       input: Parameters<SecretFileStore["restoreSecretFileToBeforeMoment"]>[0],
     ) =>
-      runMutation(
+      runRawMutation(
         async (adapter) =>
           await adapter.restoreSecretFileToBeforeMoment({
             ...input,
@@ -1021,7 +1120,7 @@ export function createCaptureLiveStores(
     materializeSecretFile: (
       input: Parameters<SecretFileStore["materializeSecretFile"]>[0],
     ) =>
-      runRead(async (adapter) => await adapter.materializeSecretFile(input)),
+      runRawRead(async (adapter) => await adapter.materializeSecretFile(input)),
     close: async () => await sessions.closeWorkspace(workspace.workspaceId),
   };
 
