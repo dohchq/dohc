@@ -137,3 +137,42 @@ it.skipIf(engine.missing)(
   },
   60_000,
 );
+
+// The domain-code translation (#418) is asserted on the loopback in
+// workspaceVersionOperations.test.ts. It is asserted HERE against the real
+// daemon because the loopback is where those codes could quietly stop matching
+// the engine's: the translation reads the refusal message, and a fixture is free
+// to write any message it likes.
+it.skipIf(engine.missing)(
+  "reports refusals from the real daemon under their domain error codes",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-codes-"));
+    roots.push(root);
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-codes",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+    });
+    try {
+      await capture.createVersion("Draft");
+      await expect(capture.createVersion("Draft")).rejects.toMatchObject({
+        code: "version-name-conflict",
+      });
+      await expect(capture.switchVersion("no-such-version")).rejects.toMatchObject({
+        code: "version-not-found",
+      });
+    } finally {
+      await capture.stop();
+      await sessions.closeAll();
+      await lifecycle.stop();
+    }
+  },
+  60_000,
+);

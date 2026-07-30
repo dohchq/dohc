@@ -3612,7 +3612,11 @@ impl EngineService {
                 .iter()
                 .any(|version| version.version_id == params.version_id)
             {
-                return Err(wire(ErrorCode::InvalidParams, "version not found"));
+                // The domain code, like every other refusal (`map_runtime`).
+                // Spelling this one as prose gave the SAME refusal two wire
+                // messages depending on which method the caller reached it
+                // through, and a client that keys on the code saw neither.
+                return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
             }
         }
         let has_more = rows.len() > limit;
