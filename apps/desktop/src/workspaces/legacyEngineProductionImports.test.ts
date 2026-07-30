@@ -72,6 +72,12 @@ function isProductionSource(posixPath: string): boolean {
   if (/^(apps|packages|services)\/[^/]+\/[^/]*\.config\.[cm]?[jt]s$/.test(posixPath)) {
     return false;
   }
+  // Compile-check modules exist so tsc proves a contract still type-checks; they
+  // are consumed by a test and exported from nothing. Two exist today
+  // (workspace-contracts/src/engine.compile.ts,
+  // workspace-engine/src/engineContracts.compile.ts) and a value-shaped legacy
+  // import in one would be QA tooling, not a shipped dependency.
+  if (/\.compile\.[cm]?tsx?$/.test(posixPath)) return false;
   // Declaration files carry no runtime import — everything in them is erased,
   // including `import Engine = require(…)`.
   if (/\.d\.[cm]?ts$/.test(posixPath)) return false;
@@ -189,6 +195,15 @@ function resolveSpecifiers(
   return [];
 }
 
+// The Worker constructor, by local binding rather than by spelling: a bare
+// identifier bound to node:worker_threads' Worker, or a member access such as
+// `workerThreads.Worker`.
+function isWorkerConstructor(expression: ts.Expression, workerNames: ReadonlySet<string>): boolean {
+  if (ts.isIdentifier(expression)) return workerNames.has(expression.text);
+  if (ts.isPropertyAccessExpression(expression)) return expression.name.text === "Worker";
+  return false;
+}
+
 // `{ eval: true }` in a Worker's options object literal.
 function workerRunsEval(
   node: ts.NewExpression,
@@ -236,6 +251,10 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
   // The LOCAL name bound to node:module's createRequire. `import { createRequire
   // as makeRequire }` is legal and would defeat a check on the callee's text.
   const createRequireNames = new Set<string>(["createRequire"]);
+  // The LOCAL name bound to node:worker_threads' Worker, for the same reason:
+  // `import { Worker as ThreadWorker }` is an ordinary refactor away, and a
+  // name-only check would stop inspecting evaluated bodies the moment it happened.
+  const workerNames = new Set<string>(["Worker"]);
   // `const name = "@dohc/workspace-engine"; await import(name)` resolves the
   // package just the same, and factoring a specifier into a constant is a
   // routine refactor. Multi-valued so a name declared twice keeps BOTH — see
@@ -255,9 +274,9 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       const bindings = node.importClause?.namedBindings;
       if (bindings !== undefined && ts.isNamedImports(bindings)) {
         for (const element of bindings.elements) {
-          if ((element.propertyName ?? element.name).text === "createRequire") {
-            createRequireNames.add(element.name.text);
-          }
+          const imported = (element.propertyName ?? element.name).text;
+          if (imported === "createRequire") createRequireNames.add(element.name.text);
+          if (imported === "Worker") workerNames.add(element.name.text);
         }
       }
     }
@@ -331,8 +350,8 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       // template literal (REGEX_WORKER_SOURCE) and evals it, which makes this a
       // live shape rather than a hypothetical one. Recurse into the body when it
       // is statically knowable.
-      if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
-        if (node.expression.text === "Worker" && workerRunsEval(node, optionObjects)) {
+      if (ts.isNewExpression(node) && isWorkerConstructor(node.expression, workerNames)) {
+        if (workerRunsEval(node, optionObjects)) {
           const body = node.arguments?.[0];
           const sources = body === undefined ? [] : resolveSpecifiers(body, stringConsts);
           if (sources.some((source) => hasRuntimeLegacyImport(source, fileName))) {
@@ -684,6 +703,26 @@ const m = require(name);`;
     ].join("\n");
     expect(hasRuntimeLegacyImport(noEval)).toBe(false);
 
+    // The constructor by BINDING, not spelling: an alias refactor is ordinary,
+    // and a name-only check would stop inspecting bodies the moment it happened.
+    const aliasedCtor = [
+      `import { Worker as ThreadWorker } from "node:worker_threads";`,
+      "const SRC = `",
+      `const e = require("${L}");`,
+      "`;",
+      "export const w = new ThreadWorker(SRC, { eval: true });",
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(aliasedCtor)).toBe(true);
+
+    const memberCtor = [
+      `import * as workerThreads from "node:worker_threads";`,
+      "const SRC = `",
+      `const e = require("${L}");`,
+      "`;",
+      "export const w = new workerThreads.Worker(SRC, { eval: true });",
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(memberCtor)).toBe(true);
+
     // An eval worker with a clean body stays clean.
     const cleanWorker = [
       "const SRC = `",
@@ -703,6 +742,13 @@ const m = require(name);`;
     expect(isProductionSource("packages/mcp/src/tools.config.ts")).toBe(true);
     // Outside src/ but NOT at a package root — still shipping code.
     expect(isProductionSource("apps/desktop/lib/engine.config.ts")).toBe(true);
+    // Compile-check modules prove a contract type-checks; they ship nowhere.
+    expect(isProductionSource("packages/workspace-contracts/src/engine.compile.ts")).toBe(false);
+    expect(isProductionSource("packages/workspace-engine/src/engineContracts.compile.ts")).toBe(
+      false,
+    );
+    // A source file merely CONTAINING "compile" is production.
+    expect(isProductionSource("apps/desktop/src/workspaces/compileHelpers.ts")).toBe(true);
     expect(isProductionSource("packages/cli/internal/build.config.ts")).toBe(true);
   });
 
