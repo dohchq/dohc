@@ -69,6 +69,21 @@ drifts, goes missing, or outlives the skill it points at.
 }
 
 /**
+ * True when a YAML scalar carries no usable text. `""`, `''`, `null` and `~`
+ * are all ways of writing nothing, and a raw-token check reads every one of
+ * them as content — which puts an unusable description into both adapters.
+ *
+ * A *quoted* "null" stays non-empty: quoting makes it the string "null".
+ */
+function scalarIsEmpty(raw) {
+  const t = raw.trim();
+  if (t === "") return true;
+  const quoted = t.match(/^(["'])([\s\S]*)\1$/);
+  if (quoted) return quoted[2].trim() === "";
+  return /^(null|Null|NULL|~)$/.test(t);
+}
+
+/**
  * The value of a top-level frontmatter key, or null if the key is absent.
  * Returns "" when the key exists with no usable value, so an empty
  * `description:` is rejected rather than passing a presence check.
@@ -146,8 +161,8 @@ for (const name of shared) {
     if (value === null) {
       problems.push(`${canonical} frontmatter has no '${key}:'`);
       ok = false;
-    } else if (value === "") {
-      problems.push(`${canonical} frontmatter '${key}:' is empty`);
+    } else if (scalarIsEmpty(value)) {
+      problems.push(`${canonical} frontmatter '${key}:' has no usable value`);
       ok = false;
     }
   }
