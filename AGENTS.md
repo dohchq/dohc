@@ -303,7 +303,10 @@ These are meant to steer us in the right direction. They are not hard-set, but w
   stopping it.
 - Brand identity is final: lowercase `dohc`, the drop-lobe mark, warm
   paper + graphite. There must be no legacy product identity in shipping
-  source — `src/__tests__/brandNoLegacy.test.ts` enforces this.
+  source. **Nothing enforces this — it is on you.** A scanner used to, at
+  `apps/web/src/__tests__/brandNoLegacy.test.ts`, and it was deleted along with
+  that app; this line claimed otherwise for months. If you reintroduce a check,
+  cite it here in the same commit.
 - The product is the local-first desktop app (`apps/desktop`) on the workspace
   engine; it needs no backend. The opt-in cloud surface is reduced to live
   collaboration (Hocuspocus + the workspace-api collab-token route) and the
