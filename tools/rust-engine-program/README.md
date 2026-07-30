@@ -67,16 +67,22 @@ collected on the founder's machine:
    distribution (DECISIONS.md Gate 0 item 2). Until it exists, Gate 7's "every
    supported platform" claim is scoped to `{Windows, Linux-WSL}`.
 
-Pass `--expect-arch=<x64|arm64>` to hard-pin which platform a run represents;
-the gate validates what **cargo** builds, not what Node is: it reads cargo's
-host triple and its effective target (`CARGO_BUILD_TARGET`, else `[build].target`
-from `.cargo/config.toml`), aborts if they differ at all — a cross-compiled run
-is not native evidence — and aborts if the target's architecture is not the one
-you pinned. Checking Node's `os.arch()` would not do: cargo honours those
-settings independently, so an arm64 Node could satisfy `--expect-arch=arm64`
-while every cargo command built x86_64 and macOS ran the tests under Rosetta.
-Neither check detects emulation of Node itself, which is why the cargo target is
-what gets pinned. (This pin used to live in
+**Every** run validates what cargo will actually build, with no flag required —
+which matters, because no call site here passes one. The gate reads cargo's host
+triple and its effective target (`CARGO_BUILD_TARGET`, else `[build].target` from
+`.cargo/config.toml` in this directory, any ancestor, or `CARGO_HOME`) and aborts
+if they differ at all: a cross-compiled run is not native evidence. The evidence
+line reports **cargo's** architecture, not Node's.
+
+`--expect-arch=<x64|arm64>` adds one more assertion — that cargo's target is the
+architecture you expected — and makes an unverifiable target fatal rather than a
+warning.
+
+Checking Node's `os.arch()` would not do: cargo honours those settings
+independently, so an arm64 Node could satisfy `--expect-arch=arm64` while every
+cargo command built x86_64 and macOS ran the tests under Rosetta. Neither check
+detects emulation of Node itself, which is why the cargo target is what gets
+pinned. (This pin used to live in
 `run-native-suite.mjs`; it moved here when that runner was retired in R16,
 because this gate is now the native evidence.)
 

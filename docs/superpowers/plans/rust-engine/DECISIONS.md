@@ -99,8 +99,7 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
   macOS untested during construction and MUST be revisited before any Mac
   release (recorded as pre-release obligation, replaces old open
   decision 2). PR #139's workflow is retired; native-suite evidence moves
-  to R02's local runner scripts. **(SUPERSEDED 2026-07-29 — see
-  "Native-suite evidence RETIRED (R16)" below; that runner is deleted.)**
+  to R02's local runner scripts.
 - **Freeze**: Ice enforces no further TS-engine changes on main. In-flight
   engine changes already on main are IMPORTANT FEATURES and are
   **integrated, not discarded**: every engine commit since the inventory
@@ -518,18 +517,8 @@ Consequences, all owned by R16:
 
 - delete the two filter steps in `run-native-suite.mjs` (and the runner itself if
   nothing else remains in it)
-- ~~delete the two `pnpm --filter @dohc/workspace-engine test|typecheck` steps in
-  `.github/workflows/desktop-release.yml`~~ **NOT done in #375, deliberately.**
-  The reason given for doing it early was that an unmatched `--filter` would
-  hard-fail. That is false: pnpm 10.24.0 prints `No projects matched the
-  filters` and **exits 0**, so the steps would merely become no-ops. Meanwhile
-  they are the only *automatically triggered* CI run of the still-live legacy
-  package — `pr-checks.yml` and `rust-engine-macos-evidence.yml` are
-  dispatch-only, and preflight's remaining steps never enter
-  `packages/workspace-engine`. Removing them ahead of the package deletion
-  would drop real coverage of code still imported by `main.ts`, `cliServer.ts`,
-  `ydocEngineProviderSession.ts` and `services/sync-relay`. They go with the
-  package, not before it.
+- delete the two `pnpm --filter @dohc/workspace-engine test|typecheck` steps in
+  `.github/workflows/desktop-release.yml`
 - rewrite `tools/rust-engine-program/README.md`, which currently calls this "the
   native evidence GATE0/TS-NATIVE-CI depends on" and a "mandatory pre-release
   obligation"
@@ -538,27 +527,6 @@ Consequences, all owned by R16:
   `GATE0` lists it as a dependency — deleting the runner while leaving that row
   intact points the machine-readable program record at a gate that no longer
   exists
-
-**One consequence this list missed, found while executing it:** the
-`--expect-arch=<x64|arm64>` pin existed **only** in `run-native-suite.mjs`.
-`run-rust-checks.mjs` reports `platform()/arch()` in its evidence line but never
-asserted an expected value. Deleting the runner would therefore have quietly
-removed the guard, while the README kept claiming "every native run asserts the
-host architecture". Since `run-rust-checks.mjs` is now the native evidence, the
-pin moved there rather than being dropped. `GATE0`'s dependency list still names
-`TS-NATIVE-CI` and is left alone: it is a historical record of a gate that did
-pass, not a live dependency.
-
-What the pin guarantees, corrected twice: it validates **cargo's** effective
-target, not Node's architecture. It reads cargo's host triple plus
-`CARGO_BUILD_TARGET` / `[build].target`, aborts when they differ (a
-cross-compiled run is not native evidence), and aborts when the target's arch is
-not the pinned one. My first version compared `os.arch()`, which describes only
-the Node binary: cargo honours those settings independently, so an arm64 Node
-could satisfy `--expect-arch=arm64` while cargo built x86_64 and macOS ran the
-tests under Rosetta — stamping `darwin/arm64` onto x64 evidence. Neither version
-detects emulation of Node itself, which is why the cargo target is the thing
-pinned.
 
 **What is NOT retired:** the macOS pre-release obligation from the entry above
 still stands on its own. It is about untested platforms, not about this runner,

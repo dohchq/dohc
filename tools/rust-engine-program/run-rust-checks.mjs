@@ -22,9 +22,11 @@
 // Usage:
 //   node tools/rust-engine-program/run-rust-checks.mjs
 //   node tools/rust-engine-program/run-rust-checks.mjs --expect-arch=x64
-//     (validates CARGO's effective target — host triple vs CARGO_BUILD_TARGET /
-//      [build].target — so a cross-compiled run cannot be recorded as native
-//      evidence; aborts with exit 2)
+// EVERY run validates CARGO's effective target (host triple vs CARGO_BUILD_TARGET
+// or [build].target here / in an ancestor / in CARGO_HOME) and aborts on a
+// cross-compile: the evidence line certifies the Rust workspace, and no call site
+// passes a flag. --expect-arch additionally asserts which arch that target is,
+// and makes an unverifiable target fatal instead of a warning.
 // Exit code is non-zero if any REQUIRED step fails (optional tool skips do not
 // fail the run).
 
@@ -107,13 +109,19 @@ function cargoHostTriple() {
 
 function configuredCargoTarget() {
   if (process.env.CARGO_BUILD_TARGET) return process.env.CARGO_BUILD_TARGET;
+  // Cargo config is HIERARCHICAL: it reads .cargo/config.toml in the cwd and in
+  // every ancestor directory, closest winning, then CARGO_HOME. Checking only the
+  // repo root would miss a cross target inherited from a parent (a sibling
+  // checkout under C:\w, say) that cargo nonetheless applies to every command.
+  const candidates = [];
+  for (let dir = repoRoot; ; ) {
+    candidates.push(join(dir, ".cargo", "config.toml"), join(dir, ".cargo", "config"));
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
   const cargoHome = process.env.CARGO_HOME || join(homedir(), ".cargo");
-  const candidates = [
-    join(repoRoot, ".cargo", "config.toml"),
-    join(repoRoot, ".cargo", "config"),
-    join(cargoHome, "config.toml"),
-    join(cargoHome, "config"),
-  ];
+  candidates.push(join(cargoHome, "config.toml"), join(cargoHome, "config"));
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     // Walk sections rather than regexing across them: only [build].target is a
@@ -140,38 +148,52 @@ const expectArch = process.argv
   .filter((a) => a.startsWith("--expect-arch="))
   .map((a) => a.split("=")[1])[0];
 
+// UNCONDITIONAL. Every run of this gate prints an evidence line, so every run is
+// producing evidence — and no call site passes --expect-arch: not
+// macos-evidence.sh, not either workflow, not any README example. A guard that
+// only ran with the flag would never run at all.
+const cargoHost = cargoHostTriple();
+const cargoTarget = cargoHost ? (configuredCargoTarget() ?? cargoHost) : null;
+const cargoArch = cargoTarget
+  ? (TRIPLE_ARCH[cargoTarget.split("-")[0]] ?? cargoTarget.split("-")[0])
+  : null;
+
+if (cargoHost && cargoTarget !== cargoHost) {
+  console.error(
+    `ABORT: cargo builds for ${cargoTarget} on host ${cargoHost} (CARGO_BUILD_TARGET, or ` +
+      `[build].target in a .cargo/config.toml here or in an ancestor). A cross-compiled run ` +
+      `is not native evidence. Unset it, or record the evidence as ${cargoTarget}.`,
+  );
+  process.exit(2);
+}
+
 if (expectArch) {
-  const host = cargoHostTriple();
-  if (!host) {
+  // Explicitly asking to certify means an unverifiable target must fail closed.
+  if (!cargoHost) {
     console.error(
       `ABORT: --expect-arch=${expectArch} was requested but \`cargo -vV\` did not report a host ` +
         `triple, so the cargo target cannot be verified. Refusing to certify native evidence.`,
     );
     process.exit(2);
   }
-  const effective = configuredCargoTarget() ?? host;
-  if (effective !== host) {
+  if (cargoArch !== expectArch) {
     console.error(
-      `ABORT: cargo builds for ${effective} on host ${host} (CARGO_BUILD_TARGET or build.target). ` +
-        `A cross-compiled run is not native evidence whatever Node reports.`,
-    );
-    process.exit(2);
-  }
-  const targetArch = TRIPLE_ARCH[effective.split("-")[0]] ?? effective.split("-")[0];
-  if (targetArch !== expectArch) {
-    console.error(
-      `ABORT: --expect-arch=${expectArch} but cargo targets ${effective} (arch ${targetArch}). ` +
+      `ABORT: --expect-arch=${expectArch} but cargo targets ${cargoTarget} (arch ${cargoArch}). ` +
         `Cross-built runs must not be recorded as native evidence.`,
     );
     process.exit(2);
   }
-  if (targetArch !== arch()) {
-    console.warn(
-      `  note: cargo targets ${targetArch} while Node reports ${arch()} — the evidence line ` +
-        `describes Node's platform/arch, so record ${targetArch} as the Rust target.`,
-    );
-  }
+} else if (!cargoHost) {
+  // Not fatal on its own: if cargo is genuinely broken the first cargo step below
+  // fails and the verdict is FAIL anyway. Say it out loud rather than skip quietly.
+  console.warn(
+    `  note: \`cargo -vV\` reported no host triple, so the cargo target could not be verified.`,
+  );
 }
+
+// The evidence line must name the arch the RUST tests ran as, not Node's.
+const evidenceArch = cargoArch ?? arch();
+console.log(`cargo: ${cargoTarget ?? "unverified"} (arch ${evidenceArch})`);
 
 for (const step of required) {
   console.log(`\n--- ${step.name} ---`);
@@ -228,7 +250,7 @@ for (const r of results) {
 const verdict = failed ? "FAIL" : "PASS";
 console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
 console.log(
-  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} | ${verdict} | ${summary}`,
+  `- ${stamp} | run-rust-checks | ${platform()}/${evidenceArch} | ${verdict} | ${summary}`,
 );
 
 process.exit(failed ? 1 : 0);
