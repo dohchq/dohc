@@ -16,8 +16,10 @@ import type {
 } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunnerSettings } from "../settings/userSettings";
-import { EngineWorkspaceSessions } from "../workspaces/engineWorkspaceSessions";
-import { EngineClientError } from "../workspaces/engineClient";
+import {
+  EngineClientError,
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { nativeTmpdir } from "../workspaces/testTemp";
 import {
   APP_QUIT_EXIT_CODE,

@@ -3,14 +3,12 @@ import { statSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
-import type {
-  CompletedDaemonBlob,
-  Event,
-  JsonValue,
-  Request,
-  Response,
-  WorkspaceHandle,
-} from "@dohc/workspace-engine-client";
+import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
+import type { Event } from "../ydoc/generated/Event";
+import type { Request } from "../ydoc/generated/Request";
+import type { Response } from "../ydoc/generated/Response";
+import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import {
   createEngineClient,
   type EngineClientSpawnOptions,

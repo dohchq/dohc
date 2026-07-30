@@ -7,7 +7,7 @@ import {
   type WorkspaceSecretState,
 } from "@dohc/workspace-engine";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import type { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 
 export type { WorkspaceSecretState };
 

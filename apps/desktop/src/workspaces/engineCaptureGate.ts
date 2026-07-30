@@ -4,7 +4,7 @@ import {
 } from "./workspaceEngineCapture";
 import { readWorkspaceSettingsFile } from "./workspaceSettingsFile";
 import type { WorkspaceCaptureHooks } from "./workspaceActivity";
-import type { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 
 // THE captureFor gate (single owner). Workspace-engine alpha (PR 0M-3/0M-5):
 // when the per-workspace flag is on, the engine store under .dohc/engine/ is

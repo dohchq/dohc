@@ -62,7 +62,7 @@ import {
 import {
   isEngineSessionReconnectError,
   type EngineWorkspaceSessions,
-} from "./engineWorkspaceSessions";
+} from "@dohc/workspace-engine-client/daemon";
 import {
   createCaptureLiveStores,
   type CaptureTextFileMetadata,

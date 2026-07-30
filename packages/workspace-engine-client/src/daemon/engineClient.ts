@@ -6,15 +6,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
-import type {
-  EngineTransport,
-  Envelope,
-  Event,
-  Request,
-  Response,
-  WireError,
-} from "@dohc/workspace-engine-client";
-import type { BlobStart } from "../../../../packages/workspace-engine-client/src/ydoc/generated/BlobStart";
+import type { BlobStart } from "../ydoc/generated/BlobStart";
+import type { Envelope } from "../ydoc/generated/Envelope";
+import type { Event } from "../ydoc/generated/Event";
+import type { Request } from "../ydoc/generated/Request";
+import type { Response } from "../ydoc/generated/Response";
+import type { WireError } from "../ydoc/generated/WireError";
+import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;

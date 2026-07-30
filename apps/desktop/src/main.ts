@@ -386,7 +386,7 @@ import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
   type EngineDaemonLifecycle,
-} from "./workspaces/engineDaemonLifecycle";
+} from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
 import {
   EngineRelayClient,
@@ -395,7 +395,7 @@ import {
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
 } from "./workspaces/engineRelayClient";
-import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   createDesktopLinkedChatStore,
   type DesktopLinkedChatStore,

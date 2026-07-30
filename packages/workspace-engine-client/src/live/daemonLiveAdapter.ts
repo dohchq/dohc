@@ -178,7 +178,7 @@ const RETRYABILITIES: readonly Retryability[] = [
 
 // This intentionally duck-types EngineClientError because the package cannot
 // import the desktop app. Source of truth:
-// apps/desktop/src/workspaces/engineClient.ts:423-448.
+// packages/workspace-engine-client/src/daemon/engineClient.ts:422-447.
 function wireErrorFrom(error: unknown): DaemonWireError | null {
   if (!isRecord(error) || !isRecord(error.wireError)) return null;
   const candidate = error.wireError;
