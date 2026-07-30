@@ -15,6 +15,20 @@ Nothing here is a claim about current behaviour. **No rich document has ever
 replicated** — see #378 and #356. This is a specification to build against, not
 a description of something running.
 
+**How to read this document.** It mixes three kinds of statement, and conflating
+them is how a port goes wrong:
+
+- **Observed** — what the TypeScript reference or the Rust code actually does,
+  with a file cited. Trustworthy.
+- **Divergent** — the two implementations differ, and the difference is named.
+  Neither is automatically the right answer.
+- **Required** — a property the finished implementation must have, derived from
+  the failure it prevents. **No working implementation of these exists**, so they
+  are reasoned rather than proven. Review them as design, not as documentation.
+
+Where a Required property has no implementation to copy, this document says so
+instead of pointing at code that only half does it.
+
 ## Why a base needs claiming at all
 
 A replicated Y.Doc is one durable CRDT lineage that every peer converges to. A
@@ -56,6 +70,15 @@ from it yields the same converged content as replaying the un-compacted log.
 
 The invariant is that whatever remains must still reconstruct the lineage. Delete
 what is redundant; never delete the lineage itself.
+
+**And "convergence-neutral" is conditional, not automatic.** A full-state snapshot
+only represents updates the document could actually apply. If the reconstructed
+document has **unresolved dependencies** — an update whose predecessor has not
+arrived — those rows are *not* redundant, and folding them away destroys part of
+the canonical lineage permanently. Rust guards this explicitly: `maybe_compact`
+returns `Skipped` when `persisted.doc.has_missing_updates()` is true, before
+encoding or pruning anything (`durable.rs`). Compaction must retain every row while
+unresolved updates remain.
 
 ## The local-only path, and why it may prune
 
@@ -138,13 +161,24 @@ the origin still reconstructs its content from its own private rows while every
 new peer is permanently missing it. The divergence is invisible from the machine
 that has the data.
 
-So the base must be the **reconstructed lineage plus** the incoming bytes. The
-Rust inbound path already does this for the analogous case
-(`crates/dohc-engine-sync/src/ydoc_apply.rs`): load the persisted document, apply
-the base bytes onto it, and refuse if they fail validation. Its own comment states
-the requirement — the projection must be the reconstructed lineage *plus* the
-base, "or the visible snapshot would drop local content that is still durably part
-of the CRDT."
+So the journaled base must full-state-encode the **merged** document — the
+reconstructed lineage plus the incoming bytes — or the pre-existing updates must be
+journaled as a delta alongside it. Either way the local rows must reach
+`replication_log`.
+
+**Required, with no implementation to copy.** The Rust inbound path does *half* of
+this and it is important not to mistake it for a model
+(`crates/dohc-engine-sync/src/ydoc_apply.rs`). It loads the persisted document,
+applies the base bytes onto it, and refuses if they fail validation — but the
+merged `base_doc` is passed only to `project_and_write_in_tx`, while
+`claim_base_in_tx` receives the original `claim_bytes`. So the merge fixes the
+**local projection** and the journaled base still omits the pre-existing updates.
+Those rows remain absent from `replication_log`, a clean peer still cannot
+reconstruct them, and later deltas that depend on them can stay pending forever.
+
+The comment there states the projection requirement — "or the visible snapshot
+would drop local content that is still durably part of the CRDT" — and that is
+exactly the narrower guarantee it delivers. Origination has to go further.
 
 **3. Journal the base in the same transaction as the snapshot rows.** The
 snapshot blob lands in `binary_blobs` first, satisfying blob-before-log, and the
@@ -161,6 +195,22 @@ winner. There is no counter to maintain and no idempotency check downstream.
 The invariant "never two live Y.Docs for one object" must hold across every
 driver instance in the process, not merely within one
 `createYDocEngineDriver()`. The reservation is therefore process-global.
+
+**Key it by canonical physical-database identity, not by coordinates and not by
+the caller's path string.** The reference builds
+`` `${canonicalEngineDbPath(rootDir)}\0${workspaceId}\0${objectId}` ``
+(`ydocEngineDriver.ts`). Both simpler keys are wrong in opposite directions:
+
+- Keyed by workspace and object IDs alone, one process opening two **cloned roots**
+  that happen to contain the same IDs would have an open on one database falsely
+  block an unrelated database.
+- Keyed by the supplied root string, two **path aliases** to the same database each
+  get a private namespace — admitting two live writers and defeating the invariant
+  outright.
+
+The canonical path must also match the store's own write-chain key, so a store and
+a driver on one physical database agree on identity. Rust likewise scopes its
+shared `LeaseRegistry` per root.
 
 Related, and easy to get wrong when porting: writes go through a single write
 lane. `node:sqlite` busy-waits block the JS thread, so two same-process writers
@@ -233,8 +283,16 @@ What is dormant is the **origination path specifically**, not the crate.
 Keep two things separate here, or an inventory of Rust entry points will
 contradict itself — and the local apply path is the one that gets dropped:
 
-- **Creating a replicated marker** happens locally today. `ydoc.apply` reaches
-  `record_local_update_creating_marker(..., Regime::Replicated, ...)`.
+- **Creating a replicated marker** happens locally today, but **only for an object
+  that has no marker yet**. `ydoc.apply` reaches
+  `record_local_update_creating_marker(..., Regime::Replicated, ...)`, and the
+  guarded helper uses the requested `regime` *only* in the marker-absent INSERT
+  branch (`durable.rs`). When a marker already exists it returns that marker
+  unchanged, checking only `content_kind`. So against an object with a local-only
+  marker, `ydoc.apply` does **not** promote it: the update stays local-only, emits
+  nothing, and remains prunable on close.
+  **`ydoc.apply` is therefore not an existing promotion path** — do not treat it as
+  one.
 - **Claiming a base** does not. The only live caller of `claim_base_in_tx` is the
   inbound apply, so a peer-delivered base is currently the only way a lineage
   gets one.
@@ -270,5 +328,22 @@ most plausible-looking route available.
 Closing #378 therefore needs a **new** assertion: two peers, a rich document, and
 a check that the base operation is emitted exactly once and that a delta follows
 it. Write that gate before writing the implementation.
+
+**And that gate needs two scenarios, not one.** Starting from a fresh rich document
+proves base-once and delta-follows — but it passes even if the promotion
+requirement (2b) is entirely broken, because a fresh document never has a
+`base_claimed = 0` marker carrying durable updates. So add the promotion case
+explicitly:
+
+1. Open a document **local-only** and leave updates durable (do not settle or
+   close cleanly — that is the crash shape the case exists for).
+2. Promote the lineage to replicated.
+3. Assert a **clean peer** reconstructs both the pre-promotion content *and* later
+   edits.
+
+Without step 3 against a clean peer, the origin reconstructs from its own private
+rows and the gate goes green on precisely the silent divergence 2b warns about.
+This is the same trap as the disabled rejoin spec above, one level deeper: a gate
+written to cover a fixed bug that never exercises the bug's precondition.
 
 Before claiming any sync behaviour works, check which table the write landed in.
