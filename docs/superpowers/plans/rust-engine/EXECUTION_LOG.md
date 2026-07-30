@@ -3268,3 +3268,182 @@ desktop from 2,249 to 2,250.
 config. The mutation was reverted in a separate command, because a compound
 `mutate && test && restore` never reaches its restore leg when the middle step
 times out.
+
+## 2026-07-30/31 — the fallback was never reachable, and I said the opposite for hours
+
+Seven more PRs landed: #401, #406, #410, #411, #413, #414, #415. The through-line is that
+the legacy engine's remaining hold on the product turned out to be entirely test-shaped,
+and that I got the central fact backwards and had to retract it.
+
+### The claim I got wrong
+
+I recorded on #391, emphatically, that the `useRustEngine === false` branch is "NOT dead
+code — it is the daemon-unavailable production fallback", and escalated a product decision
+to Ice: when the Rust daemon cannot start, should a workspace show a capture failure or
+keep silently recording through the old engine?
+
+**There was no decision to make.** `startRustEngineDaemon` shows "The desktop cannot start
+without the Rust engine.", stops the lifecycle, nulls all three engine handles and calls
+`app.quit()`. The `app.whenReady` continuation returns early on its false result, so IPC is
+never registered and no workspace is opened. And `rustEngineWorkspaceSessions` has exactly
+two writes: set on success, nulled on that failure path immediately before the quit. A
+running workspace cannot reach the capture gate without a daemon.
+
+Precision matters on one point, because I first wrote this as "no window is created" and
+that is FALSE — codex caught it reviewing this entry. The `open-file` and `second-instance`
+handlers are registered OUTSIDE `whenReady`, and both call `showOrCreateMainWindow()` when
+`app.isReady()`, which can be true while `startRustEngineDaemon` is still awaiting. So a
+window CAN appear before the gate resolves. The capture-reachability conclusion survives —
+IPC and capture are what the gate protects — but the reasoning I published was wrong in a
+way that hid a partially-initialized-window race, filed separately.
+
+Two independent investigations — one via codex, one a separate opus-5 pass — both opened by
+correcting the premise rather than answering the question. I then verified it in `main.ts`
+myself before accepting it, which is the only reason this reads as a retraction and not a
+second wrong turn.
+
+What makes it worse, and worth writing down: `cliServer.ts` had already deleted its own
+copy of the same branch, with a comment explaining exactly this reasoning — "main.ts quits
+the app if startRustEngineDaemon fails, before the CLI server is even registered — so the
+legacy branch here … was unreachable." The answer was in the repo, beside the same shape of
+code, and I traced `engineCaptureGate.ts` and a nullable variable and stopped one level
+short of the thing that decides it.
+
+**The lesson is not "read more".** I read plenty. It is that a nullable handle plus a
+conditional spread *looks* exactly like a supported configuration, and looking like one was
+enough for me to build an escalation on top of it. When a type says a degraded mode exists,
+check whether anything can reach it before believing the type.
+
+#411 makes the type stop lying: the daemon is required, and the two call sites narrow
+through `requireEngineSessions()` in the shape `linkedChatStoreFor` already used.
+
+### The mid-session case, which is the question I should have asked
+
+The narrower version of my question is real: what happens when the daemon dies *mid-session*
+and exhausts its restart budget. That is already handled honestly. The five-second capture
+health poll reports `ok: false` even on a thrown task, reaching the existing notice —
+"History paused … Your files are safe on disk, but recent changes may be missing from
+History."
+
+And that claim is TRUE, which is what matters against the durability rule. The daemon's
+startup reconcile rehydrates its baseline from **recorded history** rather than a scan
+cache, so any gap — app closed, daemon down, capture failing — is backfilled on the next
+successful open. What is permanently lost is **granularity, not content**: N saves during a
+gap collapse into one "Reconciled offline edits" moment. A file created and deleted entirely
+inside the gap leaves no trace.
+
+One qualification I first left out, and codex caught it reviewing this entry: the
+deletion half of that depends on the rehydration SUCCEEDING. `capture_manifest_seed`
+failures degrade to `None` via `.ok().flatten()`, and the code's own comment says what that
+costs — "against an EMPTY baseline a file deleted while the daemon was down could never emit
+a Retire and its stale head would stay readable forever." The degradation is deliberate and
+biased safely (over-capture, never data loss) rather than blocking start, but "deletions
+during the gap emit a Retire" is only true when the seed works, and an unqualified
+durability claim is the one kind this log must not carry.
+
+Filed #412 for two real supervision defects found while establishing this: a daemon
+crashing every 31 seconds restarts forever without reaching `terminal`, so the "engine
+stopped" dialog never appears; and a daemon that is alive but wedged is never restarted at
+all, because only process *exit* triggers the restart path.
+
+### Ten review rounds on one guard, and what they were actually finding
+
+#402 is a ratchet pinning the legacy package's production importers at two. It took ten
+rounds, and every single one found a real hole — **all of them in the detector, none in the
+allowlist**:
+
+1. A lazy regex clause spanning statements: a file opening with `import type { … } from
+   "@dohc/workspace-core"` produced a clause starting with `type`, so a 1,134-character run
+   containing two real value imports was waved through.
+2. Dynamic import and `require` bypassed it entirely.
+3. `createRequire` aliases — the worst, because `workspaceDatabase.ts` documents that
+   production deliberately avoids the name `require` (a bundler's CommonJS shim injects its
+   own `const require`, so a second declaration is a load-time SyntaxError). The guard was
+   open along the path the codebase *prefers*.
+4. Template-literal specifiers, relative paths into the package's source, `module.require`,
+   `.d.mts`/`.d.cts`, and `.tsx` files parsed as `.ts` — where JSX fails to parse and hides
+   every import after it. 111 files were in that state.
+5. Const-bound and concatenated specifiers; the config exclusion unanchored.
+6. Shadowed bindings, where a file-wide map let the last declaration decide — a false
+   negative, the one direction a ratchet must not have.
+7. Worker bodies passed as source with `eval: true`, which `cliServer.ts` really does use.
+8. **My vacuity guard could itself go vacuous.** It checked the raw walk output, so a
+   regression making `isProductionSource` reject everything would empty the importer list
+   while the sentinels survived — and once the allowlist reaches zero, which is the entire
+   goal, both assertions would pass forever.
+
+The last one is the one to remember. I had been arguing for two rounds that the remaining
+surface was adversarial-only and it was time to land. It was not: the defect was in the
+assertion everything else rests on, and it was reachable by ordinary regression rather than
+by an attacker.
+
+**The transferable rule**: for any "nothing may depend on X" guard, use the AST and
+enumerate the spellings FIRST — static import, bare side-effect import, value re-export,
+`import = require`, dynamic import, `require`, aliased require, `createRequire` stored /
+invoked directly / imported under another name, `module.require`, template-literal and
+const-bound and concatenated specifiers, erased expression wrappers, relative paths into
+the target, per-extension script kind, and eval-worker bodies. I started with a regex and
+paid for it ten times.
+
+### The migrations, and two fakes caught being less faithful than the daemon
+
+`sharedView.test.ts` is now completely free of the legacy package. Generated-text (9 sites)
+and restore (12 sites) run on the daemon capture path. #413 extracted the `mockLiveSessions`
+harness so each migration stops growing its own — a per-suite copy is how fixtures drift
+apart and start disagreeing about what the daemon does, which is the failure #398 froze the
+capture goldens against.
+
+Two findings worth more than the migrations themselves:
+
+**The loopback silently dropped `metadata.summary` and `metadata.correlationId`**, which the
+daemon persists and returns and the desktop sends. So a loopback-backed test could certify
+history the real daemon carries and the fake did not. Fixed for MOMENT responses, mirroring
+the daemon — including its dedup, which hashes both fields into `payload_hash`, read in the
+Rust rather than inferred.
+
+Scoped deliberately, and codex was right to make me say so: the daemon also carries the pair
+on file HEADS, so on snapshots, and the loopback still does not. Nothing reads it today, and
+the gap is recorded in the loopback beside the fix rather than quietly closed over — a
+loopback-backed test that asserted snapshot metadata could still certify something the fake
+does not model. Then codex caught **my own report being wrong about the scope**: I wrote that all
+six `makeMoment` call sites were covered including binary write; binary write was not, so
+the fingerprints counted metadata as part of a binary write's identity while its moment
+dropped it. I checked all eight sites rather than the one reported.
+
+**My prescribed mutation for one suite was simply wrong.** I told an agent to starve
+`versionedText.list` and expect failures. That suite never calls it — a method probe showed
+77 reads, 45 `versions.active`, 18 writes, zero `list` — so the acceptance criterion I set
+could not have failed no matter how bad the migration was. Same class of mistake as the
+checks this campaign exists to unpick. The standing instruction now is: probe which methods
+a suite actually sends, then starve those. Also run an INVERSE mutation, because a test
+asserting an ABSENCE cannot be falsified by starvation — only by an over-permissive store.
+
+Mutation testing also exposed **two assertions that had been vacuous all along**, on the
+legacy path too: `moments.every(...)` is trivially true on an empty page, and
+`expect(fileObjectIdForPath(...)).toBe(objectId)` reduces to `null === null` when reads are
+starved. Both are stronger now than before the migration.
+
+### Where the legacy package still lives
+
+Production runtime importers: **two**, both on the `useRustEngine === false` branch — the
+store factories in `workspaceEngineCapture.ts`, and the legacy provider session that branch
+selects. Eleven further production files name the package but import only types. Both numbers are
+still a MANUAL inventory at the time of writing — #402 is the guard that would make them
+mechanical and it has not landed, so nothing enforces this boundary yet. codex caught me
+writing "#402 now confirms" while it was still open, which would have left a reader believing
+a dependency boundary was enforced when it was not.
+
+The branch itself is held up by roughly 100 test call sites across four remaining files that
+construct capture with neither sessions nor a store. Three fixture-only tests stay legacy
+deliberately, each commented: the on-disk assertion that a mount's pull state lands INSIDE
+the mount folder is the only proof of that nesting contract, and two others must refuse
+before any store opens.
+
+Also settled, and it was a genuine blocker: deleting the package does NOT delete the
+recipient-side secret-path gate. The Rust replay refuses secret-classified paths in
+`enforce_share_view_boundary`, tested with a `.env` inside the share — refused on
+classification alone — and the classifier itself lives in `@dohc/security-contract`, not in
+the package being deleted. Cross-language conformance is proven against a fixture generated
+from that contract. #409 records the one real gap: no end-to-end share-view-pull test with a
+secret path, which matters most for DELETE ops because the write-sink floor deliberately
+admits secret paths for deletes, leaving the boundary check as the only gate.
