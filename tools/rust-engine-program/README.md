@@ -11,7 +11,6 @@ local evidence pipeline.
 | Script | What it does |
 | --- | --- |
 | `run-rust-checks.mjs` | Rust policy gate: fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
-| `run-native-suite.mjs` | TS-NATIVE-CI local equivalent: runs the reference `@dohc/workspace-engine` `typecheck` + `test` suites natively, asserts host arch, prints an evidence line. This is the native evidence GATE0/TS-NATIVE-CI depends on. |
 | `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 
 Banked soak artifacts live in `soak-evidence/`; see
@@ -26,7 +25,7 @@ every artifact carries, which files predate it, and the residual gap.
   fails the verdict (required steps may not skip).
 - Rust toolchain pinned by `rust-toolchain.toml` (channel 1.96.1, with
   `rustfmt` + `clippy`).
-- `pnpm` on PATH (JS workspace install above, plus the native suite).
+- `pnpm` on PATH (for the JS workspace install above).
 - Optional: `cargo install cargo-deny --locked` and
   `cargo install cargo-audit --locked` to enable the supply-chain checks.
 
@@ -36,7 +35,6 @@ From the repo root, in **PowerShell or Git Bash** (Windows-first; both work):
 
 ```sh
 node tools/rust-engine-program/run-rust-checks.mjs
-node tools/rust-engine-program/run-native-suite.mjs
 ```
 
 Each prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
@@ -60,7 +58,6 @@ collected on the founder's machine:
    ```sh
    wsl
    cd /mnt/c/Users/ice/dev/dohc   # or the WSL-native clone
-   node tools/rust-engine-program/run-native-suite.mjs
    node tools/rust-engine-program/run-rust-checks.mjs
    ```
    Record the resulting `linux/x64` evidence lines. (Prefer a WSL-native clone
@@ -70,9 +67,11 @@ collected on the founder's machine:
    distribution (DECISIONS.md Gate 0 item 2). Until it exists, Gate 7's "every
    supported platform" claim is scoped to `{Windows, Linux-WSL}`.
 
-Every native run asserts the host architecture so a cross-built or emulated
-run cannot masquerade as native evidence. `run-native-suite.mjs` accepts
-`--expect-arch=<x64|arm64>` to hard-pin which platform a given run represents.
+Pass `--expect-arch=<x64|arm64>` to hard-pin which platform a run represents;
+the gate aborts if the host does not match, so a cross-built or emulated run
+cannot masquerade as native evidence. (This pin used to live in
+`run-native-suite.mjs`; it moved here when that runner was retired in R16,
+because this gate is now the native evidence.)
 
 ## Rust policy enforced here
 

@@ -528,6 +528,17 @@ Consequences, all owned by R16:
   intact points the machine-readable program record at a gate that no longer
   exists
 
+**One consequence this list missed, found while executing it:** the
+`--expect-arch=<x64|arm64>` pin — the thing that stops a cross-built or emulated
+run being recorded as native evidence — existed **only** in
+`run-native-suite.mjs`. `run-rust-checks.mjs` reports `platform()/arch()` in its
+evidence line but never asserted an expected value. Deleting the runner would
+therefore have quietly removed the guard, while the README kept claiming "every
+native run asserts the host architecture". Since `run-rust-checks.mjs` is now the
+native evidence, the pin moved there rather than being dropped. `GATE0`'s
+dependency list still names `TS-NATIVE-CI` and is left alone: it is a historical
+record of a gate that did pass, not a live dependency.
+
 **What is NOT retired:** the macOS pre-release obligation from the entry above
 still stands on its own. It is about untested platforms, not about this runner,
 and R16 does not discharge it.

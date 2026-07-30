@@ -86,6 +86,21 @@ console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}\n`);
 
+// Inherited from run-native-suite.mjs when that runner was retired (R16). This
+// gate is now the native evidence, so the pin that stops a cross-built or
+// emulated run being recorded as native belongs here.
+const expectArch = process.argv
+  .slice(2)
+  .filter((a) => a.startsWith("--expect-arch="))
+  .map((a) => a.split("=")[1])[0];
+if (expectArch && expectArch !== arch()) {
+  console.error(
+    `ABORT: --expect-arch=${expectArch} but host arch is ${arch()}. ` +
+      `Cross-built/emulated runs must not be recorded as native evidence.`,
+  );
+  process.exit(2);
+}
+
 for (const step of required) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
