@@ -548,6 +548,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
         existingMoment.after?.contentKind === "text" &&
         existingMoment.after.text === text &&
         existingMoment.wire.metadataOrigin === origin &&
+        (existingMoment.wire.metadataSummary ?? null) ===
+          (optionalString(params, "summary") ?? null) &&
+        (existingMoment.wire.metadataCorrelationId ?? null) ===
+          (optionalString(params, "correlationId") ?? null) &&
         (existingMoment.writeAuthorFingerprint ?? null) === authorFingerprint;
       if (exact) {
         const recorded = copyFile(existingMoment.after!);
@@ -574,7 +578,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: origin,
       momentLog: before ? [...before.momentLog] : [],
     };
-    const moment = this.makeMoment(version, path, momentId, "write", file, before, now);
+    const moment = this.makeMoment(
+      version,
+      path,
+      momentId,
+      "write",
+      file,
+      before,
+      now,
+      this.momentMetadataFields(params),
+    );
     const internal = {
       wire: moment,
       before: before && copyFile(before),
@@ -753,7 +766,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: origin,
       momentLog: before ? [...before.momentLog] : [],
     };
-    const moment = this.makeMoment(version, path, momentId, "write", file, before, now);
+    const moment = this.makeMoment(
+      version,
+      path,
+      momentId,
+      "write",
+      file,
+      before,
+      now,
+      this.momentMetadataFields(params),
+    );
     const internal = { wire: moment, before: before && copyFile(before), after: copyFile(file) };
     file.momentLog.push(internal);
     version.files.set(path, file);
@@ -841,7 +863,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
       latestMomentId: momentId,
       metadataOrigin: origin,
     };
-    const moment = this.makeMoment(version, toPath, momentId, "rename", after, before, now);
+    const moment = this.makeMoment(
+      version,
+      toPath,
+      momentId,
+      "rename",
+      after,
+      before,
+      now,
+      this.momentMetadataFields(params),
+    );
     moment.beforePath = fromPath;
     const internal = {
       wire: moment,
@@ -896,7 +927,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: origin,
       momentLog: [...before.momentLog],
     };
-    const moment = this.makeMoment(version, path, momentId, "delete", tombstone, before, now);
+    const moment = this.makeMoment(
+      version,
+      path,
+      momentId,
+      "delete",
+      tombstone,
+      before,
+      now,
+      this.momentMetadataFields(params),
+    );
     const internal = { wire: moment, before: copyFile(before) };
     state.moments.set(momentId, internal);
     version.files.delete(path);
@@ -1291,7 +1331,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
         metadataOrigin: origin,
         momentLog: [...before.momentLog],
       };
-      const moment = this.makeMoment(target, path, momentId, "delete", tombstone, before, now);
+      const moment = this.makeMoment(
+        target,
+        path,
+        momentId,
+        "delete",
+        tombstone,
+        before,
+        now,
+        this.momentMetadataFields(params),
+      );
       const internal: InternalMoment = { wire: moment, before: copyFile(before) };
       target.files.delete(path);
       state.moments.set(momentId, internal);
@@ -1322,7 +1371,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
       latestMomentId: momentId,
       metadataOrigin: origin,
     };
-    const moment = this.makeMoment(target, path, momentId, "write", copied, before, now);
+    const moment = this.makeMoment(
+      target,
+      path,
+      momentId,
+      "write",
+      copied,
+      before,
+      now,
+      this.momentMetadataFields(params),
+    );
     const internal: InternalMoment = {
       wire: moment,
       before: before && copyFile(before),
@@ -1732,6 +1790,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       momentId,
       objectId,
       metadataOrigin: origin,
+      metadataSummary: params.summary ?? null,
+      metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
     });
   }
@@ -1753,6 +1813,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       momentId,
       objectId,
       metadataOrigin: origin,
+      metadataSummary: params.summary ?? null,
+      metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
     });
   }
@@ -1770,6 +1832,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       toPath: params.toPath,
       momentId,
       metadataOrigin: origin,
+      metadataSummary: params.summary ?? null,
+      metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
     });
   }
@@ -1786,6 +1850,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       path: params.path,
       momentId,
       metadataOrigin: origin,
+      metadataSummary: params.summary ?? null,
+      metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
     });
   }
@@ -1807,6 +1873,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       objectId,
       conflictId,
       metadataOrigin: origin,
+      metadataSummary: params.summary ?? null,
+      metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
     });
   }
@@ -1893,6 +1961,27 @@ export class VersionedLoopbackEngine implements EngineTransport {
     };
   }
 
+  /**
+   * The daemon stamps each moment with the write's `summary` and
+   * `correlationId` (store.rs `metadata_summary` / `metadata_correlation_id`)
+   * and returns them from moments.list and moments.get. A caller that supplies
+   * neither gets neither field, so an unlabelled write keeps the shape it had.
+   *
+   * Known remaining gap: the daemon carries the same pair on the FILE HEAD, and
+   * so on its snapshots. This loopback does not, because nothing reads it here
+   * yet — the history row is what moments.list serves.
+   */
+  private momentMetadataFields(params: JsonObject): JsonObject {
+    const summary = optionalString(params, "summary");
+    const correlationId = optionalString(params, "correlationId");
+    return {
+      ...(summary !== undefined ? { metadataSummary: summary } : {}),
+      ...(correlationId !== undefined
+        ? { metadataCorrelationId: correlationId }
+        : {}),
+    };
+  }
+
   private makeMoment(
     version: LoopbackVersion,
     path: string,
@@ -1901,11 +1990,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     after: LoopbackFile,
     before: LoopbackFile | undefined,
     recordedAtMs = this.clock++,
+    metadata: JsonObject = {},
   ): MomentRecord {
     const deleted = operation === "delete";
     const afterText = !deleted && after.contentKind === "text" ? after.text ?? "" : null;
     const beforeText = before?.contentKind === "text" ? before.text ?? "" : null;
     return {
+      ...metadata,
       momentOrder: this.clock++,
       momentId,
       versionId: version.id,

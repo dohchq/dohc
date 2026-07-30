@@ -2,6 +2,12 @@ import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promise
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  VERSIONED_METHOD,
+  VersionedLoopbackEngine,
+  type Request,
+} from "@dohc/workspace-engine-client";
+import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
@@ -35,10 +41,19 @@ async function readText(root: string, path: string): Promise<string> {
   return readFile(join(root, path), "utf8");
 }
 
-function capture(root: string): WorkspaceEngineCapture {
+// Every test here runs on the daemon path: `rustEngineSessions` selects the
+// Rust engine, and the loopback behind it holds real state and real sha256, so
+// the history these tests read back is recorded state rather than a canned
+// responder. Passing `requests` is what lets a test PROVE the path it took.
+function capture(
+  root: string,
+  loopback: VersionedLoopbackEngine,
+  requests?: Request[],
+): WorkspaceEngineCapture {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-restore-test",
     rootPath: root,
+    rustEngineSessions: mockLiveSessions(loopback, requests),
   });
 }
 
@@ -46,7 +61,9 @@ describe("engine history reads", () => {
   it("lists the active version's moments newest first and reads one payload", async () => {
     const root = await tempRoot();
     await write(root, "a.md", "first\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = capture(root, loopback, requests);
     engine.start();
     await engine.flush();
     await write(root, "a.md", "second\n");
@@ -54,6 +71,14 @@ describe("engine history reads", () => {
     await engine.flush();
 
     const page = await engine.listMoments();
+    // Positive proof of the path: a relapse to the legacy in-process engine
+    // never opens a daemon workspace, never writes text over the wire, and
+    // never asks the daemon for the timeline. Assert all three, so the suite
+    // cannot go quietly green on the engine it is being migrated off.
+    const methods = requests.map((request) => request.method);
+    expect(methods).toContain("workspace.open");
+    expect(methods).toContain(VERSIONED_METHOD.textWrite);
+    expect(methods).toContain(VERSIONED_METHOD.momentsList);
     expect(page.activeVersionId).toBe("main");
     expect(page.moments).toHaveLength(2);
     expect(page.moments[0].recordedAtMs).toBeGreaterThanOrEqual(
@@ -72,7 +97,8 @@ describe("engine history reads", () => {
   it("scopes the timeline to the active version after a switch", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "main body\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -82,6 +108,9 @@ describe("engine history reads", () => {
 
     const draftPage = await engine.listMoments();
     expect(draftPage.activeVersionId).not.toBe("main");
+    // `every` is vacuously true on an empty page, so the scoping claim below
+    // means nothing without this: a starved timeline would otherwise pass.
+    expect(draftPage.moments.length).toBeGreaterThan(0);
     expect(
       draftPage.moments.every((moment) => moment.versionId === draftPage.activeVersionId),
     ).toBe(true);
@@ -93,7 +122,8 @@ describe("engine restore", () => {
   it("restores a file to before a moment: forward moment, disk write, no re-capture", async () => {
     const root = await tempRoot();
     await write(root, "doc.md", "original\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
     await write(root, "doc.md", "edited\n");
@@ -125,7 +155,8 @@ describe("engine restore", () => {
   it("captures an unsaved disk edit before restoring so nothing is lost", async () => {
     const root = await tempRoot();
     await write(root, "doc.md", "original\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
     await write(root, "doc.md", "edited\n");
@@ -151,7 +182,8 @@ describe("engine restore", () => {
 
   it("restoring to before a create removes the file; undo brings it back", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
     await write(root, "new.md", "created\n");
@@ -173,7 +205,8 @@ describe("engine restore", () => {
   it("undo of a text restore returns the file to its pre-restore content", async () => {
     const root = await tempRoot();
     await write(root, "doc.md", "original\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
     await write(root, "doc.md", "edited\n");
@@ -192,7 +225,8 @@ describe("engine restore", () => {
   it("rejects restoring a moment that belongs to another version", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "main body\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
     const mainMomentId = (await engine.listMoments()).moments[0].id;
@@ -206,7 +240,8 @@ describe("engine restore", () => {
 
   it("rejects unknown moments", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
     await expect(
@@ -220,7 +255,8 @@ describe("stable object ids for the linked-chat rail", () => {
   it("resolves a path to its engine object id and null for untracked paths", async () => {
     const root = await tempRoot();
     await write(root, "doc.md", "body\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
 
@@ -233,7 +269,8 @@ describe("stable object ids for the linked-chat rail", () => {
   it("preserves the object id across an engine-coordinated rename", async () => {
     const root = await tempRoot();
     await write(root, "before.md", "body\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
     const objectId = await engine.fileObjectIdForPath("before.md");
@@ -262,10 +299,14 @@ describe("stable object ids for the linked-chat rail", () => {
   it("rolls the engine rename back when the disk move fails", async () => {
     const root = await tempRoot();
     await write(root, "before.md", "body\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
     const objectId = await engine.fileObjectIdForPath("before.md");
+    // Without this, the rollback claim below reduces to null === null on a
+    // starved store — the same vacuity the sibling rename test avoids.
+    expect(objectId).not.toBeNull();
 
     const finish = await engine.beginFileRename("before.md", "after.md");
     // Disk move failed; roll back.
@@ -278,7 +319,8 @@ describe("stable object ids for the linked-chat rail", () => {
 
   it("returns a no-op finisher for non-engine-owned renames", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
     engine.start();
     await engine.flush();
 
