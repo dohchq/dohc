@@ -145,15 +145,15 @@ function checkChatSurfaceSelfHostable() {
   }
   const relayPkg = readPackageJson(relayPkgPath)
   const deps = Object.keys(relayPkg.dependencies ?? {})
-  const ALLOWED_EXTERNAL_RUNTIME_DEPS = new Set([
+  const ALLOWED_RUNTIME_DEPS = new Set([
+    '@dohc/security-contract',
+    '@dohc/workspace-auth',
+    '@dohc/workspace-contracts',
+    '@dohc/workspace-core',
     'better-auth', // rides the `postgres` auth core
     'pg', // rides the `postgres` auth core
   ])
-  const foreignDeps = deps.filter(
-    (dep) =>
-      !dep.startsWith('@dohc/') &&
-      !ALLOWED_EXTERNAL_RUNTIME_DEPS.has(dep),
-  )
+  const foreignDeps = deps.filter((dep) => !ALLOWED_RUNTIME_DEPS.has(dep))
   record(
     'chat surface: relay runtime deps stay within the self-host matrix',
     foreignDeps.length === 0,

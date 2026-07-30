@@ -51,6 +51,10 @@ Restore Postgres first, run migrations, then start the workspace API and relay.
 ## Security
 
 - Browser clients do not provide trusted identity.
+- The relay derives user identity and authorship from the authenticated
+  session.
+- Unauthorized share probes return the same response as missing shares.
+- Presence is ephemeral and never enters the replicated log.
 - Expose the services only through TLS.
 - Use a high-entropy Better Auth secret.
 - Keep Postgres and relay storage private.

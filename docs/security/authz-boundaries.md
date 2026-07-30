@@ -5,10 +5,13 @@ engine daemon, and the opt-in sync services.
 
 ## Electron
 
-- The renderer is untrusted input.
-- Main verifies the IPC sender and parses every payload.
-- Main resolves the workspace from its registry.
+- The renderer is untrusted input. IPC handlers call `assertTrustedSender` and
+  parse payloads with the Zod contracts in
+  `apps/desktop/src/ipc/bridgeContract.ts`.
+- Main resolves workspace scope with `requireWorkspace`. Engine operations also
+  require the workspace's live capture through `requireEngineCapture`.
 - The renderer does not provide trusted user, workspace, or agent identity.
+  Agent attribution comes from a main-process run slot.
 - Asynchronous renderer state must carry a workspace or request guard.
 
 ## Workspace engine
@@ -18,7 +21,10 @@ engine daemon, and the opt-in sync services.
 - Files, moments, versions, chats, search, secrets, and Y.Doc sessions remain
   inside that handle.
 - Workspace-relative paths pass lexical validation and realpath containment.
-- `.dohc/` metadata and secret-classified paths receive stricter handling.
+- `resolveWorkspaceMetadataDir` refuses a symlinked `.dohc/` directory.
+  Settings and policy files must be regular files no larger than 256 KiB.
+  Invalid settings fall back to safe defaults, including an enabled workspace
+  engine.
 
 The effective policy parser lives in
 `packages/security-contract/src/effectivePolicy.ts`. Search, export, capture,

@@ -46,7 +46,9 @@ pnpm dev:postgres
 pnpm migrate
 ```
 
-Start the workspace API in one terminal:
+In both service terminals, set `NODE_ENV=development` and the same
+`BETTER_AUTH_SECRET` of at least 32 characters. Then start the workspace API in
+one terminal:
 
 ```bash
 pnpm dev:workspace-api

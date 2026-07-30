@@ -20,15 +20,30 @@ It does not need a server or environment file.
 
 ## Sync stack
 
+Start Postgres. After it is ready, run the migrations:
+
 ```bash
 pnpm dev:postgres
 pnpm migrate
+```
+
+In both service terminals, set `NODE_ENV=development` and the same
+`BETTER_AUTH_SECRET` of at least 32 characters. Then start the workspace API in
+one terminal:
+
+```bash
 pnpm dev:workspace-api
+```
+
+Start the sync relay in another terminal:
+
+```bash
 pnpm --filter @dohc/sync-relay dev
 ```
 
-Copy `.env.self-host.example` when you need a complete local environment.
-The workspace API and relay must use the same `BETTER_AUTH_SECRET`.
+The development services use the default Postgres URL.
+`.env.self-host.example` is for the self-hosted Compose stack, not these
+development commands.
 
 ## Package layout
 

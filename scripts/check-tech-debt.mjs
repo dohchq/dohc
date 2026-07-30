@@ -18,8 +18,6 @@ const debtPatterns = [
   { label: term('dead ', 'code'), regex: phraseRegex('dead ', 'code') },
 ]
 
-const allowlist = []
-
 const skippedDirectories = new Set([
   '.git',
   '.gstack',
@@ -39,8 +37,8 @@ const skippedFiles = new Set([
   'yarn.lock',
 ])
 const skippedPathPrefixes = [
-  // These records preserve the active Rust rewrite's decisions and evidence.
-  // They quote past findings verbatim, including resolved debt markers.
+  // These program-evidence records quote historical findings. They are not
+  // live product documentation.
   'docs/superpowers/plans/rust-engine/',
   'docs/superpowers/plans/2026-07-16-dohc-rust-engine-rewrite.md',
 ]
@@ -57,8 +55,6 @@ const skippedExtensions = new Set([
   '.webp',
   '.zip',
 ])
-
-validateAllowlist()
 
 const hits = []
 for (const file of walk(root)) {
@@ -80,7 +76,7 @@ for (const file of walk(root)) {
         pattern: pattern.label,
         text: line.trim(),
       }
-      if (!isAllowed(hit, lines)) hits.push(hit)
+      hits.push(hit)
     }
   }
 }
@@ -93,7 +89,7 @@ if (hits.length > 0) {
   process.exit(1)
 }
 
-console.log(`Tech debt check passed with ${allowlist.length} documented allowlist entries.`)
+console.log('Tech debt check passed.')
 
 function* walk(dir) {
   for (const name of readdirSync(dir)) {
@@ -123,27 +119,4 @@ function readTextFile(file) {
   const body = readFileSync(file)
   if (body.includes(0)) return null
   return body.toString('utf8')
-}
-
-function isAllowed(hit, lines) {
-  return allowlist.some((entry) => {
-    if (entry.file !== hit.file) return false
-    if (!entry.patterns.includes(hit.pattern)) return false
-    if (entry.contains && !hit.text.includes(entry.contains)) {
-      const context = lines.slice(Math.max(0, hit.line - 12), Math.min(lines.length, hit.line + 4))
-      return context.some((line) => line.includes(entry.contains))
-    }
-    return true
-  })
-}
-
-function validateAllowlist() {
-  for (const entry of allowlist) {
-    if (!entry.reason || !entry.deleteWhen) {
-      throw new Error(`Allowlist entry for ${entry.file} is missing reason or deletion condition.`)
-    }
-    if (!Array.isArray(entry.patterns) || entry.patterns.length === 0) {
-      throw new Error(`Allowlist entry for ${entry.file} has no patterns.`)
-    }
-  }
 }
