@@ -22,15 +22,17 @@
 // Usage:
 //   node tools/rust-engine-program/run-rust-checks.mjs
 //   node tools/rust-engine-program/run-rust-checks.mjs --expect-arch=x64
-//     (hard-pins the host arch so a cross-built run cannot be recorded as
-//      native evidence; aborts with exit 2 on a mismatch)
+//     (validates CARGO's effective target — host triple vs CARGO_BUILD_TARGET /
+//      [build].target — so a cross-compiled run cannot be recorded as native
+//      evidence; aborts with exit 2)
 // Exit code is non-zero if any REQUIRED step fails (optional tool skips do not
 // fail the run).
 
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-import { arch, platform, release } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { arch, homedir, platform, release } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -89,21 +91,86 @@ console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}\n`);
 
-// Inherited from run-native-suite.mjs when that runner was retired (R16). This
-// gate is now the native evidence, so the pin that stops a cross-built run
-// being recorded as native belongs here. It compares os.arch(), which IS
-// process.arch — the arch Node was built for — so it cannot detect emulation:
-// an emulated x64 Node on arm64 reports x64 and satisfies --expect-arch=x64.
+// Inherited from run-native-suite.mjs when that runner was retired (R16), and
+// then corrected: the evidence certifies the RUST workspace, so the pin has to
+// validate what CARGO builds. os.arch() describes only the Node binary, while
+// cargo honours CARGO_BUILD_TARGET and build.target independently — so an arm64
+// Node could satisfy --expect-arch=arm64 while every spawned cargo command built
+// x86_64 and macOS ran the tests under Rosetta, stamping darwin/arm64 onto x64
+// evidence. Neither check detects emulation of Node itself; that is why the
+// cargo target, not process.arch, is the thing being pinned.
+function cargoHostTriple() {
+  const res = spawnSync("cargo -vV", { cwd: repoRoot, shell: true, encoding: "utf8" });
+  if (res.error || res.status !== 0) return null;
+  return /^host:\s*(\S+)$/mu.exec(res.stdout ?? "")?.[1] ?? null;
+}
+
+function configuredCargoTarget() {
+  if (process.env.CARGO_BUILD_TARGET) return process.env.CARGO_BUILD_TARGET;
+  const cargoHome = process.env.CARGO_HOME || join(homedir(), ".cargo");
+  const candidates = [
+    join(repoRoot, ".cargo", "config.toml"),
+    join(repoRoot, ".cargo", "config"),
+    join(cargoHome, "config.toml"),
+    join(cargoHome, "config"),
+  ];
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    // Walk sections rather than regexing across them: only [build].target is a
+    // default. A [target.<triple>] section configures that triple, it does not
+    // select it.
+    let inBuild = false;
+    for (const line of readFileSync(path, "utf8").split(/\r?\n/u)) {
+      const section = /^\s*\[([^\]]+)\]/u.exec(line);
+      if (section) {
+        inBuild = section[1].trim() === "build";
+        continue;
+      }
+      if (!inBuild) continue;
+      const found = /^\s*target\s*=\s*"([^"]+)"/u.exec(line)?.[1];
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+const TRIPLE_ARCH = { x86_64: "x64", aarch64: "arm64", i686: "ia32", armv7: "arm" };
 const expectArch = process.argv
   .slice(2)
   .filter((a) => a.startsWith("--expect-arch="))
   .map((a) => a.split("=")[1])[0];
-if (expectArch && expectArch !== arch()) {
-  console.error(
-    `ABORT: --expect-arch=${expectArch} but host arch is ${arch()}. ` +
-      `Cross-built runs must not be recorded as native evidence.`,
-  );
-  process.exit(2);
+
+if (expectArch) {
+  const host = cargoHostTriple();
+  if (!host) {
+    console.error(
+      `ABORT: --expect-arch=${expectArch} was requested but \`cargo -vV\` did not report a host ` +
+        `triple, so the cargo target cannot be verified. Refusing to certify native evidence.`,
+    );
+    process.exit(2);
+  }
+  const effective = configuredCargoTarget() ?? host;
+  if (effective !== host) {
+    console.error(
+      `ABORT: cargo builds for ${effective} on host ${host} (CARGO_BUILD_TARGET or build.target). ` +
+        `A cross-compiled run is not native evidence whatever Node reports.`,
+    );
+    process.exit(2);
+  }
+  const targetArch = TRIPLE_ARCH[effective.split("-")[0]] ?? effective.split("-")[0];
+  if (targetArch !== expectArch) {
+    console.error(
+      `ABORT: --expect-arch=${expectArch} but cargo targets ${effective} (arch ${targetArch}). ` +
+        `Cross-built runs must not be recorded as native evidence.`,
+    );
+    process.exit(2);
+  }
+  if (targetArch !== arch()) {
+    console.warn(
+      `  note: cargo targets ${targetArch} while Node reports ${arch()} — the evidence line ` +
+        `describes Node's platform/arch, so record ${targetArch} as the Rust target.`,
+    );
+  }
 }
 
 for (const step of required) {

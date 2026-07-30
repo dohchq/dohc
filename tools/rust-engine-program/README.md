@@ -68,11 +68,15 @@ collected on the founder's machine:
    supported platform" claim is scoped to `{Windows, Linux-WSL}`.
 
 Pass `--expect-arch=<x64|arm64>` to hard-pin which platform a run represents;
-the gate aborts when the running Node's architecture does not match, so a
-cross-built run cannot masquerade as native evidence. It cannot detect
-emulation: `os.arch()` is `process.arch`, the architecture Node itself was
-built for, so an emulated x64 Node on arm64 reports `x64` and satisfies
-`--expect-arch=x64`. (This pin used to live in
+the gate validates what **cargo** builds, not what Node is: it reads cargo's
+host triple and its effective target (`CARGO_BUILD_TARGET`, else `[build].target`
+from `.cargo/config.toml`), aborts if they differ at all — a cross-compiled run
+is not native evidence — and aborts if the target's architecture is not the one
+you pinned. Checking Node's `os.arch()` would not do: cargo honours those
+settings independently, so an arm64 Node could satisfy `--expect-arch=arm64`
+while every cargo command built x86_64 and macOS ran the tests under Rosetta.
+Neither check detects emulation of Node itself, which is why the cargo target is
+what gets pinned. (This pin used to live in
 `run-native-suite.mjs`; it moved here when that runner was retired in R16,
 because this gate is now the native evidence.)
 

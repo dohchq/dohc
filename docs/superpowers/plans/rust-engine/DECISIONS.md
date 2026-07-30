@@ -549,12 +549,16 @@ pin moved there rather than being dropped. `GATE0`'s dependency list still names
 `TS-NATIVE-CI` and is left alone: it is a historical record of a gate that did
 pass, not a live dependency.
 
-What the pin does and does not guarantee, stated here because the README
-overclaimed it and I repeated the overclaim in this ledger: it aborts when the
-running Node's reported architecture does not match, so a **cross-built** run
-cannot be recorded as native evidence. It does **not** detect emulation —
-`os.arch()` is `process.arch`, the architecture Node itself was built for, so an
-emulated x64 Node on arm64 reports `x64` and satisfies `--expect-arch=x64`.
+What the pin guarantees, corrected twice: it validates **cargo's** effective
+target, not Node's architecture. It reads cargo's host triple plus
+`CARGO_BUILD_TARGET` / `[build].target`, aborts when they differ (a
+cross-compiled run is not native evidence), and aborts when the target's arch is
+not the pinned one. My first version compared `os.arch()`, which describes only
+the Node binary: cargo honours those settings independently, so an arm64 Node
+could satisfy `--expect-arch=arm64` while cargo built x86_64 and macOS ran the
+tests under Rosetta — stamping `darwin/arm64` onto x64 evidence. Neither version
+detects emulation of Node itself, which is why the cargo target is the thing
+pinned.
 
 **What is NOT retired:** the macOS pre-release obligation from the entry above
 still stands on its own. It is about untested platforms, not about this runner,
