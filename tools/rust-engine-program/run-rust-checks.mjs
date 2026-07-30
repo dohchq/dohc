@@ -115,38 +115,67 @@ function configuredCargoTarget() {
   // checkout under C:\w, say) that cargo nonetheless applies to every command.
   const candidates = [];
   for (let dir = repoRoot; ; ) {
-    candidates.push(join(dir, ".cargo", "config.toml"), join(dir, ".cargo", "config"));
+    // `config` BEFORE `config.toml`: when both exist cargo warns and uses the
+    // extensionless one, so reading config.toml first would validate a file cargo
+    // ignores.
+    candidates.push(join(dir, ".cargo", "config"), join(dir, ".cargo", "config.toml"));
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
   const cargoHome = process.env.CARGO_HOME || join(homedir(), ".cargo");
-  candidates.push(join(cargoHome, "config.toml"), join(cargoHome, "config"));
+  candidates.push(join(cargoHome, "config"), join(cargoHome, "config.toml"));
+  // Collect from EVERY level rather than returning at the first hit. Cargo MERGES
+  // array-valued build.target across config levels (a repo `["aarch64"]` plus an
+  // ancestor `["x86_64"]` builds both) and overrides scalars nearest-first. This
+  // parser cannot implement those semantics — three review rounds of trying proved
+  // that — so it collects everything and refuses unless the whole picture is
+  // unambiguously the host. Over-refusing is the safe direction: a legitimate
+  // nearest-scalar override now aborts too, and the operator unsets it or records
+  // the evidence by hand.
+  const found = [];
   for (const path of candidates) {
     if (!existsSync(path)) continue;
-    // Walk sections rather than regexing across them: only [build].target is a
-    // default. A [target.<triple>] section configures that triple, it does not
-    // select it.
+    let text;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (error) {
+      // Existing-but-unreadable must not read as "no target configured", and must
+      // not crash the gate before its summary either.
+      return { unparseable: `${path} (${error.code ?? error.message})` };
+    }
+    // Walk sections: only a build-scoped `target` is a default. A
+    // [target.<triple>] section configures that triple, it does not select it.
     let inBuild = false;
-    for (const line of readFileSync(path, "utf8").split(/\r?\n/u)) {
+    for (const line of text.split(/\r?\n/u)) {
       const section = /^\s*\[([^\]]+)\]/u.exec(line);
       if (section) {
         inBuild = section[1].trim() === "build";
         continue;
       }
-      if (!inBuild) continue;
-      // [build].target is a string OR an array of strings, per cargo's config
-      // reference. A scalar-only match silently fell back to the host triple on
-      // `target = ["x86_64-apple-darwin"]` and certified a cross run as native.
-      const raw = /^\s*target\s*=\s*(.+?)\s*(?:#.*)?$/u.exec(line)?.[1];
-      if (!raw) continue;
-      const triples = [...raw.matchAll(/"([^"]+)"/gu)].map((m) => m[1]);
-      // More than one target is never a single native run.
-      if (triples.length > 1) return triples.join(",");
-      if (triples.length === 1) return triples[0];
+      // Cargo accepts all of: [build] + target=, the dotted key build.target=,
+      // and the inline table build={target=...}. Missing any spelling meant
+      // falling back to the host triple and certifying a cross run as native.
+      const assignment = inBuild
+        ? /^\s*target\s*=\s*(.*)$/u.exec(line)?.[1]
+        : (/^\s*build\s*\.\s*target\s*=\s*(.*)$/u.exec(line)?.[1] ??
+           (/^\s*build\s*=\s*\{/u.test(line)
+             ? /target\s*=\s*([^},]*)/u.exec(line)?.[1]
+             : undefined));
+      if (assignment === undefined) continue;
+      // Both quote styles, scalar or array.
+      const triples = [...assignment.matchAll(/["']([^"']+)["']/gu)].map((m) => m[1]);
+      // Anything we cannot read as at least one triple FAILS CLOSED. This parser
+      // is not a TOML implementation and must never guess: `cargo config get
+      // build.target` is nightly-only, so there is no authoritative fallback.
+      if (triples.length === 0) return { unparseable: `${path}: ${line.trim()}` };
+      for (const triple of triples) if (!found.includes(triple)) found.push(triple);
     }
   }
-  return null;
+  if (found.length === 0) return null;
+  // Any spread of configured targets — merged arrays, or an override this parser
+  // cannot rank — is never a single native run.
+  return found.length > 1 ? found.join(",") : found[0];
 }
 
 const TRIPLE_ARCH = { x86_64: "x64", aarch64: "arm64", i686: "ia32", armv7: "arm" };
@@ -160,7 +189,15 @@ const expectArch = process.argv
 // macos-evidence.sh, not either workflow, not any README example. A guard that
 // only ran with the flag would never run at all.
 const cargoHost = cargoHostTriple();
-const cargoTarget = cargoHost ? (configuredCargoTarget() ?? cargoHost) : null;
+const configured = cargoHost ? configuredCargoTarget() : null;
+if (configured && typeof configured === "object") {
+  console.error(
+    `ABORT: cannot determine cargo's effective target from ${configured.unparseable}. ` +
+      `Refusing to certify native evidence on a target this gate cannot read.`,
+  );
+  process.exit(2);
+}
+const cargoTarget = cargoHost ? (configured ?? cargoHost) : null;
 const cargoArch = cargoTarget
   ? (TRIPLE_ARCH[cargoTarget.split("-")[0]] ?? cargoTarget.split("-")[0])
   : null;
