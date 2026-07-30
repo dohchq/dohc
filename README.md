@@ -39,10 +39,22 @@ Multi-device sync, sharing, presence, and co-editing use two services:
 
 Postgres stores Better Auth data. The relay stores its own data in SQLite.
 
+Start Postgres. After it is ready, run the migrations:
+
 ```bash
 pnpm dev:postgres
 pnpm migrate
+```
+
+Start the workspace API in one terminal:
+
+```bash
 pnpm dev:workspace-api
+```
+
+Start the sync relay in another terminal:
+
+```bash
 pnpm --filter @dohc/sync-relay dev
 ```
 
