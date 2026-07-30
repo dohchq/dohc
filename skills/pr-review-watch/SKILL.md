@@ -185,6 +185,14 @@ fi
 declare -A high seen watched firstseen qn
 fails=0
 
+# ISO-8601 Z to epoch, on GNU and on BSD/macOS. Prints nothing if neither works,
+# so callers can report that rather than doing arithmetic on an empty string.
+to_epoch() {
+  date -u -d "$1" +%s 2>/dev/null && return 0
+  date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null && return 0
+  return 1
+}
+
 # Repeat, don't fire once. A key that is set and never cleared means a persistent
 # outage produces one line and then indefinite silence while nothing is verified —
 # the anti-silence tool going silent during exactly the outage it exists to expose.
@@ -342,7 +350,15 @@ while true; do
       clear_note "$n|qf|$who|reviews"; clear_note "$n|qf|$who|comments"; clear_note "$n|qf|$who|trigger"
       [ "$answered" -eq 0 ] || continue
 
-      age=$(( ( $(date -u +%s) - $(date -u -d "$base" +%s) ) / 60 ))
+      # `date -d` is GNU-only; macOS needs `-j -f`. Without both, the substitution
+      # is empty and the arithmetic below aborts the watcher the first time a
+      # review is late — killing it at exactly the moment it should alert.
+      based=$(to_epoch "$base")
+      if [ -z "$based" ]; then
+        note "$n|ts|$short" "TIMESTAMP UNPARSED #$n @$short — cannot age this round; deadline not enforced here"
+        continue
+      fi
+      age=$(( ( $(date -u +%s) - based ) / 60 ))
       [ "$age" -ge "$DEADLINE_MIN" ] || continue
       # The key carries the round baseline, so a SECOND failed trigger on an
       # unchanged head still alerts instead of being suppressed as already-seen.
@@ -383,9 +399,11 @@ unset -f review_status 2>/dev/null
 
 # The guards must PREVENT the source and the call, not just announce a problem.
 # Printing and falling through is how you get a verdict from the wrong function.
-PR=<the PR you are actually checking>   # NOT a literal from this doc: copying a
-                                        # number here checks someone else's PR
-                                        # and reports its verdict as yours
+# Set PR yourself, to the pull request you are actually checking. Do not paste a
+# number out of this doc — a copied literal reports another PR's verdict as
+# yours. This form fails loudly when PR is unset instead of guessing.
+: "${PR:?set PR to the pull request number you are checking}"
+
 if [ -s "$R" ] && bash -n "$R"; then
   . "$R"
   review_status "$PR"
