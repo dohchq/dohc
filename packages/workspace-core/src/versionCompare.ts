@@ -1,12 +1,10 @@
 import type {
   VersionFileChange,
   VersionFileChangeStatus,
-} from "@dohc/workspace-contracts/engine";
-import type {
   VersionId,
   VersionedTextStore,
   WorkspaceId,
-} from "./versionedTextStore";
+} from "@dohc/workspace-contracts/engine";
 
 // UI-facing whole-version comparison (PR 0M-4). The per-file three-way
 // comparison (compareTextFileVersions) answers "how do these sides relate for

@@ -58,8 +58,10 @@ type ContractChecks = [
   AssertSame<Engine.SearchVisibility, Contracts.SearchVisibility>,
   AssertSame<Engine.TextFileSnapshot, Contracts.TextFileSnapshot>,
   AssertSame<Engine.ThreadDispatchPauseState, Contracts.ThreadDispatchPauseState>,
-  AssertSame<Engine.VersionFileChange, Contracts.VersionFileChange>,
-  AssertSame<Engine.VersionFileChangeStatus, Contracts.VersionFileChangeStatus>,
+  // VersionFileChange/VersionFileChangeStatus are gone from this list because the
+  // engine no longer re-exports them: versionCompare moved to @dohc/workspace-core,
+  // which re-exports them straight from @dohc/workspace-contracts/engine. There is
+  // no longer a second declaration for them to drift from.
   AssertSame<Engine.VersionId, Contracts.VersionId>,
   AssertSame<Engine.VersionKind, Contracts.VersionKind>,
   AssertSame<Engine.VersionRecord, Contracts.VersionRecord>,

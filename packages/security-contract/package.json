@@ -4,7 +4,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./effective-policy": "./src/effectivePolicy.ts",
     "./engine-path-floor": "./src/enginePathFloor.ts",
+    "./secret-key-envelope": "./src/secretKeyEnvelope.ts",
     "./chat-wire-ids": "./src/chatWireIds.ts"
   },
   "scripts": {
@@ -13,7 +15,8 @@
   },
   "dependencies": {
     "@dohc/workspace-contracts": "workspace:*",
-    "@dohc/workspace-core": "workspace:*"
+    "@dohc/workspace-core": "workspace:*",
+    "smol-toml": "^1.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

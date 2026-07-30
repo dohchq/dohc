@@ -144,6 +144,98 @@ For codex, you have to tag the bot (In a pull request comment, mention @codex re
 
 Claude is not setup to review PRs automatically (not part of my subscription), so you have to invoke this review locally (ideally after the PR is created and in parallel with coderabbit and codex reviews). So you have to manually ask claude via the local cli to review the PR and manually go back and forth with it until no issues remain. Everytime claude finishes a review please update the PR via commenting what claude reviewed, then address them. So basically we're trying to do a pseudo claude PR review bot we orchestrate ourselves. Use fable-5 and fallback to opus-5 if fable is unavailable or rate limited.
 
+**Use the `pr-review-watch` skill for this — do not hand-roll a review poller.**
+See [`.claude/skills/pr-review-watch/SKILL.md`](.claude/skills/pr-review-watch/SKILL.md).
+Hand-rolled watchers have failed in every way available: filtering on guessed
+commit timestamps (and so hiding a `CHANGES_REQUESTED`), exiting after the first
+round so the next one went unseen, polling only one bot, and never noticing that
+a `@codex review` trigger silently did not take.
+
+The rule the skill enforces, and the one worth remembering even without it: **a
+review applies to a COMMIT, not to a PR.** Before merging anything, compare each
+review's `commit_id` against the PR's `headRefOid`:
+
+Prefer `review_status <PR>` from the skill, which handles every shape below (the
+skill shows how to extract it — it is a function inside a Markdown file, so it
+cannot be sourced directly). This is the copy-pasteable minimum if you are checking
+by hand. Set `PR`, and treat a **failed** `gh api` as unknown rather than as "nobody
+reviewed" — piping it straight into `grep` hides its exit status, which is why the
+commands below capture first:
+
+```
+PR=371
+HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+SHORT=${HEAD:0:10}
+# Guard everything on this. An empty HEAD turns the filters below into
+# contains("") and grep "", which match EVERY historical comment and make an
+# unknown head look reviewed.
+[ -n "$HEAD" ] || echo "HEAD LOOKUP FAILED — stop here, decide nothing"
+
+# 1. formal reviews of THIS head (codex when it HAS findings; CodeRabbit usually).
+#    codex files findings as COMMENTED, never CHANGES_REQUESTED. Only APPROVED /
+#    CHANGES_REQUESTED / COMMENTED are coverage — a DISMISSED or PENDING review says
+#    nothing about the code, so R1T (used to gate step 3) excludes them while R1
+#    still shows them, labelled.
+TERM='.state=="APPROVED" or .state=="CHANGES_REQUESTED" or .state=="COMMENTED"'
+[ -n "$HEAD" ] && { R1=$(gh api "repos/dohc-ai/dohc/pulls/$PR/reviews" --paginate \
+  --jq ".[]|select(.commit_id==\"$HEAD\")|if ($TERM) then \"\(.user.login) \(.state)\" else \"\(.user.login) \(.state)   <- NOT coverage\" end") \
+  || echo "reviews query FAILED — unknown, not empty"
+printf '%s\n' "$R1"
+R1T=$(gh api "repos/dohc-ai/dohc/pulls/$PR/reviews" --paginate \
+  --jq ".[]|select(.commit_id==\"$HEAD\")|select($TERM)|.user.login"); }
+
+# 2. a codex CLEAN pass is an ISSUE comment, not a review — check it too.
+#    Guarded on HEAD: with SHORT empty, contains("") matches every historical
+#    comment and prints a stale clean pass as if it were this head's.
+[ -n "$HEAD" ] && { CB=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+  --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|contains(\"$SHORT\"))|.body") \
+  || echo "codex comment query FAILED — unknown, not empty"
+printf '%s' "$CB" | grep -iE "didn.t find any major issues|no major issues"; }
+
+# 2b. codex's "cannot run" reply names NO sha, so it can never appear in (2).
+#     Query it separately or you will wait for a review that is not coming.
+gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+  --jq ".[]|select(.user.login==\"chatgpt-codex-connector[bot]\")|select(.body|test(\"create an environment for this repo\"))|.created_at" \
+  | tail -1
+
+# 3. CodeRabbit's status comment, which it EDITS IN PLACE, names the head it
+#    RECEIVED — it is NOT proof it reviewed. Only (1) proves that.
+#    ONLY consult it when (1) shows no CodeRabbit review: the rate-limit wrapper
+#    NEVER leaves the comment, so on a head CodeRabbit approved this would
+#    otherwise contradict (1) and reject a reviewed PR forever (see #317).
+[ -n "$HEAD" ] && ! printf '%s' "$R1T" | grep -q coderabbitai && {
+CR=$(gh api "repos/dohc-ai/dohc/issues/$PR/comments" --paginate \
+  --jq ".[]|select(.user.login==\"coderabbitai[bot]\")|select(.body|contains(\"$HEAD\"))|.body") \
+  || echo "CodeRabbit comment query FAILED — unknown, not empty"
+printf '%s' "$CR" | grep -iE "review limit|rate limit|review failed|currently processing" \
+  && echo "^ CodeRabbit received this head but did NOT review it — not approval"; }
+```
+
+CodeRabbit coverage means **a review object in (1)**. Its status comment is written
+when it receives a head, before doing any work, so a comment naming the head proves
+nothing — two PRs had exactly that with zero reviews ever produced. codex is the
+opposite: a clean pass leaves (1) empty and lives only in (2), so checking only (1)
+reports a reviewed-and-passed PR as unreviewed.
+
+If neither (1) nor a clean pass in (2) shows the head, the code is **unreviewed**
+however many reviews the PR has collected — reviews of superseded commits look
+identical to current ones in the GitHub UI.
+
+Two more shapes that decide merges: codex files real findings under state
+**`COMMENTED`**, never `CHANGES_REQUESTED`, so a populated review is not a pass;
+and `--paginate` runs the `--jq` program **once per page**, so an aggregate like
+`[…]|length` returns one count per page and any arithmetic test on it silently
+misfires. Count lines instead.
+
+Note `gh api --jq` does **not** accept `--arg` (that is a standalone-`jq` flag,
+and `jq` is not installed here) — it exits 1 and prints nothing, which reads
+exactly like "no matches". Embed values in the program string as above.
+
+Two adjacent traps that have both cost real cycles: CodeRabbit announces a rate
+limit in a comment body rather than failing, so its silence is not approval; and
+the canonical Rust gate can exit 0 while its own summary block says FAIL, so read
+`== summary ==` and never the exit code.
+
 ## How we write
 
 dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified

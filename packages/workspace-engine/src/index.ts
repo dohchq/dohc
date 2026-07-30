@@ -134,11 +134,6 @@ export type {
   YDocSession,
   YDocSettleResult,
 } from "./ydocEngineDriver";
-export { compareVersionFiles } from "./versionCompare";
-export type {
-  VersionFileChange,
-  VersionFileChangeStatus,
-} from "./versionCompare";
 export {
   VersionedFileWorkspaceError,
   getFileWorkspaceCapabilityReport,
@@ -252,15 +247,6 @@ export {
   readWorkspaceSecretState,
   type WorkspaceSecretState,
 } from "./secretFileStore";
-export {
-  SECRET_KEY_ENVELOPE_FORMAT,
-  SECRET_KEY_ENVELOPE_SCRYPT_N,
-  SECRET_KEY_ENVELOPE_SCRYPT_P,
-  SECRET_KEY_ENVELOPE_SCRYPT_R,
-  SecretKeyEnvelopeError,
-  unwrapWorkspaceDataKey,
-  wrapWorkspaceDataKey,
-} from "./secretKeyEnvelope";
 export type {
   SecretFileCompareEntry,
   SecretFileDeleteOutcome,
@@ -273,21 +259,6 @@ export type {
   SecretFileStoreOptions,
   SecretFileWriteOutcome,
 } from "./secretFileStore";
-export {
-  parseFilesPolicy,
-  parseVisibilityPolicy,
-  policyGlobMatches,
-  resolveEffectivePolicy,
-  validatePolicyGlob,
-} from "./effectivePolicy";
-export type {
-  EffectivePolicyInput,
-  EffectivePolicyResult,
-  FilesPolicyRule,
-  PolicyGlobValidation,
-  PolicyParseResult,
-  VisibilityPolicyRule,
-} from "./effectivePolicy";
 export type {
   EngineFilePathClassification,
   SearchSurface,

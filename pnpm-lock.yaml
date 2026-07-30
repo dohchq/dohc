@@ -391,6 +391,9 @@ importers:
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../workspace-core
+      smol-toml:
+        specifier: ^1.7.0
+        version: 1.7.0
     devDependencies:
       '@types/node':
         specifier: ^22.19.19
@@ -476,9 +479,6 @@ importers:
       '@dohc/ydoc-projection':
         specifier: workspace:*
         version: link:../ydoc-projection
-      smol-toml:
-        specifier: ^1.7.0
-        version: 1.7.0
       yjs:
         specifier: ^13.6.30
         version: 13.6.30

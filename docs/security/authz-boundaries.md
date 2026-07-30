@@ -36,7 +36,7 @@ This page states where authorization is enforced today.
 
 ## Policy, search, export
 
-- The effective-policy resolver (`packages/workspace-engine/src/effectivePolicy.ts`,
+- The effective-policy resolver (`packages/security-contract/src/effectivePolicy.ts`,
   `.dohc/files.toml` / `.dohc/visibility.toml`) is the single input for
   what search indexes and what export may leave the workspace. Secret-backed
   files (the `.env` driver) keep values out of moments, search, and export.

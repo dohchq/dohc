@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { wrapWorkspaceDataKey } from "@dohc/workspace-engine";
+import { wrapWorkspaceDataKey } from "@dohc/security-contract/secret-key-envelope";
 import type {
   DaemonErrorCode,
   Event,
