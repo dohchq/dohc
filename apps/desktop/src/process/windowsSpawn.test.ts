@@ -5,9 +5,16 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { killChildTreeWin32, resolveSpawnCommand } from "./windowsSpawn";
 
-// Teardown retries rmdir against asynchronously-released Windows handles, so
-// the hook needs room for the backoff (#372).
-vi.setConfig({ hookTimeout: 20_000 });
+// Teardown retries rmdir against asynchronously-released Windows handles, so the
+// hook needs room for the backoff (#372).
+//
+// testTimeout matters too, and hookTimeout alone did NOT cover it: the win32 tests
+// carry their own 10s pid-file deadline and 5s death poll, both sitting inside a 5s
+// test budget — so `expect(grandchildPid).toBeGreaterThan(0)` could never report and
+// you got vitest's generic timeout instead of the real diagnostic. That is exactly
+// the "a deadline longer than its container" mistake this file's sibling fix in
+// presence.integration.test.ts was about.
+vi.setConfig({ hookTimeout: 20_000, testTimeout: 20_000 });
 
 const tempRoots: string[] = [];
 

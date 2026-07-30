@@ -10,11 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-// collectZipEntries tests write thousands of real files; 5s is an I/O budget,
-// not a logic budget (#372).
-vi.setConfig({ testTimeout: 15_000 });
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   collectZipEntries,
   copyIntoWorkspace,
@@ -510,7 +506,10 @@ describe("collectZipEntries", () => {
       ),
     );
     await expect(collectZipEntries(root, "many")).rejects.toThrow(/Export too large/);
-  });
+    // 15s because this one writes 2001 real files — an I/O budget, not a logic
+    // budget (#372). Scoped to this test: the other 58 in this file are fast, and
+    // a file-wide bump would triple how long a genuine hang takes to surface.
+  }, 15_000);
 
   it("exports mounted-share paths (read surface, not a write)", async () => {
     await mkdir(join(root, SHARED_WITH_ME_FOLDER, "alex", "docs"), { recursive: true });

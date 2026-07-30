@@ -33,7 +33,14 @@ afterEach(async () => {
         }),
     ),
   );
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+  // The relay child owning relay.sqlite was just killed and Windows releases its
+  // handles asynchronously — the same EBUSY shape fixed in windowsSpawn.test.ts,
+  // one directory over. `force` swallows only ENOENT.
+  await Promise.all(
+    roots.map((root) =>
+      rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }),
+    ),
+  );
 });
 
 function packageRoot(): string {
@@ -59,7 +66,12 @@ async function spawnRelay(dbPath: string): Promise<string> {
     let stderr = "";
     const timeout = setTimeout(
       () => reject(new Error(`relay did not report a port\n${stdout}\n${stderr}`)),
-      15_000,
+      // 45s, not 15s. This spawns `node --import tsx/esm src/main.ts`, which
+      // COMPILES on startup — under load that measured 12-15s. THIS is the
+      // deadline that failed the #372 presence flakes; not any waiter budget and
+      // not the `it` budget, neither of which the failing test even reached. The
+      // enclosing budgets are 90s, which contains this.
+      45_000,
     );
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
@@ -443,19 +455,24 @@ describe("two-client presence over a real relay child", () => {
     // node adapter must propagate the disconnect into the fetch Request's
     // AbortSignal so the hub releases the parked waiter — long before the
     // 20s hold would have expired.
+    const HOLD_MS = 20_000;
     const controller = new AbortController();
+    const parkedAt = Date.now();
     const parked = fetch(
-      `${baseUrl}/sync/${ws}/presence?topic=general&since=${current.version}&hold=20000`,
+      `${baseUrl}/sync/${ws}/presence?topic=general&since=${current.version}&hold=${HOLD_MS}`,
       { method: "GET", headers: bearer("owner"), signal: controller.signal },
     ).catch(() => undefined);
     await waitForWaiters(baseUrl, 1);
     controller.abort(); // client vanishes mid-park
-    // Observe the release BEFORE awaiting `parked`, and inside a budget below the
-    // 20s hold. Both matter. Awaiting `parked` first would absorb the whole hold,
-    // after which zero waiters is guaranteed however the release happened — and a
-    // budget at or above the hold is satisfied by the hold expiring on its own.
-    // Either mistake makes this go green when abort propagation is broken.
-    await waitForWaiters(baseUrl, 0, 15_000);
+    // Observe the release BEFORE awaiting `parked`: awaiting first absorbs the whole
+    // hold, after which zero waiters is guaranteed however the release happened.
+    await waitForWaiters(baseUrl, 0);
+    // Then attribute it to the abort, measured from the PARK. A budget merely
+    // "below the hold" is NOT enough — it starts at the abort, so once the first
+    // wait costs >5s the hold expires inside it and a broken abort goes green
+    // (verified: deleting the abort and sleeping 6s passed in 22.3s). Elapsed from
+    // the park is sound whatever the timings do.
+    expect(Date.now() - parkedAt).toBeLessThan(HOLD_MS);
     await parked;
   }, 90_000);
 });

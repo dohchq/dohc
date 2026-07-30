@@ -1,10 +1,18 @@
 // @vitest-environment jsdom
+import { configure } from "@testing-library/dom";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// These await a lazily-imported CodeMirror in jsdom, so the wait is wall-clock
-// bound rather than assertion-bound (#372).
+// 32 of the 39 tests here await a lazily-imported CodeMirror via findBy*, so the
+// wall-clock profile is the file, not one test (#372). File-level is the honest
+// scope; per-test would be 32 copies of the same line.
+//
+// asyncUtilTimeout is the one that actually mattered: findBy* rejects on RTL's own
+// 1000ms default, so these failed at ~1s with "Unable to find [data-testid=...]"
+// while the test budget was never reached. Raising testTimeout alone fixed nothing
+// here — an error shape that reads like a product regression rather than a flake.
+configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
 import * as Y from "yjs";
 import {

@@ -75,7 +75,10 @@ describe("ui-state file store", () => {
     expect(
       (await readdir(join(root, ".dohc"))).filter((name) => name.includes(".tmp-")),
     ).toEqual([]);
-  });
+    // 15s: 40 real atomic writes (write + fsync + rename each) is an I/O budget, not
+    // a logic budget — same profile as collectZipEntries, and it timed out at 5000ms
+    // under contention (#372). Scoped to this test; the rest of the file is fast.
+  }, 15_000);
 
   it("retries a transient Windows rename failure and completes the write", async () => {
     const root = await tempRoot();

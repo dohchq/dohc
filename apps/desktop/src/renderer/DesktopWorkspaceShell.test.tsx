@@ -8,10 +8,18 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { configure } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// Shell tests drive userEvent through async UI settles; wall-clock bound (#372).
+// These drive userEvent through async UI settles — 67 findBy* awaits across 47
+// tests — so the wall-clock profile is the file, not one test (#372).
+//
+// asyncUtilTimeout is the constraint that actually bit: findBy* rejects on RTL's
+// own 1000ms default, so these failed at ~1-3s with "Unable to find
+// [data-testid=...]" while the test budget was never reached. Raising testTimeout
+// alone fixed nothing here.
+configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
 import type {
   ChatChannelRecord,

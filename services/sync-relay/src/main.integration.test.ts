@@ -116,7 +116,7 @@ async function spawnRelay(dbPath: string): Promise<string> {
     let stderr = "";
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not report a port\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 15_000);
+    }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
       const match = /SYNC_RELAY_LISTENING host=([^\s]+) port=(\d+)/u.exec(stdout);
@@ -1624,7 +1624,7 @@ async function spawnRelayExpectExit(
     let stderr = "";
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not exit\nstderr:\n${stderr}`));
-    }, 15_000);
+    }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
