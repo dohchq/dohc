@@ -3284,10 +3284,18 @@ keep silently recording through the old engine?
 
 **There was no decision to make.** `startRustEngineDaemon` shows "The desktop cannot start
 without the Rust engine.", stops the lifecycle, nulls all three engine handles and calls
-`app.quit()`. The whole bootstrap is gated on its result, so no window is created and IPC
-is never registered. And `rustEngineWorkspaceSessions` has exactly two writes: set on
-success, nulled on that failure path immediately before the quit. A running workspace
-cannot reach the capture gate without a daemon.
+`app.quit()`. The `app.whenReady` continuation returns early on its false result, so IPC is
+never registered and no workspace is opened. And `rustEngineWorkspaceSessions` has exactly
+two writes: set on success, nulled on that failure path immediately before the quit. A
+running workspace cannot reach the capture gate without a daemon.
+
+Precision matters on one point, because I first wrote this as "no window is created" and
+that is FALSE — codex caught it reviewing this entry. The `open-file` and `second-instance`
+handlers are registered OUTSIDE `whenReady`, and both call `showOrCreateMainWindow()` when
+`app.isReady()`, which can be true while `startRustEngineDaemon` is still awaiting. So a
+window CAN appear before the gate resolves. The capture-reachability conclusion survives —
+IPC and capture are what the gate protects — but the reasoning I published was wrong in a
+way that hid a partially-initialized-window race, filed separately.
 
 Two independent investigations — one via codex, one a separate opus-5 pass — both opened by
 correcting the premise rather than answering the question. I then verified it in `main.ts`
@@ -3381,9 +3389,15 @@ Two findings worth more than the migrations themselves:
 
 **The loopback silently dropped `metadata.summary` and `metadata.correlationId`**, which the
 daemon persists and returns and the desktop sends. So a loopback-backed test could certify
-history the real daemon carries and the fake did not. Fixed mirroring the daemon — including
-its dedup, which hashes both fields into `payload_hash`, read in the Rust rather than
-inferred. Then codex caught **my own report being wrong about the scope**: I wrote that all
+history the real daemon carries and the fake did not. Fixed for MOMENT responses, mirroring
+the daemon — including its dedup, which hashes both fields into `payload_hash`, read in the
+Rust rather than inferred.
+
+Scoped deliberately, and codex was right to make me say so: the daemon also carries the pair
+on file HEADS, so on snapshots, and the loopback still does not. Nothing reads it today, and
+the gap is recorded in the loopback beside the fix rather than quietly closed over — a
+loopback-backed test that asserted snapshot metadata could still certify something the fake
+does not model. Then codex caught **my own report being wrong about the scope**: I wrote that all
 six `makeMoment` call sites were covered including binary write; binary write was not, so
 the fingerprints counted metadata as part of a binary write's identity while its moment
 dropped it. I checked all eight sites rather than the one reported.
