@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
+import ts from "typescript";
 
 // R16 ratchet. The legacy TypeScript engine `@dohc/workspace-engine` is being
 // deleted in favour of the Rust daemon. Deleting it is blocked on work tracked
@@ -44,6 +45,9 @@ function isProductionSource(posixPath: string): boolean {
   if (posixPath.includes("/e2e/")) return false;
   if (posixPath.includes("/scripts/")) return false;
   if (posixPath.includes("/testing/")) return false;
+  // Declaration files carry no runtime import — everything in them is erased,
+  // including `import Engine = require(…)`. `/\.tsx?$/` alone matches them.
+  if (posixPath.endsWith(".d.ts")) return false;
   return /\.tsx?$/.test(posixPath);
 }
 
@@ -77,77 +81,97 @@ function walk(dir: string, out: string[]): void {
   }
 }
 
-// Matches `import ... from "@dohc/workspace-engine"` / subpaths, plus bare
-// side-effect imports and `export ... from`, capturing the clause so a
-// type-only import can be told apart from a runtime one.
-//
-// The clause is `[^;"']*?` rather than `[\s\S]*?` on purpose. A lazy
-// any-character clause starts matching at the FIRST import in the file and
-// spans every statement up to this module's `from`, so a file whose first
-// import happens to be `import type { … } from "@dohc/workspace-core"` yields a
-// clause beginning with `type` — and the type-only check below then waves
-// through a genuine runtime import. That false negative is what this guard
-// exists to prevent, so: a real import clause contains no quote and no
-// semicolon, which pins the match to a single statement.
-const IMPORT_RE = new RegExp(
-  String.raw`(?:^|\n)\s*(?:import|export)\b([^;"']*?)\bfrom\s*["']` +
-    LEGACY_PACKAGE.replace(/[/\\^$*+?.()|[\]{}]/g, "\\$&") +
-    String.raw`(?:/[^"']*)?["']`,
-  "g",
-);
-const BARE_IMPORT_RE = new RegExp(
-  String.raw`(?:^|\n)\s*import\s*["']` +
-    LEGACY_PACKAGE.replace(/[/\\^$*+?.()|[\]{}]/g, "\\$&") +
-    String.raw`(?:/[^"']*)?["']`,
-  "g",
-);
-// `await import(...)`, `require(...)` and `import x = require(...)`. All three
-// load at runtime and none of them can be type-only, so no clause analysis is
-// needed — the call form alone is the answer.
-//
-// Nothing imports the legacy engine this way today. It is covered because the
-// codebase does use dynamic import to keep heavy modules off the launch path
-// (`workspaceDatabase.ts:333` does exactly that for `@dohc/sqlite-worker`), so
-// it is a form a future change would plausibly reach for — and a guard that a
-// one-line change can walk around is not a guard.
-const DYNAMIC_RE = new RegExp(
-  String.raw`\b(?:import|require)\s*\(\s*["']` +
-    LEGACY_PACKAGE.replace(/[/\\^$*+?.()|[\]{}]/g, "\\$&") +
-    String.raw`(?:/[^"']*)?["']\s*\)`,
-  "g",
-);
+// Detection is an AST walk, not a regex. The regex version of this shipped one
+// false negative already: a lazy clause pattern started matching at the FIRST
+// import in a file and spanned every statement up to the target's `from`, so a
+// file opening with `import type { … } from "@dohc/workspace-core"` produced a
+// clause beginning with `type` and a genuine runtime import was waved through.
+// Patching the pattern fixed that instance; the class remains — comments between
+// `import` and its parenthesis, the specifier appearing inside a string or a
+// comment, `loader.require(…)` masquerading as `require(…)`. The compiler
+// already knows the difference, so ask it.
+function isLegacySpecifier(specifier: string): boolean {
+  return specifier === LEGACY_PACKAGE || specifier.startsWith(`${LEGACY_PACKAGE}/`);
+}
 
-function hasRuntimeLegacyImport(source: string): boolean {
-  if (BARE_IMPORT_RE.test(source)) {
-    BARE_IMPORT_RE.lastIndex = 0;
-    return true;
-  }
-  BARE_IMPORT_RE.lastIndex = 0;
-  if (DYNAMIC_RE.test(source)) {
-    DYNAMIC_RE.lastIndex = 0;
-    return true;
-  }
-  DYNAMIC_RE.lastIndex = 0;
-  IMPORT_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = IMPORT_RE.exec(source)) !== null) {
-    const clause = (match[1] ?? "").trim();
-    // `import type { X }` — erased entirely.
-    if (/^type\b/.test(clause)) continue;
-    // `import { type A, type B }` — every named binding is type-only, so this
-    // is erased too. A single value binding among them makes it runtime.
-    const named = clause.match(/^\{([\s\S]*)\}$/);
-    if (named) {
-      const specifiers = named[1]
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
-      if (specifiers.length > 0 && specifiers.every((s) => /^type\s/.test(s)))
-        continue;
-    }
-    return true;
+// True when the whole declaration is erased at build time: `import type { X }`,
+// or named bindings that are ALL individually `type`. One value binding among
+// them makes the declaration runtime.
+function isErasedImport(node: ts.ImportDeclaration): boolean {
+  const clause = node.importClause;
+  if (clause === undefined) return false; // bare `import "pkg"` — side effect
+  if (clause.isTypeOnly) return true;
+  const bindings = clause.namedBindings;
+  if (clause.name === undefined && bindings !== undefined && ts.isNamedImports(bindings)) {
+    return bindings.elements.length > 0 && bindings.elements.every((e) => e.isTypeOnly);
   }
   return false;
+}
+
+function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ false,
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isImportDeclaration(node)) {
+      const spec = node.moduleSpecifier;
+      if (ts.isStringLiteral(spec) && isLegacySpecifier(spec.text) && !isErasedImport(node)) {
+        found = true;
+        return;
+      }
+    } else if (ts.isExportDeclaration(node)) {
+      // `export { x } from "pkg"` re-exports a value; `export type { X }` does
+      // not — and neither does `export { type X }`, whose specifiers are each
+      // type-only while the declaration itself is not.
+      const spec = node.moduleSpecifier;
+      if (spec !== undefined && ts.isStringLiteral(spec) && isLegacySpecifier(spec.text)) {
+        const clause = node.exportClause;
+        const allSpecifiersErased =
+          clause !== undefined &&
+          ts.isNamedExports(clause) &&
+          clause.elements.length > 0 &&
+          clause.elements.every((e) => e.isTypeOnly);
+        if (!node.isTypeOnly && !allSpecifiersErased) {
+          found = true;
+          return;
+        }
+      }
+    } else if (ts.isImportEqualsDeclaration(node)) {
+      // `import Engine = require("pkg")`.
+      const ref = node.moduleReference;
+      if (
+        ts.isExternalModuleReference(ref) &&
+        ts.isStringLiteral(ref.expression) &&
+        isLegacySpecifier(ref.expression.text) &&
+        !node.isTypeOnly
+      ) {
+        found = true;
+        return;
+      }
+    } else if (ts.isCallExpression(node)) {
+      const arg = node.arguments[0];
+      const isStringArg = arg !== undefined && ts.isStringLiteral(arg) && isLegacySpecifier(arg.text);
+      if (isStringArg) {
+        // `import("pkg")`, and a BARE `require("pkg")` — but not a method call
+        // such as `loader.require("pkg")`, which is not Node's require.
+        const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+        const isBareRequire = ts.isIdentifier(node.expression) && node.expression.text === "require";
+        if (isDynamicImport || isBareRequire) {
+          found = true;
+          return;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
 }
 
 describe("legacy engine production imports (R16 ratchet)", () => {
@@ -219,6 +243,51 @@ describe("legacy engine production imports (R16 ratchet)", () => {
         `import { thing } from "@dohc/workspace-engine-client";`,
       ),
     ).toBe(false);
+  });
+
+  it("is not fooled by the shapes a regex gets wrong", () => {
+    // Each of these is why detection is an AST walk. A pattern match gets at
+    // least one of them wrong, and the failure direction that matters is the
+    // false NEGATIVE — a guard that cannot see an importer.
+    const L = LEGACY_PACKAGE;
+
+    // The specifier inside a string or a comment is not an import.
+    expect(hasRuntimeLegacyImport(`const example = 'import("${L}")';`)).toBe(false);
+    expect(hasRuntimeLegacyImport(`// see await import("${L}") for the old way`)).toBe(false);
+    expect(hasRuntimeLegacyImport(`/* import { x } from "${L}"; */`)).toBe(false);
+
+    // A method call named `require` is not Node's require.
+    expect(hasRuntimeLegacyImport(`loader.require("${L}");`)).toBe(false);
+    expect(hasRuntimeLegacyImport(`this.require("${L}");`)).toBe(false);
+
+    // A comment between the keyword and the parenthesis does not hide it.
+    expect(hasRuntimeLegacyImport(`await import(/* lazy */ "${L}");`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`const m = require(
+  "${L}",
+);`)).toBe(true);
+
+    // Re-exports: a value re-export is runtime, a type re-export is not.
+    expect(hasRuntimeLegacyImport(`export { thing } from "${L}";`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`export type { Thing } from "${L}";`)).toBe(false);
+    expect(hasRuntimeLegacyImport(`export { type Thing } from "${L}";`)).toBe(false);
+
+    // Default and namespace imports are runtime; their type-only forms are not.
+    expect(hasRuntimeLegacyImport(`import thing from "${L}";`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`import * as all from "${L}";`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`import type thing from "${L}";`)).toBe(false);
+
+    // A prefix collision must not match.
+    expect(hasRuntimeLegacyImport(`import { x } from "${L}-client";`)).toBe(false);
+    expect(hasRuntimeLegacyImport(`await import("${L}-client");`)).toBe(false);
+  });
+
+  it("excludes declaration files, whose imports are erased", () => {
+    // `/\.tsx?$/` matches `.d.ts`, so without the explicit check a declaration
+    // containing `import Engine = require(…)` would be read as a runtime import.
+    expect(isProductionSource("apps/desktop/src/renderer/assets.d.ts")).toBe(false);
+    expect(isProductionSource("apps/desktop/src/renderer/assets.ts")).toBe(true);
+    // The detector alone WOULD flag it, which is what makes the filter load-bearing.
+    expect(hasRuntimeLegacyImport(`import Engine = require("${LEGACY_PACKAGE}");`)).toBe(true);
   });
 
   it("does not let a preceding type-only import mask a real one", () => {
