@@ -1,5 +1,6 @@
 import {
   mkdirSync,
+  symlinkSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -178,5 +179,64 @@ describe("requireE2eEngine", () => {
         override: join(root, "absent-engine"),
       }),
     ).toThrow(/does not exist/);
+  });
+  it("does not destroy the source when it is a symlink AT the staged path", () => {
+    // The inverse alias. Unlinking the destination first would delete the very
+    // file the copy is about to read, failing ENOENT and leaving no daemon.
+    const root = tempRoot();
+    const cargoTargetDir = join(root, "cargo");
+    const desktopTargetDir = join(root, "desktop");
+    mkdirSync(cargoTargetDir, { recursive: true });
+    mkdirSync(desktopTargetDir, { recursive: true });
+    const staged = join(desktopTargetDir, "dohc-workspace-engine");
+    const built = join(cargoTargetDir, "dohc-workspace-engine");
+    writeFileSync(staged, "the only copy");
+    try {
+      symlinkSync(staged, built);
+    } catch {
+      return; // symlinks unavailable on this host
+    }
+
+    const result = requireE2eEngine({
+      desktopTargetDir,
+      cargoTargetDir,
+      platform: "linux",
+      override: null,
+    });
+
+    // No copy happened, and it says so rather than reporting one that did not.
+    expect(result.copied).toBe(false);
+    expect(readFileSync(staged, "utf8")).toBe("the only copy");
+  });
+
+  it("replaces a symlinked staged path without touching its target", () => {
+    const root = tempRoot();
+    const cargoTargetDir = join(root, "cargo");
+    const desktopTargetDir = join(root, "desktop");
+    const elsewhere = join(root, "precious");
+    mkdirSync(cargoTargetDir, { recursive: true });
+    mkdirSync(desktopTargetDir, { recursive: true });
+    mkdirSync(elsewhere, { recursive: true });
+    const staged = join(desktopTargetDir, "dohc-workspace-engine");
+    const built = join(cargoTargetDir, "dohc-workspace-engine");
+    const target = join(elsewhere, "real-build");
+    writeFileSync(target, "precious build");
+    writeFileSync(built, "new build");
+    try {
+      symlinkSync(target, staged);
+    } catch {
+      return;
+    }
+
+    requireE2eEngine({
+      desktopTargetDir,
+      cargoTargetDir,
+      platform: "linux",
+      override: null,
+    });
+
+    // copyFileSync would have followed the link and rewritten the target.
+    expect(readFileSync(target, "utf8")).toBe("precious build");
+    expect(readFileSync(staged, "utf8")).toBe("new build");
   });
 });

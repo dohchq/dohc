@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFileSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,12 +27,32 @@ function isFile(path) {
   }
 }
 
-// copyFileSync FOLLOWS a symlink at the destination and overwrites its TARGET.
-// A developer who links the staged path at the repo-root build would have
-// test setup silently rewrite that build. Replace the entry instead.
+// Two symlink hazards, in opposite directions, both destructive.
+//
+// 1. The DESTINATION is a link: copyFileSync follows it and overwrites its
+//    TARGET, so a developer who links the staged path at the repo-root build
+//    would have test setup silently rewrite that build. Hence the unlink first.
+// 2. The SOURCE is a link pointing AT the destination (the inverse alias):
+//    unlinking the destination first destroys the very file the copy is about to
+//    read, failing with ENOENT and leaving no staged daemon at all.
+//
+// `realpathSync` — not `resolve` — is what separates these, because `resolve`
+// normalises a path string without following links. Same real file means there is
+// nothing to copy and nothing to remove.
+function sameRealFile(a, b) {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    // Either side may not exist yet, in which case they are not the same file.
+    return false;
+  }
+}
+
 function stageBinary(from, to) {
+  if (sameRealFile(from, to)) return false;
   rmSync(to, { force: true });
   copyFileSync(from, to);
+  return true;
 }
 
 // Kept as a literal rather than imported from src/testing/engineBinary.ts: this
@@ -59,12 +79,11 @@ export function requireE2eEngine({
         `${overrideEnvVar}=${override} does not exist, so the e2e app cannot launch a daemon.`,
       );
     }
-    if (resolve(override) === resolve(wanted)) {
-      return { binary: wanted, copied: false, refreshed: false };
-    }
     mkdirSync(desktopTargetDir, { recursive: true });
-    stageBinary(override, wanted);
-    return { binary: wanted, copied: true, refreshed: true };
+    // stageBinary reports false when source and destination are the same real
+    // file — including via a symlink either way, which resolve() cannot see.
+    const staged = stageBinary(override, wanted);
+    return { binary: wanted, copied: staged, refreshed: staged };
   }
 
   const built = join(cargoTargetDir, name);
@@ -80,8 +99,11 @@ export function requireE2eEngine({
   if (isFile(built)) {
     mkdirSync(desktopTargetDir, { recursive: true });
     const hadStaged = isFile(wanted);
-    stageBinary(built, wanted);
-    return { binary: wanted, copied: true, refreshed: hadStaged };
+    // Report what actually happened. stageBinary returns false when the two
+    // paths are the same real file — a symlink either way — and hardcoding
+    // `copied: true` here would tell a caller a copy occurred that did not.
+    const staged = stageBinary(built, wanted);
+    return { binary: wanted, copied: staged, refreshed: staged && hadStaged };
   }
 
   // No build to stage. An existing staged copy is all there is, so the app can
