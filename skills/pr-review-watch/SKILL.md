@@ -130,7 +130,7 @@ ambiguous, and a bare process substitution of an empty extraction exits instantl
 while looking armed:
 
 ```
-S=.claude/skills/pr-review-watch/SKILL.md
+S=skills/pr-review-watch/SKILL.md
 W=$(mktemp -t live-watcher.XXXXXX)   # NOT a fixed name: two sessions launching at
 trap 'rm -f "$W"' EXIT               # once would overwrite each other's script
 awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==1{print}' "$S" > "$W"
@@ -363,7 +363,7 @@ It is a shell function in a Markdown file, so `source SKILL.md` cannot work. Ext
 it the same way the watcher is extracted, then call it:
 
 ```
-S=.claude/skills/pr-review-watch/SKILL.md
+S=skills/pr-review-watch/SKILL.md
 awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==2{print}' "$S" > /tmp/review_status.sh
 . /tmp/review_status.sh
 review_status 371
