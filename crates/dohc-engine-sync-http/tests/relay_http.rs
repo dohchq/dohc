@@ -914,53 +914,30 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
 }
 
 #[test]
-fn every_documented_error_code_maps_to_a_distinct_rust_variant() {
-    // MUTATION: collapsing server codes into Conflict/HttpStatus makes the
-    // first affected variant assertion fail.
-    let cases = VecDeque::from([
-        (400, "bad_request", RelayError::BadRequest),
-        (409, "conflict", RelayError::Conflict),
-        (409, "epoch_superseded", RelayError::EpochSuperseded),
-        (
-            409,
-            "identity_not_recognized",
-            RelayError::IdentityNotRecognized,
-        ),
-        (409, "identity_required", RelayError::IdentityRequired),
-        (
-            409,
-            "stream_identity_mismatch",
-            RelayError::StreamIdentityMismatch,
-        ),
-        (403, "authorship_mismatch", RelayError::AuthorshipMismatch),
-        (403, "unknown_chat_op", RelayError::UnknownChatOperation),
-        (403, "share_read_only", RelayError::ShareReadOnly),
-        (403, "share_op_rejected", RelayError::ShareOperationRejected),
-        (413, "payload_too_large", RelayError::PayloadTooLarge),
-        (429, "presence_capacity", RelayError::PresenceCapacity),
-        (413, "quota_exceeded", RelayError::QuotaExceeded),
-        (422, "blob_missing", RelayError::BlobReferenceMissing),
-        (404, "blob_not_found", RelayError::BlobMissing),
-        (
-            404,
-            "key_envelope_not_found",
-            RelayError::KeyEnvelopeMissing,
-        ),
-        (400, "self_share", RelayError::SelfShare),
-        (400, "ambiguous_selector", RelayError::AmbiguousSelector),
-        (400, "invalid_channel", RelayError::InvalidChannel),
-        (405, "method_not_allowed", RelayError::MethodNotAllowed),
-        (500, "internal_error", RelayError::ServerInternal),
-        (404, "not_found", RelayError::WorkspaceUnavailable),
-    ]);
+fn every_relay_fixture_code_maps_to_its_rust_variant() {
+    let fixture: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../services/sync-relay/relay-error-codes.json"
+    ))
+    .expect("relay error-code fixture");
+    let cases = fixture
+        .iter()
+        .map(|entry| {
+            let status = entry["status"].as_u64().expect("fixture status");
+            let status = u16::try_from(status).expect("fixture status fits u16");
+            let code = entry["code"].as_str().expect("fixture code").to_owned();
+            (status, code)
+        })
+        .collect::<VecDeque<_>>();
+    // MUTATION: collapsing a specific server code into a status-class error
+    // makes the affected variant assertion fail.
     let expected = cases
         .iter()
-        .map(|(_, _, error)| error.clone())
+        .map(|(_, code)| expected_relay_error(code))
         .collect::<Vec<_>>();
     let cases = Arc::new(Mutex::new(cases));
     let handler_cases = Arc::clone(&cases);
     let server = FakeServer::start(move |_| {
-        let (status, code, _) = handler_cases
+        let (status, code) = handler_cases
             .lock()
             .expect("error cases")
             .pop_front()
@@ -979,6 +956,35 @@ fn every_documented_error_code_maps_to_a_distinct_rust_variant() {
         assert_eq!(actual, expected);
     }
     assert!(cases.lock().expect("error cases").is_empty());
+}
+
+fn expected_relay_error(code: &str) -> RelayError {
+    match code {
+        "ambiguous_selector" => RelayError::AmbiguousSelector,
+        "authorship_mismatch" => RelayError::AuthorshipMismatch,
+        "bad_request" | "empty_selector" | "invalid_access" | "invalid_path"
+        | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,
+        "blob_missing" => RelayError::BlobReferenceMissing,
+        "blob_not_found" => RelayError::BlobMissing,
+        "conflict" => RelayError::Conflict,
+        "epoch_superseded" => RelayError::EpochSuperseded,
+        "identity_not_recognized" => RelayError::IdentityNotRecognized,
+        "identity_required" => RelayError::IdentityRequired,
+        "internal_error" => RelayError::ServerInternal,
+        "invalid_channel" => RelayError::InvalidChannel,
+        "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
+        "method_not_allowed" => RelayError::MethodNotAllowed,
+        "not_found" => RelayError::WorkspaceUnavailable,
+        "payload_too_large" => RelayError::PayloadTooLarge,
+        "presence_capacity" => RelayError::PresenceCapacity,
+        "quota_exceeded" => RelayError::QuotaExceeded,
+        "self_share" => RelayError::SelfShare,
+        "share_op_rejected" => RelayError::ShareOperationRejected,
+        "share_read_only" => RelayError::ShareReadOnly,
+        "stream_identity_mismatch" => RelayError::StreamIdentityMismatch,
+        "unknown_chat_op" => RelayError::UnknownChatOperation,
+        unknown => panic!("fixture code {unknown} needs an expected Rust variant"),
+    }
 }
 
 #[test]

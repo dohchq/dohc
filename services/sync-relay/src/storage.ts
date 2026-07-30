@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { RELAY_ERRORS } from "./errorCodes";
 
 export interface SyncRelayLogInput {
   originSeq: number;
@@ -1645,13 +1646,13 @@ function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {
 }
 
 export class SyncRelayConflictError extends Error {
-  readonly statusCode = 409;
-  readonly code = "conflict";
+  readonly statusCode = RELAY_ERRORS.conflict.status;
+  readonly code = RELAY_ERRORS.conflict.code;
 }
 
 export class SyncRelayQuotaExceededError extends Error {
-  readonly statusCode = 413;
-  readonly code = "quota_exceeded";
+  readonly statusCode = RELAY_ERRORS.quota_exceeded.status;
+  readonly code = RELAY_ERRORS.quota_exceeded.code;
 }
 
 // A log append referenced a blob the relay does not hold. 422 (not 409): the
@@ -1660,6 +1661,6 @@ export class SyncRelayQuotaExceededError extends Error {
 // the client surfaces as a generic failure and retries -- its next push
 // re-uploads the missing blob (via /blobs/have) before re-posting the batch.
 export class SyncRelayBlobMissingError extends Error {
-  readonly statusCode = 422;
-  readonly code = "blob_missing";
+  readonly statusCode = RELAY_ERRORS.blob_missing.status;
+  readonly code = RELAY_ERRORS.blob_missing.code;
 }

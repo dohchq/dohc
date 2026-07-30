@@ -26,6 +26,7 @@ import {
   type SyncRelayShareRow,
   type SyncRelayStorage,
 } from "./storage";
+import { RELAY_ERRORS, type RelayErrorCode, type RelayErrorDefinition } from "./errorCodes";
 
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
@@ -608,9 +609,8 @@ export function createSyncRelayHandler({
           // mismatch. Reject it instead (hardens regular shared-channel grants
           // too).
           if (input.paths !== undefined || input.versionId !== undefined) {
-            throw new HttpError(
-              400,
-              "ambiguous_selector",
+            throw relayHttpError(
+              RELAY_ERRORS.ambiguous_selector,
               "a chat-channel share must not also carry paths or versionId",
             );
           }
@@ -622,7 +622,7 @@ export function createSyncRelayHandler({
             chatResolverFor(route.workspaceId),
           );
           if (!chatValidation.ok) {
-            throw new HttpError(400, chatValidation.code, chatValidation.message);
+            throw relayHttpError(RELAY_ERRORS[chatValidation.code], chatValidation.message);
           }
           selector = chatValidation.selector;
         } else {
@@ -631,7 +631,7 @@ export function createSyncRelayHandler({
             versionId: input.versionId,
           });
           if (!validation.ok) {
-            throw new HttpError(400, validation.code, validation.message);
+            throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
           }
           selector = validation.selector;
         }
@@ -648,7 +648,7 @@ export function createSyncRelayHandler({
           );
           if (recipientUserId === actor.userId) throw selfShare();
           if (selectorTargetsBlockedChannel(route.workspaceId, selector)) {
-            throw new HttpError(400, "invalid_channel", "channel is not shareable");
+            throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
           }
           storage.createShare({
             shareId,
@@ -685,7 +685,7 @@ export function createSyncRelayHandler({
         // Re-check after the asynchronous account lookup: a pre-provisioned
         // wire may have become an agent channel while this request was waiting.
         if (selectorTargetsBlockedChannel(route.workspaceId, selector)) {
-          throw new HttpError(400, "invalid_channel", "channel is not shareable");
+          throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
         }
         storage.createShare({
           shareId,
@@ -1253,7 +1253,7 @@ function presenceResponse(snapshot: PresenceSnapshot): Response {
 // well-behaved client backs off; anything else re-throws unchanged.
 function presenceCapacityAs429(error: unknown): unknown {
   if (error instanceof PresenceCapacityError) {
-    return new HttpError(429, "presence_capacity", error.message);
+    return relayHttpError(RELAY_ERRORS.presence_capacity, error.message);
   }
   return error;
 }
@@ -1308,7 +1308,10 @@ function errorResponse(error: unknown): Response {
     (Number.isInteger(duckStatus) && duckStatus! >= 400 && duckStatus! <= 499);
   if (!classified) {
     console.error("[sync-relay] unhandled error", error);
-    return jsonResponse({ ok: false, error: "internal error", code: "internal_error" }, 500);
+    return jsonResponse(
+      { ok: false, error: "internal error", code: RELAY_ERRORS.internal_error.code },
+      RELAY_ERRORS.internal_error.status,
+    );
   }
   const status =
     error instanceof HttpError ||
@@ -1340,45 +1343,56 @@ function errorResponse(error: unknown): Response {
 class HttpError extends Error {
   constructor(
     readonly statusCode: number,
-    readonly code: string,
+    readonly code: RelayErrorCode,
     message: string,
   ) {
     super(message);
   }
 }
 
+function relayHttpError(error: RelayErrorDefinition, message: string): HttpError {
+  return new HttpError(error.status, error.code, message);
+}
+
 function badRequest(message: string): HttpError {
-  return new HttpError(400, "bad_request", message);
+  return relayHttpError(RELAY_ERRORS.bad_request, message);
 }
 
 function epochSuperseded(): HttpError {
-  return new HttpError(409, "epoch_superseded", "replication epoch has been superseded");
+  return relayHttpError(
+    RELAY_ERRORS.epoch_superseded,
+    "replication epoch has been superseded",
+  );
 }
 
 // `identity_not_recognized` means the coordinate is unknown/newer, not proven
 // stale. Clients must preserve local state and must not discard/reseed it.
 function epochUnknown(): HttpError {
-  return new HttpError(
-    409,
-    "identity_not_recognized",
+  return relayHttpError(
+    RELAY_ERRORS.identity_not_recognized,
     "replication coordinate is not recognized",
   );
 }
 
 function identityRequired(): HttpError {
-  return new HttpError(
-    409,
-    "identity_required",
+  return relayHttpError(
+    RELAY_ERRORS.identity_required,
     "this workspace requires replication identity",
   );
 }
 
 function streamIdentityMismatch(): HttpError {
-  return new HttpError(409, "stream_identity_mismatch", "stream identity does not match");
+  return relayHttpError(
+    RELAY_ERRORS.stream_identity_mismatch,
+    "stream identity does not match",
+  );
 }
 
 function selfShare(): HttpError {
-  return new HttpError(400, "self_share", "a share needs a recipient other than yourself");
+  return relayHttpError(
+    RELAY_ERRORS.self_share,
+    "a share needs a recipient other than yourself",
+  );
 }
 
 // MU-C0: a chat op claimed an author other than the authenticated pusher (or a
@@ -1386,7 +1400,10 @@ function selfShare(): HttpError {
 // owns the bucket — the request is forbidden, not hidden. Non-retryable; the
 // client must send its OWN identity. Deliberately does not name which op failed.
 function authorshipMismatch(): HttpError {
-  return new HttpError(403, "authorship_mismatch", "chat op author does not match the authenticated actor");
+  return relayHttpError(
+    RELAY_ERRORS.authorship_mismatch,
+    "chat op author does not match the authenticated actor",
+  );
 }
 
 // MU-C0 fail-closed completeness: a chat.* op the authorship policy does not
@@ -1395,7 +1412,10 @@ function authorshipMismatch(): HttpError {
 // authenticated and owns the bucket; the op is forbidden until the policy
 // learns to verify it. Non-retryable as sent.
 function unknownChatOp(): HttpError {
-  return new HttpError(403, "unknown_chat_op", "unrecognized chat op cannot be authorship-verified");
+  return relayHttpError(
+    RELAY_ERRORS.unknown_chat_op,
+    "unrecognized chat op cannot be authorship-verified",
+  );
 }
 
 // MU-C4: an append addressed to a share that takes no appends — a read-only
@@ -1404,7 +1424,7 @@ function unknownChatOp(): HttpError {
 // recipient and may keep reading; only writing is refused. Deliberately one
 // code for both cases so the response does not reveal the selector kind.
 function shareNotAppendable(): HttpError {
-  return new HttpError(403, "share_read_only", "this share does not accept appends");
+  return relayHttpError(RELAY_ERRORS.share_read_only, "this share does not accept appends");
 }
 
 // MU-C4 fail-closed append scoping: an op in the batch is not a chat op for
@@ -1412,25 +1432,25 @@ function shareNotAppendable(): HttpError {
 // op, or a forged thread re-bind). The whole batch is rejected atomically.
 // Deliberately does not name which op failed or why.
 function shareOpRejected(): HttpError {
-  return new HttpError(403, "share_op_rejected", "an op is outside the shared channel");
+  return relayHttpError(RELAY_ERRORS.share_op_rejected, "an op is outside the shared channel");
 }
 
 function notFound(): HttpError {
-  return new HttpError(404, "not_found", "not found");
+  return relayHttpError(RELAY_ERRORS.not_found, "not found");
 }
 
 function blobNotFound(): HttpError {
-  return new HttpError(404, "blob_not_found", "blob not found");
+  return relayHttpError(RELAY_ERRORS.blob_not_found, "blob not found");
 }
 
 function keyEnvelopeNotFound(): HttpError {
-  return new HttpError(404, "key_envelope_not_found", "key envelope not found");
+  return relayHttpError(RELAY_ERRORS.key_envelope_not_found, "key envelope not found");
 }
 
 function methodNotAllowed(): HttpError {
-  return new HttpError(405, "method_not_allowed", "method not allowed");
+  return relayHttpError(RELAY_ERRORS.method_not_allowed, "method not allowed");
 }
 
 function payloadTooLarge(): HttpError {
-  return new HttpError(413, "payload_too_large", "payload too large");
+  return relayHttpError(RELAY_ERRORS.payload_too_large, "payload too large");
 }

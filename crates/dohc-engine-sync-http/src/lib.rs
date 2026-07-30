@@ -662,32 +662,49 @@ fn map_http_error(response: &mut Response<Body>, context: RequestContext) -> Rel
     }
 }
 
-fn map_server_code(code: &str, context: RequestContext) -> RelayError {
-    match code {
-        "bad_request" => RelayError::BadRequest,
-        "conflict" => RelayError::Conflict,
-        "epoch_superseded" => RelayError::EpochSuperseded,
-        "identity_not_recognized" => RelayError::IdentityNotRecognized,
-        "identity_required" => RelayError::IdentityRequired,
-        "stream_identity_mismatch" => RelayError::StreamIdentityMismatch,
-        "authorship_mismatch" => RelayError::AuthorshipMismatch,
-        "unknown_chat_op" => RelayError::UnknownChatOperation,
-        "share_read_only" => RelayError::ShareReadOnly,
-        "share_op_rejected" => RelayError::ShareOperationRejected,
-        "payload_too_large" => RelayError::PayloadTooLarge,
-        "presence_capacity" => RelayError::PresenceCapacity,
-        "quota_exceeded" => RelayError::QuotaExceeded,
-        "blob_missing" => RelayError::BlobReferenceMissing,
-        "blob_not_found" => RelayError::BlobMissing,
-        "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
-        "self_share" => RelayError::SelfShare,
-        "ambiguous_selector" => RelayError::AmbiguousSelector,
-        "invalid_channel" => RelayError::InvalidChannel,
-        "method_not_allowed" => RelayError::MethodNotAllowed,
-        "internal_error" => RelayError::ServerInternal,
-        "not_found" => unavailable(context),
-        unknown => RelayError::UnknownServerCode(unknown.to_owned()),
-    }
+macro_rules! define_server_error_codes {
+    ($( $code:literal => $mapper:expr ),+ $(,)?) => {
+        #[cfg(test)]
+        const MAPPED_SERVER_CODES: &[&str] = &[$($code),+];
+
+        fn map_server_code(code: &str, context: RequestContext) -> RelayError {
+            match code {
+                $($code => ($mapper)(context),)+
+                unknown => RelayError::UnknownServerCode(unknown.to_owned()),
+            }
+        }
+    };
+}
+
+define_server_error_codes! {
+    "ambiguous_selector" => |_| RelayError::AmbiguousSelector,
+    "authorship_mismatch" => |_| RelayError::AuthorshipMismatch,
+    "bad_request" => |_| RelayError::BadRequest,
+    "blob_missing" => |_| RelayError::BlobReferenceMissing,
+    "blob_not_found" => |_| RelayError::BlobMissing,
+    "conflict" => |_| RelayError::Conflict,
+    "empty_selector" => |_| RelayError::BadRequest,
+    "epoch_superseded" => |_| RelayError::EpochSuperseded,
+    "identity_not_recognized" => |_| RelayError::IdentityNotRecognized,
+    "identity_required" => |_| RelayError::IdentityRequired,
+    "internal_error" => |_| RelayError::ServerInternal,
+    "invalid_access" => |_| RelayError::BadRequest,
+    "invalid_channel" => |_| RelayError::InvalidChannel,
+    "invalid_path" => |_| RelayError::BadRequest,
+    "invalid_version" => |_| RelayError::BadRequest,
+    "key_envelope_not_found" => |_| RelayError::KeyEnvelopeMissing,
+    "method_not_allowed" => |_| RelayError::MethodNotAllowed,
+    "not_found" => |context| unavailable(context),
+    "payload_too_large" => |_| RelayError::PayloadTooLarge,
+    "presence_capacity" => |_| RelayError::PresenceCapacity,
+    "quota_exceeded" => |_| RelayError::QuotaExceeded,
+    "secret_path" => |_| RelayError::BadRequest,
+    "self_share" => |_| RelayError::SelfShare,
+    "share_op_rejected" => |_| RelayError::ShareOperationRejected,
+    "share_read_only" => |_| RelayError::ShareReadOnly,
+    "stream_identity_mismatch" => |_| RelayError::StreamIdentityMismatch,
+    "too_many_paths" => |_| RelayError::BadRequest,
+    "unknown_chat_op" => |_| RelayError::UnknownChatOperation,
 }
 
 fn unavailable(context: RequestContext) -> RelayError {
@@ -890,6 +907,7 @@ struct WireOk {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
@@ -900,6 +918,41 @@ mod tests {
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
     use super::*;
+
+    #[derive(Deserialize)]
+    struct RelayErrorFixture {
+        code: String,
+        status: u16,
+    }
+
+    #[test]
+    fn mapped_server_codes_and_relay_fixture_are_bidirectional() {
+        let fixture: Vec<RelayErrorFixture> = serde_json::from_str(include_str!(
+            "../../../services/sync-relay/relay-error-codes.json"
+        ))
+        .expect("relay error-code fixture");
+        let fixture_codes = fixture
+            .iter()
+            .map(|entry| entry.code.as_str())
+            .collect::<BTreeSet<_>>();
+        let mapped_codes = MAPPED_SERVER_CODES.iter().copied().collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            fixture_codes.len(),
+            fixture.len(),
+            "fixture codes must be unique"
+        );
+        assert!(
+            fixture
+                .iter()
+                .all(|entry| (400..=599).contains(&entry.status)),
+            "fixture statuses must be HTTP errors"
+        );
+        assert_eq!(
+            mapped_codes, fixture_codes,
+            "the Rust code map and relay fixture must contain the same codes"
+        );
+    }
 
     const TEST_CERT_DER_BASE64: &str = "MIIDJTCCAg2gAwIBAgIUEHQ492IM8Ral38aCrsQtLAty8wAwDQYJKoZIhvcNAQELBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDcyNjIyMzQyNloXDTI2MDcyODIyMzQyNlowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlas3XDBWs7j98PENiunFPUWT5X7I+PKLO7A+HFd3JMBwtYVtWBvxmBsLcZ+2Rx4eVJXtAjR4xxBHekNs3z44Ao9didAx485uOPPO8Ksj+cWNgZ4bAYrJrqF7sWEvhP7dilFLKT/vi0BnG/zrac8CEaHl5LzxpBZDOvsQ0mDY0RWXysq6QV37woJIY6wxJ0zJP93T5fl/a3sHE29WkSPgNIEBz85jVkbmmQBWXPEH4sQ0Ey7dOC2q+qZPOrfkgQrbXMHnPxO6LKrwVwRGnFgjIxqnjaOnBEsxyhVzgxe9oXoAIgooibIx7lZUFg72D+Wo9cRs2wTL3ZLJji8z0HD1JQIDAQABo28wbTAdBgNVHQ4EFgQU91mseAS1pHPttIK0/FAofXtrkIkwHwYDVR0jBBgwFoAU91mseAS1pHPttIK0/FAofXtrkIkwDwYDVR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwDQYJKoZIhvcNAQELBQADggEBAAgv1+SbYGUsfw7FpwATOjt4lLSZYItTel9FtszmWsCnD2l9NaFaOeGLjHN/A/maczv3QGEIDu5ZD9jkNkabsPQeOsV2aR/266AW4OjbCCQ8GujSZxZzdoaUhjTumwI9sIkni6Z7FJuCL0ch8ljGh9YxIvtgmX05E9k1md9wsXOT56pCvQ8jmcdkxROpoGZOkJqyqmJ5P/rEf+bHsnjR9PGv2YqvS/984MaYBKmgZ4BhRd8QksAum7KHSczJ/pZL/YEg8AQowEf6vXgS7reXDjOQfc+Er+Lh9im01E56Fqp78RlnEo5ifGw/sn8vM0FescNxLs9pqZRX6haaYjT5S7o=";
     const TEST_KEY_DER_BASE64: &str = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCVqzdcMFazuP3w8Q2K6cU9RZPlfsj48os7sD4cV3ckwHC1hW1YG/GYGwtxn7ZHHh5Ule0CNHjHEEd6Q2zfPjgCj12J0DHjzm44887wqyP5xY2BnhsBismuoXuxYS+E/t2KUUspP++LQGcb/OtpzwIRoeXkvPGkFkM6+xDSYNjRFZfKyrpBXfvCgkhjrDEnTMk/3dPl+X9rewcTb1aRI+A0gQHPzmNWRuaZAFZc8QfixDQTLt04Lar6pk86t+SBCttcwec/E7osqvBXBEacWCMjGqeNo6cESzHKFXODF72hegAiCiiJsjHuVlQWDvYP5aj1xGzbBMvdksmOLzPQcPUlAgMBAAECggEAAv3QL/QGL5zRdCWyEkyedOoombKUiSetfiZrv2MSJ9zLnYOXgWZuYdtpUz6Qq2nTMl6cXtBpeS6x0KRIKOTt93ZVG/v0Abkh1w3GEGWWfpei8ewukjPR2L80ITUvkkMKO4lpBqyKX0HZlCO65ggz4uIina7j54mYYDWEPkHR45ZSj5UAxhvTGoY+AdECQy7J96+czeKf2qsciBOtfwQDeivO+BHLFCKWYcgmMb+Dq91eXL4vdWZr29duWpr/7WXLmPfo9/4B6dkZbKxPxDg4PBUOSUsi4B0L2lXOBQY++To0FUdfFB9EiBBNHD9RrAqXHpNvLD77CFd4xsVzCUPScQKBgQDPuDZT2JYchrrdvBue8JS21JrMw2IHzQ5zIhMTWhFcGSNF/YhuLrVSsSFdYrmOFJ1aE5d7NQ1p7G19Pe/OcSoEkxeqMZaMjki1UAxqMoAmdC/lgYSkPsxZYjSw1VqpvHGlbyyg/FNbQC9U2mrYP+oo6lCxrYTwprDpApsbUfSELQKBgQC4dNnxwIL/loKoEXe8SuC7apTqvSfJwvAlBC3QH/hURHgIBpQ4R+ZzpT2+WPY3YY92ZxCSWJfySHaoHj/Dls1Q5wmQdrw5bn/sJ7dNGFSf7fdUoiHoydl0mdHgjhC5ZN76jFqiuAtboOA8MvpCo9xRApuhIVA7qDbPPadTMyx32QKBgQCZKbfFc3qcZiv7u+yR8ct2VKYgPiFWpzj0ZDe0mUEbq916ikvDEuXYp4t2lIlF3qV3+eJEkwXlCNRi+PyOOJtG7D8S26Wq1m9+YhwFYl9j+2Al1q67fSKo9eTsTyWe6rjRx3wc6HF+Y4GDC9qkwdwjd0MxAEV6PS9NYQKFzpSBsQKBgBWpIy7QfJGnCxDRfE4QPPPFQFeQfuuiiLDQHNEj7/V1VOMcYqt5RgaukOGZcNBwFHjDAZ8t6Cn7eHOlmbdOLi4h822Tg+b6ousIfu3+vXFKcJDvuSutCGw44/yKskwTHFwvvzT8h9jqu2pWUi0hMO4ScFQrpVBcIJOVmeCbUc2BAoGBALy89w8VTTKbHZ9EMHthbOF1DLxu939/li1J+q9vHh7Ie7T37CKZ+XZFS2od54g451QSDeaYHCihcC7YR2y/EfefPRRRjio157ULeZ2avB4Gd7tvVntYPv9+HG5pxLXkbgZL7b077vSL4kFi9m32V8Vo5SRsI8J722Npyq7q2spR";

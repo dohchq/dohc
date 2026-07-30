@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
+import { RELAY_ERRORS } from "./errorCodes";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
@@ -202,14 +203,21 @@ const server = createServer((request, response) => {
     if (received > MAX_BODY_BYTES) {
       rejected = true;
       chunks.length = 0;
-      response.statusCode = 413;
+      response.statusCode = RELAY_ERRORS.payload_too_large.status;
       response.setHeader("content-type", "application/json");
       response.setHeader("connection", "close");
       // Flush the 413 for well-behaved clients, then destroy the socket so
       // the sender cannot keep streaming.
-      response.end(JSON.stringify({ ok: false, error: "payload too large", code: "payload_too_large" }), () => {
-        request.destroy();
-      });
+      response.end(
+        JSON.stringify({
+          ok: false,
+          error: "payload too large",
+          code: RELAY_ERRORS.payload_too_large.code,
+        }),
+        () => {
+          request.destroy();
+        },
+      );
       return;
     }
     chunks.push(Buffer.from(chunk));
