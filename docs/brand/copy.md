@@ -39,12 +39,10 @@ new became usable, it is a Change.
   naming dohc there adds a word and no information. Never use the passive to
   hide a *failing* actor: write `dohc could not reach the relay`, not
   `the relay could not be reached`.
-- **Name the thing the user names it.** Use the glossary in the writing skill:
-  `file`, `folder`, `workspace`, `chat`, `share`, `history`, `agent`. Never
-  `atom`, `entity`, `capture`, or `object` in UI copy — `capture` is the
-  engine's name for the recorder; the user's word for the feature is
-  `history`. Use `item` only for a selection that genuinely mixes files and
-  folders, where neither noun is true of everything in it.
+- **Name the thing the way the UI already names it.** Read the surrounding
+  surface and match it. Never invent a synonym, and never carry an internal
+  name into user-facing text — check what the code calls it *and* what the
+  shipping UI calls it, because those differ more often than you would expect.
 - **Same word every time.** If it is a `file` in the sidebar it is a `file` in
   the error. Do not vary wording to avoid repetition.
 - **No figurative language, no jokes, no irony.** Not because dohc is humorless
@@ -141,7 +139,7 @@ Agent activity gets the olive `agent` voice visually. In words:
 | `Your changes have been successfully saved!` | `Saved` | Passive, padded, exclaimed. Six words for one fact. |
 | `Something went wrong. Please try again later.` | `dohc could not reach the sync relay. Check your connection.` — with a `Retry` action | Names the failing actor, one instruction per sentence, and the retry is a control rather than a second instruction. |
 | `Seamlessly sync your workspace across all your devices` | `When you turn on sync, this workspace stays current on every machine you join it from.` | Marketing word out, and the opt-in stays visible — sync is off by default and signing in alone does not enable it. |
-| `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, glossary noun, shorter. |
+| `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, the noun the UI uses, shorter. |
 | `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/trash if that fails, and can be restored.` | States the count and the true recovery path including the fallback — dohc deletes are recoverable, so `This cannot be undone` would be false. |
 | `AI is analyzing your workspace…` | `Agent is reading 40 files.` | Concrete, countable, no magic. |
 
@@ -151,21 +149,23 @@ This file is new and the app predates it. Existing strings are not
 automatically conformant. Two are confirmed:
 
 - `apps/desktop/src/renderer/editor/slashCommands.tsx:83` — `Link another page`
-  uses `page`, a banned synonym for `file`.
+  says `page` where the rest of the UI says `file`.
 - `apps/desktop/src/renderer/settings/SettingsDialog.tsx:487` — "without
-  changing document content" uses `document`, a banned synonym for `file`.
-Not a violation, though it looks like one: the delete dialog's
-`${confirmDelete.length} items` (`Explorer.tsx:1524`) is correct — that
-selection can mix files and folders, so `files` would be false.
+  changing document content" says `document` where the UI says `file`.
+- `apps/desktop/src/renderer/workbench/Explorer.tsx:1528` — the delete dialog
+  says the trash fallback happens "on drives without one", but `deletePath`
+  falls back on *any* `trashItem` rejection. The stated condition is narrower
+  than the real one.
 
 Fix these when you next touch the surface. Do not read existing copy as an
-example of the rules.
+example of the rules — and note that `${confirmDelete.length} items` in that
+same dialog is *correct*, because the selection can mix files and folders.
 
 ## Checklist per string
 
 1. Which move is it — State, Change, Ready, or Next?
 2. Does it owe the user a **Next**? Does it give one?
-3. Every noun from the glossary, and the same noun the surrounding UI uses?
+3. Every noun the same as the surrounding UI uses, and none of them internal?
 4. Active voice with a named actor?
 5. Under 20 words, one instruction?
 6. Any word that promises rather than states? Cut it.

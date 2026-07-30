@@ -57,7 +57,7 @@ wrong or unclear — see the precedence rule under Orwell's six:
 - Active voice, named actor. `The engine rejects the write`, not
   `the write is rejected`.
 - No figurative language, no idiom, no irony, no humor.
-- One approved term per concept — see the glossary below.
+- One term per concept, and the same term the surrounding surface uses.
 - State the condition before the action it controls.
 - Say what the reader must do, not only what went wrong.
 
@@ -142,81 +142,23 @@ means two.
 
 Rules:
 
-- Use the approved term. Do not swap in a synonym to avoid repetition.
-  Repetition is correct.
-- One term, one meaning, per surface.
-- When a concept has no approved term yet, pick one.
-- Use that term consistently from then on.
-- Add it to the table in the same change.
+- Use the word the surrounding surface already uses. Match the UI, the
+  contract, and the neighbouring docs.
+- Do not swap in a synonym to avoid repetition. Repetition is correct.
+- One term, one meaning, within a document.
+- Check the word against the code before asserting what it means. Several dohc
+  nouns mean different things in different layers.
+- When the codebase has not settled a term, say so in the text. Do not pick a
+  winner silently.
 
-### Approved terms
-
-The third column lists words that must not stand in **as a synonym for that
-term**. It does not ban the word. Several words that look like synonyms name
-different live concepts — see the next section before assuming.
-
-| Term | Means | Not a synonym for it |
-| --- | --- | --- |
-| `workspace` | The top-level scope. Workspace-owned resources are each scoped to one; provider driver and model inventory is global and is not. | vault, space, org, tenant |
-| `file` | A user-visible item of workspace content. Two contracts, by layer: desktop and Explorer use `WorkspaceFileEntry` (`kind: "file" \| "database"`); the backend and workspace-fs use `WorkspaceFile` (`kind: "atom" \| "asset" \| "database"`). Use the one for the layer you are in. | page, note, document, item |
-| `asset` | A file kind alongside `atom` and `database`. `AssetKind` is the full enum: image, audio, video, pdf, csv, json, sqlite, file. In UI copy say `file` unless the kind matters. | attachment, media, upload |
-| `folder` | A container of files. | directory (in UI copy), collection |
-| `chat` | **Unsettled — see the conflict note below.** The UI and the engine disagree on whether this names the surface or one conversation. Do not rely on either reading. | conversation |
-| `history` | The user-facing name for the versioned record of workspace changes. `capture` is the engine's name for the recorder that produces it. | versions, backups, timeline |
-| `channel` | A division of the chat surface. Durable rows key on `channel_id`; load-bearing in sharing and authorization. Every channel has a `name` and a `kind` — `channel`, `dm`, or `agent`. | room, group, space |
-| `dm` | A channel whose `kind` is `"dm"`. Same `ChatChannel` type, same required `name`, same sharing and authorization paths as any other channel. Never exclude dms from channel-wide behavior. | private chat |
-| `thread` | A message sequence with exactly one owner — a linked file or a channel, never both and never neither. | topic, reply chain |
-| `capture` | The engine's history recorder. It records settled workspace file changes into versioned history, and is a workspace's only history. | snapshot, backup |
-| `share` | An explicit grant of access beyond the owner. | invite |
-| `skill` | A reusable process an agent can run. | playbook, macro, recipe |
-| `agent` | The non-human actor. Attribution uses the olive `agent` voice. | AI, assistant, bot |
-| `source-backed` | Derived from an inspectable source rather than hidden state. | generated, smart |
-
-### Near-neighbours that are not synonyms
-
-Each pair below looks interchangeable and is not. Both terms are approved, for
-their own meaning. Collapsing either one makes copy and technical docs wrong.
-
-| Term | Means | Not the same as |
-| --- | --- | --- |
-| `import` | The user-initiated operation that brings outside files in (`ImportWorkspaceFiles`, `ImportToDatabase`). | `capture`, which records workspace history |
-| `model` | The inference model an agent runs on (`AgentModel`), selectable independently of the agent. | `agent`, which is the actor |
-| `permission` | The agent tool-approval gate. `AgentPermissionRequestSchema` is a *pending request*. Only the `allow_once` and `allow_always` decisions grant it — `reject_once`, `reject_always`, and `cancel` do not. Never write copy implying the agent may act before an allow decision. | `share`, which grants access to another person |
-| `synced` | A replication state — whether copies agree. | `source-backed`, which is about provenance |
-
-### Terms that mean different things in different layers
-
-- **`atom`** is live in code. It is retired only from user-facing copy, and it
-  carries two distinct technical meanings. Neither is legacy.
-  - `WorkspaceFile.kind === "atom"` — a text-content file, as opposed to an
-    `asset` or a `database`. `AtomKind` is that file's content type
-    (`markdown`, `text`, `csv`, `json`, `html`), defined in
-    `packages/workspace-contracts/src/domain.ts`.
-  - `inlineAtom` in the editor — **both** a canonical ProseMirror node
-    (`Node.create({ name: "inlineAtom", atom: true })` in `extensions.ts`,
-    declared `canonical: "tiptap-node"` in `schema-contracts.ts`) **and** a
-    separate decoration layer in `inlineAtomPlugin.ts`. Serialization expects
-    the node. Do not remove or bypass it in favour of the decoration.
-
-  Use `atom` in contract and editor code, with that layer's meaning. Never put
-  it in UI copy. The user's word is `file`.
-- **`doc` / `document`** appear widely and mean at least five things: a `file`,
-  a `Y.Doc`, prose under `docs/`, a ProseMirror document in the editor, and a
-  CodeMirror document in the source view. In new *product* writing say `file`
-  for content, `Y.Doc` for the CRDT, and `docs` only for the directory. In
-  editor and source-view code, `doc` keeps its library meaning — do not rename
-  a ProseMirror or CodeMirror `doc` to `file`.
-- **`chat`** is not settled between the UI and the engine. The engine models
-  `channel` and `thread` as separate things. The UI counts threads and labels
-  the count `chats` — `ChatsView` renders `${channel.threadCount} chats`. Copy
-  that says "3 chats" is counting threads. Do not build a new distinction on
-  `chat` until this resolves.
-- **`entity`** is effectively dead in source — 4 occurrences, none of them a
-  domain type. It survives in older plans and specs, and in the product
-  invariants in `AGENTS.md`. Do not build new copy or new types on it.
-
-Recording the real split beats inventing a tidy answer. A glossary that
-quietly picks a winner for an unsettled term is just wrong in a new direction.
+**There is deliberately no term list here yet.** One was drafted for this file
+and removed. It made specific claims about a large, moving codebase, and review
+found it wrong round after round — including entries that would have told an
+agent to avoid a live contract, and one that could have excluded direct
+messages from channel-wide authorization. A word list that is subtly wrong is
+worse than no list, because it states things authoritatively to a reader who
+will act on them. Add one when the terms settle, and keep it next to the code
+it describes so it cannot drift.
 
 ## Workflow
 
@@ -226,7 +168,7 @@ Drafting:
 2. Name the audience and what they must be able to do after reading.
 3. Draft in concrete, direct English.
 4. Apply the register's rules.
-5. Check every noun against the glossary.
+5. Check every noun against the surrounding surface and the code.
 
 Revising:
 
@@ -259,7 +201,7 @@ Revising:
 - Does every pronoun have one clear referent?
 - Could a shorter common word carry the same meaning?
 - Is the actor named wherever the actor matters?
-- Does each noun match the glossary?
+- Does each noun match what the surrounding surface and the code call it?
 - In executable text: is any sentence over 20 words, or carrying two
   instructions?
 - Did the rewrite keep every fact and constraint from the source?

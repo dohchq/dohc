@@ -160,10 +160,11 @@ subjects) keeps its voice, and STE applies to it only as a slop filter.
 Flattening editorial prose into compliance-speak is a failure, not compliance.
 
 Term drift is the failure mode that costs us most, so: one name for one thing.
-The skill holds the glossary. Note that the product invariants above are
-written in `atom` and `entity` — the glossary records those as layer-specific
-and near-dead respectively. Those invariants are binding as written, and will
-be restated when the terms settle.
+Use the word the surrounding surface already uses, and check it against the
+code before asserting what it means — several dohc nouns mean different things
+in different layers. There is deliberately no term list yet; one was drafted
+and cut because it kept being wrong about a codebase that moves. Add it when
+the terms settle, next to the code it describes.
 
 ## Regarding long code comments
 
