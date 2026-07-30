@@ -3,11 +3,6 @@ import {
   RelayUnauthorizedError,
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-contracts/relay";
-import {
-  pullWorkspaceFromRelay,
-  pushWorkspaceToRelay,
-  recoverRelayOrigin,
-} from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createRelaySyncEngine,
@@ -15,35 +10,19 @@ import {
 } from "./relaySyncEngine";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
-// The push/pull transport is mocked; the capture is NOT over-mocked — its
+// The push/pull transport is injected; the capture is NOT over-mocked — its
 // runRelaySync invokes the engine's real callback (the closure under test in
 // relaySyncEngine.ts) and honors the commit-after-materialization contract,
 // exactly like the real capture implementation.
-vi.mock("@dohc/workspace-engine", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@dohc/workspace-engine")>();
-  return {
-    ...actual,
-    pushWorkspaceToRelay: vi.fn(),
-    pullWorkspaceFromRelay: vi.fn(),
-    recoverRelayOrigin: vi.fn(),
-  };
-});
-
-const pushMock = vi.mocked(pushWorkspaceToRelay);
-const pullMock = vi.mocked(pullWorkspaceFromRelay);
-const recoverMock = vi.mocked(recoverRelayOrigin);
-
-const mockRelayInput = {
-  rootDir: "/tmp/workspace",
-  workspaceId: "workspace-a",
-  relay: { baseUrl: "http://relay.test", token: "token" },
-};
+const pushMock = vi.fn<RelaySyncOperations["push"]>();
+const pullMock = vi.fn<RelaySyncOperations["pull"]>();
+const recoverMock = vi.fn<RelaySyncOperations["recoverOrigin"]>();
 
 function mockOperations(): RelaySyncOperations {
   return {
-    push: () => pushMock(mockRelayInput),
-    pull: () => pullMock(mockRelayInput),
-    recoverOrigin: () => recoverMock(mockRelayInput),
+    push: pushMock,
+    pull: pullMock,
+    recoverOrigin: recoverMock,
   };
 }
 
@@ -293,13 +272,8 @@ describe("relaySyncEngine", () => {
     const sync = engine({ capture: cap });
     await sync.start();
 
-    const expectedInput = {
-      rootDir: "/tmp/workspace",
-      workspaceId: "workspace-a",
-      relay: { baseUrl: "http://relay.test", token: "token" },
-    };
-    expect(pushMock).toHaveBeenCalledWith(expectedInput);
-    expect(pullMock).toHaveBeenCalledWith(expectedInput);
+    expect(pushMock).toHaveBeenCalledOnce();
+    expect(pullMock).toHaveBeenCalledOnce();
     expect(pushMock.mock.invocationCallOrder[0]!).toBeLessThan(
       pullMock.mock.invocationCallOrder[0]!,
     );
@@ -321,13 +295,7 @@ describe("relaySyncEngine", () => {
     const sync = engine({ capture: cap });
     await sync.start();
 
-    const expectedInput = {
-      rootDir: "/tmp/workspace",
-      workspaceId: "workspace-a",
-      relay: { baseUrl: "http://relay.test", token: "token" },
-    };
     // Divergence detected → recovery ran once → push retried → pull ran.
-    expect(recoverMock).toHaveBeenCalledWith(expectedInput);
     expect(recoverMock).toHaveBeenCalledTimes(1);
     expect(pushMock).toHaveBeenCalledTimes(2);
     expect(pullMock).toHaveBeenCalledTimes(1);

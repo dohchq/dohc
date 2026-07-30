@@ -4,10 +4,10 @@ import { dirname, resolve, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
 import {
   ShareUnavailableError,
+  type PullShareViewResult,
   type ShareViewChangedPath,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import type { pullShareView } from "@dohc/workspace-engine";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // The receive side of a relay share (PR 18): a shared view is a local
@@ -211,7 +211,12 @@ export async function refreshSharedViewOnce(input: {
   // Required at the factory boundary: every rooted caller must explicitly
   // select its relay implementation, so no call can drift back to the legacy
   // TypeScript SQLite path.
-  pull: typeof pullShareView;
+  pull: (input: {
+    rootDir: string;
+    workspaceId: string;
+    relay: SyncRelayConnection;
+    shareId: string;
+  }) => Promise<PullShareViewResult>;
   // Required at the factory boundary for the same reason: every rooted caller
   // must explicitly select its store implementation.
   store: CaptureVersionedTextStore;

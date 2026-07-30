@@ -1,12 +1,10 @@
 import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  type PullSharedChannelResult,
+  type PushSharedChannelResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import {
-  type pullSharedChannel,
-  type pushSharedChannel,
-} from "@dohc/workspace-engine";
 import type { JoinedSharedChannel } from "./registryStore";
 
 // MU-C4 shared channels — the desktop's refresh pass over every shared
@@ -143,8 +141,20 @@ export async function syncJoinedSharedChannels(input: {
   channels: readonly JoinedSharedChannel[];
   // Required factory-selected operations prevent a rooted sync pass from
   // silently falling back to the legacy TypeScript relay client.
-  pull: typeof pullSharedChannel;
-  push: typeof pushSharedChannel;
+  pull: (input: {
+    rootDir: string;
+    workspaceId: string;
+    relay: SyncRelayConnection;
+    shareId: string;
+    channelWireId: string;
+  }) => Promise<PullSharedChannelResult>;
+  push: (input: {
+    rootDir: string;
+    workspaceId: string;
+    relay: SyncRelayConnection;
+    shareId: string;
+    channelWireId: string;
+  }) => Promise<PushSharedChannelResult>;
 }): Promise<SyncJoinedSharedChannelsResult> {
   const { pull, push } = input;
   const endedShareIds: string[] = [];

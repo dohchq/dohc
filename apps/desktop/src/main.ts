@@ -365,11 +365,9 @@ import type {
   ChatThread,
   VersionedTextMomentSummary,
 } from "@dohc/workspace-contracts/engine";
-import {
-  installWorkspaceDataKey,
-  fetchShareViewInfo,
-  fetchSharedChannelInfo,
-} from "@dohc/workspace-engine";
+import { fetchShareViewInfo } from "./workspaces/shareViewInfo";
+import { fetchSharedChannelInfo } from "./workspaces/sharedChannelInfo";
+import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
 import {
   readWorkspaceDataKeyForEnrollment,

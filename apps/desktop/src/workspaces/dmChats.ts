@@ -1,4 +1,4 @@
-import type { LinkedChatStore } from "@dohc/workspace-engine";
+import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import type { JoinedSharedChannel } from "./registryStore";
 
 // WS-MU-C3 — desktop DM orchestration, kept out of main.ts so it is unit
