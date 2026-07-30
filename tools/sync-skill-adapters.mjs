@@ -125,15 +125,20 @@ function orphansIn(rootDir, canonicalNames) {
     .map((e) => join(rootDir, e.name, "SKILL.md"));
 }
 
+// An EMPTY skills/ is a legitimate state — someone removed the last shared skill
+// — and it is exactly when orphan cleanup matters most, so it must not short
+// circuit. Only a MISSING skills/ is an error, and it means the wrong directory.
+// This has to run BEFORE the read, or the "wrong directory" case is a raw
+// ENOENT stack trace instead of a sentence telling you what to do.
+if (!existsSync(SOURCE)) {
+  console.error(`no ${SOURCE}/ directory here — run this from the repository root`);
+  process.exit(1);
+}
+
 const shared = readdirSync(SOURCE, { withFileTypes: true })
   .filter((e) => e.isDirectory())
   .map((e) => e.name)
   .sort();
-
-if (shared.length === 0) {
-  console.error(`no shared skills found under ${SOURCE}/`);
-  process.exit(1);
-}
 
 const problems = [];
 
