@@ -34,32 +34,42 @@ What we're doing here is fundamentally different so treat it that way. Being tha
 
 ### Justify operational limits
 
-A hard limit that rejects otherwise valid work needs measurement evidence.
-Before adding one, measure a representative workload and record the evidence
-near the limit.
+Classify a limit by what happens when code reaches it, not by its name.
 
-A defect tripwire belongs beyond measured healthy behavior. If healthy behavior
-reaches it, measure again and revisit the limit.
+A defect tripwire rejects work outside supported healthy behavior. Before
+adding one, measure a representative workload. Set the tripwire beyond the
+measured healthy behavior. Record the measurement in a focused test, benchmark,
+or decision document that names the limit. If healthy behavior reaches the
+tripwire, measure again. Then revisit the limit.
 
-A backpressure or load-shedding limit can reject healthy work temporarily.
-Justify it with measured capacity and latency targets. Give callers an explicit
-retry or degradation path.
+A backpressure or load-shedding limit rejects work temporarily when a finite
+resource is saturated. Set it from measured capacity and latency targets. Give
+callers an explicit retry or degradation path.
 
-A routing threshold selects another supported path instead of rejecting work.
-Healthy work can cross it. Protocol versions and fixed schema values need their
-own justification, not workload measurements.
+A routing threshold does not reject work. It selects another supported path,
+and healthy work can cross it.
+
+Protocol versions and fixed schema values are contract values, not workload
+limits. Justify them with a compatibility or interoperability requirement.
 
 ### Show agents the limits they hit
 
-Developers will not always read the code. Their agents will read the errors. An
-agent can fix `limit 128 nodes, requested 129 nodes`; it cannot fix a blank
-window.
+This section governs developer- and agent-facing failures, including build,
+check, daemon, and API errors. For any error a user reads, also follow
+[`docs/brand/copy.md`](docs/brand/copy.md).
 
-A hard-limit error must name the constraint, its configured limit, and the unit.
-When available, include the requested or observed usage in the same unit. A
-backpressure error must name the saturated resource and tell the caller how to
-retry or degrade. Report the error during a build or check when possible.
-Otherwise, expose a structured runtime error. Do not catch the error silently.
+Developers will not always read the code. Their agents will read the errors. An
+agent can fix `richdoc node count: limit 128 nodes, requested 129 nodes`; it
+cannot fix a blank window.
+
+A defect-tripwire error must name the constraint, its configured limit, and the
+unit. When available, include the requested or observed usage in the same unit.
+A backpressure error must name the saturated resource. It must tell the caller
+how to retry or degrade.
+
+Report the error during a build or check when possible. Otherwise, use the
+existing structured error type for that surface. Add stable fields when a
+caller needs them to act. Do not catch the error silently.
 
 ### Let their agents shape the workspace they need
 
@@ -75,15 +85,15 @@ Should dohc ship a hardcoded CRM for every possible team? Probably not. A user's
 
 We should avoid being clever and doing things because it feels smart. We want everything we build to be so obvious it feels kind of stupid.
 
-Understand the problem before building. The best design is the simplest one
-that meets the required function and performance. Make necessary tradeoffs
-explicit. Do not hide them in patches or follow-up work.
+Understand the problem before building. When simple and obvious differ, prefer
+obvious. Among equally obvious designs, choose the simplest one that meets the
+stated behavior and performance requirements. Record material tradeoffs in the
+PR or a decision document. Do not hide them in patches or follow-up work.
 
 When one of us prompts you, never hesitate to push back and suggest ways we
-could make things more obvious. "Simple" and "obvious" are not always the same.
-Sometimes the obvious solution has more parts. Obvious solutions are the
-defaults that agents and the next reader expect. The next reader decides
-whether a design is obvious.
+could make things more obvious. An obvious solution can have more parts. Obvious
+solutions are the defaults that agents and the next reader expect. The next
+reader decides whether a design is obvious.
 
 ### Don't be afraid to lie (to agents) if it makes working easier
 
@@ -170,17 +180,24 @@ gate (`.github/workflows/pr-checks.yml`) is dispatch-only while we are
 pre-launch; it will be re-enabled when it makes more sense (approaching
 launch / first users). Do not "fix" the missing checks.
 
-Choose local gates with the `rust` and `js` path filters under `jobs.changes` in
-`.github/workflows/pr-checks.yml`. Use those filters as the source of truth
-while PR CI is disabled:
+Before merging, select and run the required local gates for the exact PR head.
+For a PR, use the `rust` and `js` filters in the `changes` job of
+`.github/workflows/pr-checks.yml`. This policy replaces the workflow header's
+older unconditional local-gate reminder. A manual `workflow_dispatch` still
+runs all gates by design.
 
 - If `rust` matches, run the canonical Rust gate
-  (`node tools/rust-engine-program/run-rust-checks.mjs`).
-- If `js` matches, run `pnpm run typecheck` and `pnpm run test`.
+  (`node tools/rust-engine-program/run-rust-checks.mjs`). Read its
+  `== summary ==` block. Require every required step to report `PASS`; do not
+  trust the process exit code alone.
+- If `js` matches, reproduce the `javascript` job's required services,
+  environment variables, and daemon prebuild locally. Then run
+  `pnpm run typecheck` and `pnpm run test`.
 - Run both when both filters match. Rust source matches both because the desktop
   end-to-end tests drive the daemon.
 - Prose-only changes can skip code gates only when neither filter matches. Some
   documents are test inputs and therefore match `js`.
+- If it is unclear whether a file is a test or build input, run both gates.
 - In the PR, state which gates ran or why no code gate applies.
 
 When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. These are setup (coderabbit and codex) to review every PR reliably.
