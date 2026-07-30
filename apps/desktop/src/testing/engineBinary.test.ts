@@ -52,14 +52,15 @@ describe("engine binary discovery", () => {
     expect(candidate).toBe(resolve("./artifacts/dohc-workspace-engine"));
   });
 
-  it("offers the desktop-relative path before the repo root, and names both", () => {
+  it("tries the workspace-root cargo output BEFORE the staged copy", () => {
+    // Root first, because it is the only one a `cargo build` refreshes. The
+    // staged copy under apps/desktop exists for Electron, and keeping it in step
+    // is the staging hook's job.
     vi.stubEnv(ENGINE_BINARY_ENV_VAR, "");
     const candidates = engineBinaryCandidates();
     expect(candidates).toHaveLength(2);
-    // Order is what the diagnostic message shows a developer; the *selection*
-    // is by mtime, asserted separately below.
-    expect(candidates[0]).toMatch(/apps[\\/]desktop[\\/]target[\\/]debug/);
-    expect(candidates[1]).not.toMatch(/apps[\\/]desktop/);
+    expect(candidates[0]).not.toMatch(/apps[\\/]desktop/);
+    expect(candidates[1]).toMatch(/apps[\\/]desktop[\\/]target[\\/]debug/);
   });
 
   it("carries the platform executable suffix", () => {
@@ -70,18 +71,14 @@ describe("engine binary discovery", () => {
     }
   });
 
-  it("prefers the NEWEST existing binary regardless of candidate order", () => {
-    // The regression this guards: `cargo build` refreshes only the repo-root
-    // binary while require-e2e-engine.mjs leaves a stale COPY under
-    // apps/desktop/target/debug. First-match ordering would run the suites
-    // against daemon code from an earlier build.
-    const older = tempBinary(1_700_000_000);
-    const newer = tempBinary(1_800_000_000);
-
-    // Asserted BOTH orders. Passing only [older, newer] would also pass an
-    // implementation that simply returned the last existing candidate.
-    expect(findEngineBinary([older, newer])).toBe(newer);
-    expect(findEngineBinary([newer, older])).toBe(newer);
+  it("takes the FIRST existing candidate, ignoring mtime", () => {
+    // Deliberately gives the second candidate the newer mtime. An earlier
+    // revision picked by mtime and that heuristic produced four defects in
+    // review; order is now the whole rule, so this must not drift back.
+    const first = tempBinary(1_700_000_000);
+    const secondNewer = tempBinary(1_900_000_000);
+    expect(findEngineBinary([first, secondNewer])).toBe(first);
+    expect(findEngineBinary([secondNewer, first])).toBe(secondNewer);
   });
 
   it("ignores a candidate that does not exist when choosing the newest", () => {

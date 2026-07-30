@@ -168,12 +168,16 @@ export class EngineWorkspaceSessions {
     const deadline = options.workspaceOpenDeadlineMs;
     if (
       deadline !== undefined &&
-      (!Number.isFinite(deadline) ||
+      (!Number.isInteger(deadline) ||
         deadline <= 0 ||
         deadline > MAX_TIMER_DELAY_MS)
     ) {
+      // Integer, not merely finite: the protocol declares deadlineMs as uint32
+      // and the Rust wire field is a u32, so 12.5 would ship an invalid envelope
+      // and can terminate the transport instead of widening anything.
+      // Number.isInteger also rejects NaN and Infinity.
       throw new TypeError(
-        `workspaceOpenDeadlineMs must be a finite positive number no greater than ${MAX_TIMER_DELAY_MS}, received ${String(deadline)}.`,
+        `workspaceOpenDeadlineMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}, received ${String(deadline)}.`,
       );
     }
     this.workspaceOpenDeadlineMs = deadline ?? WORKSPACE_OPEN_DEADLINE_MS;

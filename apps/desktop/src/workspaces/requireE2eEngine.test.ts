@@ -35,6 +35,7 @@ describe("requireE2eEngine", () => {
         desktopTargetDir: join(root, "desktop"),
         cargoTargetDir: join(root, "cargo"),
         platform: "win32",
+        override: null,
       }),
     ).toThrow(/cargo build --bin dohc-workspace-engine/);
   });
@@ -50,6 +51,7 @@ describe("requireE2eEngine", () => {
       desktopTargetDir,
       cargoTargetDir,
       platform: "win32",
+      override: null,
     });
 
     expect(result.copied).toBe(true);
@@ -66,6 +68,7 @@ describe("requireE2eEngine", () => {
       desktopTargetDir,
       cargoTargetDir: join(root, "cargo"),
       platform: "linux",
+      override: null,
     });
 
     expect(result.copied).toBe(false);
@@ -92,6 +95,7 @@ describe("requireE2eEngine", () => {
       desktopTargetDir,
       cargoTargetDir,
       platform: "linux",
+      override: null,
     });
 
     expect(result.refreshed).toBe(true);
@@ -118,6 +122,7 @@ describe("requireE2eEngine", () => {
       desktopTargetDir,
       cargoTargetDir,
       platform: "linux",
+      override: null,
     });
 
     expect(result.refreshed).toBe(false);

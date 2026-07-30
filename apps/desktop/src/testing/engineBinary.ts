@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,19 +8,21 @@ import { fileURLToPath } from "node:url";
 // depending on whether somebody had run `cargo build` first, and a clean
 // checkout reported green having run nothing (#390).
 //
-// Candidates, in the order they are listed for diagnostics:
-// 1. DOHC_TEST_ENGINE_BINARY — explicit override, and nothing else is consulted.
-// 2. apps/desktop/target/debug — what the app under test resolves in e2e
-//    (defaultEngineBinaryPath from appPath dist/main -> ../..), and where
-//    staged-binary harnesses copy it.
-// 3. <repo>/target/debug — where a repo-root `cargo build` places it.
+// Candidates, tried in order:
+// 1. DOHC_TEST_ENGINE_BINARY — explicit override, resolved absolute, and nothing
+//    else is consulted.
+// 2. <repo>/target/debug — where `cargo build` puts it. AUTHORITATIVE for tests,
+//    because it is the only one a build refreshes.
+// 3. apps/desktop/target/debug — a *copy* staged for Electron by
+//    scripts/require-e2e-engine.mjs, which the app resolves at launch.
 //
-// When several exist, the NEWEST wins rather than the first. `cargo build`
-// updates only (3), while `scripts/require-e2e-engine.mjs` leaves a *copy* at
-// (2) — so first-match ordering would silently run these suites against daemon
-// code from an earlier build. Three of the four suites previously read (3)
-// directly, so preferring a stale staged copy would have been a regression in
-// freshness, and with CI disabled these local runs are the only safety net.
+// Root before staged, first match, no mtime comparison. An earlier revision of
+// this module compared mtimes to answer "which of these is fresher", and that
+// heuristic generated four separate defects in review — seed/app skew, a
+// clobbered override, an unresolved relative path, and a symlink whose target got
+// overwritten. The simpler answer is that freshness is not this module's
+// question: `cargo build` owns (2), the staging hook owns (3) and keeps it equal
+// to (2) or to the override, and a test just needs the cargo output.
 //
 // This module holds no Playwright or vitest import, so both `src/**` tests and
 // `e2e/**` helpers can use it. It computes the desktop root itself rather than
@@ -50,35 +52,25 @@ export function engineBinaryCandidates(): string[] {
   if (override) return [resolve(override)];
   const name = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
   return [
-    join(desktopRoot, "target", "debug", name),
     join(desktopRoot, "..", "..", "target", "debug", name),
+    join(desktopRoot, "target", "debug", name),
   ];
 }
 
 /**
- * The NEWEST candidate that exists, or null when none does.
+ * The first candidate that exists, or null when none does.
  *
- * Newest rather than first: a staged copy and a fresh `cargo build` output can
- * both exist, and only mtime distinguishes the one that matches the checked-out
- * Rust code. An override short-circuits this — `engineBinaryCandidates()`
- * already collapses to it, so there is nothing to compare.
+ * First match, not newest. See the ordering note above: the workspace-root cargo
+ * output is authoritative for tests, and keeping the staged copy in step with it
+ * is the staging hook's job, not this module's.
  */
 export function findEngineBinary(
   candidates: readonly string[] = engineBinaryCandidates(),
 ): string | null {
-  let best: { path: string; mtimeMs: number } | null = null;
   for (const candidate of candidates) {
-    if (!existsSync(candidate)) continue;
-    let mtimeMs: number;
-    try {
-      mtimeMs = statSync(candidate).mtimeMs;
-    } catch {
-      // Raced away between the existsSync and the stat; treat as absent.
-      continue;
-    }
-    if (best === null || mtimeMs > best.mtimeMs) best = { path: candidate, mtimeMs };
+    if (existsSync(candidate)) return candidate;
   }
-  return best?.path ?? null;
+  return null;
 }
 
 function missingBinaryError(requiredMode: boolean): Error {

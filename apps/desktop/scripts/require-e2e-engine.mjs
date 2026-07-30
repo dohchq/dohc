@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFileSync, mkdirSync, statSync } from "node:fs";
+import { copyFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,6 +25,14 @@ function isFile(path) {
   } catch {
     return false;
   }
+}
+
+// copyFileSync FOLLOWS a symlink at the destination and overwrites its TARGET.
+// A developer who links the staged path at the repo-root build would have
+// test setup silently rewrite that build. Replace the entry instead.
+function stageBinary(from, to) {
+  rmSync(to, { force: true });
+  copyFileSync(from, to);
 }
 
 function mtimeMs(path) {
@@ -63,7 +71,7 @@ export function requireE2eEngine({
       return { binary: wanted, copied: false, refreshed: false };
     }
     mkdirSync(desktopTargetDir, { recursive: true });
-    copyFileSync(override, wanted);
+    stageBinary(override, wanted);
     return { binary: wanted, copied: true, refreshed: true };
   }
 
@@ -79,7 +87,7 @@ export function requireE2eEngine({
     const stagedAt = mtimeMs(wanted);
     const builtAt = isFile(built) ? mtimeMs(built) : null;
     if (stagedAt !== null && builtAt !== null && builtAt > stagedAt) {
-      copyFileSync(built, wanted);
+      stageBinary(built, wanted);
       return { binary: wanted, copied: true, refreshed: true };
     }
     return { binary: wanted, copied: false, refreshed: false };
@@ -87,7 +95,7 @@ export function requireE2eEngine({
 
   if (isFile(built)) {
     mkdirSync(desktopTargetDir, { recursive: true });
-    copyFileSync(built, wanted);
+    stageBinary(built, wanted);
     return { binary: wanted, copied: true, refreshed: false };
   }
 
