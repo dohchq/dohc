@@ -25,7 +25,7 @@ use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -347,6 +347,70 @@ async fn drive_step_to_visibility(
 async fn rust_capture_matches_the_typescript_oracle_goldens() {
     let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
     let goldens: Goldens = serde_json::from_str(GOLDENS).expect("goldens parse");
+
+    // === The freeze, enforced HERE rather than described in a document. ===
+    //
+    // R16 deletes the TypeScript oracle that produced these goldens. After that
+    // the only implementation able to regenerate them is the daemon this test
+    // grades, so an unenforced freeze means the daemon can certify itself by
+    // editing one file. These hashes are the anchor, and they live in Rust source
+    // precisely so that changing either JSON file cannot be a one-file diff.
+    //
+    // Both files are covered on purpose. Freezing only the goldens leaves the
+    // INPUTS mutable, and input coverage can vanish without changing any output:
+    // drop the first step of `update-coalesce` and the final projection is
+    // identical, so every value assertion passes while the update-transition case
+    // is gone.
+    //
+    // If you are here because one of these failed: do not update the hash to make
+    // it pass. Work out which behaviour changed, and why the new answer is right.
+    // See tools/rust-engine-program/capture-goldens.provenance.md.
+    const FIXTURES_SHA256: &str =
+        "2a8649c9b2a7e513e6f7a480569c7ac995b31309bfab48b1bda2cf02fbe92304";
+    const GOLDENS_SHA256: &str = "246655d8e2f697d069d121c50faec04222f7f45eecc970f1af4e0b4ee64e5292";
+
+    let hash_of = |raw: &str| -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(raw.as_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
+    assert_eq!(
+        hash_of(GOLDENS).as_str(),
+        GOLDENS_SHA256,
+        "capture-goldens.json changed. The goldens are FROZEN — see \
+         capture-goldens.provenance.md. Do not update this constant to silence it \
+         without establishing which behaviour changed and why the new value is \
+         correct."
+    );
+    assert_eq!(
+        hash_of(FIXTURES).as_str(),
+        FIXTURES_SHA256,
+        "capture-fixtures.json changed. The input traces are frozen too, because \
+         a step can be removed without altering any final projection. See \
+         capture-goldens.provenance.md."
+    );
+
+    // Scenario IDENTITIES, not counts. Equal lengths prove nothing: delete one
+    // fixture scenario and duplicate another and both sides still read 10, while
+    // the loop resolves the duplicate twice and the deleted scenario's golden is
+    // never read.
+    let fixture_names: BTreeSet<&str> =
+        fixtures.scenarios.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        fixture_names.len(),
+        fixtures.scenarios.len(),
+        "capture-fixtures.json has duplicate scenario names; a duplicate hides a \
+         deleted scenario behind an unchanged count"
+    );
+    let golden_names: BTreeSet<&str> = goldens.scenarios.keys().map(String::as_str).collect();
+    assert_eq!(
+        fixture_names, golden_names,
+        "capture-fixtures.json and capture-goldens.json cover different scenarios"
+    );
 
     for scenario in &fixtures.scenarios {
         let golden = goldens
