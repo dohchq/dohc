@@ -1,7 +1,7 @@
-//! Extension → media-type mapping, ported byte-for-byte from the reference
-//! accelerator (`crates/workspace-kernel/src/main.rs::media_type_for_path`) so
-//! a CAL-3 scan listing is comparable to the accelerator's documented output in
-//! the differential harness. The mapping is deliberately small and
+//! Extension → media-type mapping, ported byte-for-byte from the retired
+//! reference accelerator's `media_type_for_path` so a CAL-3 scan listing is
+//! comparable to the accelerator's documented output (`fixtures/workspace-kernel/`)
+//! in the differential harness. The mapping is deliberately small and
 //! extension-driven; unknown extensions are `application/octet-stream`.
 
 /// The media type for a workspace-relative path, by its lowercased extension.

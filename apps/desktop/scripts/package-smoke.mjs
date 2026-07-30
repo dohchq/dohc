@@ -89,14 +89,6 @@ if (config) {
   check(
     extraResources.some(
       (entry) =>
-        entry?.from === "resources/workspace-kernel" &&
-        entry?.to === "workspace-kernel",
-    ),
-    "workspace kernel ships as an unpacked extraResource",
-  );
-  check(
-    extraResources.some(
-      (entry) =>
         entry?.from === "resources/cli-bin" && entry?.to === "cli-bin",
     ),
     "dohc chat CLI ships as an unpacked extraResource",

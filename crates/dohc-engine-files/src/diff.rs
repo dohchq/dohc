@@ -2,8 +2,8 @@
 //! manifest against a fresh listing to classify **added / changed / removed**.
 //!
 //! Change detection is by content hash and size, never mtime — "hashes, not
-//! timestamps, are the source of truth" (the reference accelerator's own
-//! contract, `crates/workspace-kernel/src/main.rs`). The classification
+//! timestamps, are the source of truth" (the retired reference accelerator's own
+//! contract). The classification
 //! predicate is factored into [`diff_core`] behind a seam so the seeded-bug
 //! proof (a flipped hash comparison) exercises the real machinery with only the
 //! predicate mutated — the differential harness must be able to catch exactly

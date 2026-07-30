@@ -1,7 +1,8 @@
 //! The path floor: which workspace-relative paths a scan excludes.
 //!
-//! This ports the win32-safe classification *lessons* from the reference
-//! accelerator (`crates/workspace-kernel/src/main.rs`) and the TS path floor
+//! This ports the win32-safe classification *lessons* from the retired
+//! reference accelerator (its documented output survives as
+//! `fixtures/workspace-kernel/`) and the TS path floor
 //! (`packages/workspace-engine/.../enginePathFloor.ts`, `paths.ts`): a path is
 //! excluded if any segment is reserved (`.dohc`, `.git`, `node_modules`), a
 //! segment carries an ignored write-temp prefix (`.dohc-write-`), or the file
@@ -15,12 +16,11 @@
 //! those are **distinct real inodes** — a user's `.DOHC`, `.Dohc`, or `.dohc.`
 //! directory is legitimate content, NOT the engine floor — so the strip and the
 //! case-fold are gated behind `cfg(windows)` and only the EXACT `.dohc` (etc.)
-//! is reserved on POSIX. The reference TS kernel lowercases + strips
-//! unconditionally (`workspace-kernel/src/main.rs:683-684`), which silently
-//! omits those real POSIX directories from the scan; Rust is corrected here per
-//! the plan's "Rust is right, TS is platform-buggy → approved delta, don't
-//! reproduce the bug" rule (recorded in `BEHAVIOR_DELTA.md`, CAL-3 section;
-//! the TS kernel is flagged for a matching fix).
+//! is reserved on POSIX. The retired reference accelerator lowercased + stripped
+//! unconditionally, which silently omitted those real POSIX directories from the
+//! scan; Rust is corrected here per the plan's "Rust is right, TS is
+//! platform-buggy → approved delta, don't reproduce the bug" rule (recorded in
+//! `BEHAVIOR_DELTA.md`, CAL-3 section).
 //!
 //! We deliberately do NOT re-open the ADS-colon (7.2), device-name (7.10), or
 //! 8.3-short-name (7.12) hazards here: those are `validateWorkspacePath`

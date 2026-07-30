@@ -24,10 +24,7 @@ import { afterEach, expect, it } from "vitest";
 import { createSecretFileStore, createVersionedTextStore } from "@dohc/workspace-engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import { nativeTmpdir } from "./testTemp";
-import {
-  createWorkspaceEngineCapture,
-  resetWorkspaceKernelRuntimeForTests,
-} from "./workspaceEngineCapture";
+import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 const requireModule = createRequire(import.meta.url);
 type SqliteDatabase = new (
@@ -80,7 +77,6 @@ const roots: string[] = [];
 afterEach(async () => {
   // Windows cannot unlink engine.db* files with open sqlite handles (EBUSY).
   closeTrackedEngineDbHandlesForTest();
-  resetWorkspaceKernelRuntimeForTests();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -225,12 +221,6 @@ it.skipIf(!DatabaseSync)(
   "capture goldens match the TypeScript oracle",
   { timeout: 120_000 },
   async () => {
-  // Forcing the TS fallback path must not leak into other tests sharing
-  // this Vitest worker — restore whatever the environment had.
-  const priorSidecar = process.env.DOHC_KERNEL_SIDECAR;
-  process.env.DOHC_KERNEL_SIDECAR = "0";
-  resetWorkspaceKernelRuntimeForTests();
-  try {
     const fixtures = JSON.parse(await readFile(FIXTURES_PATH, "utf8")) as {
       scenarios: FixtureScenario[];
     };
@@ -247,13 +237,5 @@ it.skipIf(!DatabaseSync)(
       scenarios: Record<string, Record<string, PathProjection>>;
     };
     expect(produced).toEqual(goldens.scenarios);
-  } finally {
-    if (priorSidecar === undefined) {
-      delete process.env.DOHC_KERNEL_SIDECAR;
-    } else {
-      process.env.DOHC_KERNEL_SIDECAR = priorSidecar;
-    }
-    resetWorkspaceKernelRuntimeForTests();
-  }
   },
 );

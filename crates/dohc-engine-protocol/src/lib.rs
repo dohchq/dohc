@@ -26,7 +26,7 @@
 //! - **Supervision**: [`supervisor::Supervisor`] (feature `supervisor`) is a
 //!   tokio-based bounded dispatch skeleton — bounded queue + bounded
 //!   in-flight concurrency, deadlines, cooperative cancellation, and typed
-//!   `OVERLOADED` backpressure errors — replacing the workspace-kernel
+//!   `OVERLOADED` backpressure errors — replacing the retired accelerator
 //!   spike's thread-per-request model.
 //!
 //! The crate is standalone (no repo-level Cargo workspace yet; R02 owns

@@ -181,11 +181,6 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # packages/workspace-kernel-client's suite shells out to
-      # `cargo build --offline` to produce the kernel binary it drives. The
-      # --offline is deliberate -- it keeps the test hermetic -- but it only
-      # works against a populated registry, which a fresh runner does not have.
-      # Fetching here preserves the test's intent instead of relaxing it.
       - name: Rust toolchain
         run: |
           set -euo pipefail
@@ -202,16 +197,10 @@ jobs:
         with:
           shared-key: js-daemon
 
-      # crates/workspace-kernel is deliberately EXCLUDED from the cargo
-      # workspace (Cargo.toml documents why: build-workspace-kernel.mjs copies
-      # from a hard-coded crates/workspace-kernel/target/... path that workspace
-      # membership would relocate). So a root fetch does not cover it and its
-      # deps must be fetched through its own manifest.
       - name: Fetch crate dependencies
         run: |
           set -euo pipefail
           cargo fetch --locked
-          cargo fetch --locked --manifest-path crates/workspace-kernel/Cargo.toml
 
       # The desktop capture e2e drives a REAL daemon over stdio; without this
       # binary it self-skips. It skipped on every platform since the day it was

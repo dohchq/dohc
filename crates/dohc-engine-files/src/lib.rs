@@ -3,9 +3,9 @@
 //! Workspace filesystem **scan → hash → diff → reconcile-plan**, with the path
 //! floor, the watcher dirty-generation state machine, and full resource bounds,
 //! driven actor-native on a dedicated blocking thread under a tokio command
-//! loop (the CAL-2 model). This is the actor-native successor to the reference
-//! accelerator (`crates/workspace-kernel`, NDJSON thread-per-request) — studied
-//! for its documented behavior, not depended on.
+//! loop (the CAL-2 model). This is the actor-native successor to the retired
+//! reference accelerator (NDJSON thread-per-request) — studied for its
+//! documented behavior, not depended on.
 //!
 //! The calibration point is **cancellation + bounds** (`plan §Workspace actor
 //! model`, `PORTING.md` §12/§14):
