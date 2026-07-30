@@ -22,18 +22,6 @@ Quick gloassary of relevant parties in this document:
 - _me_/_we_/_us_ - the humans contributing to dohc. This is the party talking to you as we build
 - _users_ - these are our users. We are assuming they won't need to program or be expert at prompting like someone technical would, rather they will have their own agents to build things using dohc.
 
-And some words we use when we work:
-
-- _landmine_ - a decision that costs little now but becomes load-bearing before
-  it fails. Unmeasured limits and silent catches are common landmines.
-- _receipt_ - the measurement behind a number. No receipt, no number.
-- _tripwire_ - a limit set beyond healthy behavior so that normal work never
-  touches it and broken behavior cannot pass it.
-- _simple_ - logic that breaks into clear steps. Each step follows from the
-  last, and no step does two jobs.
-- _obvious_ - the next reader does not have to ask why something is there.
-  Obviousness belongs to the reader, and the obvious design can have more parts.
-
 Here's some philosophical things to consider as we build and work together:
 
 ### Boil the ocean
@@ -44,25 +32,30 @@ When planning, do not be afraid to suggest seeminlgy insane solutions. For examp
 
 What we're doing here is fundamentally different so treat it that way. Being that you are an agent, you're prediction model will likely want to steer towards conformity. That's okay and even preferred in most scenarios, but there will be times where we need to think outside the box. Literally (since you're in a box) so think outside of it. Transcend. Transcend. Ascend.
 
-### Every number needs a receipt
+### Measure rejection budgets
 
-A limit without a measurement is a landmine. Before adding a node limit, byte
-cap, timeout, or other budget, measure a representative workload and record the
-receipt near the number.
+A budget that rejects otherwise valid work needs measurement evidence. Before
+adding one, measure a representative workload and record the evidence near the
+budget.
 
-Set the limit as a tripwire: beyond healthy behavior, but close enough to catch
-a real failure. When the system allocates capacity lazily, reserve generously
-and commit lazily. Do not eagerly initialize unused capacity. If healthy work
-hits the budget, the budget is wrong. Measure again and update the receipt.
+Set a rejection budget beyond measured healthy work. It should expose broken
+behavior without constraining healthy work. If healthy work reaches the budget,
+measure again and revisit it.
 
-### A limit an agent can hit is a limit it must see
+A routing threshold is not a rejection budget. It selects another supported
+path, so healthy work can cross it. Protocol versions and fixed schema values
+also need their own justification, not a workload measurement.
+
+### Show agents the limits they hit
 
 Developers will not always read the code. Their agents will read the errors. An
-agent can fix `limit 128, requested 129`; it cannot fix a blank window.
+agent can fix `limit 128 nodes, requested 129 nodes`; it cannot fix a blank
+window.
 
-Every budget failure must name the budget, the limit, and the request. Report
-the failure during a build or check when possible. Otherwise, report it loudly
-at runtime. A silent budget is worse than no budget.
+Every budget rejection must name the budget, its configured limit, and the
+unit. When available, include the requested or observed usage in the same unit.
+Report the rejection during a build or check when possible. Otherwise, expose a
+structured runtime error. Do not catch a budget rejection silently.
 
 ### Let their agents shape the workspace they need
 
@@ -78,15 +71,15 @@ Should dohc ship a hardcoded CRM for every possible team? Probably not. A user's
 
 We should avoid being clever and doing things because it feels smart. We want everything we build to be so obvious it feels kind of stupid.
 
-Measure twice and cut once: understand the problem before building. Cleverness
-fills gaps in understanding. The best code is the simplest design that
-preserves the full function and performance, with nothing traded away and
-nothing bolted on.
+Understand the problem before building. The best design is the simplest one
+that meets the required function and performance. Make necessary tradeoffs
+explicit. Do not hide them in patches or follow-up work.
 
 When one of us prompts you, never hesitate to push back and suggest ways we
 could make things more obvious. "Simple" and "obvious" are not always the same.
 Sometimes the obvious solution has more parts. Obvious solutions are the
-defaults that agents and the next reader expect.
+defaults that agents and the next reader expect. The next reader decides
+whether a design is obvious.
 
 ### Don't be afraid to lie (to agents) if it makes working easier
 
@@ -171,10 +164,18 @@ Deterministic software should provide the sturdy pieces: permissions, storage, s
 **CI is deliberately disabled for now (Ice's decision, 2026-07-28).** The PR
 gate (`.github/workflows/pr-checks.yml`) is dispatch-only while we are
 pre-launch; it will be re-enabled when it makes more sense (approaching
-launch / first users). Do not "fix" the missing checks. Consequence for you:
-there is no automated safety net, so before merging any PR you must run the
-canonical Rust gate (`node tools/rust-engine-program/run-rust-checks.mjs`)
-and the JS `typecheck` + `test` suites locally and say so in the PR.
+launch / first users). Do not "fix" the missing checks.
+
+Choose local gates from the files and behavior the PR can change:
+
+- Run the canonical Rust gate
+  (`node tools/rust-engine-program/run-rust-checks.mjs`) for changes to Rust
+  source, Cargo configuration, Rust fixtures, or cross-engine contracts.
+- Run the JS `typecheck` and `test` suites for changes to JS/TS source, package
+  configuration, build or test configuration, or cross-language contracts.
+- Prose-only changes do not require code gates. If the impact is unclear, run
+  all three gates.
+- In the PR, state which gates ran or why no code gate applies.
 
 When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. These are setup (coderabbit and codex) to review every PR reliably.
 
