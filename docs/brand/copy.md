@@ -107,7 +107,9 @@ because it costs them a search.
 
 Agent activity gets the olive `agent` voice visually. In words:
 
-- Completed work: past tense, with the count. `Updated 3 files`.
+- Completed work: past tense, with the count when one exists and means
+  something. `Updated 3 files`. Some runs change no countable set — say what
+  happened without inventing a number.
 - Work in progress: name the concrete action, and the count when known.
   `Reading 40 files`. Never `Working on it…`.
 - Work waiting on the user: state the gate. `Waiting for your review`.
@@ -146,12 +148,14 @@ Agent activity gets the olive `agent` voice visually. In words:
 ## Known violations in shipping copy
 
 This file is new and the app predates it. Existing strings are not
-automatically conformant. Two are confirmed:
+automatically conformant. Confirmed so far:
 
 - `apps/desktop/src/renderer/editor/slashCommands.tsx:83` — `Link another page`
   says `page` where the rest of the UI says `file`.
-- `apps/desktop/src/renderer/settings/SettingsDialog.tsx:487` — "without
-  changing document content" says `document` where the UI says `file`.
+- `apps/desktop/src/renderer/settings/SettingsDialog.tsx` — this dialog says
+  `document` throughout (`:487`, `:662`, `:669`) where the rest of the UI says
+  `file`. Settle the whole dialog in one change; fixing a single string here
+  would create local drift rather than remove it.
 - `apps/desktop/src/renderer/workbench/Explorer.tsx:1528` — the delete dialog
   says the trash fallback happens "on drives without one", but `deletePath`
   falls back on *any* `trashItem` rejection. The stated condition is narrower
