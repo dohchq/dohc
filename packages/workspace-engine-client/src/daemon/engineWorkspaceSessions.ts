@@ -154,8 +154,18 @@ export class EngineWorkspaceSessions {
     this.transportRebindAttempts =
       options.transportRebindAttempts ?? TRANSPORT_REBIND_ATTEMPTS;
     this.sleep = options.sleep ?? defaultSleep;
-    this.workspaceOpenDeadlineMs =
-      options.workspaceOpenDeadlineMs ?? WORKSPACE_OPEN_DEADLINE_MS;
+    // `??` alone would accept 0, a negative, NaN or Infinity — an exported
+    // option, so an invalid value would either fail every workspace.open or
+    // quietly void the deadline guarantee this option exists to preserve.
+    // Reject rather than clamp: silently substituting a value is how a caller
+    // ends up believing it widened a deadline it did not.
+    const deadline = options.workspaceOpenDeadlineMs;
+    if (deadline !== undefined && (!Number.isFinite(deadline) || deadline <= 0)) {
+      throw new TypeError(
+        `workspaceOpenDeadlineMs must be a finite positive number, received ${String(deadline)}.`,
+      );
+    }
+    this.workspaceOpenDeadlineMs = deadline ?? WORKSPACE_OPEN_DEADLINE_MS;
   }
 
   async run<T>(

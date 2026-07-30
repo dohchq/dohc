@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,12 +8,19 @@ import { fileURLToPath } from "node:url";
 // depending on whether somebody had run `cargo build` first, and a clean
 // checkout reported green having run nothing (#390).
 //
-// Resolution order mirrors how the binary actually lands on disk:
-// 1. DOHC_TEST_ENGINE_BINARY — explicit override, used verbatim.
+// Candidates, in the order they are listed for diagnostics:
+// 1. DOHC_TEST_ENGINE_BINARY — explicit override, and nothing else is consulted.
 // 2. apps/desktop/target/debug — what the app under test resolves in e2e
 //    (defaultEngineBinaryPath from appPath dist/main -> ../..), and where
 //    staged-binary harnesses copy it.
 // 3. <repo>/target/debug — where a repo-root `cargo build` places it.
+//
+// When several exist, the NEWEST wins rather than the first. `cargo build`
+// updates only (3), while `scripts/require-e2e-engine.mjs` leaves a *copy* at
+// (2) — so first-match ordering would silently run these suites against daemon
+// code from an earlier build. Three of the four suites previously read (3)
+// directly, so preferring a stale staged copy would have been a regression in
+// freshness, and with CI disabled these local runs are the only safety net.
 //
 // This module holds no Playwright or vitest import, so both `src/**` tests and
 // `e2e/**` helpers can use it. It computes the desktop root itself rather than
@@ -42,12 +49,30 @@ export function engineBinaryCandidates(): string[] {
   ];
 }
 
-/** The first candidate that exists, or null when none does. */
-export function findEngineBinary(): string | null {
-  for (const candidate of engineBinaryCandidates()) {
-    if (existsSync(candidate)) return candidate;
+/**
+ * The NEWEST candidate that exists, or null when none does.
+ *
+ * Newest rather than first: a staged copy and a fresh `cargo build` output can
+ * both exist, and only mtime distinguishes the one that matches the checked-out
+ * Rust code. An override short-circuits this — `engineBinaryCandidates()`
+ * already collapses to it, so there is nothing to compare.
+ */
+export function findEngineBinary(
+  candidates: readonly string[] = engineBinaryCandidates(),
+): string | null {
+  let best: { path: string; mtimeMs: number } | null = null;
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(candidate).mtimeMs;
+    } catch {
+      // Raced away between the existsSync and the stat; treat as absent.
+      continue;
+    }
+    if (best === null || mtimeMs > best.mtimeMs) best = { path: candidate, mtimeMs };
   }
-  return null;
+  return best?.path ?? null;
 }
 
 function missingBinaryError(requiredMode: boolean): Error {
