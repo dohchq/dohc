@@ -403,10 +403,13 @@ unset -f review_status 2>/dev/null
 # number out of this doc — a copied literal reports another PR's verdict as
 # yours. This form fails loudly when PR is unset instead of guessing.
 : "${PR:?set PR to the pull request number you are checking}"
+# Keep the default for routine code. Set REVIEWERS=codex for prose-only,
+# low-risk changes, or coderabbit when it replaces an unavailable Codex review.
+REVIEWERS="${REVIEWERS:-both}"
 
 if [ -s "$R" ] && bash -n "$R"; then
   . "$R"
-  review_status "$PR"
+  review_status "$PR" "$REVIEWERS"
 else
   echo "review_status NOT AVAILABLE — extraction from $S was empty or does not parse"
 fi
@@ -416,18 +419,27 @@ fi
 counts `bash` blocks, so making this one of them would renumber the very block it is
 trying to fetch. Block 1 is the watcher, block 2 is `review_status`.)
 
-Run it before merging, and whenever the watcher says to look.
+Run it before merging, and whenever the watcher says to look. The optional
+second argument selects `codex` or `coderabbit`; the default is `both`.
 
 ```bash
 review_status() {
   local REPO=dohc-ai/dohc n="$1"
   local CODEX="chatgpt-codex-connector[bot]" RABBIT="coderabbitai[bot]"
+  local required="${2:-both}"
+  local -a reviewers
   local CLEAN="didn.t find any major issues|no major issues"
   local DEGRADED="Review limit|rate limit|Review failed"
   local head short rows lines rid st cnt blen who body cbody envt newest now crs verdict=OK
   local blocked=0 findings=0 unknown=0 unreviewed=0 pending=0
 
   [ -n "$n" ] || { echo "review_status: no PR number given"; return 2; }
+  case "$required" in
+    both)       reviewers=("$CODEX" "$RABBIT") ;;
+    codex)      reviewers=("$CODEX") ;;
+    coderabbit) reviewers=("$RABBIT") ;;
+    *) echo "review_status: reviewer set must be both, codex, or coderabbit"; return 2 ;;
+  esac
   head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid) \
     || { echo "PR #$n — head query FAILED, verdict UNKNOWN"; return 2; }
   # An empty head would turn every filter below into contains(""), matching all
@@ -435,8 +447,9 @@ review_status() {
   [ -n "$head" ] || { echo "PR #$n — head resolved EMPTY, verdict UNKNOWN"; return 2; }
   short=${head:0:10}
   echo "PR #$n head $short"
+  echo "  required reviewer set: $required"
 
-  for who in "$CODEX" "$RABBIT"; do
+  for who in "${reviewers[@]}"; do
     if ! rows=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate \
           --jq ".[]|select(.commit_id==\"$head\" and .user.login==\"$who\")|\"\(.submitted_at) \(.id) \(.state)\"" 2>/dev/null); then
       echo "  $who — reviews query FAILED, coverage UNKNOWN"; unknown=1; continue
@@ -580,24 +593,26 @@ review_status() {
 
 | verdict | meaning |
 |---|---|
-| `OK` | both reviewers covered this head and neither left findings |
+| `OK` | every selected reviewer covered this head and none left findings |
 | `BLOCKED` | a `CHANGES_REQUESTED` on this head |
 | `FINDINGS` | a review of this head carries inline comments or a body — unresolved work, even though its state is only `COMMENTED` |
 | `UNREVIEWED` | a required reviewer filed no review of this head — including when it acknowledged receiving it, hit a rate limit, or (codex) cannot run on this repo at all |
 | `PENDING` | CodeRabbit filed no review but says it is still processing this head — wait rather than re-trigger |
 | `UNKNOWN` | a query failed — decide nothing |
 
-It returns non-zero unless the verdict is `OK`, so it can gate a script. Note
-what `FINDINGS` implies about the loop: findings never disappear from the API, so
-the only way to reach `OK` is to push fixes — which changes the head, retires the
-old review, and earns a fresh round. That is the intended shape, not a nuisance.
+It returns non-zero unless the verdict is `OK`, so it can gate a script.
+`FINDINGS` requires triage, not an automatic code change. The review policy in
+`AGENTS.md` decides whether a finding blocks. Document declined findings in the
+PR before merging with a non-zero `FINDINGS` verdict.
 
-It is deliberately strict about requiring **both** reviewers, and a rate limit is
-no exception: a limited or failed CodeRabbit round scores `UNREVIEWED`, so the
-function returns non-zero and **does not** let you merge. If you decide to go
-ahead anyway, that is a conscious override — say so in the PR, naming which
-reviewer never covered the head and why you accepted that. Do not read a rate
-limit as approval, and do not read this paragraph as permission.
+The default reviewer set is `both`. Use `codex` only for prose-only, low-risk
+changes under the policy in `AGENTS.md`. Use `coderabbit` when CodeRabbit
+replaces an unavailable Codex review. Do not use a smaller set to bypass a
+required review.
+
+A limited or failed required reviewer scores `UNREVIEWED`. Replace an
+unavailable reviewer as `AGENTS.md` requires, and record the reason in the PR.
+Do not read a rate limit as approval.
 
 ## Triggering a re-review
 

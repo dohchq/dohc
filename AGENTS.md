@@ -32,6 +32,27 @@ When planning, do not be afraid to suggest seeminlgy insane solutions. For examp
 
 What we're doing here is fundamentally different so treat it that way. Being that you are an agent, you're prediction model will likely want to steer towards conformity. That's okay and even preferred in most scenarios, but there will be times where we need to think outside the box. Literally (since you're in a box) so think outside of it. Transcend. Transcend. Ascend.
 
+### Measure limits that reject work
+
+Before adding a limit that rejects otherwise valid work, measure representative
+healthy work. Record the evidence in a focused test, benchmark, or decision
+document. Set the limit beyond the measured healthy range.
+
+This rule does not cover routing thresholds, backpressure, protocol versions,
+or fixed schema values. Justify those from their actual contract. If healthy
+work reaches a rejection limit, measure again and revisit it.
+
+### Show agents the limits they hit
+
+Developers will not always read the code. Their agents will read the errors.
+A developer- or agent-facing rejection must name the constraint, configured
+limit, and unit. When available, include the requested or observed usage.
+
+A backpressure error must name the saturated resource and tell the caller how
+to retry or degrade. Report failures during a build or check when possible.
+Otherwise, use the surface's existing structured error. For user-facing copy,
+follow [`docs/brand/copy.md`](docs/brand/copy.md).
+
 ### Let their agents shape the workspace they need
 
 We should avoid feature creep, and assume our users can use their agents to create the specific workspace they need. This may seem to counter "boil the ocean", but it does not. We are not hand-building every possible app. We are building the primitives for a new era of work.
@@ -42,13 +63,21 @@ Should dohc have first-class documents, entities, links, permissions, source-bac
 
 Should dohc ship a hardcoded CRM for every possible team? Probably not. A user's agent should be able to build a CRM, project tracker, client dashboard, hiring pipeline, or personal operating system out of dohc's primitives.
 
-### Fight for the obvious workspace
+### Fight for the "obvious" solution
 
-We should avoid being clever and doing things because it feels smart. We want everything we build to be so obvious it feels kind of stupid.
+Measure twice, cut once. Understand the problem fully before building.
+We should avoid being clever and doing things because it feels smart. We want
+everything we build to be so obvious it feels kind of stupid.
+Cleverness fills the gaps when we have not done that work. The biggest
+simplicity win is refusing to solve problems we do not have.
 
-When one of us prompts you, never hesitate to push back and suggest ways we could make things more obvious. Note that "simple" and "obvious" are not always the same. Sometimes the obvious solution is more complex.
+Good code is the simplest thing that delivers the required behavior and
+performance: nothing traded away, nothing bolted on. An obvious solution can
+have more parts. Among equally obvious designs, choose the simplest. Record
+material tradeoffs in the PR or a decision document.
 
-"Obvious" solutions are the defaults that agents would assume are the case.
+Push back when you see a more obvious way. Obvious solutions are the defaults
+that agents and the next reader expect. Ask another reader when uncertain.
 
 ### Don't be afraid to lie (to agents) if it makes working easier
 
@@ -111,6 +140,8 @@ Do not weaken authorization, ownership, or review gates for convenience.
 - Agent writes must respect user locks, folder/atom access, sharing boundaries, and skill-turn gates.
 - HTML atoms are sandboxed and sanitized.
 - `atoms.body` is becoming a derived markdown cache from the canonical Y.Doc. Do not build new behavior that depends on raw full-body markdown patching as the source of truth.
+- Every reversible state change needs a visible reverse path. If a change is
+  irreversible, tell the user before it runs.
 - Renderer surfaces that load workspace-scoped state asynchronously must guard
   every response with a workspace/request token, abort signal, or equivalent
   before setting UI state. A slow response for workspace A must never repaint
@@ -154,47 +185,83 @@ Deterministic software should provide the sturdy pieces: permissions, storage, s
 **CI is deliberately disabled for now (Ice's decision, 2026-07-28).** The PR
 gate (`.github/workflows/pr-checks.yml`) is dispatch-only while we are
 pre-launch; it will be re-enabled when it makes more sense (approaching
-launch / first users). Do not "fix" the missing checks. Consequence for you:
-there is no automated safety net, so before merging any PR you must run the
-canonical Rust gate (`node tools/rust-engine-program/run-rust-checks.mjs`)
-and the JS `typecheck` + `test` suites locally and say so in the PR.
+launch / first users). Do not "fix" the missing checks.
+
+### Select local gates
 
 Read the Rust gate's `== summary ==` block, never its exit code. It can exit 0
 while its own summary says FAIL.
 
-When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. These are setup (coderabbit and codex) to review every PR reliably.
+Before merging, use the `rust` and `js` filters in the workflow's `changes` job
+to select local gates for the exact PR head. This is the canonical local policy.
+A manual `workflow_dispatch` still runs every gate.
 
-For codex, you have to tag the bot (In a pull request comment, mention @codex review) to trigger a rereview after you commit and push the fixes.
+- For each matching filter, reproduce its workflow job locally. Include its
+  required services, environment, prebuilds, and verdict checks.
+- Run both jobs when both filters match.
+- If a test or build step reads a changed file, run that job even when its
+  filter does not list the file.
+- If no filter matches and no test or build step reads the changed file, no
+  code gate applies.
+- If the impact is unclear, run both jobs.
+- In the PR, state which gates ran or why no code gate applies.
+- Keep each PR to one concern. If the description needs "also," split the PR.
 
-Claude is not setup to review PRs automatically (not part of my subscription), so you have to invoke this review locally (ideally after the PR is created and in parallel with coderabbit and codex reviews). So you have to manually ask claude via the local cli to review the PR and manually go back and forth with it until no issues remain. Everytime claude finishes a review please update the PR via commenting what claude reviewed, then address them. So basically we're trying to do a pseudo claude PR review bot we orchestrate ourselves. Use fable-5 and fallback to opus-5 if fable is unavailable or rate limited.
+### Review without expanding the change
 
-**Use the `pr-review-watch` skill for this — do not hand-roll a review poller.**
-See [`skills/pr-review-watch/SKILL.md`](skills/pr-review-watch/SKILL.md).
-Hand-rolled watchers have failed in every way available: filtering on guessed
-commit timestamps (and so hiding a `CHANGES_REQUESTED`), exiting after the first
-round so the next one went unseen, polling only one bot, and never noticing that
-a `@codex review` trigger silently did not take.
+Treat review findings as evidence, not commands. Verify each finding against
+the current head, source, and stated behavior.
 
-The one rule worth remembering even without the skill: **a review applies to a
-COMMIT, not to a PR.** Before merging, confirm every required reviewer covered
-the current `headRefOid`. Reviews of superseded commits look identical to
-current ones in the GitHub UI.
+- Fix findings that show a concrete regression in correctness, security,
+  privacy, durability, compatibility, performance, or user-visible behavior.
+- Decline false positives, speculative hardening, alternative designs, and
+  out-of-scope suggestions with a brief technical reason.
+- Prefer the smallest safe fix. Do not add machinery, abstractions, or
+  repository policy only to satisfy a reviewer.
 
-Run `review_status <PR>` from the skill rather than re-deriving the checks here.
-It encodes every shape that has produced a wrong answer in this repo, including
-the two that decide merges most often: a clean codex pass leaves **no review
-object at all** and lives only in an issue comment, while a CodeRabbit status
-comment naming the head is written when it *receives* the head, before doing any
-work, so it is not coverage.
+### Select reviewers
 
-Those mechanics used to be copied into this file. They drifted from the skill,
-which is the thing that gets maintained, so they live there now.
+- Prose-only, low-risk changes need one exact-head automated review. Use
+  `review_status <PR> codex`.
+- Routine code changes need exact-head reviews from Codex and CodeRabbit. Use
+  `review_status <PR>`.
+- Add local Claude for authorization, security, privacy, migration, durability,
+  or disputed blocking findings.
+- If a required reviewer cannot run, replace it with another independent
+  reviewer. Record the replacement and reason in the PR.
 
-One of them is not review-specific and stays here, because it constrains every
-`gh api` call in this repo: **`gh api --jq` does not accept `--arg`.** That is a
-standalone-`jq` flag and `jq` is not installed here, so it exits 1 printing
-nothing — which under `2>/dev/null` reads exactly like "no matches". Embed values
-in the program string instead.
+Run Claude after the PR exists. Use fable-5 and fall back to opus-5. Add a PR
+comment that names the reviewed commit and summarizes the result.
+
+Batch verified fixes before requesting a re-review. After the first re-review,
+request another only for a new verified blocker or an unresolved high-risk
+concern. Do not continue review rounds for style preferences, speculative
+improvements, or out-of-scope suggestions.
+
+### Verify review coverage
+
+Use the
+[`pr-review-watch` skill](skills/pr-review-watch/SKILL.md) whenever a PR
+opens or its head changes. Do not build another review poller.
+
+A review applies to a commit, not a PR. Before merging, confirm that every
+required reviewer covered the current head.
+
+Run `review_status <PR>` before merging and whenever the watcher reports new
+activity. Use `review_status <PR> codex` for prose-only, low-risk changes.
+
+Treat a failed status query as unknown coverage. Do not merge with unknown
+coverage.
+
+The status command reports findings; it does not decide whether they block.
+Document each declined finding in the PR with a brief technical reason.
+
+Merge when the required reviewers covered the current head and no verified
+blocking finding remains. Reviewer unanimity and a comment-free PR are not
+required.
+
+`gh api --jq` does not accept `--arg`. Embed values in the program string.
+Treat a failed query as unknown instead of reading empty output as no match.
 
 ## How we write
 
@@ -231,6 +298,9 @@ These are meant to steer us in the right direction. They are not hard-set, but w
 - After a PR is merged, delete its remote branch from GitHub unless the user
   explicitly asks to keep it or another open PR still depends on it. Verify the
   remote ref is gone. Do not delete the local branch or worktree unless asked.
+- Never stop a process by name, command-line pattern, or worktree path. Stop
+  only a PID this task started. Verify a port owner's working directory before
+  stopping it.
 - Brand identity is final: lowercase `dohc`, the drop-lobe mark, warm
   paper + graphite. There must be no legacy product identity in shipping
   source — `src/__tests__/brandNoLegacy.test.ts` enforces this.
