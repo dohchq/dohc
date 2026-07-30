@@ -2006,22 +2006,43 @@ export class VersionedLoopbackEngine implements EngineTransport {
    * so on its snapshots. This loopback does not, because nothing reads it here
    * yet — the history row is what moments.list serves.
    */
-  // Mirrors the daemon's `parsed_moment_author` (lib.rs): validate, then rebuild
-  // from the recognized fields only. `agentRunId` is OPTIONAL in the contract
-  // and never nullable, so it is omitted rather than set to null when absent.
-  // An author that fails validation becomes `{ corrupt: true }`, as the daemon
-  // does, rather than being dropped — dropping it would report actor-neutral
-  // history for a write that carried a bad author.
-  private normalizedAuthorValue(raw: JsonValue): JsonValue {
-    const corrupt = { corrupt: true } as unknown as JsonValue;
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return corrupt;
-    const object = raw as JsonObject;
+  // Mirrors the daemon's `validated_author` (lib.rs), which is the WRITE path:
+  // a malformed author is REFUSED with `invalid-metadata` before any mutation.
+  // An earlier draft mirrored `parsed_moment_author` instead and recorded
+  // `{ corrupt: true }` — but that marker exists for READING malformed
+  // historical rows, so recording it here let the fake accept writes production
+  // refuses. Same class as copying the author raw: permissive where the daemon
+  // is strict.
+  //
+  // Returns the normalized author to store. `agentRunId` is OPTIONAL in the
+  // contract and never nullable, so it is omitted rather than nulled.
+  private validatedAuthorValue(params: JsonObject): JsonValue | undefined {
+    const raw = params.author;
+    const legacy = params.authorJson;
+    const refuse = (): never => {
+      throw new Error("invalid-metadata");
+    };
+    if (raw !== undefined && raw !== null && typeof legacy === "string") refuse();
+    let value: JsonValue;
+    if (raw !== undefined && raw !== null) {
+      value = raw;
+    } else if (typeof legacy === "string") {
+      try {
+        value = JSON.parse(legacy) as JsonValue;
+      } catch {
+        return refuse();
+      }
+    } else {
+      return undefined;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) refuse();
+    const object = value as JsonObject;
     const nonEmpty = (key: string): boolean =>
       typeof object[key] === "string" && (object[key] as string).length > 0;
     const runId = object.agentRunId;
     const runOk = runId === undefined || (typeof runId === "string" && runId.length > 0);
     if (object.kind !== "agent" || !nonEmpty("agentId") || !nonEmpty("onBehalfOf") || !runOk) {
-      return corrupt;
+      refuse();
     }
     return {
       kind: "agent",
@@ -2052,15 +2073,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       // client's own `strictObjectValue` on the extra key, so a write that
       // works against the engine broke against the fake.
       ...(() => {
-        // `authorJson` is the compatibility spelling some write paths still
-        // send; both reach the same recorded author on the daemon.
-        const raw =
-          params.author !== undefined && params.author !== null
-            ? params.author
-            : typeof params.authorJson === "string"
-              ? (JSON.parse(params.authorJson) as JsonValue)
-              : undefined;
-        return raw === undefined ? {} : { author: this.normalizedAuthorValue(raw) };
+        // Validated, not merely normalized — see validatedAuthorValue. Throws
+        // `invalid-metadata` for a malformed author, exactly as the daemon
+        // refuses the request before mutating anything.
+        const author = this.validatedAuthorValue(params);
+        return author === undefined ? {} : { author };
       })(),
     };
   }

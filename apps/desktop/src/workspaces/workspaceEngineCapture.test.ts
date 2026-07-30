@@ -1905,7 +1905,13 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     const recorded = new Promise<void>((resolve) => {
       resolveRecorded = resolve;
     });
-    const loopback = new VersionedLoopbackEngine();
+    // LEFT ON THE LEGACY FIXTURE deliberately, write and read together. This
+    // test's claim is DURABLE post-close state — that the drain landed the
+    // moment before shutdown finished, in a form a new process would see — and
+    // it reads through a fresh SQLite connection to prove it. A loopback cannot:
+    // `mockLiveSessions` does not apply `workspace.close` and the fake stays
+    // callable, so a wire read would still pass if shutdown order regressed and
+    // closed the adapter before a late capture.
     const activity = createWorkspaceActivity(
       () => resolveRecorded?.(),
       {
@@ -1914,7 +1920,6 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
           return createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
-            rustEngineSessions: mockLiveSessions(loopback),
           });
         },
       },
@@ -1931,11 +1936,15 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     // drain — the last capture is recorded in the engine when it resolves.
     await activity.stopAll();
 
-    // Read AFTER stopAll, off the wire: the capture is gone, so this can only
-    // pass if the drain really landed the moment before shutdown finished.
-    expect(await liveMomentPaths(loopback, workspace.workspaceId)).toContain(
-      "flushed.md",
-    );
+    // Read through a FRESH SQLite connection, deliberately still the legacy
+    // reader for this one assertion. The point of this test is DURABLE
+    // post-close state: that the drain landed the moment before shutdown
+    // finished, in a form a new process would see. An in-memory loopback cannot
+    // express that — `mockLiveSessions` does not apply `workspace.close` and the
+    // fake stays callable indefinitely, so a wire read here would still pass if
+    // shutdown order regressed and closed the adapter before a late capture.
+    const moments = readEngineMoments(root);
+    expect(moments.some((m) => m.path === "flushed.md")).toBe(true);
   }, 15_000);
 
   it("registerExpectedEngineEvents reaches the open workspace's capture", async () => {

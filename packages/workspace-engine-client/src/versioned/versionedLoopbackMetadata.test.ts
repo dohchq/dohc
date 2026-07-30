@@ -121,26 +121,49 @@ describe("loopback moment metadata", () => {
     });
   });
 
-  it("marks an invalid author corrupt rather than dropping it", async () => {
-    // The daemon returns `{ corrupt: true }` for an author that fails
-    // validation. Dropping it instead would report actor-neutral history for a
-    // write that carried a bad author.
+  it("REFUSES a malformed author instead of recording it", async () => {
+    // The daemon's write path (`validated_author`) rejects with
+    // `invalid-metadata` before any mutation. An earlier draft of this suite
+    // expected `{ corrupt: true }` on the recorded moment, mirroring
+    // `parsed_moment_author` — but that marker is for READING malformed
+    // historical rows, so expecting it here let the fake accept a write
+    // production refuses.
     const engine = new VersionedLoopbackEngine();
     const versionId = await openWorkspace(engine);
-    await send(engine, VERSIONED_METHOD.textWrite, {
-      workspaceId: WORKSPACE,
-      versionId,
-      path: "notes.md",
-      text: "hello",
-      origin: "local-file",
-      author: { kind: "agent", agentId: "", onBehalfOf: "user-1" },
-    });
+    await expect(
+      send(engine, VERSIONED_METHOD.textWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "notes.md",
+        text: "hello",
+        origin: "local-file",
+        author: { kind: "agent", agentId: "", onBehalfOf: "user-1" },
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+
+    // And nothing was recorded — a refusal that still mutated would be worse
+    // than accepting the author.
     const page = await send(engine, VERSIONED_METHOD.momentsList, {
       workspaceId: WORKSPACE,
       versionId,
     });
-    const moments = page.moments as Array<Record<string, unknown>>;
-    expect(moments[0].author).toEqual({ corrupt: true });
+    expect(page.moments as unknown[]).toHaveLength(0);
+  });
+
+  it("REFUSES author and authorJson together, as the daemon does", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await expect(
+      send(engine, VERSIONED_METHOD.textWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "notes.md",
+        text: "hello",
+        origin: "local-file",
+        author: { kind: "agent", agentId: "a", onBehalfOf: "u" },
+        authorJson: JSON.stringify({ kind: "agent", agentId: "a", onBehalfOf: "u" }),
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
   });
 
   it("omits agentRunId when the caller does not supply it", async () => {
