@@ -1,0 +1,109 @@
+#!/usr/bin/env node
+// Shared skills have one canonical body and two native discovery roots.
+//
+//   skills/<name>/SKILL.md          canonical body, tool-neutral
+//   .claude/skills/<name>/SKILL.md  adapter — Claude Code scans this root
+//   .agents/skills/<name>/SKILL.md  adapter — Codex CLI scans this root
+//
+// Every directory under skills/ is a shared skill and gets both adapters. A
+// skill that only one host should see lives directly in that host's root with
+// no counterpart under skills/ (the codex-* delegation skills work that way:
+// Claude runs them, Codex is only the worker they invoke).
+//
+// Adapters carry the canonical frontmatter verbatim, because the description is
+// what makes a host trigger the skill — a stale copy means one tool silently
+// stops offering it. `--check` fails when any adapter drifts or is missing.
+//
+//   node tools/sync-skill-adapters.mjs          rewrite adapters
+//   node tools/sync-skill-adapters.mjs --check  verify only, non-zero on drift
+
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { join, relative, posix } from "node:path";
+
+const CHECK = process.argv.includes("--check");
+const SOURCE = "skills";
+const ROOTS = [
+  { dir: join(".claude", "skills"), host: "Claude Code" },
+  { dir: join(".agents", "skills"), host: "Codex CLI" },
+];
+
+/** Split a SKILL.md into its raw frontmatter block and the rest. */
+function splitFrontmatter(text, file) {
+  if (!text.startsWith("---\n") && !text.startsWith("---\r\n")) {
+    throw new Error(`${file}: no YAML frontmatter (must start with '---')`);
+  }
+  const end = text.indexOf("\n---", 3);
+  if (end === -1) throw new Error(`${file}: unterminated frontmatter`);
+  const close = text.indexOf("\n", end + 1);
+  return { frontmatter: text.slice(0, close === -1 ? text.length : close + 1) };
+}
+
+function adapterFor(frontmatter, canonicalPath, host) {
+  const p = posix.join(...canonicalPath.split(/[\\/]/));
+  return `${frontmatter}
+# Adapter
+
+${host} discovers skills from this directory, so this file exists to be found.
+The skill itself lives in one place:
+
+**[\`${p}\`](${"../".repeat(2)}../${p})**
+
+Read that file and follow it. Do not edit this adapter except to match the
+canonical frontmatter — \`node tools/sync-skill-adapters.mjs\` regenerates it,
+and \`--check\` fails if it drifts.
+`;
+}
+
+const shared = readdirSync(SOURCE, { withFileTypes: true })
+  .filter((e) => e.isDirectory())
+  .map((e) => e.name)
+  .sort();
+
+if (shared.length === 0) {
+  console.error(`no shared skills found under ${SOURCE}/`);
+  process.exit(1);
+}
+
+const problems = [];
+let wrote = 0;
+
+for (const name of shared) {
+  const canonical = join(SOURCE, name, "SKILL.md");
+  if (!existsSync(canonical)) {
+    problems.push(`${SOURCE}/${name}/ has no SKILL.md`);
+    continue;
+  }
+  const { frontmatter } = splitFrontmatter(readFileSync(canonical, "utf8"), canonical);
+
+  for (const { dir, host } of ROOTS) {
+    const target = join(dir, name, "SKILL.md");
+    const want = adapterFor(frontmatter, canonical, host);
+    const have = existsSync(target) ? readFileSync(target, "utf8") : null;
+
+    if (have === want) continue;
+
+    if (CHECK) {
+      problems.push(have === null ? `MISSING  ${target}` : `DRIFTED  ${target}`);
+      continue;
+    }
+    mkdirSync(join(dir, name), { recursive: true });
+    writeFileSync(target, want, "utf8");
+    console.log(`${have === null ? "created" : "updated"}  ${target}`);
+    wrote++;
+  }
+}
+
+if (problems.length > 0) {
+  console.error(`\nskill adapters out of sync (${problems.length}):`);
+  for (const p of problems) console.error(`  ${p}`);
+  console.error(`\nrun: node tools/sync-skill-adapters.mjs`);
+  process.exit(1);
+}
+
+console.log(
+  CHECK
+    ? `skill adapters OK — ${shared.length} shared skill(s) x ${ROOTS.length} roots`
+    : wrote === 0
+      ? `already in sync — ${shared.length} shared skill(s)`
+      : `synced ${wrote} adapter file(s)`,
+);
