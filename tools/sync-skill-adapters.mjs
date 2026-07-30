@@ -100,7 +100,10 @@ function scalarIsEmpty(raw) {
  */
 function frontmatterValue(frontmatter, key) {
   const lines = frontmatter.split(/\r?\n/);
-  const i = lines.findIndex((l) => new RegExp(`^${key}:`).test(l));
+  // YAML needs whitespace after the colon for a mapping entry. `name:foo` is a
+  // plain scalar, not a key, so accepting it generates adapters whose
+  // frontmatter has no name/description at all.
+  const i = lines.findIndex((l) => new RegExp(`^${key}:(\\s|$)`).test(l));
   if (i === -1) return null;
 
   let inline = lines[i].slice(key.length + 1).trim();

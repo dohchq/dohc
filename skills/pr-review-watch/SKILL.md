@@ -173,6 +173,15 @@ CODEX="chatgpt-codex-connector[bot]"
 RABBIT="coderabbitai[bot]"
 CLEAN="didn.t find any major issues|no major issues"
 
+# Associative arrays need Bash 4. Stock macOS /bin/bash is 3.2, where `declare -A`
+# fails and execution CONTINUES with indexed arrays — string keys then collapse to
+# subscript 0, so every PR shares one slot and the watcher silently tracks nothing
+# while printing WATCHER ARMED. Refuse to start instead.
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+  echo "WATCHER CANNOT START — needs Bash 4+ for associative arrays (found ${BASH_VERSION:-unknown})"
+  exit 1
+fi
+
 declare -A high seen watched firstseen qn
 fails=0
 
@@ -374,9 +383,12 @@ unset -f review_status 2>/dev/null
 
 # The guards must PREVENT the source and the call, not just announce a problem.
 # Printing and falling through is how you get a verdict from the wrong function.
+PR=<the PR you are actually checking>   # NOT a literal from this doc: copying a
+                                        # number here checks someone else's PR
+                                        # and reports its verdict as yours
 if [ -s "$R" ] && bash -n "$R"; then
   . "$R"
-  review_status 371
+  review_status "$PR"
 else
   echo "review_status NOT AVAILABLE — extraction from $S was empty or does not parse"
 fi
