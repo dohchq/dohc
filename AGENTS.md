@@ -32,50 +32,26 @@ When planning, do not be afraid to suggest seeminlgy insane solutions. For examp
 
 What we're doing here is fundamentally different so treat it that way. Being that you are an agent, you're prediction model will likely want to steer towards conformity. That's okay and even preferred in most scenarios, but there will be times where we need to think outside the box. Literally (since you're in a box) so think outside of it. Transcend. Transcend. Ascend.
 
-### Justify operational limits
+### Measure limits that reject work
 
-Classify a limit by what happens when code reaches it, not by its name.
-These categories guide the justification. They are not names to copy into
-code; use the existing term on that surface.
+Before adding a limit that rejects otherwise valid work, measure representative
+healthy work. Record the evidence in a focused test, benchmark, or decision
+document. Set the limit beyond the measured healthy range.
 
-A defect tripwire rejects work outside supported healthy behavior. Before
-adding one, measure a representative workload. Set the tripwire beyond the
-measured healthy behavior with a recorded safety margin. Record the measurement
-and margin in a focused test, benchmark, or decision document that names the
-limit. If healthy behavior reaches the tripwire, measure again. Then revisit
-the limit.
-
-A backpressure or load-shedding limit rejects work temporarily when a finite
-resource is saturated. Set it from measured capacity and latency targets. Give
-callers an explicit retry or degradation path.
-
-A routing threshold does not reject work. It selects another supported path,
-and healthy work can cross it.
-
-Protocol versions and fixed schema values are contract values, not workload
-limits. Justify them with a compatibility or interoperability requirement.
-If none of these categories fits, stop and make the contract explicit before
-changing the limit.
+This rule does not cover routing thresholds, backpressure, protocol versions,
+or fixed schema values. Justify those from their actual contract. If healthy
+work reaches a rejection limit, measure again and revisit it.
 
 ### Show agents the limits they hit
 
-This section governs developer- and agent-facing failures, including build,
-check, daemon, and API errors. For any error a user reads,
-[`docs/brand/copy.md`](docs/brand/copy.md) controls the visible wording. Keep
-the constraint, limit, unit, and usage in the structured error fields.
+Developers will not always read the code. Their agents will read the errors.
+A developer- or agent-facing rejection must name the constraint, configured
+limit, and unit. When available, include the requested or observed usage.
 
-Developers will not always read the code. Their agents will read the errors. An
-agent can fix `richdoc node count: limit 128 nodes, requested 129 nodes`; it
-cannot fix a blank window.
-
-A defect-tripwire error must name the constraint, its configured limit, and the
-unit. When available, include the requested or observed usage in the same unit.
-A backpressure error must name the saturated resource. It must tell the caller
-how to retry or degrade.
-
-Report the error during a build or check when possible. Otherwise, use the
-existing structured error type for that surface. Add stable fields when a
-caller needs them to act. Do not catch the error silently.
+A backpressure error must name the saturated resource and tell the caller how
+to retry or degrade. Report failures during a build or check when possible.
+Otherwise, use the surface's existing structured error. For user-facing copy,
+follow [`docs/brand/copy.md`](docs/brand/copy.md).
 
 ### Let their agents shape the workspace they need
 
@@ -91,16 +67,15 @@ Should dohc ship a hardcoded CRM for every possible team? Probably not. A user's
 
 We should avoid being clever and doing things because it feels smart. We want everything we build to be so obvious it feels kind of stupid.
 
-Understand the problem before building. When simple and obvious differ, prefer
-obvious. Among equally obvious designs, choose the simplest one that meets the
-stated behavior and performance requirements. Record material tradeoffs in the
-PR or a decision document. Do not hide them in patches or follow-up work.
+Understand the problem before building. Prefer the most obvious design that
+meets the stated behavior and performance requirements. Among equally obvious
+designs, choose the simplest. Record material tradeoffs in the PR or a decision
+document.
 
 When one of us prompts you, never hesitate to push back and suggest ways we
 could make things more obvious. An obvious solution can have more parts. Obvious
-solutions are the defaults that agents and the next reader expect. The next
-reader decides whether a design is obvious. Do not declare your own design
-obvious. Ask another reader when uncertain.
+solutions are the defaults that agents and the next reader expect. Ask another
+reader when uncertain.
 
 ### Don't be afraid to lie (to agents) if it makes working easier
 
@@ -187,32 +162,18 @@ gate (`.github/workflows/pr-checks.yml`) is dispatch-only while we are
 pre-launch; it will be re-enabled when it makes more sense (approaching
 launch / first users). Do not "fix" the missing checks.
 
-Before merging, select and run the required local gates for the exact PR head.
-For a PR, use the `rust` and `js` filters in the `changes` job of
-`.github/workflows/pr-checks.yml`. This policy replaces the workflow header's
-older unconditional local-gate reminder. A manual `workflow_dispatch` still
-runs all gates by design.
+Before merging, use the `rust` and `js` filters in the workflow's `changes` job
+to select local gates for the exact PR head. This is the canonical local policy.
+A manual `workflow_dispatch` still runs every gate.
 
-- If `rust` matches, run the canonical Rust gate
-  (`node tools/rust-engine-program/run-rust-checks.mjs 2>&1 | tee pr-engine-gate.log`).
-  Then run `node tools/rust-engine-program/require-ci-pass-verdict.mjs pr-engine-gate.log`.
-  The verifier is the verdict. Do not trust the runner's process exit code.
-- If `js` matches, complete all of these prerequisites:
-  - Start the repository's Postgres 17 service with
-    `docker compose -f docker-compose.dev.yml up -d postgres`.
-  - Set `DOHC_REQUIRE_POSTGRES=1` and `DOHC_REQUIRE_ENGINE_E2E=1`.
-  - Run
-    `cargo build -p dohc-workspace-engine --bin dohc-workspace-engine`.
-  - Set `DOHC_TEST_RUST_ENGINE_BIN` to the absolute path of the built daemon.
-    Include the `.exe` suffix on Windows.
-  - Run `pnpm run typecheck` and `pnpm run test`.
-- Run both when both filters match. Changes under `crates/**` match both because
-  the desktop end-to-end tests drive the daemon.
-- Prose-only changes can skip code gates only when neither filter matches. Some
-  documents are test inputs and therefore match `js`.
-- If a test or build step reads a changed file, run its gate even when the
-  filter does not list that file.
-- If it is unclear whether a file is a test or build input, run both gates.
+- For each matching filter, reproduce its workflow job locally. Include its
+  required services, environment, prebuilds, and verdict checks.
+- Run both jobs when both filters match.
+- If a test or build step reads a changed file, run that job even when its
+  filter does not list the file.
+- If no filter matches and no test or build step reads the changed file, no
+  code gate applies.
+- If the impact is unclear, run both jobs.
 - In the PR, state which gates ran or why no code gate applies.
 
 When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. These are setup (coderabbit and codex) to review every PR reliably.
