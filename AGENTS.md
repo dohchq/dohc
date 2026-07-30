@@ -190,6 +190,12 @@ work, so it is not coverage.
 Those mechanics used to be copied into this file. They drifted from the skill,
 which is the thing that gets maintained, so they live there now.
 
+One of them is not review-specific and stays here, because it constrains every
+`gh api` call in this repo: **`gh api --jq` does not accept `--arg`.** That is a
+standalone-`jq` flag and `jq` is not installed here, so it exits 1 printing
+nothing — which under `2>/dev/null` reads exactly like "no matches". Embed values
+in the program string instead.
+
 ## How we write
 
 dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified

@@ -364,8 +364,14 @@ it the same way the watcher is extracted, then call it:
 
 ```
 S="$(git rev-parse --show-toplevel)/skills/pr-review-watch/SKILL.md"
-awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==2{print}' "$S" > /tmp/review_status.sh
-. /tmp/review_status.sh
+R=$(mktemp -t review_status.XXXXXX)   # not a fixed name: concurrent sessions
+awk '/^```bash$/{f=1;n++;next} /^```$/{f=0} f&&n==2{print}' "$S" > "$R"
+# Same guards as the watcher launcher. Sourcing an empty file defines no
+# function, and the caller then gets "command not found" instead of a verdict —
+# or worse, a stale review_status from an earlier extraction still in scope.
+[ -s "$R" ] || { echo "review_status NOT AVAILABLE — empty extraction from $S"; }
+bash -n "$R" || { echo "review_status NOT AVAILABLE — extracted script does not parse"; }
+. "$R"
 review_status 371
 ```
 
