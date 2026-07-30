@@ -3,12 +3,19 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Two DIFFERENT clients over a REAL relay child process (the SYNC_RELAY_TEST_AUTH
 // bearer seam), proving the ephemeral awareness transport end to end: client A
 // sees client B come online + type, and B leaving clears B for A — all with no
 // durable log write.
+
+// The teardown can need the full 5s SIGTERM grace per child AND up to 5.5s of
+// linear rm() backoff (100+200+…+1000) once SQLite handles are still busy — over
+// vitest's stock 10s hook budget before filesystem overhead. Leaving it at the
+// default would fail teardown with a generic hook timeout in exactly the
+// contention the retries exist for: a deadline outside its container again (#372).
+vi.setConfig({ hookTimeout: 30_000 });
 
 let roots: string[] = [];
 let children: ChildProcess[] = [];
@@ -33,7 +40,14 @@ afterEach(async () => {
         }),
     ),
   );
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+  // The relay child owning relay.sqlite was just killed and Windows releases its
+  // handles asynchronously — the same EBUSY shape fixed in windowsSpawn.test.ts,
+  // one directory over. `force` swallows only ENOENT.
+  await Promise.all(
+    roots.map((root) =>
+      rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }),
+    ),
+  );
 });
 
 function packageRoot(): string {
@@ -59,7 +73,12 @@ async function spawnRelay(dbPath: string): Promise<string> {
     let stderr = "";
     const timeout = setTimeout(
       () => reject(new Error(`relay did not report a port\n${stdout}\n${stderr}`)),
-      15_000,
+      // 45s, not 15s. This spawns `node --import tsx/esm src/main.ts`, which
+      // COMPILES on startup — under load that measured 12-15s. THIS is the
+      // deadline that failed the #372 presence flakes; not any waiter budget and
+      // not the `it` budget, neither of which the failing test even reached. The
+      // enclosing budgets are 90s, which contains this.
+      45_000,
     );
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
@@ -290,7 +309,7 @@ describe("two-client presence over a real relay child", () => {
     });
     const afterLeave = await poll(baseUrl, "owner", ws, "general", 0, 0);
     expect(afterLeave.peers.map((p) => p.clientId)).toEqual(["A"]);
-  }, 30_000);
+  }, 90_000);
 
   it("converges an OWNER (workspace scope) and a PARTICIPANT (share scope) on ONE shared-channel presence scope via the wireId topic", async () => {
     const relayRoot = await tempDir();
@@ -341,7 +360,7 @@ describe("two-client presence over a real relay child", () => {
     // the owner + the member.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
     expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
-  }, 30_000);
+  }, 90_000);
 
   it("converges owner + participant on a THREAD topic bound to the granted channel, and isolates other/unknown threads", async () => {
     const relayRoot = await tempDir();
@@ -418,7 +437,7 @@ describe("two-client presence over a real relay child", () => {
     // The rejected thread probes left the shared thread scope untouched.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
     expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
-  }, 30_000);
+  }, 90_000);
 
   it("a non-owner cannot read another workspace's presence (isolation)", async () => {
     const relayRoot = await tempDir();
@@ -429,7 +448,7 @@ describe("two-client presence over a real relay child", () => {
       headers: bearer("intruder"),
     });
     expect(r.status).toBe(404);
-  }, 30_000);
+  }, 90_000);
 
   it("a client DISCONNECT releases its parked long-poll waiter promptly", async () => {
     const relayRoot = await tempDir();
@@ -443,22 +462,43 @@ describe("two-client presence over a real relay child", () => {
     // node adapter must propagate the disconnect into the fetch Request's
     // AbortSignal so the hub releases the parked waiter — long before the
     // 20s hold would have expired.
+    const HOLD_MS = 20_000;
     const controller = new AbortController();
+    const parkedAt = Date.now();
     const parked = fetch(
-      `${baseUrl}/sync/${ws}/presence?topic=general&since=${current.version}&hold=20000`,
+      `${baseUrl}/sync/${ws}/presence?topic=general&since=${current.version}&hold=${HOLD_MS}`,
       { method: "GET", headers: bearer("owner"), signal: controller.signal },
     ).catch(() => undefined);
     await waitForWaiters(baseUrl, 1);
     controller.abort(); // client vanishes mid-park
-    await parked;
+    // Observe the release BEFORE awaiting `parked`: awaiting first absorbs the whole
+    // hold, after which zero waiters is guaranteed however the release happened.
     await waitForWaiters(baseUrl, 0);
-  }, 30_000);
+    // Then attribute it to the abort, measured from the PARK. A budget merely
+    // "below the hold" is NOT enough — it starts at the abort, so once the first
+    // wait costs >5s the hold expires inside it and a broken abort goes green
+    // (verified: deleting the abort and sleeping 6s passed in 22.3s). Elapsed from
+    // the park is sound whatever the timings do.
+    expect(Date.now() - parkedAt).toBeLessThan(HOLD_MS);
+    await parked;
+  }, 90_000);
 });
 
 // Poll the test-seam health endpoint until the hub reports `expected` parked
 // waiters (bounded; fails the test with a clear message on timeout).
-async function waitForWaiters(baseUrl: string, expected: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
+async function waitForWaiters(
+  baseUrl: string,
+  expected: number,
+  budgetMs = 25_000,
+): Promise<void> {
+  // 10s lost the race under contention — this polls a real relay child over HTTP,
+  // so it is wall-clock bound (#372). 25s by default, and the callers raise their
+  // own `it` budget to contain a slow spawn plus two of these waits; a deadline
+  // longer than its test budget would be killed before its diagnostic fires.
+  //
+  // Callers proving something happened BEFORE a server-side timeout must pass a
+  // budget shorter than that timeout — see the disconnect test.
+  const deadline = Date.now() + budgetMs;
   let last: unknown;
   while (Date.now() < deadline) {
     const health = (await (await fetch(`${baseUrl}/health`)).json()) as {

@@ -2,13 +2,36 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { killChildTreeWin32, resolveSpawnCommand } from "./windowsSpawn";
+
+// Teardown retries rmdir against asynchronously-released Windows handles, so the
+// hook needs room for the backoff (#372).
+//
+// testTimeout matters too, and hookTimeout alone did NOT cover it: the win32 tests
+// carry their own 10s pid-file deadline and 5s death poll, both sitting inside a 5s
+// test budget — so `expect(grandchildPid).toBeGreaterThan(0)` could never report and
+// you got vitest's generic timeout instead of the real diagnostic. That is exactly
+// the "a deadline longer than its container" mistake this file's sibling fix in
+// presence.integration.test.ts was about.
+vi.setConfig({ hookTimeout: 20_000, testTimeout: 20_000 });
 
 const tempRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  // These tests kill real process trees, and Windows releases the dead
+  // processes' handles asynchronously — so the rmdir can land while a handle on
+  // the temp tree is still open and fail with EBUSY. `force` only swallows
+  // ENOENT, not EBUSY, so teardown failed the test even though the kill it was
+  // asserting had worked (#372). maxRetries is fs.rm's own remedy for exactly
+  // this: it retries EBUSY/EPERM/ENOTEMPTY with a linear backoff.
+  await Promise.all(
+    tempRoots
+      .splice(0)
+      .map((root) =>
+        rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }),
+      ),
+  );
 });
 
 async function tempDir(): Promise<string> {
