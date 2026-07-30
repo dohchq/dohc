@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -56,7 +56,9 @@ for (const path of trackedFiles) {
     name.startsWith('.env') && name.endsWith('.example')
   if (!textExtensions.has(extension) && !isEnvironmentExample) continue
 
-  const body = readFileSync(join(root, path))
+  const file = join(root, path)
+  if (!existsSync(file)) continue
+  const body = readFileSync(file)
   if (body.includes(0)) {
     violations.push(`${path}: contains a NUL byte`)
     continue

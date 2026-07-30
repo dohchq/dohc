@@ -28,7 +28,8 @@ pnpm migrate
 ```
 
 Pre-cleanup data remains in the old `dohc_v2_postgres` named volume. To recover
-it, run the `docker-compose.dev.yml` from `307bac13^` at the repository root.
+it, open the repository revision before this cleanup in another worktree and
+run `pnpm dev:postgres` there.
 
 In both service terminals, set `NODE_ENV=development` and the same
 `BETTER_AUTH_SECRET` of at least 32 characters. Then start the workspace API in
