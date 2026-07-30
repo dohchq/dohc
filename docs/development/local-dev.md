@@ -29,7 +29,8 @@ pnpm migrate
 
 Pre-cleanup data remains in the old `dohc_v2_postgres` named volume. To recover
 it, open the repository revision before this cleanup in another worktree and
-run `pnpm dev:postgres` there.
+run `pnpm dev:postgres` there with `COMPOSE_PROJECT_NAME` set to the original
+checkout directory name.
 
 In both service terminals, set `NODE_ENV=development` and the same
 `BETTER_AUTH_SECRET` of at least 32 characters. Then start the workspace API in
