@@ -192,24 +192,28 @@ function resolveSpecifiers(
 // `{ eval: true }` in a Worker's options object literal.
 function workerRunsEval(
   node: ts.NewExpression,
-  optionObjects: ReadonlyMap<string, ts.ObjectLiteralExpression>,
+  optionObjects: ReadonlyMap<string, readonly ts.ObjectLiteralExpression[]>,
 ): boolean {
   const argument = node.arguments?.[1];
   if (argument === undefined) return false;
   // Either inline, or a const holding the options object — `const opts = { eval:
-  // true }; new Worker(SRC, opts)` runs source just the same.
-  const options = ts.isObjectLiteralExpression(argument)
-    ? argument
+  // true }; new Worker(SRC, opts)` runs source just the same. EVERY candidate for
+  // that name is considered, for the same reason specifiers keep every candidate:
+  // a later `const opts = { eval: false }` must not hide an earlier evaluated
+  // body.
+  const candidates = ts.isObjectLiteralExpression(argument)
+    ? [argument]
     : ts.isIdentifier(argument)
-      ? optionObjects.get(argument.text)
-      : undefined;
-  if (options === undefined) return false;
-  return options.properties.some(
-    (property) =>
-      ts.isPropertyAssignment(property) &&
-      (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) &&
-      property.name.text === "eval" &&
-      property.initializer.kind === ts.SyntaxKind.TrueKeyword,
+      ? (optionObjects.get(argument.text) ?? [])
+      : [];
+  return candidates.some((options) =>
+    options.properties.some(
+      (property) =>
+        ts.isPropertyAssignment(property) &&
+        (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) &&
+        property.name.text === "eval" &&
+        property.initializer.kind === ts.SyntaxKind.TrueKeyword,
+    ),
   );
 }
 
@@ -239,7 +243,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
   const stringConsts = new Map<string, readonly string[]>();
   // Object literals bound to a name, so a Worker's options can be reached
   // through a const rather than only inline.
-  const optionObjects = new Map<string, ts.ObjectLiteralExpression>();
+  const optionObjects = new Map<string, ts.ObjectLiteralExpression[]>();
   const addConst = (name: string, values: readonly string[]): void => {
     if (values.length === 0) return;
     stringConsts.set(name, [...(stringConsts.get(name) ?? []), ...values]);
@@ -261,7 +265,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       const init = node.initializer;
       if (init !== undefined) addConst(node.name.text, resolveSpecifiers(init, stringConsts));
       if (init !== undefined && ts.isObjectLiteralExpression(init)) {
-        optionObjects.set(node.name.text, init);
+        optionObjects.set(node.name.text, [...(optionObjects.get(node.name.text) ?? []), init]);
       }
     }
     ts.forEachChild(node, collectNames);
@@ -395,8 +399,13 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     // healthy range to pick from. These three prove each root was walked, and
     // they fail loudly if one is ever renamed — which is the correct outcome,
     // since a renamed sentinel means this guard is no longer checking that root.
+    // Filtered through isProductionSource, not the raw walk. With the raw set, a
+    // regression making isProductionSource reject everything would empty
+    // `importers` while the sentinels stayed present — and once ALLOWED reaches
+    // zero, BOTH assertions would pass vacuously. This asserts the whole
+    // selection pipeline, which is the part that has to keep working.
     const scanned = new Set(
-      files.map((f) => relative(REPO_ROOT, f).split(sep).join("/")),
+      files.map((f) => relative(REPO_ROOT, f).split(sep).join("/")).filter(isProductionSource),
     );
     for (const sentinel of [
       "apps/desktop/src/main.ts",
@@ -656,6 +665,24 @@ const m = require(name);`;
       "export const w = new Worker(SRC, opts);",
     ].join("\n");
     expect(hasRuntimeLegacyImport(namedOptions)).toBe(true);
+
+    // A LATER `const opts = { eval: false }` must not hide an earlier evaluated
+    // body, the same conservative bias specifiers use for shadowed names.
+    const shadowedOptions = [
+      "const SRC = `",
+      `const e = require("${L}");`,
+      "`;",
+      "export function a() { const opts = { eval: true }; return new Worker(SRC, opts); }",
+      'export function b() { const opts = { eval: false }; return new Worker("./x.js", opts); }',
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(shadowedOptions)).toBe(true);
+
+    // eval: false alone is a path, not source.
+    const noEval = [
+      `const SRC = "./x.js";`,
+      "export function b() { const opts = { eval: false }; return new Worker(SRC, opts); }",
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(noEval)).toBe(false);
 
     // An eval worker with a clean body stays clean.
     const cleanWorker = [
