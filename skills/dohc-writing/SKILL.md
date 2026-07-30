@@ -49,6 +49,10 @@ writing: **will a reader execute this text, or think about it?**
 Error messages, empty states, button labels, procedures, runbooks, skills,
 agent instructions, product invariants, migration steps.
 
+**Writing UI copy? Read [`docs/brand/copy.md`](../../docs/brand/copy.md) too.**
+It holds the concrete rules for labels, errors, empty states, toasts, and
+destructive actions, and it is binding for those surfaces.
+
 A reader acts on this text and cannot ask a follow-up question. Ambiguity here
 becomes a real failure. These rules hold unless obeying one would make the text
 wrong or unclear — see the precedence rule under Orwell's six:

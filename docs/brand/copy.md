@@ -38,7 +38,9 @@ new became usable, it is a Change.
   makes that obvious. `Saved` and `Moved 4 files to Archived` are correct;
   naming dohc there adds a word and no information. Never use the passive to
   hide a *failing* actor: write `dohc could not reach the relay`, not
-  `the relay could not be reached`.
+  `the relay could not be reached`. Attribution labels are the other exemption:
+  `Edited by agent` is a label naming who acted, not a sentence hiding an
+  actor.
 - **Name the thing the way the UI already names it.** Read the surrounding
   surface and match it. Never invent a synonym, and never carry an internal
   name into user-facing text — check what the code calls it *and* what the
@@ -192,7 +194,7 @@ the selection can mix files and folders, so `files` would be false.
 2. Does it owe the user a **Next**? Does it give one?
 3. Every noun the same as the surrounding UI uses, and none of them internal?
 4. Active voice with a named actor?
-5. Under 20 words, one instruction?
+5. 20 words or fewer, one instruction?
 6. Any word that promises rather than states? Cut it.
 7. Read it aloud during a bad moment — a failed sync, a lost file. Does it
    help, or does it perform?

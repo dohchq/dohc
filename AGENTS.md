@@ -150,7 +150,9 @@ dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified
 Technical English, applied by register. The rules live in
 [`skills/dohc-writing/SKILL.md`](skills/dohc-writing/SKILL.md); UI copy has its
 own in [`docs/brand/copy.md`](docs/brand/copy.md). Read the skill before
-writing docs, specs, plans, PR bodies, UI copy, or another skill.
+writing docs, specs, plans, PR bodies, or another skill. For UI copy — any
+label, error, empty state, or toast — read the copy guide as well; the skill
+alone does not carry those rules.
 
 The one idea worth carrying even without it: **the register decides the
 rules.** Text a reader *executes* (an error, a button, a procedure, an agent
