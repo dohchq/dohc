@@ -3,6 +3,9 @@
 Self-hosting runs the optional sync stack. The desktop app remains local-first
 and works without it.
 
+This pre-launch stack is for development and evaluation. It is not a supported
+production deployment.
+
 ## Services
 
 - `postgres` stores Better Auth data.

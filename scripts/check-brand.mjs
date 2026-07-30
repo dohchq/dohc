@@ -22,12 +22,18 @@ const skippedFiles = new Set(['Cargo.lock', 'pnpm-lock.yaml'])
 const textExtensions = new Set([
   '.css',
   '.html',
+  '.cjs',
+  '.cts',
   '.js',
   '.json',
   '.jsx',
   '.md',
   '.mjs',
+  '.mts',
+  '.ps1',
   '.rs',
+  '.sh',
+  '.sql',
   '.svg',
   '.toml',
   '.ts',
@@ -82,7 +88,11 @@ function* walk(directory) {
       yield* walk(path)
       continue
     }
-    if (stat.isFile() && textExtensions.has(extname(name).toLowerCase())) {
+    const extension = extname(name).toLowerCase()
+    if (
+      stat.isFile() &&
+      (textExtensions.has(extension) || name.startsWith('.env'))
+    ) {
       yield path
     }
   }

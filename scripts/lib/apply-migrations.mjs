@@ -2,13 +2,9 @@
 // (scripts/migrate-postgres.mjs), the dev-data reset
 // (scripts/reset-postgres-dev-data.mjs), and the self-host compose init
 // container. It applies EVERY `*.sql` under
-// packages/workspace-postgres/src/db/migrations in filename order — notably
-// 0001_better_auth.sql, the Better Auth `user`/`session`/`deviceCode` schema
-// that the workspace-api auth server and the sync-relay both read. Before this
-// runner existed the reset script applied only 0001, so a fresh self-host /
-// dev Postgres could boot the auth stack WITHOUT the schema its auth paths
-// query. Each migration is safe to run once, and every applied id is recorded
-// in `dohc_migrations`, so re-running is a no-op.
+// packages/workspace-postgres/src/db/migrations in filename order. Each
+// migration is safe to run once, and every applied id is recorded in
+// `dohc_migrations`, so re-running is a no-op.
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
