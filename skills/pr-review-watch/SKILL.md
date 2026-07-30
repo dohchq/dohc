@@ -1,6 +1,6 @@
 ---
 name: pr-review-watch
-description: Watch open PRs for bot review rounds (codex, CodeRabbit) without going silent, and decide whether a PR's CURRENT head has actually been reviewed before merging. Use when you open or push to a PR, when a review seems slow or a trigger may not have taken, and always immediately before merging.
+description: Watch ready-for-review PRs for bot review rounds (codex, CodeRabbit) without going silent, and decide whether a ready PR's CURRENT head has actually been reviewed before merging. Use when a PR becomes ready for review, when you push to a ready PR, when a review seems slow or a trigger may not have taken, and always immediately before merging. Never request reviews or start this watcher for a draft PR.
 ---
 
 # PR review: never silent, and never "reviewed" by assumption
@@ -8,6 +8,10 @@ description: Watch open PRs for bot review rounds (codex, CodeRabbit) without go
 CI is dispatch-only in this repo (see AGENTS.md), so bot review is a real gate.
 A watcher that misses a round means merging unreviewed code — and a watcher that
 *mislabels* a round is worse, because it manufactures false confidence.
+
+Draft PRs are work in progress. Do not request reviews, start the watcher, or
+run local Claude review while a PR is a draft. Start this workflow when the PR
+becomes ready for review. If a ready PR returns to draft, stop its watcher.
 
 ## Two jobs, deliberately separated
 
@@ -244,7 +248,8 @@ qfail() {
 }
 
 while true; do
-  if ! prs=$(gh pr list --repo "$REPO" --state open --limit 200 --json number --jq '.[].number' 2>/dev/null); then
+  if ! prs=$(gh pr list --repo "$REPO" --state open --limit 200 \
+            --json number,isDraft --jq '.[]|select(.isDraft==false)|.number' 2>/dev/null); then
     fails=$((fails+1))
     # Re-announce every third failure. Alerting only at exactly 3 means a
     # persistent outage produces one line and then indefinite silence, while
@@ -256,7 +261,12 @@ while true; do
 
   for n in "${!watched[@]}"; do
     printf '%s\n' "$prs" | grep -qx "$n" && continue
-    st=$(gh pr view "$n" --repo "$REPO" --json state --jq .state 2>/dev/null) || st="UNKNOWN"
+    if meta=$(gh pr view "$n" --repo "$REPO" --json state,isDraft \
+               --jq 'if .isDraft then "DRAFT" else .state end' 2>/dev/null); then
+      st="$meta"
+    else
+      st="UNKNOWN"
+    fi
     echo "PR #$n is $st — stopped watching"
     forget_pr "$n"
   done
@@ -430,7 +440,7 @@ review_status() {
   local -a reviewers
   local CLEAN="didn.t find any major issues|no major issues"
   local DEGRADED="Review limit|rate limit|Review failed"
-  local head short rows lines rid st cnt blen who body cbody envt newest now crs verdict=OK
+  local head short rows lines rid st cnt blen who body cbody envt newest now crs draft verdict=OK
   local blocked=0 findings=0 unknown=0 unreviewed=0 pending=0
 
   [ -n "$n" ] || { echo "review_status: no PR number given"; return 2; }
@@ -440,6 +450,12 @@ review_status() {
     coderabbit) reviewers=("$RABBIT") ;;
     *) echo "review_status: reviewer set must be both, codex, or coderabbit"; return 2 ;;
   esac
+  draft=$(gh pr view "$n" --repo "$REPO" --json isDraft --jq .isDraft) \
+    || { echo "PR #$n — draft-state query FAILED, verdict UNKNOWN"; return 2; }
+  if [ "$draft" = "true" ]; then
+    echo "PR #$n is DRAFT — review coverage is not required yet"
+    return 3
+  fi
   head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid) \
     || { echo "PR #$n — head query FAILED, verdict UNKNOWN"; return 2; }
   # An empty head would turn every filter below into contains(""), matching all

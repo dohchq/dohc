@@ -223,6 +223,9 @@ the current head, source, and stated behavior.
 
 ### Select reviewers
 
+These requirements apply only after a PR is ready for review. Do not request or
+run reviews while a PR is a draft.
+
 - Prose-only, low-risk changes need one exact-head automated review. Use
   `review_status <PR> codex`.
 - Routine code changes need exact-head reviews from Codex and CodeRabbit. Use
@@ -232,8 +235,9 @@ the current head, source, and stated behavior.
 - If a required reviewer cannot run, replace it with another independent
   reviewer. Record the replacement and reason in the PR.
 
-Run Claude after the PR exists. Use fable-5 and fall back to opus-5. Add a PR
-comment that names the reviewed commit and summarizes the result.
+Run Claude after the PR is ready for review. Use fable-5 and fall back to
+opus-5. Add a PR comment that names the reviewed commit and summarizes the
+result.
 
 Batch verified fixes before requesting a re-review. After the first re-review,
 request another only for a new verified blocker or an unresolved high-risk
@@ -244,7 +248,9 @@ improvements, or out-of-scope suggestions.
 
 Use the
 [`pr-review-watch` skill](skills/pr-review-watch/SKILL.md) whenever a PR
-opens or its head changes. Do not build another review poller.
+becomes ready for review or the head of a ready PR changes. Do not start the
+watcher for a draft PR. If a PR returns to draft, pause its watcher. Do not
+build another review poller.
 
 A review applies to a commit, not a PR. Before merging, confirm that every
 required reviewer covered the current head.
