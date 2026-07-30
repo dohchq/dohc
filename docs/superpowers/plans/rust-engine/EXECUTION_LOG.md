@@ -3328,10 +3328,18 @@ History."
 And that claim is TRUE, which is what matters against the durability rule. The daemon's
 startup reconcile rehydrates its baseline from **recorded history** rather than a scan
 cache, so any gap — app closed, daemon down, capture failing — is backfilled on the next
-successful open, and deletions during the gap emit a Retire instead of leaving a stale head
-readable. What is permanently lost is **granularity, not content**: N saves during a gap
-collapse into one "Reconciled offline edits" moment. A file created and deleted entirely
+successful open. What is permanently lost is **granularity, not content**: N saves during a
+gap collapse into one "Reconciled offline edits" moment. A file created and deleted entirely
 inside the gap leaves no trace.
+
+One qualification I first left out, and codex caught it reviewing this entry: the
+deletion half of that depends on the rehydration SUCCEEDING. `capture_manifest_seed`
+failures degrade to `None` via `.ok().flatten()`, and the code's own comment says what that
+costs — "against an EMPTY baseline a file deleted while the daemon was down could never emit
+a Retire and its stale head would stay readable forever." The degradation is deliberate and
+biased safely (over-capture, never data loss) rather than blocking start, but "deletions
+during the gap emit a Retire" is only true when the seed works, and an unqualified
+durability claim is the one kind this log must not carry.
 
 Filed #412 for two real supervision defects found while establishing this: a daemon
 crashing every 31 seconds restarts forever without reaching `terminal`, so the "engine
@@ -3419,8 +3427,11 @@ starved. Both are stronger now than before the migration.
 
 Production runtime importers: **two**, both on the `useRustEngine === false` branch — the
 store factories in `workspaceEngineCapture.ts`, and the legacy provider session that branch
-selects. Eleven further production files name the package but import only types, which #402
-now confirms mechanically rather than by my reading.
+selects. Eleven further production files name the package but import only types. Both numbers are
+still a MANUAL inventory at the time of writing — #402 is the guard that would make them
+mechanical and it has not landed, so nothing enforces this boundary yet. codex caught me
+writing "#402 now confirms" while it was still open, which would have left a reader believing
+a dependency boundary was enforced when it was not.
 
 The branch itself is held up by roughly 100 test call sites across four remaining files that
 construct capture with neither sessions nor a store. Three fixture-only tests stay legacy
