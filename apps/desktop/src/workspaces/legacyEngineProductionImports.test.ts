@@ -157,6 +157,21 @@ function isErasedImport(node: ts.ImportDeclaration): boolean {
   return false;
 }
 
+// Strips the wrappers TypeScript erases: (x), x as T, <T>x, x satisfies T, x!.
+// None changes the runtime value, so none may change what this guard sees.
+function unwrapExpression(node: ts.Expression): ts.Expression {
+  if (
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) ||
+    ts.isSatisfiesExpression(node) ||
+    ts.isNonNullExpression(node)
+  ) {
+    return unwrapExpression(node.expression);
+  }
+  return node;
+}
+
 // Every specifier this expression could statically be: a literal, the values a
 // const of that name is bound to anywhere in the file, or literals joined by
 // `+`. Anything computed at runtime is beyond a static guard and is not
@@ -176,22 +191,24 @@ function resolveSpecifiers(
 ): readonly string[] {
   if (ts.isStringLiteralLike(node)) return [node.text];
   if (ts.isIdentifier(node)) return stringConsts.get(node.text) ?? [];
+  // A template whose every substitution resolves statically — `${SCOPE}/pkg` is
+  // the same value as the concatenation, so it must not read differently.
+  if (ts.isTemplateExpression(node)) {
+    let parts: string[] = [node.head.text];
+    for (const span of node.templateSpans) {
+      const values = resolveSpecifiers(span.expression, stringConsts);
+      if (values.length === 0) return [];
+      parts = parts.flatMap((prefix) => values.map((v) => prefix + v + span.literal.text));
+    }
+    return parts;
+  }
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
     const left = resolveSpecifiers(node.left, stringConsts);
     const right = resolveSpecifiers(node.right, stringConsts);
     return left.flatMap((l) => right.map((r) => l + r));
   }
-  // Wrappers that TypeScript erases: (x), x as string, <string>x, x satisfies T,
-  // x!. None changes the runtime value, so none may hide the specifier.
-  if (
-    ts.isParenthesizedExpression(node) ||
-    ts.isAsExpression(node) ||
-    ts.isTypeAssertionExpression(node) ||
-    ts.isSatisfiesExpression(node) ||
-    ts.isNonNullExpression(node)
-  ) {
-    return resolveSpecifiers(node.expression, stringConsts);
-  }
+  const unwrapped = unwrapExpression(node);
+  if (unwrapped !== node) return resolveSpecifiers(unwrapped, stringConsts);
   return [];
 }
 
@@ -209,8 +226,9 @@ function workerRunsEval(
   node: ts.NewExpression,
   optionObjects: ReadonlyMap<string, readonly ts.ObjectLiteralExpression[]>,
 ): boolean {
-  const argument = node.arguments?.[1];
-  if (argument === undefined) return false;
+  const rawArgument = node.arguments?.[1];
+  if (rawArgument === undefined) return false;
+  const argument = unwrapExpression(rawArgument);
   // Either inline, or a const holding the options object — `const opts = { eval:
   // true }; new Worker(SRC, opts)` runs source just the same. EVERY candidate for
   // that name is considered, for the same reason specifiers keep every candidate:
@@ -283,8 +301,12 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const init = node.initializer;
       if (init !== undefined) addConst(node.name.text, resolveSpecifiers(init, stringConsts));
-      if (init !== undefined && ts.isObjectLiteralExpression(init)) {
-        optionObjects.set(node.name.text, [...(optionObjects.get(node.name.text) ?? []), init]);
+      const unwrapped = init === undefined ? undefined : unwrapExpression(init);
+      if (unwrapped !== undefined && ts.isObjectLiteralExpression(unwrapped)) {
+        optionObjects.set(node.name.text, [
+          ...(optionObjects.get(node.name.text) ?? []),
+          unwrapped,
+        ]);
       }
     }
     ts.forEachChild(node, collectNames);
@@ -583,6 +605,16 @@ const name = "${L}";`),
     const scoped = `const scope = "@dohc/";
 const m = require(scope + "workspace-engine");`;
     expect(hasRuntimeLegacyImport(scoped)).toBe(true);
+    // A template whose substitutions all resolve statically is the same value as
+    // the concatenation, so it must not read differently.
+    const templated = `const SCOPE = "@dohc";
+const m = await import(\`\${SCOPE}/workspace-engine\`);`;
+    expect(hasRuntimeLegacyImport(templated)).toBe(true);
+    // …and one whose substitution is computed at runtime is not claimed.
+    const runtimeTemplated = `const SCOPE = pick();
+const m = await import(\`\${SCOPE}/workspace-engine\`);`;
+    expect(hasRuntimeLegacyImport(runtimeTemplated)).toBe(false);
+
     // A genuinely runtime-computed specifier is beyond any static guard, and is
     // not claimed to be covered.
     expect(hasRuntimeLegacyImport(`const m = await import(pickPackage());`)).toBe(false);
@@ -695,6 +727,24 @@ const m = require(name);`;
       'export function b() { const opts = { eval: false }; return new Worker("./x.js", opts); }',
     ].join("\n");
     expect(hasRuntimeLegacyImport(shadowedOptions)).toBe(true);
+
+    // Option objects behind an erased wrapper, inline and via a const. `as` does
+    // not change what runs, so it must not change what this sees.
+    const wrappedInline = [
+      "const SRC = `",
+      `const e = require("${L}");`,
+      "`;",
+      "export const w = new Worker(SRC, { eval: true } as { eval: boolean });",
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(wrappedInline)).toBe(true);
+    const wrappedConst = [
+      "const opts = { eval: true } as { eval: boolean };",
+      "const SRC = `",
+      `const e = require("${L}");`,
+      "`;",
+      "export const w = new Worker(SRC, opts);",
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(wrappedConst)).toBe(true);
 
     // eval: false alone is a path, not source.
     const noEval = [
