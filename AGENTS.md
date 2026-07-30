@@ -138,6 +138,8 @@ Do not weaken authorization, ownership, or review gates for convenience.
 - Agent writes must respect user locks, folder/atom access, sharing boundaries, and skill-turn gates.
 - HTML atoms are sandboxed and sanitized.
 - `atoms.body` is becoming a derived markdown cache from the canonical Y.Doc. Do not build new behavior that depends on raw full-body markdown patching as the source of truth.
+- Every reversible state change needs a visible reverse path. If a change is
+  irreversible, tell the user before it runs.
 - Renderer surfaces that load workspace-scoped state asynchronously must guard
   every response with a workspace/request token, abort signal, or equivalent
   before setting UI state. A slow response for workspace A must never repaint
@@ -175,6 +177,7 @@ A manual `workflow_dispatch` still runs every gate.
   code gate applies.
 - If the impact is unclear, run both jobs.
 - In the PR, state which gates ran or why no code gate applies.
+- Keep each PR to one concern. If the description needs "also," split the PR.
 
 ### Review without expanding the change
 
@@ -330,6 +333,9 @@ These are meant to steer us in the right direction. They are not hard-set, but w
 - After a PR is merged, delete its remote branch from GitHub unless the user
   explicitly asks to keep it or another open PR still depends on it. Verify the
   remote ref is gone. Do not delete the local branch or worktree unless asked.
+- Never stop a process by name, command-line pattern, or worktree path. Stop
+  only a PID this task started. Verify a port owner's working directory before
+  stopping it.
 - Brand identity is final: lowercase `dohc`, the drop-lobe mark, warm
   paper + graphite. There must be no legacy product identity in shipping
   source — `src/__tests__/brandNoLegacy.test.ts` enforces this.
