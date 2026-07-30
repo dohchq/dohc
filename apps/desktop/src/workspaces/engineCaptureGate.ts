@@ -12,17 +12,22 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 // moments and no legacy .dohc/history change set is written. The flag is read
 // at open; toggling it takes effect on the next open of the workspace.
 //
-// The daemon is REQUIRED, not optional. main.ts quits the app when
-// startRustEngineDaemon() fails — dialog, then app.quit(), before any window
-// exists (main.ts:7429-7440, gated at :7487-7488) — and the sessions handle has
-// exactly two writes: set on success, nulled on the failure path immediately
-// before that quit. So no running workspace can reach here without a daemon.
+// The daemon is REQUIRED, not optional. `startRustEngineDaemon` in main.ts shows
+// an error dialog and calls `app.quit()` when the daemon does not start, and
+// `app.whenReady` returns early on its false result — before any window exists
+// or IPC is registered. Its `rustEngineWorkspaceSessions` handle is assigned only
+// on success and nulled only on that failure path, so no running workspace can
+// reach this function without a daemon.
 //
 // It used to be `rustEngineSessions?: … | null` with a conditional spread, which
 // made a no-daemon workspace silently construct the LEGACY TypeScript engine.
 // That path was unreachable in production and reachable only from tests, but the
-// type invited it back. `cliServer.ts:796-799` had already deleted its own
-// version of this branch for the same reason.
+// type invited it back. `cliServer.ts` had already deleted its own copy of this
+// branch for the same reason — see the comment on its removed legacy read.
+//
+// Deliberately no line numbers: an earlier draft of this comment cited them and
+// was already wrong in its own commit, because adding `requireEngineSessions` to
+// main.ts shifted every line it pointed at.
 export async function captureForFlaggedWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   hooks: WorkspaceCaptureHooks,
