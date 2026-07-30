@@ -1,24 +1,25 @@
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import {
   EngineDaemonLifecycle,
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, describe, expect, it } from "vitest";
+import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 
-const configuredBinary = process.env.DOHC_TEST_RUST_ENGINE_BIN?.trim() || null;
-const engineBinary =
-  configuredBinary === null ? null : resolve(configuredBinary);
+// This suite used to gate on a private env var of its own, so it kept skipping
+// even where the daemon was built and every other suite ran. It now shares the
+// one gate.
+const engine = requireEngineBinaryOrSkip();
 const scratchRoots: string[] = [];
 const lifecycles: EngineDaemonLifecycle[] = [];
 
@@ -54,18 +55,6 @@ function json(response: ServerResponse, value: unknown): void {
     connection: "close",
   });
   response.end(bytes);
-}
-
-function requiredEngineBinary(): string {
-  if (engineBinary === null) {
-    throw new Error("DOHC_TEST_RUST_ENGINE_BIN is required for this E2E.");
-  }
-  if (!existsSync(engineBinary)) {
-    throw new Error(
-      `DOHC_TEST_RUST_ENGINE_BIN does not exist: ${engineBinary}`,
-    );
-  }
-  return engineBinary;
 }
 
 async function startRelay(workspaceId: string): Promise<{
@@ -161,10 +150,10 @@ async function startRelay(workspaceId: string): Promise<{
 }
 
 describe("EngineRelayClient real daemon", () => {
-  it.runIf(configuredBinary !== null)(
+  it.skipIf(engine.missing)(
     "pushes from one replica and durably applies the pull to another",
     async () => {
-      const binary = requiredEngineBinary();
+      const binary = engine.require();
       const workspaceId = `relay-e2e-${process.pid}-${Date.now()}`;
       const senderRoot = await createShadowRoot("dohc-relay-e2e-sender-");
       const receiverRoot = await createShadowRoot(
@@ -232,7 +221,7 @@ describe("EngineRelayClient real daemon", () => {
         // "Rust engine workspace sessions are closed." (asserted as a contract
         // in engineWorkspaceSessions.test.ts). This test called it and then
         // kept using the same object, so it could never have passed — and the
-        // `DOHC_TEST_RUST_ENGINE_BIN` gate meant nobody found out. Production
+        // suite's own private binary gate meant nobody found out. Production
         // is unaffected: closeAllRelayTransportWorkspaces fans out over the
         // non-terminal closeWorkspace().
         //

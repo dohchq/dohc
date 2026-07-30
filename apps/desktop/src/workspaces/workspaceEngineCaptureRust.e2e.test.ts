@@ -1,7 +1,5 @@
-import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import {
@@ -9,30 +7,14 @@ import {
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { nativeTmpdir } from "./testTemp";
 
-// The binary name is platform-dependent. Hardcoding `.exe` meant this test
-// could not run on Linux or macOS at all, and CI does not build a debug daemon
-// on any platform -- so the one end-to-end test of the desktop capture path
-// against a real daemon SKIPPED everywhere, from the day it was written.
-const binaryPath = fileURLToPath(
-  new URL(
-    `../../../../target/debug/dohc-workspace-engine${
-      process.platform === "win32" ? ".exe" : ""
-    }`,
-    import.meta.url,
-  ),
-);
-// A skip is right for a developer who has not built the daemon and wrong for
-// CI, where it is the difference between this test guarding the cutover path
-// and reporting green without running. Same pattern as DOHC_REQUIRE_POSTGRES.
-const engineBinaryPresent = existsSync(binaryPath);
-if (!engineBinaryPresent && process.env.DOHC_REQUIRE_ENGINE_E2E === "1") {
-  throw new Error(
-    `DOHC_REQUIRE_ENGINE_E2E=1 but no engine binary at ${binaryPath}. ` +
-      "Build it with: cargo build -p dohc-workspace-engine --bin dohc-workspace-engine",
-  );
-}
+// This suite looked only under the repo root, so it SKIPPED everywhere from the
+// day it was written and its coverage came and went with whoever last ran
+// `cargo build` (#390). The shared gate also checks apps/desktop/target/debug,
+// which is where the app under test and the staged-binary harnesses put it.
+const engine = requireEngineBinaryOrSkip();
 const roots: string[] = [];
 
 async function waitForPathMoments(
@@ -69,7 +51,7 @@ afterEach(async () => {
   );
 });
 
-it.skipIf(!engineBinaryPresent)(
+it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
     const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-e2e-"));
@@ -82,7 +64,7 @@ it.skipIf(!engineBinaryPresent)(
       "utf8",
     );
     const lifecycle = new EngineDaemonLifecycle({
-      command: binaryPath,
+      command: engine.require(),
       maxRestarts: 0,
     });
     await lifecycle.start();

@@ -1,28 +1,19 @@
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   EngineDaemonLifecycle,
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
+import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { nativeTmpdir } from "./testTemp";
 
-const REAL_ENGINE_BINARY =
-  process.env.DOHC_TEST_ENGINE_BINARY ??
-  fileURLToPath(
-    new URL(
-      `../../../../target/debug/dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`,
-      import.meta.url,
-    ),
-  );
-const hasRealEngine = existsSync(REAL_ENGINE_BINARY);
+const engine = requireEngineBinaryOrSkip();
 
 describe("live linked chat store real daemon", () => {
-  it.skipIf(!hasRealEngine)(
+  it.skipIf(engine.missing)(
     "real_daemon_chat_flow_round_trips_channel_thread_message_and_read_state",
     async () => {
       const rootPath = await mkdtemp(
@@ -40,7 +31,7 @@ describe("live linked chat store real daemon", () => {
         { encoding: "utf8", flag: "wx", mode: 0o600 },
       );
       const lifecycle = new EngineDaemonLifecycle({
-        command: REAL_ENGINE_BINARY,
+        command: engine.require(),
       });
       let sessions: EngineWorkspaceSessions | null = null;
       try {

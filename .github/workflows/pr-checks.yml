@@ -157,14 +157,13 @@ jobs:
           --health-retries 20
     env:
       DOHC_REQUIRE_POSTGRES: "1"
+      # Every daemon suite resolves the binary through
+      # apps/desktop/src/testing/engineBinary, which finds the repo-root
+      # target/debug build the step below produces. No per-suite binary
+      # variable is needed; DOHC_REQUIRE_ENGINE_E2E turns a failed resolution
+      # into a failure rather than a silent skip. Override with
+      # DOHC_TEST_ENGINE_BINARY only to point at a binary somewhere else.
       DOHC_REQUIRE_ENGINE_E2E: "1"
-      # engineRelayClient.e2e gates on its own variable, so it kept skipping
-      # even once the daemon was built. Pointing it at the same binary is what
-      # makes the relay push/pull path actually covered in CI.
-      # Absolute: vitest runs with each package's directory as cwd, and the
-      # test resolve()s this against cwd, so a repo-relative path would look
-      # for the binary under apps/desktop/.
-      DOHC_TEST_RUST_ENGINE_BIN: "${{ github.workspace }}/target/debug/dohc-workspace-engine"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

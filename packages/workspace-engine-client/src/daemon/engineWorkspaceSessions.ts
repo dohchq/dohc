@@ -55,7 +55,22 @@ export interface EngineWorkspaceRunOptions {
 export interface EngineWorkspaceSessionsOptions {
   transportRebindAttempts?: number;
   sleep?: (delayMs: number) => Promise<void>;
+  /**
+   * Deadline for a single daemon `workspace.open`. Defaults to
+   * WORKSPACE_OPEN_DEADLINE_MS, which is the product guarantee about
+   * workspace-open latency — production must not pass anything else. Test
+   * harnesses that run many daemons at once can raise it, because there the
+   * cause of a missed deadline is suite contention rather than the code under
+   * test.
+   */
+  workspaceOpenDeadlineMs?: number;
 }
+
+// Node's setTimeout silently converts a delay above this to 1ms, so a caller
+// asking for a 30-day deadline would get near-immediate transport timeouts —
+// the exact opposite of widening it. EngineClient passes this value straight to
+// setTimeout, so the ceiling has to be enforced here.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 const TRANSPORT_REBIND_ATTEMPTS = 6;
 const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
@@ -135,6 +150,7 @@ export class EngineWorkspaceSessions {
   private readonly shareMounts = new Set<string>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly workspaceOpenDeadlineMs: number;
   private acceptingRuns = true;
 
   constructor(
@@ -144,6 +160,27 @@ export class EngineWorkspaceSessions {
     this.transportRebindAttempts =
       options.transportRebindAttempts ?? TRANSPORT_REBIND_ATTEMPTS;
     this.sleep = options.sleep ?? defaultSleep;
+    // `??` alone would accept 0, a negative, NaN or Infinity — an exported
+    // option, so an invalid value would either fail every workspace.open or
+    // quietly void the deadline guarantee this option exists to preserve.
+    // Reject rather than clamp: silently substituting a value is how a caller
+    // ends up believing it widened a deadline it did not.
+    const deadline = options.workspaceOpenDeadlineMs;
+    if (
+      deadline !== undefined &&
+      (!Number.isInteger(deadline) ||
+        deadline <= 0 ||
+        deadline > MAX_TIMER_DELAY_MS)
+    ) {
+      // Integer, not merely finite: the protocol declares deadlineMs as uint32
+      // and the Rust wire field is a u32, so 12.5 would ship an invalid envelope
+      // and can terminate the transport instead of widening anything.
+      // Number.isInteger also rejects NaN and Infinity.
+      throw new TypeError(
+        `workspaceOpenDeadlineMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}, received ${String(deadline)}.`,
+      );
+    }
+    this.workspaceOpenDeadlineMs = deadline ?? WORKSPACE_OPEN_DEADLINE_MS;
   }
 
   async run<T>(
@@ -380,7 +417,7 @@ export class EngineWorkspaceSessions {
             }
           : {}),
       },
-      { deadlineMs: WORKSPACE_OPEN_DEADLINE_MS },
+      { deadlineMs: this.workspaceOpenDeadlineMs },
     );
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
     return { client, workspace: opened.workspace as WorkspaceHandle };

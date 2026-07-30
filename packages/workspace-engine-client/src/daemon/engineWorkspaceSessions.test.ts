@@ -515,7 +515,61 @@ describe("EngineWorkspaceSessions", () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]?.deadlineMs).toBe(WORKSPACE_OPEN_DEADLINE_MS);
+    // Pinned literally as well as against the constant. Comparing only against
+    // the constant lets both sides move together, so a changed default would
+    // still pass — and this default IS the product guarantee.
+    expect(requests[0]?.deadlineMs).toBe(2_000);
   });
+
+  it("lets a caller widen the workspace open deadline without moving the default", async () => {
+    const workspace = await tempWorkspace();
+    const requests: Request[] = [];
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: "handle-1" } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      { workspaceOpenDeadlineMs: 30_000 },
+    );
+
+    await sessions.run(workspace, async () => undefined);
+
+    expect(requests[0]?.deadlineMs).toBe(30_000);
+    // The product guarantee is the constant, not whatever a caller passed.
+    expect(WORKSPACE_OPEN_DEADLINE_MS).toBe(2_000);
+  });
+
+  it.each([0, -1, 12.5, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648])(
+    "rejects %s as a workspace open deadline instead of silently substituting one",
+    (deadline) => {
+      // `??` accepts all of these. An exported option taking 0 or NaN would
+      // either fail every workspace.open or void the deadline guarantee, and a
+      // caller that clamped silently would believe it had widened a deadline it
+      // had not.
+      // The constructor rejects before it ever consults the client, so a stub
+      // that throws on use is enough — and proves nothing was sent.
+      const client: EngineDaemonClient = {
+        close() {},
+        async sendRequest() {
+          throw new Error("must not be reached: construction should have thrown");
+        },
+      };
+      expect(
+        () =>
+          new EngineWorkspaceSessions(
+            { currentClient: () => client },
+            { workspaceOpenDeadlineMs: deadline },
+          ),
+      ).toThrow(/positive integer/);
+    },
+  );
 
   it("retries an initial workspace open failure before running the operation", async () => {
     const workspace = await tempWorkspace();
