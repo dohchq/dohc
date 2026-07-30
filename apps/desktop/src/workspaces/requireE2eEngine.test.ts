@@ -123,4 +123,51 @@ describe("requireE2eEngine", () => {
     expect(result.refreshed).toBe(false);
     expect(readFileSync(staged, "utf8")).toBe("deliberate");
   });
+
+  it("stages an explicit override even when the cargo build is newer", () => {
+    // Electron always launches the staged path, so an override honoured only by
+    // the seed helper would leave Playwright seeding with the override and
+    // exercising the staged file — the skew this refresh exists to remove,
+    // arriving from the other direction.
+    const root = tempRoot();
+    const cargoTargetDir = join(root, "cargo");
+    const desktopTargetDir = join(root, "desktop");
+    const overrideDir = join(root, "custom");
+    mkdirSync(cargoTargetDir, { recursive: true });
+    mkdirSync(desktopTargetDir, { recursive: true });
+    mkdirSync(overrideDir, { recursive: true });
+    const staged = join(desktopTargetDir, "dohc-workspace-engine");
+    const built = join(cargoTargetDir, "dohc-workspace-engine");
+    const override = join(overrideDir, "dohc-workspace-engine");
+    writeFileSync(staged, "stale");
+    writeFileSync(built, "root-build");
+    writeFileSync(override, "override-build");
+    utimesSync(staged, 1_700_000_000, 1_700_000_000);
+    // Deliberately the NEWEST, so a naive mtime rule would pick it over the
+    // override.
+    utimesSync(built, 1_900_000_000, 1_900_000_000);
+    utimesSync(override, 1_800_000_000, 1_800_000_000);
+
+    const result = requireE2eEngine({
+      desktopTargetDir,
+      cargoTargetDir,
+      platform: "linux",
+      override,
+    });
+
+    expect(result.binary).toBe(staged);
+    expect(readFileSync(staged, "utf8")).toBe("override-build");
+  });
+
+  it("refuses an override that does not exist rather than launching without one", () => {
+    const root = tempRoot();
+    expect(() =>
+      requireE2eEngine({
+        desktopTargetDir: join(root, "desktop"),
+        cargoTargetDir: join(root, "cargo"),
+        platform: "linux",
+        override: join(root, "absent-engine"),
+      }),
+    ).toThrow(/does not exist/);
+  });
 });

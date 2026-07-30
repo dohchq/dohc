@@ -35,13 +35,38 @@ function mtimeMs(path) {
   }
 }
 
+// Kept as a literal rather than imported from src/testing/engineBinary.ts: this
+// script runs as plain node from a pnpm lifecycle hook, with no TS loader.
+const overrideEnvVar = "DOHC_TEST_ENGINE_BINARY";
+
 export function requireE2eEngine({
   desktopTargetDir = join(desktopDir, "target", "debug"),
   cargoTargetDir = join(repoDir, "target", "debug"),
   platform = process.platform,
+  override = process.env[overrideEnvVar]?.trim() || null,
 } = {}) {
   const name = engineBinaryName(platform);
   const wanted = join(desktopTargetDir, name);
+
+  // An explicit override wins, and it has to win HERE too. Electron always
+  // launches the staged path, so honouring the override only in the seed helper
+  // would leave Playwright seeding with the override and exercising whatever sat
+  // in the staged path — the same skew this refresh exists to remove, arriving
+  // from the other direction. Stage the override itself so both agree.
+  if (override) {
+    if (!isFile(override)) {
+      throw new Error(
+        `${overrideEnvVar}=${override} does not exist, so the e2e app cannot launch a daemon.`,
+      );
+    }
+    if (resolve(override) === resolve(wanted)) {
+      return { binary: wanted, copied: false, refreshed: false };
+    }
+    mkdirSync(desktopTargetDir, { recursive: true });
+    copyFileSync(override, wanted);
+    return { binary: wanted, copied: true, refreshed: true };
+  }
+
   const built = join(cargoTargetDir, name);
 
   // A staged copy that exists is not necessarily the one you just built.
