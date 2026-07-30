@@ -2,6 +2,10 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// These await a lazily-imported CodeMirror in jsdom, so the wait is wall-clock
+// bound rather than assertion-bound (#372).
+vi.setConfig({ testTimeout: 15_000 });
 import * as Y from "yjs";
 import {
   markdownToYDoc,

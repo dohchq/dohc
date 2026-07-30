@@ -10,7 +10,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// collectZipEntries tests write thousands of real files; 5s is an I/O budget,
+// not a logic budget (#372).
+vi.setConfig({ testTimeout: 15_000 });
 import {
   collectZipEntries,
   copyIntoWorkspace,

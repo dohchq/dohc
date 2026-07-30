@@ -290,7 +290,7 @@ describe("two-client presence over a real relay child", () => {
     });
     const afterLeave = await poll(baseUrl, "owner", ws, "general", 0, 0);
     expect(afterLeave.peers.map((p) => p.clientId)).toEqual(["A"]);
-  }, 30_000);
+  }, 90_000);
 
   it("converges an OWNER (workspace scope) and a PARTICIPANT (share scope) on ONE shared-channel presence scope via the wireId topic", async () => {
     const relayRoot = await tempDir();
@@ -341,7 +341,7 @@ describe("two-client presence over a real relay child", () => {
     // the owner + the member.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
     expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
-  }, 30_000);
+  }, 90_000);
 
   it("converges owner + participant on a THREAD topic bound to the granted channel, and isolates other/unknown threads", async () => {
     const relayRoot = await tempDir();
@@ -418,7 +418,7 @@ describe("two-client presence over a real relay child", () => {
     // The rejected thread probes left the shared thread scope untouched.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
     expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
-  }, 30_000);
+  }, 90_000);
 
   it("a non-owner cannot read another workspace's presence (isolation)", async () => {
     const relayRoot = await tempDir();
@@ -429,7 +429,7 @@ describe("two-client presence over a real relay child", () => {
       headers: bearer("intruder"),
     });
     expect(r.status).toBe(404);
-  }, 30_000);
+  }, 90_000);
 
   it("a client DISCONNECT releases its parked long-poll waiter promptly", async () => {
     const relayRoot = await tempDir();
@@ -452,18 +452,16 @@ describe("two-client presence over a real relay child", () => {
     controller.abort(); // client vanishes mid-park
     await parked;
     await waitForWaiters(baseUrl, 0);
-  }, 30_000);
+  }, 90_000);
 });
 
 // Poll the test-seam health endpoint until the hub reports `expected` parked
 // waiters (bounded; fails the test with a clear message on timeout).
 async function waitForWaiters(baseUrl: string, expected: number): Promise<void> {
-  // 10s was not enough when the suite runs in parallel with other packages, or
-  // alongside a cargo build: this polls a real relay child process over HTTP, so
-  // it is wall-clock-bound and lost the race (#372). The enclosing `it` allows
-  // 30s, so this stayed the binding constraint and reported a convergence
-  // failure that was really a scheduling one. 25s keeps it inside that budget
-  // while leaving the bounded-waiter diagnostic intact.
+  // 10s lost the race under contention — this polls a real relay child over
+  // HTTP, so it is wall-clock bound (#372). 25s, and the callers raise their own
+  // budget to contain a slow spawn plus two of these waits; a waiter deadline
+  // longer than its test budget would be killed before its diagnostic fires.
   const deadline = Date.now() + 25_000;
   let last: unknown;
   while (Date.now() < deadline) {

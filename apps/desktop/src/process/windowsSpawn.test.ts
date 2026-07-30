@@ -2,8 +2,12 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { killChildTreeWin32, resolveSpawnCommand } from "./windowsSpawn";
+
+// Teardown retries rmdir against asynchronously-released Windows handles, so
+// the hook needs room for the backoff (#372).
+vi.setConfig({ hookTimeout: 20_000 });
 
 const tempRoots: string[] = [];
 

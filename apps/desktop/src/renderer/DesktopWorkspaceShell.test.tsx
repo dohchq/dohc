@@ -10,6 +10,9 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Shell tests drive userEvent through async UI settles; wall-clock bound (#372).
+vi.setConfig({ testTimeout: 15_000 });
 import type {
   ChatChannelRecord,
   FileChatThreadRecord,
