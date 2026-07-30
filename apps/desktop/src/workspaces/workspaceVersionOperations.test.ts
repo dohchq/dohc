@@ -93,10 +93,6 @@ function readEngineMoments(rootPath: string): EngineMomentRow[] {
   }
 }
 
-// The loopback caps a page at 500. Nothing here records anywhere near that, and
-// a silently truncated page would weaken every length assertion below, so the
-// reader refuses a truncated page rather than returning a short one.
-const MOMENT_PAGE_LIMIT = 500;
 let momentQueryId = 1;
 
 // The daemon-path reader for the same rows: `moments.list` over the wire
@@ -108,20 +104,31 @@ let momentQueryId = 1;
 async function readDaemonMoments(
   loopback: VersionedLoopbackEngine,
 ): Promise<EngineMomentRow[]> {
-  const response = await loopback.sendRequest({
-    id: momentQueryId++,
-    method: VERSIONED_METHOD.momentsList,
-    workspace: WORKSPACE_ID,
-    params: { workspaceId: WORKSPACE_ID, limit: MOMENT_PAGE_LIMIT },
-  });
-  const page = response.result as unknown as {
-    moments: MomentRecord[];
-    nextBeforeMomentOrder: number | null;
-  };
-  if (page.nextBeforeMomentOrder !== null) {
-    throw new Error("moments.list page truncated — raise MOMENT_PAGE_LIMIT");
+  // Drained rather than capped. An earlier draft asked for one large page and
+  // threw on a cursor, which would have rejected a valid history the day a test
+  // recorded one page more — a limit with no measurement behind it. Paging costs
+  // nothing here and removes the question.
+  const moments: MomentRecord[] = [];
+  let beforeMomentOrder: number | null = null;
+  for (;;) {
+    const response = await loopback.sendRequest({
+      id: momentQueryId++,
+      method: VERSIONED_METHOD.momentsList,
+      workspace: WORKSPACE_ID,
+      params: {
+        workspaceId: WORKSPACE_ID,
+        ...(beforeMomentOrder === null ? {} : { beforeMomentOrder }),
+      },
+    });
+    const page = response.result as unknown as {
+      moments: MomentRecord[];
+      nextBeforeMomentOrder: number | null;
+    };
+    moments.push(...page.moments);
+    if (page.nextBeforeMomentOrder === null) break;
+    beforeMomentOrder = page.nextBeforeMomentOrder;
   }
-  return page.moments
+  return moments
     .filter((moment) => moment.afterText !== null)
     .sort((left, right) => left.momentOrder - right.momentOrder)
     .map((moment) => ({
