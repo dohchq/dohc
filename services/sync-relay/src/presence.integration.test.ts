@@ -458,7 +458,13 @@ describe("two-client presence over a real relay child", () => {
 // Poll the test-seam health endpoint until the hub reports `expected` parked
 // waiters (bounded; fails the test with a clear message on timeout).
 async function waitForWaiters(baseUrl: string, expected: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
+  // 10s was not enough when the suite runs in parallel with other packages, or
+  // alongside a cargo build: this polls a real relay child process over HTTP, so
+  // it is wall-clock-bound and lost the race (#372). The enclosing `it` allows
+  // 30s, so this stayed the binding constraint and reported a convergence
+  // failure that was really a scheduling one. 25s keeps it inside that budget
+  // while leaving the bounded-waiter diagnostic intact.
+  const deadline = Date.now() + 25_000;
   let last: unknown;
   while (Date.now() < deadline) {
     const health = (await (await fetch(`${baseUrl}/health`)).json()) as {

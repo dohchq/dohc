@@ -8,7 +8,19 @@ import { killChildTreeWin32, resolveSpawnCommand } from "./windowsSpawn";
 const tempRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  // These tests kill real process trees, and Windows releases the dead
+  // processes' handles asynchronously — so the rmdir can land while a handle on
+  // the temp tree is still open and fail with EBUSY. `force` only swallows
+  // ENOENT, not EBUSY, so teardown failed the test even though the kill it was
+  // asserting had worked (#372). maxRetries is fs.rm's own remedy for exactly
+  // this: it retries EBUSY/EPERM/ENOTEMPTY with a linear backoff.
+  await Promise.all(
+    tempRoots
+      .splice(0)
+      .map((root) =>
+        rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }),
+      ),
+  );
 });
 
 async function tempDir(): Promise<string> {
