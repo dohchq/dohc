@@ -219,7 +219,16 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
           ts.isIdentifier(node.expression.expression) &&
           node.expression.expression.text === "module" &&
           node.expression.name.text === "require";
-        if (isDynamicImport || isBareRequire || isModuleRequire) {
+        // `createRequire(import.meta.url)("pkg")` — invoked immediately rather
+        // than stored, so the callee is another CALL, not an identifier. Real
+        // shape in this repo: workspaceDatabase.test.ts:115.
+        const calleeIsCreateRequireCall =
+          ts.isCallExpression(node.expression) &&
+          ((ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === "createRequire") ||
+            (ts.isPropertyAccessExpression(node.expression.expression) &&
+              node.expression.expression.name.text === "createRequire"));
+        if (isDynamicImport || isBareRequire || isModuleRequire || calleeIsCreateRequireCall) {
           found = true;
           return;
         }
@@ -393,6 +402,18 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     expect(hasRuntimeLegacyImport(`module.require("${L}");`)).toBe(true);
     expect(hasRuntimeLegacyImport(`loader.require("${L}");`)).toBe(false);
     expect(hasRuntimeLegacyImport(`registry.module.require("${L}");`)).toBe(false);
+  });
+
+  it("detects a createRequire loader invoked without being stored", () => {
+    const L = LEGACY_PACKAGE;
+    // The callee is another CALL, not an identifier, so the alias set cannot see
+    // it. Real shape in this repo at workspaceDatabase.test.ts:115.
+    expect(hasRuntimeLegacyImport(`const m = createRequire(import.meta.url)("${L}");`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`const m = mod.createRequire(import.meta.url)("${L}");`)).toBe(
+      true,
+    );
+    // A different immediately-invoked factory is not a module loader.
+    expect(hasRuntimeLegacyImport(`const m = makeLoader(x)("${L}");`)).toBe(false);
   });
 
   it("resolves a relative path that reaches into the legacy package", () => {
