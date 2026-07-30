@@ -27,6 +27,9 @@ pnpm dev:postgres
 pnpm migrate
 ```
 
+Pre-cleanup data remains in the old `dohc_v2_postgres` named volume. Start the
+previous Compose definition from Git history if you need to recover it.
+
 In both service terminals, set `NODE_ENV=development` and the same
 `BETTER_AUTH_SECRET` of at least 32 characters. Then start the workspace API in
 one terminal:

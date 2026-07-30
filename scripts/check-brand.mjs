@@ -11,9 +11,14 @@ const skippedDirectories = new Set([
   '.output',
   '.turbo',
   '.vercel',
+  '.cache',
+  '.venv',
+  '.vite',
+  'build',
   'coverage',
   'dist',
   'node_modules',
+  'out',
   'playwright-report',
   'target',
   'test-results',
@@ -91,7 +96,7 @@ function* walk(directory) {
     const extension = extname(name).toLowerCase()
     if (
       stat.isFile() &&
-      (textExtensions.has(extension) || name.startsWith('.env'))
+      (textExtensions.has(extension) || name.startsWith('.env.'))
     ) {
       yield path
     }
