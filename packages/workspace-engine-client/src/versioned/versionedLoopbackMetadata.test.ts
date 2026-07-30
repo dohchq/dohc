@@ -85,6 +85,89 @@ describe("loopback moment metadata", () => {
     expect(moments[0].metadataCorrelationId).toBe("corr-binary");
   });
 
+  it("normalizes an author to the daemon's output shape", async () => {
+    // AgentAuthor is `JsonObject & {...}`, so a caller may pass extension
+    // fields. The daemon accepts them and returns only the recognized ones
+    // (parsed_moment_author). A loopback that copied the author raw would be
+    // STRICTER than the daemon: its own response fails the client's
+    // strictObjectValue on the extra key, so a write that works against the
+    // engine breaks against the fake.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "notes.md",
+      text: "hello",
+      origin: "local-file",
+      author: {
+        kind: "agent",
+        agentId: "agent-1",
+        onBehalfOf: "user-1",
+        agentRunId: "run-1",
+        somethingExtra: "must not survive",
+      },
+    });
+    const page = await send(engine, VERSIONED_METHOD.momentsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const moments = page.moments as Array<Record<string, unknown>>;
+    expect(moments[0].author).toEqual({
+      kind: "agent",
+      agentId: "agent-1",
+      onBehalfOf: "user-1",
+      agentRunId: "run-1",
+    });
+  });
+
+  it("marks an invalid author corrupt rather than dropping it", async () => {
+    // The daemon returns `{ corrupt: true }` for an author that fails
+    // validation. Dropping it instead would report actor-neutral history for a
+    // write that carried a bad author.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "notes.md",
+      text: "hello",
+      origin: "local-file",
+      author: { kind: "agent", agentId: "", onBehalfOf: "user-1" },
+    });
+    const page = await send(engine, VERSIONED_METHOD.momentsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const moments = page.moments as Array<Record<string, unknown>>;
+    expect(moments[0].author).toEqual({ corrupt: true });
+  });
+
+  it("omits agentRunId when the caller does not supply it", async () => {
+    // Contract field is `agentRunId?: string` — optional, never nullable.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "notes.md",
+      text: "hello",
+      origin: "local-file",
+      author: { kind: "agent", agentId: "agent-1", onBehalfOf: "user-1" },
+    });
+    const page = await send(engine, VERSIONED_METHOD.momentsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const moments = page.moments as Array<Record<string, unknown>>;
+    expect(moments[0].author).toEqual({
+      kind: "agent",
+      agentId: "agent-1",
+      onBehalfOf: "user-1",
+    });
+    expect(Object.keys(moments[0].author as object)).not.toContain("agentRunId");
+  });
+
   it("leaves both null when the caller supplies neither", async () => {
     // A write without metadata must produce exactly the shape it did before this
     // was threaded through, so no existing consumer changes.

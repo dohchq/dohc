@@ -2006,6 +2006,31 @@ export class VersionedLoopbackEngine implements EngineTransport {
    * so on its snapshots. This loopback does not, because nothing reads it here
    * yet — the history row is what moments.list serves.
    */
+  // Mirrors the daemon's `parsed_moment_author` (lib.rs): validate, then rebuild
+  // from the recognized fields only. `agentRunId` is OPTIONAL in the contract
+  // and never nullable, so it is omitted rather than set to null when absent.
+  // An author that fails validation becomes `{ corrupt: true }`, as the daemon
+  // does, rather than being dropped — dropping it would report actor-neutral
+  // history for a write that carried a bad author.
+  private normalizedAuthorValue(raw: JsonValue): JsonValue {
+    const corrupt = { corrupt: true } as unknown as JsonValue;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return corrupt;
+    const object = raw as JsonObject;
+    const nonEmpty = (key: string): boolean =>
+      typeof object[key] === "string" && (object[key] as string).length > 0;
+    const runId = object.agentRunId;
+    const runOk = runId === undefined || (typeof runId === "string" && runId.length > 0);
+    if (object.kind !== "agent" || !nonEmpty("agentId") || !nonEmpty("onBehalfOf") || !runOk) {
+      return corrupt;
+    }
+    return {
+      kind: "agent",
+      agentId: object.agentId,
+      onBehalfOf: object.onBehalfOf,
+      ...(runId === undefined ? {} : { agentRunId: runId }),
+    } as unknown as JsonValue;
+  }
+
   private momentMetadataFields(params: JsonObject): JsonObject {
     const summary = optionalString(params, "summary");
     const correlationId = optionalString(params, "correlationId");
@@ -2019,9 +2044,24 @@ export class VersionedLoopbackEngine implements EngineTransport {
       // without one gets null. Dropping it here made every moment look
       // actor-neutral, so a caller could not tell agent-authored history from
       // the user's own.
-      ...(params.author !== undefined && params.author !== null
-        ? { author: params.author }
-        : {}),
+      //
+      // NORMALIZED, not copied. AgentAuthor is `JsonObject & {...}`, so a
+      // caller may pass extension fields; the daemon accepts them and
+      // `parsed_moment_author` returns only the recognized ones. Copying raw
+      // made the loopback STRICTER than the daemon — the response failed the
+      // client's own `strictObjectValue` on the extra key, so a write that
+      // works against the engine broke against the fake.
+      ...(() => {
+        // `authorJson` is the compatibility spelling some write paths still
+        // send; both reach the same recorded author on the daemon.
+        const raw =
+          params.author !== undefined && params.author !== null
+            ? params.author
+            : typeof params.authorJson === "string"
+              ? (JSON.parse(params.authorJson) as JsonValue)
+              : undefined;
+        return raw === undefined ? {} : { author: this.normalizedAuthorValue(raw) };
+      })(),
     };
   }
 
