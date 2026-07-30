@@ -50,18 +50,37 @@ Copy that line into `EXECUTION_LOG.md` under the relevant shard entry.
 Per Gate 0, the per-platform GitHub Actions matrix is retired. Evidence is
 collected on the founder's machine:
 
-1. **Windows x64 (native, primary).** Run the gate in PowerShell or Git
-   Bash on the dev machine. This is the primary dogfood platform and the one a
-   cutover candidate may ship to.
+**Run the JS suites too.** The runner retired in R16 was not a second Rust gate — its
+entire step list was `pnpm --filter @dohc/workspace-engine typecheck` and `test`, i.e. JS
+checks. Deleting it must not quietly drop JS coverage from this procedure, so from the
+repo root:
+
+```sh
+pnpm run typecheck
+pnpm run test
+```
+
+Those replace what the retired runner covered, and cover more than it did: the whole
+workspace rather than one package that R16 deletes. AGENTS.md already requires both before
+any merge; this is the same obligation stated where the evidence procedure lives, because
+CI is dispatch-only and nothing else will catch it.
+
+1. **Windows x64 (native, primary).** Run the Rust gate plus the two JS suites above, in
+   PowerShell or Git Bash on the dev machine. This is the primary dogfood platform and
+   the one a cutover candidate may ship to.
 2. **Linux x64 (via WSL).** Open WSL against the same checkout and run it
    again:
    ```sh
    wsl
    cd /mnt/c/Users/ice/dev/dohc   # or the WSL-native clone
    node tools/rust-engine-program/run-rust-checks.mjs
+   pnpm run typecheck
+   pnpm run test
    ```
    Record the resulting `linux/x64` evidence line. (Prefer a WSL-native clone
-   over `/mnt/c` for realistic filesystem semantics.)
+   over `/mnt/c` for realistic filesystem semantics.) The JS suites belong here
+   too: the retired runner ran its `pnpm` steps on **both** platforms, so
+   omitting them here would drop Linux-side JS coverage as well.
 3. **macOS x64 / arm64 — NOT covered during construction.** Producing macOS
    native evidence is a **mandatory pre-release obligation** before any Mac
    distribution (DECISIONS.md Gate 0 item 2). Until it exists, Gate 7's "every
@@ -69,9 +88,9 @@ collected on the founder's machine:
 
 **There is no architecture guard on this gate — and the retired runner's one did not
 work either.** `run-native-suite.mjs` accepted `--expect-arch=<x64|arm64>` and compared
-`os.arch()`, the architecture *Node* was built for, while every check it ran was a
-`cargo` command. Cargo takes its target from channels Node knows nothing about, so the
-capability that left with that runner was a check that could not do its job.
+`os.arch()`, the architecture *Node* was built for. It never checked what the Rust
+toolchain targeted; in fact it ran no cargo at all, only the two `pnpm` steps above. So
+the capability that left with that runner was a check that could not do its job.
 
 Rebuilding it properly is tracked separately. Ten distinct channels can set cargo's
 effective target, and neither parsing `.cargo/config.toml` nor watching for
