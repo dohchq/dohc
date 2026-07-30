@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { join, posix, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
 
@@ -28,8 +28,8 @@ const LEGACY_PACKAGE = "@dohc/workspace-engine";
 // `ydocEngineProviderSession` is the legacy provider session that fallback
 // selects. Its Rust replacement already exists.
 //
-// Seven other production files name this package but import only TYPES, so they
-// are absent by design, not by omission — see the parser tests below.
+// Eleven other production files name this package but import only TYPES, so
+// they are absent by design, not by omission — see the parser tests below.
 const ALLOWED = [
   "apps/desktop/src/collab/ydocEngineProviderSession.ts",
   "apps/desktop/src/workspaces/workspaceEngineCapture.ts",
@@ -57,7 +57,7 @@ function isProductionSource(posixPath: string): boolean {
   if (/(^|\/)[^/]*\.config\.[cm]?[jt]s$/.test(posixPath)) return false;
   // Declaration files carry no runtime import — everything in them is erased,
   // including `import Engine = require(…)`.
-  if (posixPath.endsWith(".d.ts")) return false;
+  if (/\.d\.[cm]?ts$/.test(posixPath)) return false;
   return SCANNED_SOURCE.test(posixPath);
 }
 
@@ -107,8 +107,17 @@ function walk(dir: string, out: string[]): void {
 // `import` and its parenthesis, the specifier appearing inside a string or a
 // comment, `loader.require(…)` masquerading as `require(…)`. The compiler
 // already knows the difference, so ask it.
-function isLegacySpecifier(specifier: string): boolean {
-  return specifier === LEGACY_PACKAGE || specifier.startsWith(`${LEGACY_PACKAGE}/`);
+const LEGACY_SOURCE_DIR = "packages/workspace-engine/";
+
+// The package name, OR a relative path that lands inside the package. Reaching
+// into another package's source by relative path is an established pattern here
+// (apps/desktop/e2e/workspace-agent-attribution.spec.ts:19 does it), so a
+// name-only comparison would miss a real runtime dependency added that way.
+function isLegacySpecifier(specifier: string, fromFile: string): boolean {
+  if (specifier === LEGACY_PACKAGE || specifier.startsWith(`${LEGACY_PACKAGE}/`)) return true;
+  if (!specifier.startsWith(".")) return false;
+  const resolved = posix.normalize(posix.join(posix.dirname(fromFile), specifier));
+  return resolved.startsWith(LEGACY_SOURCE_DIR);
 }
 
 // True when the whole declaration is erased at build time: `import type { X }`,
@@ -160,7 +169,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
     if (found) return;
     if (ts.isImportDeclaration(node)) {
       const spec = node.moduleSpecifier;
-      if (ts.isStringLiteral(spec) && isLegacySpecifier(spec.text) && !isErasedImport(node)) {
+      if (ts.isStringLiteralLike(spec) && isLegacySpecifier(spec.text, fileName) && !isErasedImport(node)) {
         found = true;
         return;
       }
@@ -169,7 +178,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       // not — and neither does `export { type X }`, whose specifiers are each
       // type-only while the declaration itself is not.
       const spec = node.moduleSpecifier;
-      if (spec !== undefined && ts.isStringLiteral(spec) && isLegacySpecifier(spec.text)) {
+      if (spec !== undefined && ts.isStringLiteralLike(spec) && isLegacySpecifier(spec.text, fileName)) {
         const clause = node.exportClause;
         const allSpecifiersErased =
           clause !== undefined &&
@@ -186,8 +195,8 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       const ref = node.moduleReference;
       if (
         ts.isExternalModuleReference(ref) &&
-        ts.isStringLiteral(ref.expression) &&
-        isLegacySpecifier(ref.expression.text) &&
+        ts.isStringLiteralLike(ref.expression) &&
+        isLegacySpecifier(ref.expression.text, fileName) &&
         !node.isTypeOnly
       ) {
         found = true;
@@ -195,14 +204,22 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       }
     } else if (ts.isCallExpression(node)) {
       const arg = node.arguments[0];
-      const isStringArg = arg !== undefined && ts.isStringLiteral(arg) && isLegacySpecifier(arg.text);
+      const isStringArg =
+          arg !== undefined && ts.isStringLiteralLike(arg) && isLegacySpecifier(arg.text, fileName);
       if (isStringArg) {
         // `import("pkg")`, and a BARE `require("pkg")` — but not a method call
         // such as `loader.require("pkg")`, which is not Node's require.
         const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
         const isBareRequire =
           ts.isIdentifier(node.expression) && requireAliases.has(node.expression.text);
-        if (isDynamicImport || isBareRequire) {
+        // Node's CommonJS `module.require(...)`, which really does load — unlike
+        // an arbitrary `loader.require(...)` method, which does not.
+        const isModuleRequire =
+          ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          node.expression.expression.text === "module" &&
+          node.expression.name.text === "require";
+        if (isDynamicImport || isBareRequire || isModuleRequire) {
           found = true;
           return;
         }
@@ -364,6 +381,44 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     expect(scriptKindFor("a/b.jsx")).toBe(ts.ScriptKind.JSX);
     expect(scriptKindFor("a/b.mjs")).toBe(ts.ScriptKind.JS);
     expect(scriptKindFor("a/b.ts")).toBe(ts.ScriptKind.TS);
+  });
+
+  it("detects the loader spellings a name-only check misses", () => {
+    const L = LEGACY_PACKAGE;
+    // A no-substitution template literal is a NoSubstitutionTemplateLiteral, not
+    // a StringLiteral — `isStringLiteralLike` covers both.
+    expect(hasRuntimeLegacyImport("const m = await import(`" + L + "`);")).toBe(true);
+    expect(hasRuntimeLegacyImport("const m = require(`" + L + "`);")).toBe(true);
+    // Node's CommonJS module.require really loads; an arbitrary member call does not.
+    expect(hasRuntimeLegacyImport(`module.require("${L}");`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`loader.require("${L}");`)).toBe(false);
+    expect(hasRuntimeLegacyImport(`registry.module.require("${L}");`)).toBe(false);
+  });
+
+  it("resolves a relative path that reaches into the legacy package", () => {
+    // Reaching into another package's source by relative path is an established
+    // pattern here, so a name-only comparison would miss a real dependency.
+    const rel = `import { createVersionedTextStore } from "../../../../packages/workspace-engine/src/index";`;
+    expect(hasRuntimeLegacyImport(rel, "apps/desktop/src/workspaces/thing.ts")).toBe(true);
+    // Same depth, a DIFFERENT package — must not match.
+    const other = `import { x } from "../../../../packages/workspace-contracts/src/engine";`;
+    expect(hasRuntimeLegacyImport(other, "apps/desktop/src/workspaces/thing.ts")).toBe(false);
+    // A relative path that does not escape into the package.
+    expect(hasRuntimeLegacyImport(`import { x } from "./sibling";`, "apps/desktop/src/a.ts")).toBe(
+      false,
+    );
+    // Type-only stays erased even by relative path.
+    const relType = `import type { VersionedTextStore } from "../../../../packages/workspace-engine/src/index";`;
+    expect(hasRuntimeLegacyImport(relType, "apps/desktop/src/workspaces/thing.ts")).toBe(false);
+  });
+
+  it("excludes .d.mts and .d.cts, not only .d.ts", () => {
+    // SCANNED_SOURCE accepts mts/cts, so excluding only `.d.ts` would let an
+    // erased declaration count as a runtime importer.
+    expect(isProductionSource("packages/x/src/a.d.ts")).toBe(false);
+    expect(isProductionSource("packages/x/src/a.d.mts")).toBe(false);
+    expect(isProductionSource("packages/x/src/a.d.cts")).toBe(false);
+    expect(isProductionSource("packages/x/src/a.mts")).toBe(true);
   });
 
   it("scans shipping JavaScript and skips build/test config", () => {
