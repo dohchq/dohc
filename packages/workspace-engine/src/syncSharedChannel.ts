@@ -1,8 +1,15 @@
 import type { SyncReplicationEnvelope, WorkspaceId } from "@dohc/workspace-contracts/engine";
+import {
+  RelayUnauthorizedError,
+  ShareUnavailableError,
+  SharedChannelAppendRejectedError,
+  SharedChannelReadOnlyError,
+  type PullSharedChannelResult,
+  type PushSharedChannelResult,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
 import { createLinkedChatStore } from "./linkedChatStore";
 import { openEngineDb } from "./syncApply";
-import { RelayUnauthorizedError, type SyncRelayConnection } from "./syncRelay";
-import { ShareUnavailableError } from "./syncShareView";
 
 // MU-C4 — the MEMBER side of a shared channel (the bidirectional chat-channel
 // grant). Two passes, both share-scoped and idempotent:
@@ -30,20 +37,6 @@ import { ShareUnavailableError } from "./syncShareView";
 // the view; the locally replayed copy stays readable and simply stops
 // updating (PR-18's honest end-of-share).
 
-export class SharedChannelReadOnlyError extends Error {
-  constructor(message = "This shared channel is read-only for you.") {
-    super(message);
-    this.name = "SharedChannelReadOnlyError";
-  }
-}
-
-export class SharedChannelAppendRejectedError extends Error {
-  constructor(message = "The relay refused an op for this shared channel.") {
-    super(message);
-    this.name = "SharedChannelAppendRejectedError";
-  }
-}
-
 export interface SharedChannelInfo {
   shareId: string;
   granterUserId: string;
@@ -51,17 +44,6 @@ export interface SharedChannelInfo {
   channelWireId: string;
   access: "read-write" | "read-only";
   createdAtMs: number;
-}
-
-export interface PullSharedChannelResult {
-  fetched: number;
-  applied: number;
-  skipped: number;
-  nextCursor: number;
-}
-
-export interface PushSharedChannelResult {
-  pushed: number;
 }
 
 const SHARE_PAGE_LIMIT = 500;

@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type {
   EngineWriteLaneConnection,
-  PendingConflictResolve as PendingConflictResolveType,
   SyncApplyResult,
   SyncReplicationOpKind,
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
+import type {
+  PendingConflictResolve as PendingConflictResolveType,
+} from "@dohc/workspace-contracts/relay";
 
 // The journaling + peer-ack helpers only ever call `db.prepare(...).run/get`, so
 // they accept the minimal EngineWriteLaneConnection surface rather than the full
@@ -30,7 +32,6 @@ export type {
   ChatThreadCreatePayload,
   ConflictResolvePayload,
   MomentAppendPayload,
-  PendingConflictResolve,
   SecretFileDeletePayload,
   SecretFilePutPayload,
   SecretVersionForkPayload,

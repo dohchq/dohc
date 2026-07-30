@@ -6,7 +6,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 // contract with a Rust twin, not engine state. SyncRelayConnection stays on the
 // oracle -- that one IS engine surface and migrates with the relay work.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import type { SyncRelayConnection } from "@dohc/workspace-engine";
+import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { ShareMountRecord } from "./registryStore";
 import {

@@ -4,16 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { WorkspaceId } from "@dohc/workspace-contracts/engine";
+import {
+  ShareUnavailableError,
+  SharedChannelReadOnlyError,
+} from "@dohc/workspace-contracts/relay";
 import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import { createLinkedChatStore } from "./linkedChatStore";
 import { VERSIONED_TEXT_STORE_RELATIVE_PATH } from "./versionedTextStore";
 import {
-  SharedChannelReadOnlyError,
   fetchSharedChannelInfo,
   pullSharedChannel,
   pushSharedChannel,
 } from "./syncSharedChannel";
-import { ShareUnavailableError } from "./syncShareView";
 
 // MU-C4 member-side unit tests against a HAND-ROLLED relay double. The double
 // exists to simulate what the REAL relay must never do (serve another

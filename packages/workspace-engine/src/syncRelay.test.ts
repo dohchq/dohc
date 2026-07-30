@@ -4,12 +4,14 @@ import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  MAX_VERSIONED_BINARY_FILE_BYTES,
   RelayBlobMissingError,
   RelayConflictError,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
+} from "@dohc/workspace-contracts/relay";
+import {
+  MAX_VERSIONED_BINARY_FILE_BYTES,
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   claimRelayWorkspace,
   probeRelayWorkspace,

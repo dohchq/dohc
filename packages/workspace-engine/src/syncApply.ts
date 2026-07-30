@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import type { WorkspaceId } from "@dohc/workspace-contracts/engine";
+import type { PendingConflictResolve } from "@dohc/workspace-contracts/relay";
 import {
   ENGINE_SQLITE_BUSY_TIMEOUT_MS,
   assertEngineSqliteIntegrity,
@@ -16,7 +17,7 @@ import {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
-import type { PendingConflictResolve, SyncReplicationEnvelope } from "./syncReplication";
+import type { SyncReplicationEnvelope } from "./syncReplication";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 

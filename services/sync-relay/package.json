@@ -16,6 +16,7 @@
   "dependencies": {
     "@dohc/security-contract": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
+    "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "better-auth": "^1.6.16",
     "pg": "^8.21.0"

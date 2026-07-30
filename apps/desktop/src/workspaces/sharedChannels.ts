@@ -1,9 +1,11 @@
 import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
+import {
   type pullSharedChannel,
   type pushSharedChannel,
-  type SyncRelayConnection,
 } from "@dohc/workspace-engine";
 import type { JoinedSharedChannel } from "./registryStore";
 

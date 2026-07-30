@@ -13,6 +13,8 @@ import {
 import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+} from "@dohc/workspace-contracts/relay";
+import {
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   claimRelayWorkspace,
   createLinkedChatStore,

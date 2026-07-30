@@ -4,14 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { WorkspaceId } from "@dohc/workspace-contracts/engine";
+import {
+  RelayUnauthorizedError,
+  ShareUnavailableError,
+} from "@dohc/workspace-contracts/relay";
 import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import { createVersionedTextStore } from "./versionedTextStore";
 import {
-  ShareUnavailableError,
   fetchShareViewInfo,
   pullShareView,
 } from "./syncShareView";
-import { RelayUnauthorizedError } from "./syncRelay";
 
 const WORKSPACE = "shared-view-ws" as WorkspaceId;
 const SHARE_ID = "share-1";

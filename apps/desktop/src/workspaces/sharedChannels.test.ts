@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+} from "@dohc/workspace-contracts/relay";
+import {
   createLinkedChatStore,
 } from "@dohc/workspace-engine";
 import {

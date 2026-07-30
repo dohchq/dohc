@@ -659,6 +659,9 @@ importers:
       '@dohc/workspace-auth':
         specifier: workspace:*
         version: link:../../packages/workspace-auth
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../../packages/workspace-contracts
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../../packages/workspace-core

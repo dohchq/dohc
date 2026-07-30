@@ -349,11 +349,14 @@ import {
   removeMountFolder,
 } from "./workspaces/shareMounts";
 import {
-  installWorkspaceDataKey,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
+import {
+  installWorkspaceDataKey,
   GENERAL_CHANNEL_WIRE_ID,
   fetchShareViewInfo,
   fetchSharedChannelInfo,
@@ -363,7 +366,6 @@ import {
   type ChatBookmark,
   type ChatReaction,
   type ChatThread,
-  type SyncRelayConnection,
   type VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";

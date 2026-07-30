@@ -2,10 +2,12 @@ import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   type PendingConflictResolve,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
+import {
   type pullWorkspaceFromRelay,
   type pushWorkspaceToRelay,
   type recoverRelayOrigin,
-  type SyncRelayConnection,
 } from "@dohc/workspace-engine";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 

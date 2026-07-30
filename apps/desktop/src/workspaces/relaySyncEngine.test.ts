@@ -1,10 +1,12 @@
 import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
+  type PullWorkspaceFromRelayResult,
+} from "@dohc/workspace-contracts/relay";
+import {
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
   recoverRelayOrigin,
-  type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {

@@ -13,6 +13,7 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // engine state — the same reason workspaceFiles/workspaceGraph/workspaceSearch
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import {
   createSecretFileStore,
   createVersionedTextStore,
@@ -26,7 +27,6 @@ import {
   type VersionedTextMoment,
   type VersionedTextMomentSummary,
   type VersionedTextStore,
-  type RelayMaterializedPath,
   type YDocContentKind,
 } from "@dohc/workspace-engine";
 import {

@@ -11,7 +11,7 @@ import {
   RelayOriginDivergedError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/relay";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineDaemonClient } from "./engineDaemonLifecycle";
 import {
