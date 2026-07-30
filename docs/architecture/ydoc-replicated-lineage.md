@@ -23,11 +23,22 @@ them is how a port goes wrong:
 - **Divergent** — the two implementations differ, and the difference is named.
   Neither is automatically the right answer.
 - **Required** — a property the finished implementation must have, derived from
-  the failure it prevents. **No working implementation of these exists**, so they
-  are reasoned rather than proven. Review them as design, not as documentation.
+  the failure it prevents.
 
-Where a Required property has no implementation to copy, this document says so
-instead of pointing at code that only half does it.
+Every property below carries its own label, because they are genuinely mixed: some
+are implemented on one side and not the other. Rust implements the `base_claimed`
+predicate and the compaction skip; TypeScript implements the pre-write cap and the
+atomic snapshot-plus-journal transaction; **the end-to-end origination path is
+implemented nowhere**, and neither is promotion of a lineage that already holds
+updates. Do not read a Required label as "nobody has built anything here", and do
+not read an Observed label as "this is the whole property".
+
+**This document does not specify an algorithm.** It is a list of constraints any
+origination design must satisfy, each paired with the failure it prevents. That
+distinction is deliberate: earlier drafts wrote out a recipe, and review found the
+recipe wrong six times running — twice in ways that would have lost data, and once
+by recreating the very duplicate-lineage bug described below. Constraints with
+citations can be checked. A derived recipe with no implementation cannot.
 
 ## Why a base needs claiming at all
 
@@ -161,10 +172,36 @@ the origin still reconstructs its content from its own private rows while every
 new peer is permanently missing it. The divergence is invisible from the machine
 that has the data.
 
-So the journaled base must full-state-encode the **merged** document — the
-reconstructed lineage plus the incoming bytes — or the pre-existing updates must be
-journaled as a delta alongside it. Either way the local rows must reach
-`replication_log`.
+So the pre-existing local rows must reach `replication_log` somehow — either
+encoded into the journaled base, or journaled as deltas alongside it.
+
+**But do not reach for a CRDT union, and this is the trap.** "Merge the persisted
+document with the incoming bytes" is the obvious phrasing and it is wrong whenever
+those incoming bytes came from *freshly seeding the current markdown*. Two seeds
+mint different Yjs item ids for the same text — the whole reason re-seeding is
+forbidden above — so a union of persisted-plus-fresh-seed contains **both copies**,
+and promotion would recreate the duplicate-lineage bug this document opens by
+describing.
+
+Origination must encode the **persisted Y.Doc itself**, applying only updates
+generated against that same lineage. Reconciling a genuinely independent remote
+base is a different problem and needs a different strategy than union.
+
+**Two further conditions on the encoding, both Observed elsewhere and Required
+here:**
+
+- **A full-state encode is not enough when updates are unresolved.** If the
+  persisted document has a missing dependency, a full-state snapshot omits that
+  pending row — the same reason compaction must skip (below). Promotion must detect
+  `has_missing_updates()` and either wait or journal every pending row as a delta.
+  Otherwise the claim loses a durable row before its dependency arrives.
+- **Content kind must match before a durable marker is modified.** The kind is part
+  of an established lineage. Rust's `claim_base_in_tx` currently upserts the
+  incoming `content_kind` *before* it checks `base_claimed` — with a comment saying
+  it "repairs a stale `content_kind`" — so a same-byte redelivery carrying a
+  different kind commits the new kind, and the persisted Y.Doc is then projected
+  through the wrong schema. Only a genuinely bare marker may adopt the incoming
+  kind.
 
 **Required, with no implementation to copy.** The Rust inbound path does *half* of
 this and it is important not to mistake it for a model
@@ -179,6 +216,17 @@ reconstruct them, and later deltas that depend on them can stay pending forever.
 The comment there states the projection requirement — "or the visible snapshot
 would drop local content that is still durably part of the CRDT" — and that is
 exactly the narrower guarantee it delivers. Origination has to go further.
+
+**2c. A base must be self-contained — validate that, not just its size.** An
+incoming payload flagged as a base state can actually be a *delta* whose
+predecessor is absent. Byte validation accepts it, `Ydoc::apply` parks it as a
+missing update, and the claim then stores those bytes as the seq-0 snapshot. That
+snapshot is not self-contained: a fresh peer cannot reconstruct the document from
+it, which is the one job a base has.
+
+So before writing anything, apply the candidate to an **empty** Y.Doc and reject it
+if `has_missing_updates()` is true — in addition to enforcing the byte cap. The cap
+catches a base that is too big; this catches a base that is not a base.
 
 **3. Journal the base in the same transaction as the snapshot rows.** The
 snapshot blob lands in `binary_blobs` first, satisfying blob-before-log, and the
@@ -211,6 +259,16 @@ the caller's path string.** The reference builds
 The canonical path must also match the store's own write-chain key, so a store and
 a driver on one physical database agree on identity. Rust likewise scopes its
 shared `LeaseRegistry` per root.
+
+**A path string is still the weaker instrument, so prefer the file-identity
+primitive.** `canonicalEngineDbPath` resolves a path, and a path is not an identity:
+the same `engine.db` reached through a hard link or a bind-mount alias can resolve
+to two different strings, which splits the reservation *and* write-chain namespaces
+and admits two writers to one database — the exact failure the key exists to
+prevent. Rust already has the right primitive for this:
+`EngineDbIdentity(FileId)` in `crates/dohc-engine-runtime/src/identity.rs`, built
+from `file_id::get_file_id(path)`, which asks the OS what file this is rather than
+what it is called. Key reservations by that, not by a path recipe.
 
 Related, and easy to get wrong when porting: writes go through a single write
 lane. `node:sqlite` busy-waits block the JS thread, so two same-process writers
@@ -335,15 +393,30 @@ requirement (2b) is entirely broken, because a fresh document never has a
 `base_claimed = 0` marker carrying durable updates. So add the promotion case
 explicitly:
 
-1. Open a document **local-only** and leave updates durable (do not settle or
-   close cleanly — that is the crash shape the case exists for).
-2. Promote the lineage to replicated.
-3. Assert a **clean peer** reconstructs both the pre-promotion content *and* later
+1. Open a document **local-only** and leave updates durable.
+2. **Terminate the owning process without running Y.Doc close, then reopen the same
+   database.** This step is the whole scenario and it is easy to get wrong in both
+   directions: merely leaving the session open keeps its lease, so the promotion
+   attempt is refused as `ydoc-session-busy` (`CollabError::LeaseHeld`, mapped in
+   `crates/dohc-workspace-engine/src/lib.rs`); closing it *normally* prunes the
+   local-only rows and destroys the precondition. Only a crash-shaped exit leaves
+   the state the case is about.
+3. Promote the lineage to replicated.
+4. Assert a **clean peer** reconstructs both the pre-promotion content *and* later
    edits.
 
-Without step 3 against a clean peer, the origin reconstructs from its own private
+Without step 4 against a clean peer, the origin reconstructs from its own private
 rows and the gate goes green on precisely the silent divergence 2b warns about.
 This is the same trap as the disabled rejoin spec above, one level deeper: a gate
 written to cover a fixed bug that never exercises the bug's precondition.
+
+**And the fresh-creation scenario needs a clean peer too.** Base-once plus
+delta-follows is satisfied by a base that is empty, stale, or from the wrong
+document — nothing in that pair inspects what the base *contains*. So the fresh
+scenario must also replicate into a clean peer and assert both the initial content
+and a later edit, preferably including the persisted state vector, since the Y.Doc
+is canonical and the markdown projection is downstream of it. The promotion
+scenario cannot cover this: it validates the promotion path, not the fresh-creation
+encoder.
 
 Before claiming any sync behaviour works, check which table the write landed in.
