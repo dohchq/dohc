@@ -68,6 +68,32 @@ drifts, goes missing, or outlives the skill it points at.
 `;
 }
 
+/**
+ * The value of a top-level frontmatter key, or null if the key is absent.
+ * Returns "" when the key exists with no usable value, so an empty
+ * `description:` is rejected rather than passing a presence check.
+ *
+ * Handles the block scalars these files actually use (`>-`, `|`, and friends),
+ * where the value lives on the following indented lines.
+ */
+function frontmatterValue(frontmatter, key) {
+  const lines = frontmatter.split(/\r?\n/);
+  const i = lines.findIndex((l) => new RegExp(`^${key}:`).test(l));
+  if (i === -1) return null;
+
+  const inline = lines[i].slice(key.length + 1).trim();
+  if (inline !== "" && !/^[|>][+-]?\d*$/.test(inline)) return inline;
+
+  // Either an empty scalar or a block indicator: the value is whatever indented
+  // non-blank content follows, before the next top-level key.
+  let out = "";
+  for (const line of lines.slice(i + 1)) {
+    if (/^\S/.test(line)) break;
+    out += line.trim();
+  }
+  return out.trim();
+}
+
 /** Adapter directories in a root whose canonical skill no longer exists. */
 function orphansIn(rootDir, canonicalNames) {
   if (!existsSync(rootDir)) return [];
@@ -112,10 +138,16 @@ for (const name of shared) {
   }
   let ok = true;
   // A host triggers a skill off its description, so an adapter without one is
-  // discovered and never used.
+  // discovered and never used. Presence is not enough — `description:` with no
+  // value passes a key check and still leaves both hosts without trigger
+  // metadata, so require an actual value.
   for (const key of ["name", "description"]) {
-    if (!new RegExp(`^${key}:`, "m").test(frontmatter)) {
+    const value = frontmatterValue(frontmatter, key);
+    if (value === null) {
       problems.push(`${canonical} frontmatter has no '${key}:'`);
+      ok = false;
+    } else if (value === "") {
+      problems.push(`${canonical} frontmatter '${key}:' is empty`);
       ok = false;
     }
   }
