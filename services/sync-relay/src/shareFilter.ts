@@ -1,5 +1,6 @@
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { validateUserWritePath } from "@dohc/workspace-core";
+import { RELAY_ERRORS } from "./errorCodes";
 
 // PR 18 share grants: the server-side filter that decides which replicated
 // ops (and which blobs) a share RECIPIENT may see. This module is the
@@ -82,7 +83,13 @@ export function isChatChannelSelector(
 
 export type ChatChannelSelectorValidation =
   | { ok: true; selector: ChatChannelShareSelector }
-  | { ok: false; code: "invalid_channel" | "invalid_access"; message: string };
+  | {
+      ok: false;
+      code:
+        | typeof RELAY_ERRORS.invalid_channel.code
+        | typeof RELAY_ERRORS.invalid_access.code;
+      message: string;
+    };
 
 export function validateChatChannelShareSelector(
   input: {
@@ -100,7 +107,7 @@ export function validateChatChannelShareSelector(
   ) {
     return {
       ok: false,
-      code: "invalid_channel",
+      code: RELAY_ERRORS.invalid_channel.code,
       message: "channelWireId must be a non-empty trimmed string",
     };
   }
@@ -111,7 +118,7 @@ export function validateChatChannelShareSelector(
   if (access !== "read-write" && access !== "read-only") {
     return {
       ok: false,
-      code: "invalid_access",
+      code: RELAY_ERRORS.invalid_access.code,
       message: 'access must be "read-write" or "read-only"',
     };
   }
@@ -123,14 +130,14 @@ export function validateChatChannelShareSelector(
   if (resolvedKind === "agent") {
     return {
       ok: false,
-      code: "invalid_channel",
+      code: RELAY_ERRORS.invalid_channel.code,
       message: "agent channels cannot be shared",
     };
   }
   if (resolvedKind === null) {
     return {
       ok: false,
-      code: "invalid_channel",
+      code: RELAY_ERRORS.invalid_channel.code,
       message: "channel is not shareable",
     };
   }
@@ -142,11 +149,11 @@ export type ShareSelectorValidation =
   | {
       ok: false;
       code:
-        | "empty_selector"
-        | "too_many_paths"
-        | "invalid_path"
-        | "secret_path"
-        | "invalid_version";
+        | typeof RELAY_ERRORS.empty_selector.code
+        | typeof RELAY_ERRORS.too_many_paths.code
+        | typeof RELAY_ERRORS.invalid_path.code
+        | typeof RELAY_ERRORS.secret_path.code
+        | typeof RELAY_ERRORS.invalid_version.code;
       message: string;
     };
 
@@ -161,25 +168,33 @@ export function validateShareSelector(input: {
 }): ShareSelectorValidation {
   const rawPaths = input.paths ?? [];
   if (!Array.isArray(rawPaths)) {
-    return { ok: false, code: "invalid_path", message: "paths must be an array" };
+    return {
+      ok: false,
+      code: RELAY_ERRORS.invalid_path.code,
+      message: "paths must be an array",
+    };
   }
   if (rawPaths.length > MAX_SHARE_PATHS) {
     return {
       ok: false,
-      code: "too_many_paths",
+      code: RELAY_ERRORS.too_many_paths.code,
       message: `a share can select at most ${MAX_SHARE_PATHS} paths`,
     };
   }
   const paths: string[] = [];
   for (const raw of rawPaths) {
     if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_SHARE_PATH_CHARS) {
-      return { ok: false, code: "invalid_path", message: "each path must be a non-empty string" };
+      return {
+        ok: false,
+        code: RELAY_ERRORS.invalid_path.code,
+        message: "each path must be a non-empty string",
+      };
     }
     const validated = validateUserWritePath(raw);
     if (!validated.ok) {
       return {
         ok: false,
-        code: "invalid_path",
+        code: RELAY_ERRORS.invalid_path.code,
         message: "a selected path is not a valid workspace path",
       };
     }
@@ -187,14 +202,14 @@ export function validateShareSelector(input: {
     if (classification.kind === "secret") {
       return {
         ok: false,
-        code: "secret_path",
+        code: RELAY_ERRORS.secret_path.code,
         message: "secret files cannot be shared",
       };
     }
     if (classification.kind !== "tracked") {
       return {
         ok: false,
-        code: "invalid_path",
+        code: RELAY_ERRORS.invalid_path.code,
         message: "a selected path is not shareable",
       };
     }
@@ -208,14 +223,18 @@ export function validateShareSelector(input: {
       input.versionId.length === 0 ||
       input.versionId.length > MAX_SHARE_VERSION_ID_CHARS
     ) {
-      return { ok: false, code: "invalid_version", message: "versionId is not valid" };
+      return {
+        ok: false,
+        code: RELAY_ERRORS.invalid_version.code,
+        message: "versionId is not valid",
+      };
     }
     versionId = input.versionId;
   }
   if (paths.length === 0 && versionId === null) {
     return {
       ok: false,
-      code: "empty_selector",
+      code: RELAY_ERRORS.empty_selector.code,
       message: "a share must select at least one path or a version",
     };
   }
