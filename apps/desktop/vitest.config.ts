@@ -1,24 +1,11 @@
-import { cpus } from "node:os";
+import { availableParallelism } from "node:os";
 import { defineConfig } from "vitest/config";
 
-// Cap the worker pool. vitest defaults to roughly one fork per core, and on a
-// 32-core box that is ~31 forks — many of which spawn an engine daemon and hold
-// a SQLite handle on their own temp `.dohc/engine/engine.db`. That oversubscribes
-// a machine that is rarely running this suite alone, and the failures it produces
-// are indistinguishable from real ones.
-//
-// Measured on this repo, same commit, three full-suite runs at the default:
-// three DISJOINT failure sets, every failure green in isolation. One run named
-// its cause outright — `Test timed out in 5000ms` followed by `EBUSY: resource
-// busy or locked, unlink '...\.dohc\engine\engine.db'` across four files at once.
-//
-// With the cap at 8: EBUSY occurrences went from that cluster to ZERO, and two
-// consecutive runs gave 1 failure then 0. See #392.
-//
-// A quarter of the cores, floor 2, ceiling 8. The ceiling matters more than the
-// fraction: past roughly eight concurrent engine daemons the filesystem, not the
-// CPU, is the constraint, so a bigger machine should not buy more contention.
-const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(cpus().length / 4)));
+// At most 8 concurrent workers. Fifteen of these suites open their own temp
+// `.dohc/engine/engine.db`, and past roughly eight the filesystem is the
+// constraint rather than the CPU — so a bigger machine must not buy more
+// contention. Evidence and the failure modes are on #392.
+const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4)));
 
 // e2e/ runs under Playwright (playwright.config.ts), never vitest.
 export default defineConfig({
