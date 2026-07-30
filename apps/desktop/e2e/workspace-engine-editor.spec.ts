@@ -20,8 +20,8 @@ import {
 } from "./helpers/workspace";
 
 // WS-G2-C-2 editor-on-engine round trip. A rich markdown file on an engine-
-// flagged workspace edits THROUGH the engine Y.Doc provider (recordUpdate +
-// debounced settle), replacing HocuspocusProvider. The load-bearing proof: a
+// flagged workspace edits through the engine Y.Doc provider (recordUpdate +
+// debounced settle). The load-bearing proof: a
 // live edit journals ONLY as ydoc.update — NOT a duplicate moment.append that
 // would collide (P0D) with the ydoc.update stream on a shared workspace — and
 // the .md + engine.db reflect it, and a reopen resumes the rich content. The

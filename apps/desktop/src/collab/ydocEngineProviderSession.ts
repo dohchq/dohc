@@ -1,9 +1,8 @@
 // WS-G2-C-2 — the ENGINE Y.Doc provider session (main-process core).
 //
-// This is the object that replaces the HocuspocusProvider in the editor's
-// collab binding. The legacy provider synced a renderer Y.Doc to a websocket
-// server; the engine provider instead binds the editor to a Y.Doc whose
-// canonical state lives in the process-local engine driver session — no relay,
+// This object backs the editor's collaboration binding. It binds the editor to
+// a Y.Doc whose canonical state lives in the process-local engine driver
+// session — no relay,
 // no token, no network. Solo editing runs entirely on the engine; co-editing
 // rides the SAME session because a remote `ydoc.update` applied by the store
 // converges into `session.doc` (liveYDocRegistry routing, G2-C-1) and this

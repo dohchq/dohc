@@ -1208,9 +1208,8 @@ function putYDocUpdateBlobBytes(db: SqliteDb, bytes: Uint8Array): string {
   return sha256;
 }
 
-// Rebuild the persisted Y.Doc from the latest snapshot + trailing update log,
-// exactly as the driver's loadPersistedDoc does (Hocuspocus's load+replay
-// shape), but on the apply transaction's connection.
+// Rebuild the persisted Y.Doc from the latest snapshot + trailing update log
+// on the apply transaction's connection.
 function reconstructEngineYDoc(
   db: SqliteDb,
   workspaceId: WorkspaceId,
@@ -1247,9 +1246,9 @@ function reconstructEngineYDoc(
 }
 
 // Bound peer-side replay: past a threshold of accumulated updates, fold the log
-// into a fresh full-state snapshot and prune the folded rows (the compaction
-// the legacy Hocuspocus stack skipped, design Risk 3). The snapshot blob is
-// LOCAL compaction state (never pushed), still a GC root while referenced.
+// into a fresh full-state snapshot and prune the folded rows. The snapshot blob
+// is local compaction state (never pushed), but remains a GC root while
+// referenced.
 function maybeCompactPeerEngineYDoc(
   db: SqliteDb,
   workspaceId: WorkspaceId,

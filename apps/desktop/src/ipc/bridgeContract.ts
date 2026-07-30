@@ -3159,7 +3159,7 @@ export interface DohcDesktopBridge {
   // WS-G2-C-2 engine Y.Doc editor binding. The renderer mints a sessionId and
   // opens a live engine Y.Doc session for a rich file; main constructs the
   // node-only session through the workspace's engine capture (reusing its
-  // store), replacing HocuspocusProvider. available:false => not engine-backed
+  // store). available:false => not engine-backed
   // (unflagged workspace, secret path, missing file, or already live) — the
   // caller falls back to the plain local autosave editor. On success
   // initialUpdate seeds the renderer's mirror doc.

@@ -53,7 +53,7 @@ type DemoDocument = {
 
 type SaveState = "saved" | "saving";
 
-const STORAGE_KEY = "dohc-marketing-demo-documents-v2";
+const STORAGE_KEY = "dohc-marketing-demo-documents";
 const FOLDERS_STORAGE_KEY = "dohc-marketing-demo-folders-v1";
 
 const DEMO_DOCUMENTS: DemoDocument[] = [

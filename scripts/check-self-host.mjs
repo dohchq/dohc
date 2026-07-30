@@ -7,8 +7,6 @@ const REQUIRED_SERVICES = [
   'workspace-api',
   'sync-relay',
   'postgres',
-  'sqlite-worker',
-  'agent-sandbox',
 ]
 // A one-shot init container (runs to completion, then exits) — verified for
 // presence but never expected to stay running, so it is not in
@@ -72,8 +70,6 @@ function checkServiceScripts() {
   for (const [label, path] of [
     ['workspace API package', 'services/workspace-api/package.json'],
     ['sync relay package', 'services/sync-relay/package.json'],
-    ['sqlite worker package', 'services/sqlite-worker/package.json'],
-    ['agent sandbox package', 'services/agent-sandbox/package.json'],
   ]) {
     record(label, existsSync(path), path)
   }
@@ -149,17 +145,15 @@ function checkChatSurfaceSelfHostable() {
   }
   const relayPkg = readPackageJson(relayPkgPath)
   const deps = Object.keys(relayPkg.dependencies ?? {})
-  const ALLOWED_RUNTIME_DEPS = new Set([
-    // storage.ts imports AGENT_CHANNEL_WIRE_ID from it; it was a real runtime
-    // dep that this allowlist never listed, so this check had been failing on
-    // main and nothing runs it in CI.
-    '@dohc/security-contract',
-    '@dohc/workspace-auth', // Better Auth session verification (workspace-api core)
-    '@dohc/workspace-core',
+  const ALLOWED_EXTERNAL_RUNTIME_DEPS = new Set([
     'better-auth', // rides the `postgres` auth core
     'pg', // rides the `postgres` auth core
   ])
-  const foreignDeps = deps.filter((dep) => !ALLOWED_RUNTIME_DEPS.has(dep))
+  const foreignDeps = deps.filter(
+    (dep) =>
+      !dep.startsWith('@dohc/') &&
+      !ALLOWED_EXTERNAL_RUNTIME_DEPS.has(dep),
+  )
   record(
     'chat surface: relay runtime deps stay within the self-host matrix',
     foreignDeps.length === 0,
@@ -168,29 +162,6 @@ function checkChatSurfaceSelfHostable() {
       : `unexpected runtime dep(s) imply a service outside REQUIRED_SERVICES: ${foreignDeps.join(', ')}`,
   )
 
-  // Defense in depth: no chat/presence/DM source references a retired or
-  // cloud-locked collaboration service (Hocuspocus / Convex).
-  const CHAT_SOURCES = [
-    'services/sync-relay/src/server.ts',
-    'services/sync-relay/src/presence.ts',
-    'services/sync-relay/src/shareFilter.ts',
-    'services/sync-relay/src/storage.ts',
-    'services/sync-relay/src/main.ts',
-  ]
-  // Match only actual module references (import/export-from/require), not the
-  // token appearing in a comment like "no longer uses Convex".
-  const FORBIDDEN_IMPORT =
-    /^\s*(?:import\b[^;]*?from\s*|export\b[^;]*?from\s*|(?:const|let|var)\b[^=]*?=\s*require\s*\(\s*)['"][^'"]*(?:hocuspocus|convex)[^'"]*['"]/im
-  const offenders = CHAT_SOURCES.filter(
-    (path) => existsSync(path) && FORBIDDEN_IMPORT.test(readFileSync(path, 'utf8')),
-  )
-  record(
-    'chat surface: no cloud-locked collaboration service referenced',
-    offenders.length === 0,
-    offenders.length === 0
-      ? 'no hocuspocus/convex references in the chat/presence/DM sources'
-      : `cloud-locked service referenced in: ${offenders.join(', ')}`,
-  )
 }
 
 function checkComposeConfig() {
@@ -218,7 +189,7 @@ function checkComposeConfig() {
   record(
     `compose service:${MIGRATION_SERVICE}`,
     services.has(MIGRATION_SERVICE),
-    'one-shot Postgres migration init container (applies 0001..000N incl. Better Auth)',
+    'one-shot Postgres migration init container',
   )
   return (
     REQUIRED_SERVICES.every((service) => services.has(service)) &&

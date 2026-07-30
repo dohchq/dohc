@@ -2775,7 +2775,7 @@ body {
 
 
 /* ===================================================================== *
- * Obsidian callouts + ==highlight== mark (editor v2 schema additions).
+ * Obsidian callouts + ==highlight== mark.
  * Warm-paper tinted boxes: a low-opacity tint of the type's semantic token
  * over the page, plus a 3px left bar in the solid token color. The accent is
  * exposed as a per-type custom property so one rule set covers all types and

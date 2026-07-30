@@ -1,13 +1,12 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // The shared migration runner used by `pnpm migrate`, the dev-data reset, and
-// the self-host compose init container. Proving it here is the G2-C-3
-// blocker-2 guard: a fresh Postgres must gain the Better Auth schema (0002)
-// the surviving auth/relay stack queries, not just 0001.
+// the self-host compose init container. A fresh Postgres must gain the Better
+// Auth schema that the auth service and relay query.
 import { applyMigrations, listMigrations } from "../../../../scripts/lib/apply-migrations.mjs";
 
 const POSTGRES_URL =
-  process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc_v2";
+  process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
 
 // Runs against the live dev Postgres (same requirement as the workspace-auth
 // betterAuth conformance test: `pnpm dev:postgres` first). When no Postgres is
@@ -50,15 +49,13 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
 
   it("applies every migration in order, including the Better Auth schema", async () => {
     const migrations = await listMigrations();
-    // Sanity: the migration set includes the auth migration this blocker is about.
-    expect(migrations.map((m) => m.id)).toContain("0002_better_auth");
+    expect(migrations.map((m) => m.id)).toContain("0001_better_auth");
 
     const ran = await applyMigrations(client);
     // A fresh schema gains ALL migrations on the first run, in filename order.
     expect(ran).toEqual(migrations.map((m) => m.id));
 
-    // The Better Auth tables the auth server and sync-relay query now exist,
-    // alongside the 0001 workspace core.
+    // The Better Auth tables exist without the retired application schema.
     const tables = await client.query<{
       user_tbl: string | null;
       session_tbl: string | null;
@@ -75,7 +72,7 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
     expect(row.user_tbl).not.toBeNull();
     expect(row.session_tbl).not.toBeNull();
     expect(row.device_tbl).not.toBeNull();
-    expect(row.workspaces_tbl).not.toBeNull();
+    expect(row.workspaces_tbl).toBeNull();
 
     // The ledger records every applied migration.
     const ledger = await client.query<{ id: string }>(

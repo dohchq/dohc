@@ -360,7 +360,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.on(CHANNELS.searchResults, handler);
     return () => ipcRenderer.removeListener(CHANNELS.searchResults, handler);
   },
-  // WS-G2-C-2 engine Y.Doc editor binding: the drop-in for HocuspocusProvider.
+  // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound
   // session.

@@ -3,7 +3,7 @@
 //! hash assertion is non-tautological), plus a best-effort symlink helper.
 //!
 //! Each integration test file is its own crate and uses a different subset of
-//! these helpers, so unused-in-one-crate items are expected — allow dead code.
+//! these helpers, so unused items are expected in any one crate.
 #![allow(dead_code)]
 
 use sha2::{Digest, Sha256};

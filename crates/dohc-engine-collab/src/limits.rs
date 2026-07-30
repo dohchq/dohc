@@ -13,9 +13,8 @@ pub const MAX_YDOC_UPDATE_BYTES: usize = 5 * 1024 * 1024;
 
 /// Fold the append-only update log into a full-state snapshot (and prune the
 /// folded updates) once this many updates accumulate past the latest snapshot.
-/// Matches the TS driver's `DEFAULT_COMPACTION_THRESHOLD` (the legacy Hocuspocus
-/// stack never compacted; the durable layer MUST, or the log grows unbounded —
-/// design Risk 3). This is the retention bound that keeps the log finite.
+/// Matches the TS driver's `DEFAULT_COMPACTION_THRESHOLD`. This retention bound
+/// keeps the log finite.
 pub const DEFAULT_COMPACTION_THRESHOLD: u32 = 64;
 
 /// FORWARD CONTRACT (not active protection today). `apply_remote_update` applies

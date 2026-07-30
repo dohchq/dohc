@@ -4,10 +4,10 @@ import { actorFromSession, createWorkspaceAuth, type WorkspaceAuth } from "./bet
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
 
 // Runs against the live dev Postgres (same requirement as workspace-postgres
-// conformance tests): pnpm dev:postgres first. The 0002_better_auth migration
+// conformance tests): pnpm dev:postgres first. The 0001_better_auth migration
 // must be applied (test setup applies it idempotently).
 const POSTGRES_URL =
-  process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc_v2";
+  process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
 
 let pool: Pool;
 let auth: WorkspaceAuth;
@@ -36,7 +36,7 @@ const pgAvailable = await postgresReachable();
 if (!pgAvailable && process.env.DOHC_REQUIRE_POSTGRES === "1") {
   throw new Error(
     `DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}. ` +
-      "These tests apply the real 0002_better_auth.sql migration and exercise " +
+      "These tests apply the real 0001_better_auth.sql migration and exercise " +
       "session/authorization behaviour through it; skipping them here would " +
       "report green without checking anything.",
   );
@@ -85,7 +85,7 @@ if (pgAvailable) {
     const { readFile } = await import("node:fs/promises");
     const migration = await readFile(
       new URL(
-        "../../workspace-postgres/src/db/migrations/0002_better_auth.sql",
+        "../../workspace-postgres/src/db/migrations/0001_better_auth.sql",
         import.meta.url,
       ),
       "utf8",

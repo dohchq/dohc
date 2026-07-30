@@ -3,80 +3,49 @@ id: product-spec
 title: dohc Product Spec
 ---
 
-# dohc — product spec (overview)
+# dohc product spec
 
-A working summary of what dohc does today. dohc is a desktop-first product;
-the implementation lives in `apps/desktop`. There is no web client — cloud is
-opt-in (Better Auth and a sync-relay over Postgres), and co-editing is
-engine-native: Y.Doc updates replicate over the sync relay. There is no
-separate collaboration server.
+dohc is a local-first Electron app. A workspace is a folder the user owns.
+The desktop app requires the Rust workspace engine and does not require a
+backend.
 
-## Core model
+## Workspace model
 
-- **Atoms** — plain-text markdown files in a per-user vault. Each has a
-  rename-proof `id:` (frontmatter), a `title:`, and optional user
-  properties. Wikilinks (`[[path]]`) connect atoms.
-- **Inline atoms** — `{key: value}` captures inside prose. They remain literal,
-  inspectable markdown values; dohc does not execute expressions embedded in
-  documents.
-- **Sites** — normal browser-viewable website folders anywhere in the
-  workspace. dohc detects `index.html`, web package scripts/dependencies,
-  common framework config, build outputs, and optional `dohc.json` metadata.
-  Agents can create ordinary React/Vite/Next/static sites without knowing
-  dohc-specific structure.
-- **Collections** — readable structured data backed by markdown tables,
-  markdown cards, CSV, JSONL, YAML, or SQLite-backed database tables.
-- **SQLite database files** — first-class workspace files stored outside
-  markdown atoms. Raw SQLite bytes are never CRDT-synced.
-- **Entities** — a flexible store (people, projects, clients, …) with
-  user-declared types, shown through source-backed sites and tables.
-- **Folders** — organize atoms; support icons, colors, stars, and
-  drag-and-drop move with wikilink-rewrite cascade.
+- Files and folders are the visible source.
+- `.dohc/engine/engine.db` stores engine state for the workspace.
+- The engine records versions, moments, search data, chats, sync operations,
+  and document collaboration state.
+- Secret-classified files keep plaintext out of history, search, export, and
+  relay payloads.
+- `shared-with-me/` contains read-only projections of received shares.
 
-## Surfaces
+## Product surfaces
 
-- **Workspace shell** — activity bar, file tree, document canvas, and an
-  inspector/chat column.
-- **Editor** — Tiptap/Yjs-backed markdown editor with a raw source mode,
-  wikilink pills, inline-atom decorations, and ASCII sketches.
-- **HTML atoms** — `.html` atoms render in a sandboxed, server-built
-  shell (zero-network, sanitized).
-- **Sites** — normal websites previewed inside dohc. Static sites are served
-  from the workspace folder; package sites can run a dev script; built sites
-  can run build and serve `dist`, `build`, or `out`. Optional dohc SDK
-  integration can enhance a site, starting with local file reads through the
-  preview bridge, but websites remain ordinary websites. See
-  [[docs/product/site-sdk.md]].
-- **Chat** — the dohc agent: find, draft, organize; shows sources and
-  changes.
-- **Onboarding** — a short questionnaire seeds the agent's first turn,
-  which builds source atoms, identity context, a setup run, and a first
-  cockpit (`home.html` or a normal site folder for interactive workflows).
-  Generated sites should pass the desktop Sites preview E2E path before
-  onboarding can finish.
-- **Graph** — a force-directed view of atoms and their links.
-- **Import / Export** — files in, files out. Imports land where the user
-  aimed (drop target or folder menu), rename on collision, and end with a
-  visible summary. Exports are per-document Markdown/HTML/PDF plus
-  folder/workspace zip. See
-  [[docs/architecture/import-export-sharing.md]].
-- **Sharing** — relay shares: read-only live-follow shares of paths or
-  versions plus bidirectional shared chat channels, exchanged as
-  `dohc-share:` codes and filtered fail-closed server-side. A received
-  share mounts into a workspace as a read-only live `shared-with-me/<label>/`
-  folder — ordinary files, agent-readable, never writable — or opens as a
-  separate read-only shared view. (The former workspace-to-workspace
-  field-exchange panel concept is retired.)
+- **Explorer:** browse, create, move, import, export, and delete workspace
+  files.
+- **Editor:** edit Markdown with Tiptap and Yjs, or edit source directly.
+- **Chat:** talk with agents and people in channels, threads, and direct
+  messages.
+- **History:** inspect moments, versions, comparisons, conflicts, and restores.
+- **Search and graph:** find content and follow workspace links.
+- **Sites:** preview ordinary static or package-based websites inside dohc.
+- **Databases:** inspect and edit supported SQLite data through bounded tools.
+- **Sharing:** grant paths, versions, or chat channels through the sync relay.
 
-## Stack
+Document computation is not implicit. Formula-like text and fenced code remain
+text unless an explicit site, script, database tool, or agent workflow runs it.
 
-Electron, React 19, Vite, Tailwind CSS v4, SQLite (`node:sqlite`), Rust
-(workspace kernel), Tiptap, Yjs (engine-native collab over the opt-in
-sync-relay), Better Auth over Postgres (cloud auth), Vitest, Playwright.
+## Collaboration
+
+The opt-in sync relay transports engine operations, blobs, shares, and
+presence. Better Auth provides identity through the workspace API. The relay
+derives the actor from the authenticated session and enforces share boundaries.
 
 ## Invariants
 
-- The agent always checks onboarding state first and never ends
-  onboarding with an empty vault.
-- Authorization is derived server-side; no client may fake completion or
-  ownership. See `docs/security/authz-boundaries.md`.
+- The renderer cannot provide trusted identity or authorization facts.
+- Every engine request is scoped through a daemon workspace handle.
+- A slow asynchronous response cannot repaint another workspace.
+- Live document editing treats the Y.Doc session as canonical.
+- Settlement writes the Markdown artifact through the engine.
+- Site and HTML previews do not grant workspace authority by themselves.

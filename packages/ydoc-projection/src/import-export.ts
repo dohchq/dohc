@@ -30,7 +30,7 @@ const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
 const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
-const DOHC_V2_SCHEMA_VERSION = 1
+const DOHC_SCHEMA_VERSION = 1
 const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
@@ -89,14 +89,14 @@ const markdownManager = new MarkdownManager({
 })
 const schema = getSchema(extensions)
 
-type DohcV2Meta = { schemaVersion: number; contentKind?: 'plain-text' }
+type DohcMeta = { schemaVersion: number; contentKind?: 'plain-text' }
 
 export function markdownToYDoc(markdown: string): Y.Doc {
   const { meta, body } = parseFrontmatter(markdown)
   const doc = new Y.Doc()
 
   writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
-  writeMap(doc.getMap(META_FIELD), { schemaVersion: DOHC_V2_SCHEMA_VERSION })
+  writeMap(doc.getMap(META_FIELD), { schemaVersion: DOHC_SCHEMA_VERSION })
 
   const bodyFragment = doc.getXmlFragment(BODY_FIELD)
   const tiptapJson = markdownManager.parse(body)
@@ -111,7 +111,7 @@ export function plainTextToYDoc(markdown: string): Y.Doc {
 
   writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
   writeMap(doc.getMap(META_FIELD), {
-    schemaVersion: DOHC_V2_SCHEMA_VERSION,
+    schemaVersion: DOHC_SCHEMA_VERSION,
     contentKind: PLAIN_TEXT_CONTENT_KIND,
   })
   doc.getText(PLAIN_TEXT_FIELD).insert(0, body)
@@ -137,13 +137,13 @@ export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {
   return mapToObject(doc.getMap(FRONTMATTER_FIELD))
 }
 
-export function getDohcYDocMeta(doc: Y.Doc): DohcV2Meta {
+export function getDohcYDocMeta(doc: Y.Doc): DohcMeta {
   const meta = mapToObject(doc.getMap(META_FIELD))
   return {
     schemaVersion:
       typeof meta.schemaVersion === 'number'
         ? meta.schemaVersion
-        : DOHC_V2_SCHEMA_VERSION,
+        : DOHC_SCHEMA_VERSION,
     contentKind:
       meta.contentKind === PLAIN_TEXT_CONTENT_KIND
         ? PLAIN_TEXT_CONTENT_KIND

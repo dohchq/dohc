@@ -28,7 +28,7 @@ describe("Better Auth database-suite availability gate", () => {
           const { DOHC_REQUIRE_POSTGRES: _required, ...inherited } = process.env;
           return {
             ...inherited,
-            POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc_v2",
+            POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
           };
         })(),
       },

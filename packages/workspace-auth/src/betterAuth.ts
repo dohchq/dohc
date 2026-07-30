@@ -7,8 +7,7 @@ import type { Pool } from "pg";
 // backend uses (self-host = one database, no auth vendor). Email/password for
 // accounts, the organization plugin for team workspaces, and the OAuth
 // device-authorization grant for desktop login (the desktop shows a code, the
-// browser approves, the desktop polls). WorkOS remains the deferred
-// enterprise-SSO path BEHIND this surface (D-01).
+// browser approves, and the desktop polls).
 //
 // This package owns ONLY the auth surface. It has no edge into workspace-api's
 // routes: the post-verification workspace-invitation claim is injected by the

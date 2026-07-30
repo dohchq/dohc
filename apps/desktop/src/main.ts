@@ -7115,9 +7115,9 @@ function registerIpcHandlers(
 
   // WS-G2-C-2 engine Y.Doc editor binding. Main owns the node-only live session
   // (constructed through the workspace's engine capture, which reuses its store)
-  // and forwards remote CRDT deltas back to the sender that opened it. This is
-  // the drop-in for the old collab-token/Hocuspocus path: no websocket, no
-  // token. Gated on an engine-flagged workspace + a rich (markdown) path; a
+  // and forwards remote CRDT deltas back to the sender that opened it. No
+  // websocket or token is needed. Gated on an engine-flagged workspace + a
+  // rich (markdown) path; a
   // secret/not-found/already-live throw surfaces as available:false so the
   // renderer falls back to the plain local autosave editor.
   ipcMain.handle(CHANNELS.engineYDocOpen, async (event, payload) => {

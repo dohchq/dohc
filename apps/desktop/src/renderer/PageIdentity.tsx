@@ -8,8 +8,8 @@ import {
   parseFrontmatter,
 } from "./markdown/frontmatter";
 
-// The frontmatter Y.Map field name (shared with PropertiesPanel and the v2
-// schema). Title + icon are reserved keys the document system owns — this
+// The frontmatter Y.Map field name shared with PropertiesPanel. Title + icon
+// are reserved keys the document system owns — this
 // surface edits them directly instead of exposing them as user properties.
 const FRONTMATTER_FIELD = "frontmatter";
 

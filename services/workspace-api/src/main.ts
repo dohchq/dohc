@@ -7,15 +7,13 @@ import { createWorkspaceApiHandler } from "./server";
 
 // The dohc Cloud / self-host server process, reduced to its surviving surface:
 // ONE Postgres and Better Auth mounted on /api/auth/* (the desktop's device
-// sign-in flow). server.ts is the pure 404 catch-all for non-auth routes; THIS
-// file is the production wiring (and the only place that reads env). The
-// live-co-editing collab-token route was retired with Hocuspocus (G2-C-3);
-// co-editing is now engine-native over the sync-relay.
+// sign-in flow). server.ts is the 404 catch-all for non-auth routes. This file
+// contains the production wiring and is the only place that reads env.
 
 const port = Number(process.env.WORKSPACE_API_PORT ?? 1786);
 const baseURL = process.env.WORKSPACE_API_BASE_URL ?? `http://localhost:${port}`;
 const secret = process.env.BETTER_AUTH_SECRET ?? "";
-const defaultPostgresUrl = "postgres://dohc:dohc@localhost:54329/dohc_v2";
+const defaultPostgresUrl = "postgres://dohc:dohc@localhost:54329/dohc";
 
 // The /test/device/approve impersonation seam is fail-CLOSED: it requires an
 // explicit dev/test signal, never merely "not production". An operator who

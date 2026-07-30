@@ -18,44 +18,7 @@ const debtPatterns = [
   { label: term('dead ', 'code'), regex: phraseRegex('dead ', 'code') },
 ]
 
-const allowlist = [
-  {
-    file: 'docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.md',
-    patterns: [
-      term('TO', 'DO'),
-      term('TB', 'D'),
-      term('temporary ', 'dual ', 'backend'),
-      term('remove ', 'after ', 'migration'),
-      term('legacy ', 'views ', 'TO', 'DO'),
-      term('skip ', 'because ', 'migration'),
-      term('dead ', 'code'),
-    ],
-    contains: 'The script must fail on:',
-    reason: 'The active implementation plan quotes the exact prohibited terms to define this check.',
-    deleteWhen: 'Remove this allowlist entry after the implementation plan is archived or deleted.',
-  },
-  {
-    file: 'docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.md',
-    patterns: [term('TO', 'DO'), term('TB', 'D')],
-    contains: 'no untracked',
-    reason: 'The active implementation plan names the expected scan outcome.',
-    deleteWhen: 'Remove this allowlist entry after the implementation plan is archived or deleted.',
-  },
-  {
-    file: 'docs/superpowers/plans/2026-06-06-dohc-apps-sdk-sqlite-and-agent-testing.md',
-    patterns: [term('TO', 'DO')],
-    contains: 'pseudo-test helper names',
-    reason: 'Historical implementation plan text documents a review rule, not live source debt.',
-    deleteWhen: 'Remove this allowlist entry when historical plans are moved out of repo-wide debt scans.',
-  },
-  {
-    file: 'docs/superpowers/plans/2026-06-06-dohc-apps-sdk-sqlite-and-agent-testing.md',
-    patterns: [term('TB', 'D')],
-    contains: 'Placeholder scan',
-    reason: 'Historical implementation plan text documents an already completed placeholder scan.',
-    deleteWhen: 'Remove this allowlist entry when historical plans are moved out of repo-wide debt scans.',
-  },
-]
+const allowlist = []
 
 const skippedDirectories = new Set([
   '.git',
@@ -75,6 +38,12 @@ const skippedFiles = new Set([
   'package-lock.json',
   'yarn.lock',
 ])
+const skippedPathPrefixes = [
+  // These records preserve the active Rust rewrite's decisions and evidence.
+  // They quote past findings verbatim, including resolved debt markers.
+  'docs/superpowers/plans/rust-engine/',
+  'docs/superpowers/plans/2026-07-16-dohc-rust-engine-rewrite.md',
+]
 const skippedExtensions = new Set([
   '.avif',
   '.bmp',
@@ -95,6 +64,7 @@ const hits = []
 for (const file of walk(root)) {
   const rel = normalize(relative(root, file))
   if (skippedFiles.has(rel)) continue
+  if (skippedPathPrefixes.some((prefix) => rel.startsWith(prefix))) continue
   const body = readTextFile(file)
   if (body === null) continue
   const lines = body.split(/\r?\n/)

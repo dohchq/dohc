@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 language: "en-US"
 early_access: false
-tone_instructions: "Be concise, direct, and product-minded. Prioritize correctness, authz/privacy, data durability, tests, and obvious UX over style nits. Keep comments actionable."
+tone_instructions: "Be concise and direct. Prioritize correctness, data durability, workspace isolation, authorization, tests, and obvious UX."
 
 reviews:
   profile: "assertive"
@@ -9,11 +9,10 @@ reviews:
   high_level_summary: true
   high_level_summary_in_walkthrough: true
   high_level_summary_instructions: |
-    Summarize the user-facing outcome first, then call out changed subsystems,
-    risk areas, and the verification evidence visible in the PR.
+    State the user-facing outcome first. Then name the changed subsystems,
+    material risks, and verification evidence.
   auto_title_instructions: |
-    Use a short imperative title that names the touched subsystem when useful.
-    Use lowercase "dohc" only when the product name is needed.
+    Use a short imperative title. Write the product name as lowercase dohc.
   review_status: true
   review_details: true
   commit_status: true
@@ -38,168 +37,143 @@ reviews:
     - "!**/.output/**"
     - "!**/dist/**"
     - "!**/coverage/**"
+    - "!**/target/**"
     - "!**/*.tsbuildinfo"
-    - "!apps/app/src/routeTree.gen.ts"
-    - "!apps/app/convex/_generated/api.*"
-    - "!apps/app/convex/_generated/server.*"
-    - "!apps/app/convex/_generated/dataModel.d.ts"
-    - "!apps/app/convex/_generated/ai/ai-files.state.json"
 
   labeling_instructions:
     - label: "security"
-      instructions: "Auth, authorization, sharing, workspace isolation, locks, skill-turn gates, secret handling, sandboxing, or dependency security."
-    - label: "convex"
-      instructions: "Convex schema, queries, mutations, actions, indexes, auth, or generated API contract changes."
-    - label: "editor"
-      instructions: "Tiptap, Yjs, markdown import/export, inline atoms, editor readiness, collaboration, or persistence projection."
+      instructions: "Authorization, workspace isolation, sharing, secrets, path containment, sandboxing, or dependency security."
+    - label: "engine"
+      instructions: "Rust engine, daemon protocol, storage, capture, history, versions, search, chats, or engine clients."
+    - label: "desktop"
+      instructions: "Electron main, preload, IPC, lifecycle, packaging, updates, or desktop settings."
     - label: "frontend"
-      instructions: "React, TanStack Start, routing, UI components, styles, app shell, or client-side interaction behavior."
+      instructions: "React renderer, editor, workbench, styles, accessibility, or client state."
     - label: "collab"
-      instructions: "Hocuspocus, Yjs sync, awareness, collab auth, document naming, snapshots, sequences, or live provider changes."
+      instructions: "Yjs, document sessions, sync relay, sharing, presence, reactions, channels, or direct messages."
     - label: "brand"
-      instructions: "Brand package, logos, tokens, social assets, design system, or legacy product identity guard changes."
+      instructions: "Brand package, logos, tokens, social assets, design system, or identity guard changes."
     - label: "docs"
-      instructions: "Product, development, security, QA, or architecture documentation."
+      instructions: "Product, architecture, development, security, QA, or agent documentation."
     - label: "tests"
-      instructions: "Vitest, convex-test, Playwright, fixtures, test helpers, or coverage-only changes."
+      instructions: "Vitest, Node test runner, Cargo tests, Playwright, fixtures, or test helpers."
     - label: "dependencies"
-      instructions: "package.json, pnpm-lock.yaml, engines, workspace package boundaries, or dependency version changes."
+      instructions: "Package manifests, lockfiles, workspace boundaries, toolchains, or dependency versions."
     - label: "infra"
-      instructions: "Docker, compose, environment examples, scripts, CI, deployment, or service runtime configuration."
+      instructions: "Docker, environment examples, scripts, workflows, releases, or runtime configuration."
 
   path_instructions:
     - path: "**/*"
       instructions: |
-        Review dohc as a pre-launch AI-native text workspace. Favor high-signal
-        comments about correctness, authz/privacy, data durability, review
-        gates, obvious UX, and maintainability. Avoid style-only comments unless
-        they affect readability or product quality. Treat AGENTS.md as product
-        context: text is the primitive, user control matters, and durable,
-        inspectable workspace state is more important than hidden convenience.
-    - path: "apps/app/convex/**"
+        Review dohc as a pre-launch local-first workspace. Focus on correctness,
+        data durability, workspace isolation, authorization, review gates, and
+        maintainability. Avoid style-only comments.
+    - path: "crates/**"
       instructions: |
-        Convex functions are raw server endpoints. Review against
-        apps/app/convex/_generated/ai/guidelines.md and
-        docs/security/authz-boundaries.md. Flag browser/client-callable code that
-        accepts userId or other caller identity as authorization input, skips
-        ctx.auth.getUserIdentity(), omits workspace scoping, weakens folder/atom
-        access, bypasses share boundaries, or weakens lock/skill-turn gates.
-        Prefer fail-closed behavior and focused convex-test coverage.
-    - path: "apps/app/src/editor-v2/**"
+        Treat storage, capture, sync, secrets, and protocol changes as
+        data-integrity work. Preserve workspace-handle scoping, cancellation
+        safety, deterministic ordering, transaction boundaries, and the
+        workspace unsafe-code prohibition. Ask for regression tests at the
+        owning Rust boundary.
+    - path: "packages/workspace-engine-client/**"
       instructions: |
-        The canonical document state is the Y.Doc. Flag new behavior that treats
-        atoms.body or raw full-body markdown patching as the source of truth.
-        Review import/export, markdown extensions, provider lifecycle,
-        IndexedDB, and readiness code for deterministic round trips and safe
-        recovery after reconnects.
-    - path: "apps/app/src/components/AtomEditor*"
+        Keep daemon framing, request cancellation, restart recovery, event
+        generations, and wire decoders aligned with the Rust protocol. Flag
+        client assumptions that widen daemon authority or hide refusal errors.
+    - path: "apps/desktop/src/main.ts"
       instructions: |
-        Review editor changes for Y.Doc-first behavior, command ergonomics,
-        slash commands, inline atoms, and lifecycle edge cases. Watch
-        for regressions that desync sender/receiver contracts or bypass tests.
-    - path: "apps/app/src/components/HtmlAtomFrame.tsx"
+        Main is the renderer trust boundary. Verify every IPC sender, parse
+        every payload, resolve workspace and actor context in main, and keep
+        daemon lifecycle failures visible.
+    - path: "apps/desktop/src/renderer/**"
       instructions: |
-        HTML atoms must stay sandboxed and sanitized. Flag network fetches,
-        unsafe script execution, broad CSP changes, or interpolation paths that
-        bypass the trusted shell.
-    - path: "apps/app/src/lib/htmlSanitize*"
+        Review workspace-scoped asynchronous state for stale-response races.
+        Check keyboard access, focus, loading states, and clear recovery paths.
+        Renderer state never grants authorization.
+    - path: "apps/desktop/src/renderer/editor/**"
       instructions: |
-        Treat sanitizer changes as security-sensitive. Verify the allowlist is
-        intentional, scripts/events/unsafe URLs remain blocked, and tests cover
-        both accepted authoring cases and rejected exploit cases.
-    - path: "apps/app/src/**"
+        A live Y.Doc session is canonical. Settlement writes the Markdown
+        artifact through the engine. Check deterministic import and export,
+        session teardown, remote updates, and no silent save failures.
+    - path: "services/sync-relay/**"
       instructions: |
-        Review React/TanStack Start code for clear state ownership, accessible
-        keyboard and focus behavior, stable routing, and no client-side trust
-        boundary mistakes. Browser state may improve UX but must not become an
-        authorization source.
+        Derive identity from the validated Better Auth session. Preserve
+        workspace ownership, positive share filters, byte-identical denials,
+        cursor and acknowledgement safety, secret exclusion, and ephemeral
+        presence.
+    - path: "services/workspace-api/**"
+      instructions: |
+        The workspace API serves Better Auth only. Flag new application routes,
+        caller-supplied identity, permissive CORS, or configuration that lets
+        the API and relay validate different sessions.
+    - path: "packages/workspace-postgres/**"
+      instructions: |
+        Postgres stores Better Auth data only. Flag application tables or
+        migrations that restore a second workspace backend.
     - path: "packages/brand/**"
       instructions: |
-        Brand identity is final: lowercase dohc, drop-lobe mark, warm paper and
-        graphite. Flag legacy product identity, palette drift, or duplicated
-        brand constants outside the package.
-    - path: "apps/app/src/__tests__/brandNoLegacy.test.ts"
-      instructions: |
-        Treat this as a shipping identity guard. Flag broad whitelists, deleted
-        scan paths, or changes that would let legacy product names ship.
+        Preserve lowercase dohc, the drop-lobe mark, warm paper, and graphite.
+        Flag identity drift or duplicated brand constants.
     - path: "docs/**"
       instructions: |
-        Docs should preserve dohc's AI-native workspace philosophy and product
-        invariants while staying concrete. Flag docs that contradict server-side
-        authz, workspace scoping, Y.Doc canonical state, sandboxed HTML atoms,
-        or individual-first MVP direction.
+        Treat docs outside the Rust engine evidence directory as current.
+        Flag old paths, removed services, historical plans presented as current,
+        and terms that disagree with the product or code.
     - path: "**/*.test.ts"
       instructions: |
-        Tests should lock behavior, not implementation trivia. Flag removed or
-        weakened authz/security/brand/editor invariants, missing regression
-        coverage for changed behavior, or tests that pass by over-mocking the
-        boundary under review.
-    - path: "apps/app/e2e/**"
+        Tests must exercise the boundary that owns the behavior. Flag removed
+        isolation or durability coverage, true-by-construction fakes, and
+        timing-only assertions.
+    - path: "apps/desktop/e2e/**"
       instructions: |
-        Playwright coverage should represent real user workflows with stable
-        selectors and deterministic setup. Avoid brittle timing-only waits.
+        Keep workflows deterministic. Use the real engine daemon for behavior
+        that depends on persistence, sync, or restart recovery.
     - path: "package.json"
       instructions: |
-        Check pnpm workspace boundaries, Node/pnpm engine compatibility, script
-        consistency, duplicate dependencies, and dependency moves between app,
-        service, package, and root scopes.
+        Check pnpm workspace boundaries, Node compatibility, script accuracy,
+        and dependency placement.
     - path: "pnpm-lock.yaml"
       instructions: |
-        Review lockfile changes only in relation to package manifest changes,
-        supply-chain risk, and unexpected transitive dependency churn.
-    - path: "**/Dockerfile"
-      instructions: |
-        Check runtime image size, non-secret build args, production install
-        scope, lockfile consistency, and whether build/runtime stages expose
-        unnecessary files or environment variables.
+        Review only against manifest changes, unexpected package churn, and
+        supply-chain risk.
     - path: "docker-compose*.yml"
       instructions: |
-        Treat compose files as local-dev infrastructure. Flag checked-in
-        secrets, insecure defaults that could be mistaken for production, port
-        conflicts, and health checks that do not reflect service readiness.
+        Keep only the documented services. Flag checked-in secrets, unsafe
+        public bindings, missing readiness conditions, and stale dependencies.
 
   pre_merge_checks:
     override_requested_reviewers_only: true
     title:
       mode: "warning"
-      requirements: "Title should be concise, imperative, and name the subsystem when that helps review."
+      requirements: "Use a concise title that names the subsystem when useful."
     description:
       mode: "warning"
     issue_assessment:
       mode: "warning"
     custom_checks:
       - mode: "error"
-        name: "Authz Boundaries"
+        name: "Authorization boundaries"
         instructions: |
-          Pass if the PR does not touch auth, Convex functions, sharing,
-          folders, atoms, captures, entities, workspaces, skill gates, locks,
-          Hocuspocus ACL, HTML atoms, or server routes. Otherwise pass only if
-          identity is derived server-side, every object remains workspace-scoped,
-          browser/client callers cannot provide authorization identity, sharing
-          boundaries are preserved, locks and skill gates still fail closed, and
-          focused tests cover the changed boundary.
+          Pass if the change preserves server-side identity, workspace scoping,
+          path containment, share filters, and secret handling. Require focused
+          tests when the PR touches one of these boundaries.
       - mode: "error"
-        name: "Canonical Document State"
+        name: "Document durability"
         instructions: |
-          Pass if the PR does not touch editor, markdown, collaboration,
-          import/export, persistence, projections, or atom body cache behavior.
-          Otherwise pass only if the Y.Doc remains canonical, atoms.body is only
-          a derived markdown cache, raw full-body markdown patching is not added
-          as a source of truth, and migration/recovery paths are tested.
+          Pass if editor and engine changes keep live Y.Doc state canonical,
+          settle through the engine, report failures, and recover safely after
+          daemon or renderer interruption.
       - mode: "error"
-        name: "Brand Identity"
+        name: "Brand identity"
         instructions: |
           Pass only if shipping source preserves lowercase dohc, the drop-lobe
-          mark direction, warm paper plus graphite identity, and the legacy
-          product identity guard. Any intentional exception must be explicitly
-          justified in the PR and covered by tests or docs.
+          mark, warm paper, graphite, and the repository brand guard.
       - mode: "warning"
         name: "Verification"
         instructions: |
-          Pass when the PR includes tests or a clear no-test rationale that fits
-          the risk. Authz, editor/collab, sanitizer, persistence, dependency,
-          and brand-guard changes should normally include focused automated
-          verification.
+          Pass when the PR reports checks that match its risk. Engine changes
+          need the canonical Rust gate. JavaScript changes need typecheck and
+          test coverage unless the PR gives a specific reason.
 
   auto_review:
     enabled: true
@@ -225,16 +199,13 @@ reviews:
       - enabled: true
         name: "add focused regression tests"
         instructions: |
-          Add or update the narrowest useful regression tests for the changed
-          behavior. Prefer Vitest or convex-test for unit and boundary coverage,
-          and Playwright only for user-visible flows.
+          Add the narrowest useful regression test for changed behavior. Use
+          Playwright only when a lower-level test cannot cover the workflow.
       - enabled: true
         name: "check dohc invariants"
         instructions: |
-          Re-read AGENTS.md, apps/app/AGENTS.md, docs/security/authz-boundaries.md,
-          and docs/development/testing.md, then identify any changed code that
-          violates dohc's product invariants. Propose fixes rather than broad
-          refactors.
+          Read AGENTS.md and docs/security/authz-boundaries.md. Identify any
+          changed code that weakens an invariant and propose a focused fix.
 
   tools:
     github-checks:
@@ -297,12 +268,11 @@ knowledge_base:
     enabled: true
     filePatterns:
       - "AGENTS.md"
-      - "apps/app/AGENTS.md"
-      - "apps/app/convex/_generated/ai/guidelines.md"
+      - "docs/README.md"
       - "docs/security/authz-boundaries.md"
       - "docs/development/testing.md"
       - "docs/product/*.md"
-      - "docs/brand/design-system.md"
+      - "docs/brand/*.md"
   learnings:
     scope: "local"
   issues:
@@ -320,16 +290,16 @@ code_generation:
   docstrings:
     language: "en-US"
     path_instructions:
-      - path: "apps/app/convex/**"
-        instructions: "Generate docstrings only for exported functions or non-obvious server-side authorization boundaries. Do not restate simple Convex boilerplate."
-      - path: "apps/app/src/**"
-        instructions: "Prefer clear names over comments. Add comments only for non-obvious editor, auth, routing, or sanitizer behavior."
+      - path: "crates/**"
+        instructions: "Document public contracts and non-obvious safety invariants. Do not restate the implementation."
+      - path: "apps/desktop/src/**"
+        instructions: "Prefer clear names. Comment only on non-obvious lifecycle, trust-boundary, or race behavior."
   unit_tests:
     path_instructions:
-      - path: "apps/app/convex/**"
-        instructions: "Use convex-test and mocked identities to cover workspace scoping, access denial, sharing, locks, and skill-turn gates."
-      - path: "apps/app/src/**"
-        instructions: "Use Vitest for pure logic and component behavior. Add Playwright only for full user workflows that unit tests cannot cover."
+      - path: "crates/**"
+        instructions: "Test transaction, cancellation, replay, and refusal behavior at the owning crate."
+      - path: "apps/desktop/src/**"
+        instructions: "Use Vitest for logic and components. Use Playwright only for full desktop workflows."
 
 issue_enrichment:
   auto_enrich:

@@ -7,9 +7,8 @@ import {
   type EngineYDocTransport,
 } from "./engineYDocProvider";
 
-// WS-G2-C-2 — the engine Y.Doc editor hook for rich-text files (it replaced the
-// retired HocuspocusProvider hook at the G2-C-3 cutover). Given a workspace +
-// rich file, it opens a
+// The engine Y.Doc editor hook for rich-text files. Given a workspace + rich
+// file, it opens a
 // live engine Y.Doc session in MAIN over IPC and binds a mirror Y.Doc the Tiptap
 // Collaboration extension drives via its "body" XmlFragment — no websocket, no
 // token, no cloud. Solo editing runs entirely on the engine; a co-editor's edit

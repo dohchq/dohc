@@ -516,7 +516,7 @@ review_status() {
         continue
       fi
       # The "cannot run" reply names NO sha, so it can never appear in the
-      # sha-scoped body above — query it separately or the branch is dead code.
+      # sha-scoped body above — query it separately or this branch cannot run.
       # It is intermittent: the same PR got three of these interleaved with five
       # successful reviews, so report it with its timestamp as a reason a trigger
       # may not have taken, never as a verdict.

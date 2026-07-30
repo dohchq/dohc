@@ -14,9 +14,8 @@ import { createLocalSyncClient } from "./syncClient";
 
 const actor: Actor = { userId: "user_1", workspaceId: "ws_local" };
 
-// The reduced workspace-api service no longer ships the file/sync HTTP routes
-// (they were retired with apps/web). This stub reimplements just the slice of
-// that contract createLocalSyncClient drives — GET files, GET/POST files/:path,
+// This stub implements the slice of the local sync contract that
+// createLocalSyncClient drives — GET files, GET/POST files/:path,
 // POST assets, POST sync/apply — over a WorkspaceBackend, so the local-sync
 // integration coverage (materialize, push, pull, conflict + approval surfacing)
 // survives without a dependency on @dohc/workspace-api.

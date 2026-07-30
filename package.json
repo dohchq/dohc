@@ -20,12 +20,12 @@
     "smoke:release:desktop": "node scripts/release-smoke.mjs",
     "mock:update:desktop": "node scripts/mock-update-server.mjs",
     "dev:workspace-api": "pnpm --filter @dohc/workspace-api dev",
-    "dev:postgres": "docker compose -f docker-compose.dev.yml up -d postgres minio",
+    "dev:postgres": "docker compose -f docker-compose.dev.yml up -d postgres",
     "build": "pnpm -r --if-present build",
     "migrate": "node scripts/migrate-postgres.mjs",
     "reset:postgres": "node scripts/reset-postgres-dev-data.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "node tools/sync-skill-adapters.mjs --check && node --test scripts/pr-checks-workflow.test.mjs scripts/rust-engine-decisions.test.mjs && pnpm -r --if-present test",
+    "test": "node tools/sync-skill-adapters.mjs --check && node scripts/check-brand.mjs && node --test scripts/pr-checks-workflow.test.mjs scripts/rust-engine-decisions.test.mjs && pnpm -r --if-present test",
     "skills:sync": "node tools/sync-skill-adapters.mjs",
     "test:phase0-agent-cli": "node scripts/phase0-agent-cli-smoke.mjs",
     "test:desktop:e2e": "pnpm --filter @dohc/desktop run test:e2e",
@@ -34,11 +34,11 @@
     "sync:local": "pnpm --filter @dohc/workspace-fs sync",
     "lint": "pnpm -r --if-present lint",
     "check:self-host": "node scripts/check-self-host.mjs",
-    "check:debt": "node scripts/check-tech-debt.mjs"
+    "check:debt": "node scripts/check-tech-debt.mjs",
+    "check:brand": "node scripts/check-brand.mjs"
   },
   "packageManager": "pnpm@10.24.0",
   "devDependencies": {
-    "@playwright/test": "^1.60.0",
-    "github-slugger": "^2.0.0"
+    "@playwright/test": "^1.60.0"
   }
 }

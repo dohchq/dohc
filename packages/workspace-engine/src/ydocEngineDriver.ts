@@ -2,10 +2,9 @@
 //
 // A rich doc's canonical state, while a session is LIVE, is a Y.Doc persisted
 // in `.dohc/engine/engine.db` beside the versioned text store; the settled .md
-// file on disk is its PROJECTION. This module ports the storage + projection
-// shapes the legacy Hocuspocus stack proved (sequential update log + periodic
-// full-state snapshots, services/hocuspocus/src/persistence.ts) onto engine.db,
-// content-addressing every update/snapshot blob into `binary_blobs` exactly
+// file on disk is its PROJECTION. The driver stores a sequential update log
+// with periodic full-state snapshots in engine.db and content-addresses every
+// update/snapshot blob into `binary_blobs` exactly
 // like every other engine artifact.
 //
 // REPLICATION SCOPE (G2-B): these ydoc_* blobs are LOCAL-ONLY today — NO
@@ -313,8 +312,7 @@ export interface YDocEngineDriverOptions {
   createMomentId?: () => VersionedTextMomentId;
   // Fold the append-only update log into a full-state snapshot (and prune the
   // folded updates) once this many updates accumulate past the latest
-  // snapshot. The legacy Hocuspocus stack NEVER compacted; the engine driver
-  // must (design Risk 3).
+  // snapshot so the update log stays bounded.
   compactionThreshold?: number;
   // MARKDOWN-IS-THE-ARTIFACT default false: a LOCAL-ONLY closed session prunes
   // its CRDT bytes. Flip to true for a future persistent-threads layer (no

@@ -42,11 +42,9 @@ function expectStableMarkdownRoundTrip(
   return once
 }
 
-// The desktop editor's markdown round-trip is a VERBATIM copy of the live
-// hocuspocus round-trip (schema parity is enforced by schema-parity.test.ts),
-// so these mirror the server's import-export tests plus the editor-v2 corpus
-// invariants the recon calls out (idempotency, frontmatter ordering, custom-
-// node preservation). Inline fixtures keep the suite self-contained.
+// These tests cover the desktop editor's markdown round-trip: idempotency,
+// frontmatter ordering, and custom-node preservation. Inline fixtures keep the
+// suite self-contained.
 describe('desktop editor markdown round-trip', () => {
   it('keeps malformed frontmatter visible instead of dropping it', () => {
     const input = ['---', 'id: atom_1', 'bad: [unclosed', '---', '# Body'].join('\n')

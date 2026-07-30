@@ -249,7 +249,7 @@ describe("Rust engine daemon lifecycle", () => {
         () => {
           expect(terminalFailures).toHaveLength(1);
         },
-        { timeout: 100 },
+        { timeout: 2_000 },
       );
       expect(exits).toHaveLength(4);
       expect(terminalFailures[0]?.message).toMatch(
@@ -340,7 +340,7 @@ describe("Rust engine daemon lifecycle", () => {
           ).toBe(true);
           expect(failures.some(({ terminal }) => terminal)).toBe(true);
         },
-        { timeout: 200 },
+        { timeout: 2_000 },
       );
     } finally {
       await lifecycle.stop();

@@ -1,53 +1,37 @@
-# Backend Modes
+# Backend modes
 
-dohc is local-first: the desktop app and the workspace engine
-(per-workspace SQLite under `.dohc/engine/`) are the product default and
-need no backend at all. The Convex-era dual-backend migration this document
-used to describe is finished — Convex is retired (Think Bigger User
-Decision 6), and there is no `DOHC_BACKEND` switch anymore.
+dohc has one local product mode and one opt-in sync stack.
 
-## Local (default)
+## Local desktop
 
-Every workspace works fully offline: files on disk, engine history/versions/
-chats/search in `.dohc/engine/`, MCP agents scoped to the workspace root.
-Nothing here talks to a server.
+The desktop app owns ordinary workspace folders. It launches the Rust workspace
+engine as a child process and communicates over authenticated stdio. Each open
+workspace receives a daemon handle.
 
-## Postgres cloud stack (opt-in, reduced)
+The engine stores workspace state in `.dohc/engine/engine.db`. Files remain
+readable without dohc. No server, account, or environment file is required.
 
-The opt-in cloud stack has been reduced to two surviving pieces, both decoupled
-from the local default path:
+## Opt-in sync stack
 
-- **Sync relay** — `services/sync-relay`, engine-journal + blob transport,
-  authenticated by a Better Auth session (bearer tokens minted by the
-  workspace-api device flow). **Co-editing is now engine-native**: a shared
-  workspace co-edits through the engine Y.Doc driver's `ydoc.update`
-  replication carried over this relay — there is no separate collaboration
-  server.
-- **Auth** — `services/workspace-api` is now AUTH ONLY. Better Auth mounts on
-  `/api/auth/*` (the auth surface itself lives in `packages/workspace-auth`);
-  it owns no application routes and 404s everything else. It is the server the
-  desktop device sign-in flow mints tokens against, which the relay validates.
+The sync stack has three running services:
 
-Hocuspocus was retired at a clean cutover (G2-C-3): `services/hocuspocus` and
-the workspace-api collab-token route are gone. `packages/workspace-postgres` is
-trimmed to its schema migrations — notably `0002_better_auth.sql`, the Better
-Auth `user`/`session` schema the relay reads directly. The former
-sharing/members/invites/files/sync web surface and the `apps/web` client were
-retired per the
-[legacy salvage audit](../superpowers/plans/2026-07-06-think-bigger-0n3-legacy-salvage-audit.md)
-Phase D; full Postgres-for-auth retirement remains deferred.
+- Postgres stores Better Auth data.
+- `services/workspace-api` serves Better Auth and the desktop device flow.
+- `services/sync-relay` serves operations, blobs, shares, presence, and
+  engine-native Y.Doc replication.
 
-Environment variables for running that stack (self-host/dev only):
+The workspace API owns no file, workspace, sharing, or collaboration routes.
+The relay stores application relay data in its own SQLite database.
+
+Both services use the same `BETTER_AUTH_SECRET` and Postgres database. The
+relay validates the session and derives the caller’s user ID server-side.
 
 ```bash
 POSTGRES_URL=postgres://...
-BETTER_AUTH_SECRET=...            # shared by workspace-api AND sync-relay
+BETTER_AUTH_SECRET=...
 WORKSPACE_API_BASE_URL=http://127.0.0.1:1786
 SYNC_RELAY_PORT=1788
-SQLITE_WORKER_TOKEN=...
 ```
 
-Security rule: client callers never provide user identity or workspace
-authorization. Backend services derive actor identity server-side and scope
-every operation to a workspace. The local trust boundary is documented in
-[docs/security/authz-boundaries.md](../security/authz-boundaries.md).
+See [authorization boundaries](../security/authz-boundaries.md) and
+[self-hosting](../self-hosting.md).
