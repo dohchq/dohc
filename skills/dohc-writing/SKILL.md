@@ -158,12 +158,13 @@ different live concepts — see the next section before assuming.
 | Term | Means | Not a synonym for it |
 | --- | --- | --- |
 | `workspace` | The top-level scope. Workspace-owned resources are each scoped to one; provider driver and model inventory is global and is not. | vault, space, org, tenant |
-| `file` | A user-visible item of workspace content. Contract type `WorkspaceFile`; its `kind` is `atom`, `asset`, or `database`. | page, note, document, item |
+| `file` | A user-visible item of workspace content. Two contracts, by layer: desktop and Explorer use `WorkspaceFileEntry` (`kind: "file" \| "database"`); the backend and workspace-fs use `WorkspaceFile` (`kind: "atom" \| "asset" \| "database"`). Use the one for the layer you are in. | page, note, document, item |
 | `asset` | A file kind alongside `atom` and `database`. `AssetKind` is the full enum: image, audio, video, pdf, csv, json, sqlite, file. In UI copy say `file` unless the kind matters. | attachment, media, upload |
 | `folder` | A container of files. | directory (in UI copy), collection |
 | `chat` | **Unsettled — see the conflict note below.** The UI and the engine disagree on whether this names the surface or one conversation. Do not rely on either reading. | conversation |
 | `history` | The user-facing name for the versioned record of workspace changes. `capture` is the engine's name for the recorder that produces it. | versions, backups, timeline |
-| `channel` | A named division of the chat surface. Durable rows key on `channel_id`; load-bearing in sharing and authorization. | room, group, space |
+| `channel` | A division of the chat surface. Durable rows key on `channel_id`; load-bearing in sharing and authorization. Every channel has a `name` and a `kind` — `channel`, `dm`, or `agent`. | room, group, space |
+| `dm` | A channel whose `kind` is `"dm"`. Same `ChatChannel` type, same required `name`, same sharing and authorization paths as any other channel. Never exclude dms from channel-wide behavior. | private chat |
 | `thread` | A message sequence with exactly one owner — a linked file or a channel, never both and never neither. | topic, reply chain |
 | `capture` | The engine's history recorder. It records settled workspace file changes into versioned history, and is a workspace's only history. | snapshot, backup |
 | `share` | An explicit grant of access beyond the owner. | invite |
@@ -178,7 +179,6 @@ their own meaning. Collapsing either one makes copy and technical docs wrong.
 
 | Term | Means | Not the same as |
 | --- | --- | --- |
-| `dm` | A direct-message channel — `channelKind: "dm"`, with its own relay grants and navigation. | `channel`, which is named |
 | `import` | The user-initiated operation that brings outside files in (`ImportWorkspaceFiles`, `ImportToDatabase`). | `capture`, which records workspace history |
 | `model` | The inference model an agent runs on (`AgentModel`), selectable independently of the agent. | `agent`, which is the actor |
 | `permission` | The agent tool-approval gate. `AgentPermissionRequestSchema` is a *pending request*. Only the `allow_once` and `allow_always` decisions grant it — `reject_once`, `reject_always`, and `cancel` do not. Never write copy implying the agent may act before an allow decision. | `share`, which grants access to another person |

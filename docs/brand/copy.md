@@ -20,7 +20,7 @@ Nearly every string in dohc is one of these. Know which one you are writing.
 | --- | --- | --- |
 | **State** | Say what is true now | `3 files changed on this machine` |
 | **Change** | Say what just happened | `Moved 4 files to Archived` |
-| **Ready** | Say something is now usable | `Export ready to download` |
+| **Ready** | Say something is now usable | `Agent result, ready to review` |
 | **Next** | Say what the user can do | `Choose which copy to keep` |
 
 An empty state and an error both owe the user a **Next**. A toast usually owes
