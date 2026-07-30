@@ -152,15 +152,16 @@ Agent activity gets the olive `agent` voice visually. In words:
 This file is new and the app predates it. Existing strings are not
 automatically conformant.
 
-But most apparent violations are not one bad string. They are **surfaces with
-their own internally consistent vocabulary** that differs from the next
-surface: the editor says `page`, Settings says `document`, the file tree says
-`file`. Changing one string inside a consistent surface makes drift worse, not
-better.
+But most apparent violations are not one bad string. dohc's UI vocabulary is
+**unsettled, and mixed inside single surfaces** — not merely different from one
+surface to the next. `WikilinkPicker` says `page links` and `No files match` in
+one component. Settings describes attachments with `files` a few rows above two
+`document` options. Renaming whichever string looks like the odd one out only
+moves the inconsistency somewhere else.
 
-**Fix a surface, never a string.** Some surfaces are mixed within themselves,
-so settling one means choosing its vocabulary deliberately — not renaming
-whichever string looks like the odd one out.
+**Settle a vocabulary, do not rename a string.** Choosing what a thing is
+called is a deliberate decision taken across every surface that shows it, and
+it has to be made before any renaming starts.
 
 **Never touch a pinned name.** `ui-language.md` states it as a hard invariant:
 every `data-testid`, `aria-*`, `role`, and accessible name is pinned by e2e and
@@ -177,8 +178,9 @@ Known so far:
   `No files match "…"` (`WikilinkPicker.tsx:218`), inside the very same
   component. Decide the vocabulary before changing anything, and leave the two
   pinned `aria-label`s alone regardless.
-- `apps/desktop/src/renderer/settings/SettingsDialog.tsx` says `document`
-  throughout (`:487`, `:662`, `:669`) where the rest of the UI says `file`.
+- `apps/desktop/src/renderer/settings/SettingsDialog.tsx` is **mixed**:
+  `document` at `:487`, `:662` and `:669`, but `files` at `:630` a few rows
+  above them.
 - `apps/desktop/src/renderer/workbench/Explorer.tsx:1528` — the delete dialog
   says the trash fallback happens "on drives without one", but `deletePath`
   falls back on *any* `trashItem` rejection. The stated condition is narrower
