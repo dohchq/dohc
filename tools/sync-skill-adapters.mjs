@@ -96,7 +96,11 @@ function frontmatterValue(frontmatter, key) {
   const i = lines.findIndex((l) => new RegExp(`^${key}:`).test(l));
   if (i === -1) return null;
 
-  const inline = lines[i].slice(key.length + 1).trim();
+  let inline = lines[i].slice(key.length + 1).trim();
+  // In a PLAIN scalar, " #" starts a comment, so `description: # blank` is null
+  // and `description: text # note` is "text". Inside quotes a # is literal, so
+  // only strip when the value is unquoted.
+  if (!/^["']/.test(inline)) inline = inline.replace(/(^|\s)#.*$/, "$1").trim();
   if (inline !== "" && !/^[|>][+-]?\d*$/.test(inline)) return inline;
 
   // Either an empty scalar or a block indicator: the value is whatever indented
@@ -166,8 +170,13 @@ for (const name of shared) {
       ok = false;
     }
   }
-  if (!new RegExp(`^name:[ \\t]*${name}[ \\t]*$`, "m").test(frontmatter)) {
-    problems.push(`${canonical} frontmatter 'name:' does not match its directory (${name})`);
+  // Compare as strings. Interpolating the directory name into a regex let a
+  // metacharacter match something else — `skills/foo+/` with `name: foo` passed.
+  const declared = frontmatterValue(frontmatter, "name");
+  if (declared !== null && !scalarIsEmpty(declared) && declared.replace(/^["']|["']$/g, "") !== name) {
+    problems.push(
+      `${canonical} frontmatter 'name: ${declared}' does not match its directory (${name})`,
+    );
     ok = false;
   }
   if (ok) valid.set(name, frontmatter);
