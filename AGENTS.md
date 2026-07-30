@@ -63,19 +63,19 @@ Should dohc have first-class documents, entities, links, permissions, source-bac
 
 Should dohc ship a hardcoded CRM for every possible team? Probably not. A user's agent should be able to build a CRM, project tracker, client dashboard, hiring pipeline, or personal operating system out of dohc's primitives.
 
-### Fight for the obvious workspace
+### Fight for the "obvious" solution
 
-We should avoid being clever and doing things because it feels smart. We want everything we build to be so obvious it feels kind of stupid.
+Measure twice, cut once. Understand the problem fully before building.
+Cleverness fills the gaps when we have not done that work. The biggest
+simplicity win is refusing to solve problems we do not have.
 
-Understand the problem before building. Prefer the most obvious design that
-meets the stated behavior and performance requirements. Among equally obvious
-designs, choose the simplest. Record material tradeoffs in the PR or a decision
-document.
+Good code is the simplest thing that delivers the required behavior and
+performance: nothing traded away, nothing bolted on. An obvious solution can
+have more parts. Among equally obvious designs, choose the simplest. Record
+material tradeoffs in the PR or a decision document.
 
-When one of us prompts you, never hesitate to push back and suggest ways we
-could make things more obvious. An obvious solution can have more parts. Obvious
-solutions are the defaults that agents and the next reader expect. Ask another
-reader when uncertain.
+Push back when you see a more obvious way. Obvious solutions are the defaults
+that agents and the next reader expect. Ask another reader when uncertain.
 
 ### Don't be afraid to lie (to agents) if it makes working easier
 
