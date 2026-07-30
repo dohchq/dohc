@@ -443,6 +443,10 @@ export interface WorkspaceEngineCaptureOptions {
   // The reconnect-safe session owner supplies the daemon-backed text, secret,
   // and Y.Doc paths. Injectable stores still take precedence in focused tests.
   rustEngineSessions?: EngineWorkspaceSessions;
+  // Which engine owns the Y.Doc provider session, stated rather than inferred.
+  // Defaults to "the daemon, when sessions were supplied". Set it explicitly to
+  // wrap a daemon-backed store without dropping onto the legacy engine.
+  useRustEngine?: boolean;
   // The real Rust daemon owns filesystem observation and version
   // materialization. Tests backed by the in-process loopback omit this because
   // that transport has no autonomous watcher or disk writer.
@@ -826,10 +830,17 @@ export function createWorkspaceEngineCapture(
   };
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
 
+  // Which engine owns the Y.Doc provider session. Injected stores are honoured
+  // either way — `store`/`secretStore` are assigned before the `??=` fallbacks
+  // below — so this is only about the engine, not about the stores.
+  //
+  // It used to be inferred from `!options.store && !options.secretStore`, which
+  // made injecting a store the way to select the legacy engine. That coupled two
+  // unrelated decisions: a caller who wrapped a store to observe it silently lost
+  // the daemon, and the injectable `openRustYDocProviderSession` seam became
+  // unreachable in exactly the tests that wanted it.
   const useRustEngine =
-    !options.store &&
-    !options.secretStore &&
-    options.rustEngineSessions !== undefined;
+    options.useRustEngine ?? options.rustEngineSessions !== undefined;
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
     if (!options.rustEngineSessions) {
