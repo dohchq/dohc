@@ -1,8 +1,14 @@
 import { createLinkedChatStore } from "@dohc/workspace-engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
+import {
+  VERSIONED_METHOD,
+  VersionedLoopbackEngine,
+  type Request,
+} from "@dohc/workspace-engine-client";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 import {
   createDefaultDiskWriter,
@@ -50,9 +56,12 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const legacyPath = "Bookmarks/Chats/legacy.md";
     const legacyText = bookmarkProjection("bookmark-legacy", "Legacy projection");
     await write(rootPath, legacyPath, legacyText);
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-bookmark-recovery-test",
       rootPath,
+      rustEngineSessions: mockLiveSessions(loopback, requests),
     });
 
     const upgraded = await writeChatBookmarkProjection({
@@ -75,6 +84,12 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     expect(await readFile(join(rootPath, legacyPath), "utf8")).toContain(
       "# Crash retry projection",
     );
+    // Positive proof of the backend, not of the outcome: a silent relapse to
+    // the legacy in-process store would never open a daemon workspace nor send
+    // a versioned write, so these two methods cannot both appear by accident.
+    const methods = requests.map((request) => request.method);
+    expect(methods).toContain("workspace.open");
+    expect(methods).toContain(VERSIONED_METHOD.textWrite);
     await capture.stop();
   });
 
@@ -83,6 +98,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-bookmark-collision-test",
       rootPath,
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
     });
     const unrelatedPath = "Bookmarks/Chats/unrelated.md";
     const unrelatedText = bookmarkProjection("bookmark-someone-else", "Unrelated");
@@ -132,6 +148,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-bookmark-archive-recovery-test",
       rootPath,
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
     });
     const legacyBookmark = {
       bookmarkId: "bookmark-disk-only-archive",
@@ -203,6 +220,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-bookmark-archive-reactivate-race-test",
       rootPath,
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
     });
     const channel = await chats.ensureGeneralChannel({ workspaceId: "ws" });
     const started = await chats.startChannelThread({
@@ -310,6 +328,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-text-test",
       rootPath,
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
     });
 
     const created = await capture.writeGeneratedTextFile({
@@ -345,6 +364,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-path-test",
       rootPath,
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
     });
 
     await expect(
@@ -385,6 +405,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-archive-test",
       rootPath,
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
     });
     const created = await capture.writeGeneratedTextFile({
       path: "Bookmarks/Chats/launch.md",
@@ -422,6 +443,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-archive-retry-test",
       rootPath,
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
       diskWriter: {
         writeTextFile: disk.writeTextFile,
         writeBinaryFile: disk.writeBinaryFile,
@@ -475,6 +497,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
       const capture = createWorkspaceEngineCapture({
         workspaceId: `generated-archive-${scenario.name}-source-test`,
         rootPath,
+        rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
         diskWriter: {
           writeTextFile: disk.writeTextFile,
           writeBinaryFile: disk.writeBinaryFile,
