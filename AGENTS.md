@@ -66,6 +66,8 @@ Should dohc ship a hardcoded CRM for every possible team? Probably not. A user's
 ### Fight for the "obvious" solution
 
 Measure twice, cut once. Understand the problem fully before building.
+We should avoid being clever and doing things because it feels smart. We want
+everything we build to be so obvious it feels kind of stupid.
 Cleverness fills the gaps when we have not done that work. The biggest
 simplicity win is refusing to solve problems we do not have.
 
