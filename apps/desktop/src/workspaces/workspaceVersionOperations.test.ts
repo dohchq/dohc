@@ -5,19 +5,41 @@ import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createVersionedTextStore, type VersionedTextStore } from "@dohc/workspace-engine";
+import { type VersionedTextStore } from "@dohc/workspace-engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
+import {
+  VERSIONED_METHOD,
+  VersionedLoopbackEngine,
+  type MomentRecord,
+  type Request,
+} from "@dohc/workspace-engine-client";
+import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
   type EngineDiskWriter,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
+import {
+  createCaptureLiveStores,
+  type CaptureVersionedTextStore,
+} from "./workspaceEngineCaptureLiveStore";
 
 // PR 0M-4 named-version operations: active-version capture routing, the
 // switch flow (disk swap, loss-free capture, expected-event suppression,
 // mid-switch failure recovery), merge into Main (clean + conflict + each
 // resolution kind), and compare.
+//
+// Most tests here run on the DAEMON capture path: `rustEngineSessions` selects
+// the Rust engine, and the loopback behind it holds real state and real sha256,
+// so what these tests read back is recorded state rather than a canned
+// responder. The exceptions are named at their describe blocks — the merge and
+// conflict family, which needs `conflicts.*` RPCs the loopback does not
+// implement, and the switch-latency evidence, which is only evidence when it is
+// measured against the real store.
+
+const WORKSPACE_ID = "version-ops-test";
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
@@ -71,6 +93,46 @@ function readEngineMoments(rootPath: string): EngineMomentRow[] {
   }
 }
 
+// The loopback caps a page at 500. Nothing here records anywhere near that, and
+// a silently truncated page would weaken every length assertion below, so the
+// reader refuses a truncated page rather than returning a short one.
+const MOMENT_PAGE_LIMIT = 500;
+let momentQueryId = 1;
+
+// The daemon-path reader for the same rows: `moments.list` over the wire
+// instead of engine.db, because the loopback behind the daemon harness keeps
+// its state in memory. Both differences from the SQL above are deliberate
+// mirrors of it — ascending `momentOrder` matches `ORDER BY m.moment_order`,
+// and dropping payload-less moments matches the inner JOIN on the after-text
+// blob, which excluded deletes and binary writes.
+async function readDaemonMoments(
+  loopback: VersionedLoopbackEngine,
+): Promise<EngineMomentRow[]> {
+  const response = await loopback.sendRequest({
+    id: momentQueryId++,
+    method: VERSIONED_METHOD.momentsList,
+    workspace: WORKSPACE_ID,
+    params: { workspaceId: WORKSPACE_ID, limit: MOMENT_PAGE_LIMIT },
+  });
+  const page = response.result as unknown as {
+    moments: MomentRecord[];
+    nextBeforeMomentOrder: number | null;
+  };
+  if (page.nextBeforeMomentOrder !== null) {
+    throw new Error("moments.list page truncated — raise MOMENT_PAGE_LIMIT");
+  }
+  return page.moments
+    .filter((moment) => moment.afterText !== null)
+    .sort((left, right) => left.momentOrder - right.momentOrder)
+    .map((moment) => ({
+      versionId: moment.versionId,
+      path: moment.path,
+      operation: moment.operation,
+      text: moment.afterText as string,
+      summary: moment.metadataSummary ?? null,
+    }));
+}
+
 async function write(root: string, path: string, contents: string) {
   const absolute = join(root, path);
   await mkdir(dirname(absolute), { recursive: true });
@@ -95,12 +157,25 @@ function capture(root: string, options: {
   onError?: (context: string, error: unknown) => void;
   diskWriter?: EngineDiskWriter;
   store?: VersionedTextStore;
+  rustEngineSessions?: EngineWorkspaceSessions;
+  useRustEngine?: boolean;
 } = {}): WorkspaceEngineCapture {
   return createWorkspaceEngineCapture({
-    workspaceId: "version-ops-test",
+    workspaceId: WORKSPACE_ID,
     rootPath: root,
     ...options,
   });
+}
+
+// The daemon-path capture. `requests` collects every wire request when
+// supplied, which is how a test proves the path it took instead of inferring it
+// from the result.
+function daemonCapture(
+  root: string,
+  loopback: VersionedLoopbackEngine,
+  requests?: Request[],
+): WorkspaceEngineCapture {
+  return capture(root, { rustEngineSessions: mockLiveSessions(loopback, requests) });
 }
 
 async function versionIdByName(
@@ -117,7 +192,9 @@ describe("active-version capture routing", () => {
   it("captures batches into the active named version, not Main", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = daemonCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
 
@@ -128,7 +205,15 @@ describe("active-version capture routing", () => {
     engine.captureBatch([{ path: "plan.md", operation: "update" }]);
     await engine.stop();
 
-    const draftWrites = readEngineMoments(root).filter(
+    // Positive proof of the backend, not of the outcome: a silent relapse to
+    // the legacy in-process store would never open a daemon workspace, never
+    // create a version over the wire, and never write text over it.
+    const methods = requests.map((request) => request.method);
+    expect(methods).toContain("workspace.open");
+    expect(methods).toContain(VERSIONED_METHOD.versionsCreateNamed);
+    expect(methods).toContain(VERSIONED_METHOD.textWrite);
+
+    const draftWrites = (await readDaemonMoments(loopback)).filter(
       (moment) => moment.path === "plan.md" && moment.text === "draft text\n",
     );
     expect(draftWrites).toHaveLength(1);
@@ -138,7 +223,8 @@ describe("active-version capture routing", () => {
   it("reads the active version per task, not cached across a switch", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = daemonCapture(root, loopback);
     engine.start();
     const created = await engine.createVersion("Draft");
 
@@ -150,7 +236,7 @@ describe("active-version capture routing", () => {
     await engine.stop();
 
     expect(switched.activeVersionId).toBe("main");
-    const draftMoments = readEngineMoments(root).filter(
+    const draftMoments = (await readDaemonMoments(loopback)).filter(
       (moment) => moment.text === "draft text\n" && moment.operation === "write",
     );
     expect(draftMoments.map((moment) => moment.versionId)).toEqual([
@@ -163,7 +249,8 @@ describe("createVersion", () => {
   it("forks from the latest disk state and becomes active", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = daemonCapture(root, loopback);
     engine.start();
     await engine.flush();
 
@@ -180,7 +267,7 @@ describe("createVersion", () => {
     expect(draft?.kind).toBe("named");
     expect(snapshot.activeVersionId).toBe(draft?.id);
     // The late edit was captured into Main (the fork source) first.
-    const mainMoments = readEngineMoments(root).filter(
+    const mainMoments = (await readDaemonMoments(loopback)).filter(
       (moment) => moment.versionId === "main" && moment.path === "plan.md",
     );
     expect(mainMoments.at(-1)?.text).toBe("v1 text with late edit\n");
@@ -188,6 +275,12 @@ describe("createVersion", () => {
     expect(await readText(root, "plan.md")).toBe("v1 text with late edit\n");
   });
 
+  // LEGACY FIXTURE, and it has to be: the assertion is on the DOMAIN error code
+  // `version-name-conflict`, which only the in-process store raises. The daemon
+  // path surfaces an `EngineRequestError` carrying a wire code, and nothing
+  // between the daemon client and this API maps one to the other — so the code
+  // this asserts cannot appear there. Migrating it would mean deleting the
+  // `code` assertion, which is the whole test.
   it("rejects duplicate names without changing the active version", async () => {
     const root = await tempRoot();
     const engine = capture(root);
@@ -208,7 +301,7 @@ describe("switchVersion", () => {
     await write(root, "plan.md", "v1 text\n");
     const logoBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
     await writeBytes(root, "logo.png", logoBytes);
-    const engine = capture(root);
+    const engine = daemonCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
 
@@ -245,23 +338,40 @@ describe("switchVersion", () => {
     // content equals the engine tip, so an unsuppressed capture records
     // nothing either) — the read counter is what fails when suppression
     // breaks.
-    const store = createVersionedTextStore(root);
+    //
+    // The counted store wraps the DAEMON store, not a legacy one. Injecting a
+    // store used to force the legacy engine, which made this counter and the
+    // daemon mutually exclusive; `useRustEngine` states the choice instead, so
+    // the read being counted is now a real `versionedText.read` over the wire.
+    const loopback = new VersionedLoopbackEngine();
+    const sessions = mockLiveSessions(loopback);
+    const store = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root },
+      sessions,
+    ).store;
     let planReads = 0;
-    const countingStore: VersionedTextStore = {
+    const countingStore: CaptureVersionedTextStore = {
       ...store,
       async readTextFile(input) {
         if (input.path === "plan.md") planReads += 1;
         return store.readTextFile(input);
       },
     };
-    const engine = capture(root, { store: countingStore });
+    const engine = capture(root, {
+      store: countingStore,
+      rustEngineSessions: sessions,
+      useRustEngine: true,
+    });
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
     await write(root, "plan.md", "draft text\n");
     await engine.switchVersion("main");
+    // The counter is only a suppression signal if the un-suppressed path DOES
+    // read: a wrapper that never sees a read would report zero for any reason.
+    expect(planReads).toBeGreaterThan(0);
 
-    const momentsBefore = readEngineMoments(root).length;
+    const momentsBefore = (await readDaemonMoments(loopback)).length;
     planReads = 0;
     // Simulate the watcher observing the switch's disk writes: the expected
     // event registrations must swallow them — zero new engine moments AND
@@ -269,7 +379,7 @@ describe("switchVersion", () => {
     engine.captureBatch([{ path: "plan.md", operation: "update" }]);
     await engine.stop();
     expect(planReads).toBe(0);
-    expect(readEngineMoments(root)).toHaveLength(momentsBefore);
+    expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
     expect(
       sha256Utf8(await readText(root, "plan.md")),
     ).toBe(sha256Utf8("v1 text\n"));
@@ -278,16 +388,22 @@ describe("switchVersion", () => {
   it("is a no-op when switching to the already-active version", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = daemonCapture(root, loopback);
     engine.start();
     await engine.flush();
-    const before = readEngineMoments(root).length;
+    const before = (await readDaemonMoments(loopback)).length;
+    // Without this the length claim below is 0 === 0, which a starved store
+    // would also satisfy.
+    expect(before).toBeGreaterThan(0);
     const result = await engine.switchVersion("main");
     expect(result).toEqual({ activeVersionId: "main", changedFileCount: 0 });
-    expect(readEngineMoments(root)).toHaveLength(before);
+    expect(await readDaemonMoments(loopback)).toHaveLength(before);
     await engine.stop();
   });
 
+  // LEGACY FIXTURE for the same reason as the duplicate-name test above: the
+  // `version-not-found` domain code exists only on the in-process store.
   it("fails closed on an unknown version id without touching disk or active version", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
@@ -327,8 +443,10 @@ describe("switchVersion", () => {
         await rm(absolutePath, { force: true });
       },
     };
+    const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, {
       diskWriter,
+      rustEngineSessions: mockLiveSessions(loopback),
       onError: (context) => {
         failures.push(context);
       },
@@ -357,7 +475,7 @@ describe("switchVersion", () => {
     expect(activeVersionId).toBe("main");
     expect(await readText(root, "a.md")).toBe("main a\n");
     expect(await readText(root, "b.md")).toBe("draft b\n");
-    const mainTipForB = readEngineMoments(root)
+    const mainTipForB = (await readDaemonMoments(loopback))
       .filter((moment) => moment.versionId === "main" && moment.path === "b.md")
       .at(-1);
     expect(mainTipForB?.text).toBe("draft b\n");
@@ -376,7 +494,7 @@ describe("switchVersion", () => {
     expect(await readText(root, "a.md")).toBe("main a\n");
     expect(await readText(root, "b.md")).toBe("draft b\n");
     expect(
-      readEngineMoments(root).some(
+      (await readDaemonMoments(loopback)).some(
         (moment) =>
           moment.versionId === "main" &&
           moment.path === "b.md" &&
@@ -392,7 +510,7 @@ describe("compareVersions", () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
     await write(root, "keep.md", "same\n");
-    const engine = capture(root);
+    const engine = daemonCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -419,6 +537,14 @@ describe("compareVersions", () => {
   });
 });
 
+// LEGACY FIXTURE for every test that reaches a conflict record. `mergeVersionIntoMain`
+// resumes open conflicts, so it calls `listTextConflicts` on every run, and that
+// is a `conflicts.list` RPC the loopback does not implement ("Unsupported
+// loopback method: conflicts.list") — nor do `conflicts.open` / `conflicts.resolve`
+// exist there. Answering them inside the shared harness would be a hand-written
+// responder deciding merge outcomes, which is exactly what the harness exists to
+// avoid. The one merge test that refuses BEFORE reaching conflicts runs on the
+// daemon.
 describe("mergeVersionIntoMain", () => {
   it("merges a clean version into Main and materializes when Main is active", async () => {
     const root = await tempRoot();
@@ -598,9 +724,11 @@ describe("mergeVersionIntoMain", () => {
     await engine.stop();
   });
 
+  // On the daemon: this refusal happens on the version list, before the merge
+  // reaches any conflict RPC.
   it("rejects merging Main into Main", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const engine = daemonCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await expect(engine.mergeVersionIntoMain("main")).rejects.toThrow(
@@ -616,7 +744,7 @@ describe("restoreFileToBeforeMoment", () => {
     const before = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
     const after = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
     await writeBytes(root, "logo.png", before);
-    const engine = capture(root);
+    const engine = daemonCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await writeBytes(root, "logo.png", after);
@@ -636,6 +764,10 @@ describe("restoreFileToBeforeMoment", () => {
   });
 });
 
+// LEGACY FIXTURE on purpose. The number this logs is evidence only while it is
+// measured against the real store on real disk; the same measurement over an
+// in-memory loopback would be a latency figure for a fixture, published under a
+// heading that claims to describe the product.
 describe("switch performance evidence (PR 0M-4)", () => {
   it("measures switch latency for a 200-file workspace with 20 differing files", async () => {
     const root = await tempRoot();
