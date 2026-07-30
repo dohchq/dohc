@@ -1,10 +1,13 @@
 // The TS side of the E-shard capture DIFFERENTIAL. It drives the REAL
 // TypeScript capture pipeline (the oracle) through the shared fixtures and
-// projects normalized per-path state. With DOHC_EMIT_CAPTURE_GOLDENS=1 it
-// rewrites tools/rust-engine-program/capture-goldens.json; otherwise it
-// asserts the committed goldens still match, so CI catches oracle drift.
+// projects normalized per-path state, then asserts the committed goldens in
+// tools/rust-engine-program/capture-goldens.json still match.
 // crates/dohc-workspace-engine/tests/capture_differential.rs replays the same
 // fixtures against the Rust daemon and compares against the same goldens.
+//
+// The goldens are FROZEN — there is no regeneration flag. See
+// capture-goldens.provenance.md for why, and for what to do if they genuinely
+// need to change.
 //
 // Projection rules (both sides MUST agree):
 // - ids and timestamps are excluded (TS uses random UUIDs — ratified);
@@ -229,10 +232,19 @@ it.skipIf(!DatabaseSync)(
       produced[scenario.name] = await runScenario(scenario);
     }
 
-    if (process.env.DOHC_EMIT_CAPTURE_GOLDENS === "1") {
-      await writeFile(GOLDENS_PATH, `${JSON.stringify({ scenarios: produced }, null, 2)}\n`);
-      return;
-    }
+    // The regeneration path is GONE, deliberately. It used to rewrite the
+    // goldens from this run and `return` — skipping the comparison — so a single
+    // invocation could both change the expected answers and report success.
+    //
+    // R16 deletes the TypeScript engine this oracle drives. Once it goes, the
+    // only remaining writer of these goldens would be the Rust side, which the
+    // same file is used to grade: the daemon would certify itself, and one
+    // regeneration would bake any Rust capture bug in permanently.
+    //
+    // So the goldens are now a FROZEN RECORD of what the TypeScript oracle
+    // produced, with their provenance in capture-goldens.provenance.md. Changing
+    // them is a hand-edited diff somebody has to justify in review, which is the
+    // whole point.
     const goldens = JSON.parse(await readFile(GOLDENS_PATH, "utf8")) as {
       scenarios: Record<string, Record<string, PathProjection>>;
     };

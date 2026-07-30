@@ -998,7 +998,7 @@ fix the process, not just the artifact.
 - Differential: `tools/rust-engine-program/capture-fixtures.json` +
   `capture-goldens.json` · TS emitter
   `apps/desktop/src/workspaces/captureOracleGoldens.test.ts`
-  (`DOHC_EMIT_CAPTURE_GOLDENS=1` regenerates; pnpm; Windows needs
+  (goldens are FROZEN — no regeneration flag, see capture-goldens.provenance.md; pnpm; Windows needs
   `closeTrackedEngineDbHandlesForTest`) · Rust replay
   `crates/dohc-workspace-engine/tests/capture_differential.rs`
 - Daemon: `crates/dohc-workspace-engine/src/lib.rs` (dispatch) ·

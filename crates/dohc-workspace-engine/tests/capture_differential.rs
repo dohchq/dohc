@@ -348,6 +348,28 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
     let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
     let goldens: Goldens = serde_json::from_str(GOLDENS).expect("goldens parse");
 
+    // The count is checked in, and it is the only thing here that can notice a
+    // scenario disappearing. Every per-path assertion below iterates the
+    // fixtures, so deleting a scenario from BOTH files leaves this test green
+    // over a smaller world — a differential that silently stops differentiating.
+    // The missing-golden panic below covers the other direction only.
+    //
+    // Bump this deliberately when adding a scenario, and update
+    // capture-goldens.provenance.md in the same commit.
+    const EXPECTED_SCENARIOS: usize = 10;
+    assert_eq!(
+        fixtures.scenarios.len(),
+        EXPECTED_SCENARIOS,
+        "capture-fixtures.json scenario count changed; if that is intended, bump \
+         EXPECTED_SCENARIOS and update capture-goldens.provenance.md"
+    );
+    assert_eq!(
+        goldens.scenarios.len(),
+        EXPECTED_SCENARIOS,
+        "capture-goldens.json entry count changed; the goldens are frozen — see \
+         capture-goldens.provenance.md before changing them"
+    );
+
     for scenario in &fixtures.scenarios {
         let golden = goldens
             .scenarios
