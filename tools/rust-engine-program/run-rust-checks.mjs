@@ -34,6 +34,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { arch, homedir, platform, release } from "node:os";
+import { readdirSync, statSync } from "node:fs";
 import { existsSync, readFileSync } from "node:fs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -173,7 +174,7 @@ function configuredCargoTarget() {
       // and the inline table build={target=...}. Missing any spelling meant
       // falling back to the host triple and certifying a cross run as native.
       const assignment = inBuild
-        ? /^\s*target\s*=\s*(.*)$/u.exec(line)?.[1]
+        ? /^\s*["']?target["']?\s*=\s*(.*)$/u.exec(line)?.[1]
         : (/^\s*build\s*\.\s*target\s*=\s*(.*)$/u.exec(line)?.[1] ??
            (/^\s*build\s*=\s*\{/u.test(line)
              ? /target\s*=\s*([^},]*)/u.exec(line)?.[1]
@@ -255,6 +256,35 @@ if (expectArch) {
 const evidenceArch = cargoArch ?? arch();
 console.log(`cargo: ${cargoTarget ?? "unverified"} (arch ${evidenceArch})`);
 
+// AUTHORITATIVE BACKSTOP. Nine different channels can set cargo's target —
+// CARGO_BUILD_TARGET, [build].target in eight TOML spellings across a merged config
+// hierarchy, and --target smuggled through RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS /
+// [build].rustflags. Every review round on this file found another one, so predicting
+// the target from configuration does not converge. This observes what cargo actually
+// DID instead: a cross build writes its artifacts to target/<triple>/, so a non-host
+// triple directory touched during this run means the evidence is not native, whatever
+// spelling produced it. Snapshot first, because stale directories from earlier runs
+// must not read as this run's work.
+function targetRoot() {
+  return process.env.CARGO_TARGET_DIR || join(repoRoot, "target");
+}
+function tripleDirMtimes() {
+  const root = targetRoot();
+  const seen = new Map();
+  if (!existsSync(root)) return seen;
+  for (const name of readdirSync(root)) {
+    // arch-vendor-os shaped; `debug`, `release`, `tmp`, `CACHEDIR.TAG` are not.
+    if (!/^[a-z0-9_]+-[a-z0-9_.]+-[a-z0-9_.]+/u.test(name)) continue;
+    try {
+      seen.set(name, statSync(join(root, name)).mtimeMs);
+    } catch {
+      seen.set(name, 0);
+    }
+  }
+  return seen;
+}
+const tripleDirsBefore = tripleDirMtimes();
+
 for (const step of required) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
@@ -292,6 +322,30 @@ for (const step of optional) {
   const r = run(step.cmd);
   if (!r.ok) failed = true;
   results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
+}
+
+// Did cargo actually build for anything other than the host? This is a FACT about
+// this run, not a prediction from configuration, so it holds for target overrides
+// this gate cannot parse — including --target inside RUSTFLAGS, which no amount of
+// TOML reading would catch.
+{
+  const after = tripleDirMtimes();
+  const cross = [];
+  for (const [name, mtime] of after) {
+    if (cargoHost && name === cargoHost) continue; // an explicit --target <host> is still native
+    const before = tripleDirsBefore.get(name);
+    if (before === undefined || mtime > before) cross.push(name);
+  }
+  if (cross.length > 0) {
+    failed = true;
+    results.push({
+      name: "native target",
+      status: "FAIL",
+      reason: `cargo wrote artifacts for ${cross.join(", ")} — this run is not native evidence`,
+    });
+  } else {
+    results.push({ name: "native target", status: "PASS" });
+  }
 }
 
 // Summary + pasteable evidence line.
