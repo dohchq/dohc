@@ -91,26 +91,51 @@ if (shared.length === 0) {
 }
 
 const problems = [];
-let wrote = 0;
 
+// PASS 1 — validate every canonical skill before writing anything. Recording a
+// problem and then continuing into the write loop would overwrite two working
+// adapters with the invalid frontmatter and only then exit non-zero, so a typo
+// in one canonical file would take the skill out of both hosts.
+const valid = new Map();
 for (const name of shared) {
   const canonical = join(SOURCE, name, "SKILL.md");
   if (!existsSync(canonical)) {
-    problems.push(`${SOURCE}/${name}/ has no SKILL.md`);
+    problems.push(`${SOURCE}/${name}/ has no SKILL.md — create it, or remove the directory`);
     continue;
   }
-  const { frontmatter } = splitFrontmatter(readFileSync(canonical, "utf8"), canonical);
-
+  let frontmatter;
+  try {
+    ({ frontmatter } = splitFrontmatter(readFileSync(canonical, "utf8"), canonical));
+  } catch (err) {
+    problems.push(err.message);
+    continue;
+  }
+  let ok = true;
   // A host triggers a skill off its description, so an adapter without one is
-  // discovered and never used. Refuse to generate that rather than emit it.
+  // discovered and never used.
   for (const key of ["name", "description"]) {
     if (!new RegExp(`^${key}:`, "m").test(frontmatter)) {
       problems.push(`${canonical} frontmatter has no '${key}:'`);
+      ok = false;
     }
   }
-  if (!new RegExp("^name:[ \\t]*" + name + "[ \\t]*$", "m").test(frontmatter)) {
+  if (!new RegExp(`^name:[ \\t]*${name}[ \\t]*$`, "m").test(frontmatter)) {
     problems.push(`${canonical} frontmatter 'name:' does not match its directory (${name})`);
+    ok = false;
   }
+  if (ok) valid.set(name, frontmatter);
+}
+
+if (problems.length > 0) {
+  console.error(`canonical skills are invalid (${problems.length}) — wrote nothing:`);
+  for (const p of problems) console.error(`  ${p}`);
+  process.exit(1);
+}
+let wrote = 0;
+
+// PASS 2 — every canonical skill is known good, so writing is safe.
+for (const [name, frontmatter] of valid) {
+  const canonical = join(SOURCE, name, "SKILL.md");
 
   for (const { dir, host } of ROOTS) {
     const target = join(dir, name, "SKILL.md");
