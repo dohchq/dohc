@@ -37,18 +37,35 @@ const ALLOWED = [
 
 const SCAN_ROOTS = ["apps", "packages", "services"];
 
+// Shipping code, in any language that reaches a user. `.js` is included because
+// two packages expose JavaScript launchers as their `bin` — packages/cli
+// bin/dohc.js and packages/mcp bin/dohc-mcp.js — so a legacy dependency added to
+// either would ship while a TypeScript-only scan stayed green.
+const SCANNED_SOURCE = /\.(tsx?|jsx?|mjs|cjs|mts|cts)$/;
+
 // Not production: the legacy package itself, test files, Playwright specs, and
 // build/QA tooling.
 function isProductionSource(posixPath: string): boolean {
   if (posixPath.startsWith("packages/workspace-engine/")) return false;
-  if (/\.(test|spec)\.tsx?$/.test(posixPath)) return false;
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(posixPath)) return false;
   if (posixPath.includes("/e2e/")) return false;
   if (posixPath.includes("/scripts/")) return false;
   if (posixPath.includes("/testing/")) return false;
+  // Build and test tooling that happens to sit at a package root rather than
+  // under scripts/ — electron.vite.config.ts, playwright.config.ts,
+  // vitest.config.ts. These run on a developer's machine, never a user's.
+  if (/(^|\/)[^/]*\.config\.[cm]?[jt]s$/.test(posixPath)) return false;
   // Declaration files carry no runtime import — everything in them is erased,
-  // including `import Engine = require(…)`. `/\.tsx?$/` alone matches them.
+  // including `import Engine = require(…)`.
   if (posixPath.endsWith(".d.ts")) return false;
-  return /\.tsx?$/.test(posixPath);
+  return SCANNED_SOURCE.test(posixPath);
+}
+
+function scriptKindFor(posixPath: string): ts.ScriptKind {
+  if (posixPath.endsWith(".tsx")) return ts.ScriptKind.TSX;
+  if (posixPath.endsWith(".jsx")) return ts.ScriptKind.JSX;
+  if (/\.[cm]?js$/.test(posixPath)) return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
 }
 
 const SKIP_DIRS = new Set([
@@ -114,8 +131,30 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
     source,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ false,
-    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    scriptKindFor(fileName),
   );
+  // `createRequire` bindings are runtime loaders under another name, and this
+  // repo uses them DELIBERATELY: workspaceDatabase.ts:18 explains that bundlers
+  // emitting a CommonJS shim inject their own top-level `const require`, so a
+  // second declaration is a SyntaxError. Production therefore names them
+  // `requireFromHere` / `requireModule` — and the legacy package does it too
+  // (linkedChatStore.ts:199). Matching only a callee literally named `require`
+  // would leave the ratchet open along the path the codebase already prefers.
+  const requireAliases = new Set<string>(["require"]);
+  const collectAliases = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      const init = node.initializer;
+      if (init !== undefined && ts.isCallExpression(init)) {
+        const callee = init.expression;
+        const isCreateRequire =
+          (ts.isIdentifier(callee) && callee.text === "createRequire") ||
+          (ts.isPropertyAccessExpression(callee) && callee.name.text === "createRequire");
+        if (isCreateRequire) requireAliases.add(node.name.text);
+      }
+    }
+    ts.forEachChild(node, collectAliases);
+  };
+  collectAliases(sourceFile);
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
@@ -161,7 +200,8 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
         // `import("pkg")`, and a BARE `require("pkg")` — but not a method call
         // such as `loader.require("pkg")`, which is not Node's require.
         const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
-        const isBareRequire = ts.isIdentifier(node.expression) && node.expression.text === "require";
+        const isBareRequire =
+          ts.isIdentifier(node.expression) && requireAliases.has(node.expression.text);
         if (isDynamicImport || isBareRequire) {
           found = true;
           return;
@@ -180,9 +220,7 @@ describe("legacy engine production imports (R16 ratchet)", () => {
   const importers = files
     .map((f) => relative(REPO_ROOT, f).split(sep).join("/"))
     .filter(isProductionSource)
-    .filter((p) =>
-      hasRuntimeLegacyImport(readFileSync(join(REPO_ROOT, p), "utf8")),
-    )
+    .filter((p) => hasRuntimeLegacyImport(readFileSync(join(REPO_ROOT, p), "utf8"), p))
     .sort();
 
   it("actually reached every scan root — a scan that matched nothing would pass vacuously", () => {
@@ -279,6 +317,67 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     // A prefix collision must not match.
     expect(hasRuntimeLegacyImport(`import { x } from "${L}-client";`)).toBe(false);
     expect(hasRuntimeLegacyImport(`await import("${L}-client");`)).toBe(false);
+  });
+
+  it("detects createRequire bindings, which this repo prefers over bare require", () => {
+    // workspaceDatabase.ts:18 explains why production names these something
+    // other than `require`: a bundler emitting a CommonJS shim injects its own
+    // top-level `const require`, so a second declaration is a SyntaxError. Real
+    // examples: workspaceDatabase.ts:35 `requireFromHere`, cliServer.ts:229 and
+    // mcp/tools.ts:398 `requireModule`, and the legacy package's own
+    // linkedChatStore.ts:199. Matching only `require` left the ratchet open
+    // along the exact path the codebase already prefers.
+    const viaAlias = [
+      `import { createRequire } from "node:module";`,
+      `const requireFromHere = createRequire(import.meta.url);`,
+      `export const engine = requireFromHere("${LEGACY_PACKAGE}");`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(viaAlias)).toBe(true);
+
+    const otherName = [
+      `const requireModule = createRequire(import.meta.url);`,
+      `export const e = requireModule("${LEGACY_PACKAGE}");`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(otherName)).toBe(true);
+
+    // A binding NOT from createRequire must not be treated as a loader.
+    const notALoader = [
+      `const requireFromHere = makeSomethingElse();`,
+      `export const e = requireFromHere("${LEGACY_PACKAGE}");`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(notALoader)).toBe(false);
+  });
+
+  it("parses each file with the script kind its extension implies", () => {
+    // A .tsx file parsed as TS chokes on JSX, and a malformed AST hides the
+    // import that follows it. The scan passes the real path for this reason.
+    const tsx = [
+      `export function View() {`,
+      `  return <div className="x">{"hi"}</div>;`,
+      `}`,
+      `export async function load() {`,
+      `  return await import("${LEGACY_PACKAGE}");`,
+      `}`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(tsx, "some/View.tsx")).toBe(true);
+    expect(scriptKindFor("a/b.tsx")).toBe(ts.ScriptKind.TSX);
+    expect(scriptKindFor("a/b.jsx")).toBe(ts.ScriptKind.JSX);
+    expect(scriptKindFor("a/b.mjs")).toBe(ts.ScriptKind.JS);
+    expect(scriptKindFor("a/b.ts")).toBe(ts.ScriptKind.TS);
+  });
+
+  it("scans shipping JavaScript and skips build/test config", () => {
+    // packages/cli exposes bin/dohc.js and packages/mcp exposes bin/dohc-mcp.js,
+    // so a legacy dependency in either would ship to users.
+    expect(isProductionSource("packages/cli/bin/dohc.js")).toBe(true);
+    expect(isProductionSource("packages/mcp/bin/dohc-mcp.js")).toBe(true);
+    // Config at a package root is tooling, not shipping code — and it is not
+    // under scripts/, so it needs its own exclusion.
+    expect(isProductionSource("apps/desktop/electron.vite.config.ts")).toBe(false);
+    expect(isProductionSource("apps/desktop/playwright.config.ts")).toBe(false);
+    expect(isProductionSource("apps/desktop/vitest.config.ts")).toBe(false);
+    // But a source file whose name merely contains "config" is production.
+    expect(isProductionSource("apps/desktop/src/preloadBundleConfig.ts")).toBe(true);
   });
 
   it("excludes declaration files, whose imports are erased", () => {
