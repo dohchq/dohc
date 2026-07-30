@@ -694,7 +694,7 @@ define_server_error_codes! {
     "invalid_version" => |_| RelayError::BadRequest,
     "key_envelope_not_found" => |_| RelayError::KeyEnvelopeMissing,
     "method_not_allowed" => |_| RelayError::MethodNotAllowed,
-    "not_found" => |context| unavailable(context),
+    "not_found" => unavailable,
     "payload_too_large" => |_| RelayError::PayloadTooLarge,
     "presence_capacity" => |_| RelayError::PresenceCapacity,
     "quota_exceeded" => |_| RelayError::QuotaExceeded,
