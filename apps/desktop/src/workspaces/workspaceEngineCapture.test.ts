@@ -11,6 +11,7 @@ import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import {
@@ -155,52 +156,6 @@ function capture(root: string, options: {
   });
 }
 
-function mockLiveSessions(
-  loopback: VersionedLoopbackEngine,
-  requests?: Request[],
-  captureFlushResult: () => {
-    settled: boolean;
-    running: boolean;
-    degraded: boolean;
-  } = () => ({ settled: true, running: true, degraded: false }),
-) {
-  const client = {
-    close: () => undefined,
-    onEvent: () => () => undefined,
-    async sendRequest(request: Request): Promise<Response> {
-      requests?.push(request);
-      const params = request.params as Record<string, JsonValue | undefined>;
-      if (request.method === "workspace.open") {
-        return {
-          id: request.id,
-          result: { workspace: String(params.workspaceId) },
-        };
-      }
-      if (request.method === "workspace.close") {
-        return { id: request.id, result: { closed: true } };
-      }
-      if (request.method === "capture.flush") {
-        return {
-          id: request.id,
-          result: captureFlushResult(),
-        };
-      }
-      if (request.method === "capture.setAuthor") {
-        return { id: request.id, result: { updated: true } };
-      }
-      if (request.method === "watcher.status") {
-        return {
-          id: request.id,
-          result: { running: true, degraded: false, terminal: false },
-        };
-      }
-      return await loopback.sendRequest(request);
-    },
-  };
-  return new EngineWorkspaceSessions({
-    currentClient: () => client,
-  });
-}
 
 // PR 0N-1: the author a persisted moment carries (NULL = actor-neutral).
 function readEngineMomentAuthors(rootPath: string): Array<Record<string, unknown> | null> {
