@@ -1,11 +1,81 @@
 @AGENTS.md
 
-# Claude-specific instructions
+# Personal Preferences
 
-- Use pnpm. Do not use npm, Yarn, Bun, or another package manager.
-- Do not start a development server. Assume the user already controls it.
-- Run checks that match the changed surface. Do not run a full build unless the
-  task requires build or packaging evidence.
-- Avoid TypeScript `any`. Use it only when the boundary cannot be typed safely,
-  and explain why in code.
-- Prefer the smallest clear implementation that preserves dohc’s contracts.
+## TypeScript
+
+- Never use `any` unless 100% necessary or specifically instructed.
+
+## Commands
+
+- Don't run dev server commands (e.g., `pnpm dev`) - assume it's already
+  running.
+- Don't run build commands unless specifically told to.
+- Focus on checking commands like `pnpm typecheck`, `pnpm test`, etc.
+
+## Package Managers
+
+- Use pnpm if the project already uses it, otherwise use bun.
+- Never use npm or yarn.
+
+## Code Style
+
+- Always strive for concise, simple solutions.
+- If a problem can be solved in a simpler way, propose it.
+
+## General preferences
+
+- If asked to do too much work at once, stop and state that clearly.
+- If computer use is helpful for completing or verifying work, shell out to
+  gpt-5.6-sol with Codex for it
+
+## Picking the right models for workflows and subagents
+
+Rankings, higher = better. Cost reflects what I actually pay (OpenAI has
+really generous limits), not list price. Intelligence is how hard a problem you
+can hand the model unsupervised. Taste covers UI/UX, code quality, API design,
+and copy.
+
+| model       | cost | intelligence | taste |
+| ----------- | ---- | ------------ | ----- |
+| gpt-5.6-sol | 9    | 8            | 6     |
+| opus-5      | 8    | 6            | 8     |
+| fable-5     | 2    | 9            | 9     |
+
+How to apply:
+
+- These are defaults, not limits. You have standing permission to override them:
+  if a cheaper model's output doesn't meet the bar, rerun or redo the work with
+  a smarter model without asking. Judge the output, not the price tag.
+  Escalating costs less than shipping mediocre work.
+- Don't let cost prevent you from using the right model for the job. Instead, take advantage of cheaper options to get more information and try things before moving the work to a more expensive option.
+- Bulk/mechanical work (clear-spec implementation, data analysis, migrations):
+  gpt-5.6-sol - it's effectively free.
+- Anything user-facing (UI, copy, API design) needs taste >= 7.
+- Reviews of plans/implementations: fable-5 or opus-5, optionally gpt-5.6-sol as
+  an extra independent perspective.
+- Never use Haiku.
+- Mechanics: gpt-5.6-sol is only reachable through the Codex CLI - `codex exec` /
+  `codex review` (my ~/.codex/config.toml defaults to gpt-5.6-sol). Use the
+  codex-implementation, codex-review, and codex-computer-use skills; for work
+  they don't cover (investigation, data analysis), run
+  `codex exec -s read-only` directly with a self-contained prompt.
+- Claude models (opus-5, fable-5) run via the Agent/Workflow model
+  parameter.
+
+Using gpt-5.6-sol inside workflows and subagents (the model parameter only takes
+Claude models, so use a wrapper):
+
+- Spawn a thin Claude wrapper agent with `model: 'opus', effort: 'low'` whose
+  prompt instructs it to write a self-contained codex prompt, run `codex exec`
+  via Bash, and return the report (use `schema` on the wrapper to get
+  structured output back).
+- Always label these agents with a `gpt-5.6-sol:` prefix, e.g.
+  `{label: 'gpt-5.6-sol:review-auth'}` - the workflow UI shows the wrapper's Claude
+  model, so the label is the only indication the real worker is gpt-5.6-sol.
+- Codex runs can exceed Bash's 10-minute timeout: pass an explicit timeout, or
+  run in background and poll for the report file.
+- Parallel gpt-5.6-sol implementation agents must use `isolation: 'worktree'` so
+  codex edits don't collide in the shared checkout.
+- Workflow token budgets only count Claude tokens; codex work is free and
+  invisible to `budget.spent()`.
