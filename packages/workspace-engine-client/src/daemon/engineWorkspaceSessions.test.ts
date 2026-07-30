@@ -517,6 +517,31 @@ describe("EngineWorkspaceSessions", () => {
     expect(requests[0]?.deadlineMs).toBe(WORKSPACE_OPEN_DEADLINE_MS);
   });
 
+  it("lets a caller widen the workspace open deadline without moving the default", async () => {
+    const workspace = await tempWorkspace();
+    const requests: Request[] = [];
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: "handle-1" } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      { workspaceOpenDeadlineMs: 30_000 },
+    );
+
+    await sessions.run(workspace, async () => undefined);
+
+    expect(requests[0]?.deadlineMs).toBe(30_000);
+    // The product guarantee is the constant, not whatever a caller passed.
+    expect(WORKSPACE_OPEN_DEADLINE_MS).toBe(2_000);
+  });
+
   it("retries an initial workspace open failure before running the operation", async () => {
     const workspace = await tempWorkspace();
     let openAttempts = 0;

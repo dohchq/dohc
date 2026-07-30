@@ -55,6 +55,15 @@ export interface EngineWorkspaceRunOptions {
 export interface EngineWorkspaceSessionsOptions {
   transportRebindAttempts?: number;
   sleep?: (delayMs: number) => Promise<void>;
+  /**
+   * Deadline for a single daemon `workspace.open`. Defaults to
+   * WORKSPACE_OPEN_DEADLINE_MS, which is the product guarantee about
+   * workspace-open latency — production must not pass anything else. Test
+   * harnesses that run many daemons at once can raise it, because there the
+   * cause of a missed deadline is suite contention rather than the code under
+   * test.
+   */
+  workspaceOpenDeadlineMs?: number;
 }
 
 const TRANSPORT_REBIND_ATTEMPTS = 6;
@@ -135,6 +144,7 @@ export class EngineWorkspaceSessions {
   private readonly shareMounts = new Set<string>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly workspaceOpenDeadlineMs: number;
   private acceptingRuns = true;
 
   constructor(
@@ -144,6 +154,8 @@ export class EngineWorkspaceSessions {
     this.transportRebindAttempts =
       options.transportRebindAttempts ?? TRANSPORT_REBIND_ATTEMPTS;
     this.sleep = options.sleep ?? defaultSleep;
+    this.workspaceOpenDeadlineMs =
+      options.workspaceOpenDeadlineMs ?? WORKSPACE_OPEN_DEADLINE_MS;
   }
 
   async run<T>(
@@ -380,7 +392,7 @@ export class EngineWorkspaceSessions {
             }
           : {}),
       },
-      { deadlineMs: WORKSPACE_OPEN_DEADLINE_MS },
+      { deadlineMs: this.workspaceOpenDeadlineMs },
     );
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
     return { client, workspace: opened.workspace as WorkspaceHandle };

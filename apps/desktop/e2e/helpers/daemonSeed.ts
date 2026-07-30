@@ -1,9 +1,8 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import {
   EngineDaemonLifecycle,
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
+import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import {
   createLiveLinkedChatStore,
   type DesktopLinkedChatStore,
@@ -12,7 +11,6 @@ import {
   createCaptureLiveStores,
   type CaptureVersionedTextStore,
 } from "../../src/workspaces/workspaceEngineCaptureLiveStore";
-import { desktopRoot } from "./desktopApp";
 
 // Post-cutover the daemon refuses stores created by the retired TS engine,
 // so e2e seeding must happen the way the product writes: over RPC to the
@@ -20,29 +18,8 @@ import { desktopRoot } from "./desktopApp";
 // Seed BEFORE launching the app — the daemon is stopped afterwards so the
 // app's own daemon owns the store exclusively.
 //
-// Resolution order mirrors how the binary actually lands on disk:
-// 1. DOHC_TEST_ENGINE_BINARY — explicit override, used verbatim.
-// 2. apps/desktop/target/debug — what the app under test resolves in e2e
-//    (defaultEngineBinaryPath from appPath dist/main -> ../..), and where
-//    staged-binary harnesses copy it.
-// 3. <repo>/target/debug — where a repo-root `cargo build` places it.
-function resolveEngineBinary(): string {
-  const override = process.env.DOHC_TEST_ENGINE_BINARY;
-  if (override) return override;
-  const name = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
-  const candidates = [
-    join(desktopRoot, "target", "debug", name),
-    join(desktopRoot, "..", "..", "target", "debug", name),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  throw new Error(
-    "dohc-workspace-engine debug binary not found. Tried:\n" +
-      candidates.map((candidate) => `  ${candidate}`).join("\n") +
-      "\nBuild it (cargo build -p dohc-workspace-engine) or set DOHC_TEST_ENGINE_BINARY.",
-  );
-}
+// Binary discovery lives in src/testing/engineBinary so the src/** daemon
+// suites and these e2e helpers agree on where the daemon is.
 
 export interface DaemonSeedStores {
   chats: DesktopLinkedChatStore;
