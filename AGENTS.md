@@ -309,9 +309,9 @@ These are meant to steer us in the right direction. They are not hard-set, but w
 - Never stop a process by name, command-line pattern, or worktree path. Stop
   only a PID this task started. Verify a port owner's working directory before
   stopping it.
-- Brand identity is final: lowercase `dohc`, the drop-lobe mark, warm
-  paper + graphite. There must be no legacy product identity in shipping
-  source. `scripts/check-brand.mjs` enforces this.
+- Brand identity is final: the drop-lobe mark, warm paper + graphite. There
+  must be no legacy product identity in shipping source.
+  `scripts/check-brand.mjs` enforces this.
 - The product is the local-first desktop app (`apps/desktop`) on the workspace
   engine; it needs no backend. The opt-in sync stack contains the workspace API
   and sync relay. Postgres backs Better Auth and session validation. The sync

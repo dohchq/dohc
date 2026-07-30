@@ -1,11 +1,10 @@
 # dohc
 
-The quiet AI workspace for documents and real work. Spoken “dock”; always
-written lowercase.
+dohc is a local-first workspace where you and your agents build documents,
+data, dashboards, and workflows from files you control.
 
-dohc is a local-first desktop app. A workspace is an ordinary folder. The Rust
-workspace engine records versions, moments, chats, search state, and sync data
-in `.dohc/engine/engine.db`.
+A workspace is an ordinary folder. The Rust workspace engine records versions,
+moments, chats, search state, and sync data in `.dohc/engine/engine.db`.
 
 ## Repository layout
 

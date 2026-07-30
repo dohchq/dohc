@@ -5,7 +5,7 @@ export const BRAND_NAME = 'dohc'
 
 /** Short positioning statement for meta descriptions and intros. */
 export const BRAND_DESCRIPTION =
-  'The quiet AI and docs workspace where work becomes clear, traceable, and ready.'
+  'Build documents, data, dashboards, and workflows with your agents in files you control.'
 
 export const FONT_STACKS = {
   serif: "'Iowan Old Style', 'Charter', Georgia, serif",

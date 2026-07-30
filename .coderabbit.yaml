@@ -12,7 +12,7 @@ reviews:
     State the user-facing outcome first. Then name the changed subsystems,
     material risks, and verification evidence.
   auto_title_instructions: |
-    Use a short imperative title. Write the product name as lowercase dohc.
+    Use a short imperative title.
   review_status: true
   review_details: true
   commit_status: true
@@ -112,8 +112,8 @@ reviews:
         migrations that restore a second workspace backend.
     - path: "packages/brand/**"
       instructions: |
-        Preserve lowercase dohc, the drop-lobe mark, warm paper, and graphite.
-        Flag identity drift or duplicated brand constants.
+        Preserve the drop-lobe mark, warm paper, and graphite. Flag identity
+        drift or duplicated brand constants.
     - path: "docs/**"
       instructions: |
         Treat docs outside the Rust engine evidence directory as current.
@@ -166,8 +166,8 @@ reviews:
       - mode: "error"
         name: "Brand identity"
         instructions: |
-          Pass only if shipping source preserves lowercase dohc, the drop-lobe
-          mark, warm paper, graphite, and the repository brand guard.
+          Pass only if shipping source preserves the drop-lobe mark, warm
+          paper, graphite, and the repository brand guard.
       - mode: "warning"
         name: "Verification"
         instructions: |

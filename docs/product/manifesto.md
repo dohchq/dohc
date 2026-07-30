@@ -1,6 +1,7 @@
 # dohc manifesto
 
-dohc is a quiet AI workspace for documents and real work.
+dohc is a local-first workspace where people and their agents build documents,
+data, dashboards, and workflows from files they control.
 
 People should not have to assemble a custom operating system before an agent
 can help them. They should be able to state what they need, inspect the result,
