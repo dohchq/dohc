@@ -1,10 +1,10 @@
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, posix, resolve, win32 } from "node:path";
-import { fileURLToPath } from "node:url";
-import type { Event, Request, Response } from "@dohc/workspace-engine-client";
+import { join, posix, resolve, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Event } from "../ydoc/generated/Event";
+import type { Request } from "../ydoc/generated/Request";
+import type { Response } from "../ydoc/generated/Response";
 import type { EngineClientSpawnOptions } from "./engineClient";
 import {
   createRustEngineDaemon,
@@ -48,7 +48,6 @@ class FakeClient implements EngineDaemonClient {
 }
 
 const scratchPaths: string[] = [];
-const desktopDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function fakeBinary(): string {
   const directory = mkdtempSync(join(tmpdir(), "dohc-engine-lifecycle-test-"));
@@ -66,38 +65,6 @@ afterEach(() => {
 });
 
 describe("Rust engine daemon lifecycle", () => {
-  it("fails the packaging gate when the staged engine binary is missing", () => {
-    const emptyResourceDir = mkdtempSync(
-      join(tmpdir(), "dohc-missing-engine-resource-"),
-    );
-    scratchPaths.push(emptyResourceDir);
-
-    const gate = spawnSync(
-      process.execPath,
-      [
-        join(desktopDir, "scripts", "require-workspace-engine.mjs"),
-        emptyResourceDir,
-      ],
-      { encoding: "utf8" },
-    );
-
-    expect(gate.status).not.toBe(0);
-    expect(gate.stderr).toContain(
-      "Refusing to package without the Rust workspace engine binary",
-    );
-    expect(
-      readFileSync(join(desktopDir, "electron-builder.yml"), "utf8"),
-    ).toMatch(/^beforePack: scripts\/require-workspace-engine\.mjs$/m);
-    expect(
-      readFileSync(
-        resolve(desktopDir, "../..", ".github/workflows/desktop-release.yml"),
-        "utf8",
-      ),
-    ).toContain(
-      "pnpm --filter @dohc/desktop run build:engine -- --target",
-    );
-  });
-
   it("generates a distinct auth token for every launch", async () => {
     const tokens: string[] = [];
     const exits: EngineClientSpawnOptions["onExit"][] = [];

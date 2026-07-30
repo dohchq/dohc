@@ -3122,3 +3122,149 @@ contract (#336). No unexplained failure remains.
 
 R16 stays GO for the local core. The cloud punch-list (#335) is unchanged and
 still Ice'''s to sequence.
+
+
+## 2026-07-30 — R16 closeout: fourteen PRs, and a commit message that described work that was reverted
+
+The closeout items (A–E) are done and the program's two open decisions are
+answered. What follows is the part worth keeping: three green results that were
+not green, and one false record that reached `main`.
+
+### The record on `main` is wrong for #375, and cannot be repaired in place
+
+`e7116799` ("retire the native-suite runner, and keep the arch pin it was
+carrying") carries the commit message from that PR's **first** iteration. Three
+of the four changes it describes are not in its diff:
+
+- the `--expect-arch` pin "moved there instead of being lost" into
+  `run-rust-checks.mjs` — **not done**; that file is not in the diff;
+- the two `pnpm --filter @dohc/workspace-engine` steps removed from
+  `desktop-release.yml` — **not done**, deliberately;
+- `DECISIONS.md` recording the move — **not done**; that file is append-only and
+  the edit was a revert.
+
+Its closing "Verified: the moved pin aborts with exit 2 on `--expect-arch=arm64`"
+describes a guard that does not exist in the merged tree. So `main`'s history now
+advertises an architecture check the repo does not have — the same false
+assurance that PR existed to delete. Squash-merging took the stale body because
+the message was written before the reverts and never rewritten.
+
+It is recorded here rather than fixed because the only repair is a force-push to
+`main`, which is worse than the defect. **The rule this earns: when a PR's
+approach is abandoned mid-review, rewrite the commit message before merging, not
+the PR description.** The description is what reviewers read; the message is what
+survives.
+
+Why the pin was abandoned, since the message argues the opposite: it compared
+`os.arch()`, the architecture *Node* was built for, and never consulted the Rust
+toolchain. Ten distinct channels can set cargo's effective target, and a
+`--target` injected through `RUSTFLAGS` reaches rustc while cargo still writes to
+`target/debug` — invisible to config parsing and to `target/<triple>/` watching
+alike. The retired guard could not do its job, so no replacement was faked. The
+README now states plainly that there is no architecture guard and that a run's
+platform is whatever the operator asserts when pasting an evidence line.
+
+### Both blocking decisions are answered
+
+- **Kernel sidecar accelerator: retired** (#376). The crates, the client, the
+  `fallbackReconcileScan` branching and the `cargo fetch --manifest-path
+  crates/workspace-kernel` CI step went together. `fixtures/workspace-kernel/`
+  was kept — live input to `dohc-engine-files/tests/differential.rs`.
+- **Native-evidence gate: retired** (#375), with the correction above.
+
+Steps 2 and 6 of #362's decomposition are therefore unblocked.
+
+### Three failures that were the harness, not the code
+
+Each looked like a defect and was not. All three were mine, and ruling them out
+mattered more than finding them, because two of them pointed at a merged PR.
+
+**A rebase across a new package subpath needs a re-install.** After rebasing onto
+a main that contained #377, two sync-relay files failed collection with
+`Failed to load url @dohc/workspace-contracts/relay`. That reads exactly like a
+missing file and looked like #377 had broken `main`. The worktree's
+`node_modules` predated the merge, so the new subpath was absent from the linked
+package. `pnpm install --frozen-lockfile` resolved it.
+
+**An assertion failure on a stale tree is not a finding.** An
+`engineDaemonLifecycle` test failed with `expected [] to have a length of 1`
+under that same stale install, and passed in isolation. It does not recur on a
+clean run. Different base and different install means it was never evidence.
+
+**Surveying the shared checkout reports another session's branch.**
+`packages/workspace-kernel-client` appeared still tracked, which would have meant
+#376's deletion never took. The primary checkout had been switched to an
+unrelated branch by a concurrent session. #376 deleted it correctly. **Read
+`origin/<ref>` explicitly, or work in a dedicated worktree; never survey the
+shared tree.** The same hazard silently killed a PR watcher earlier in the
+program.
+
+### Scoping this campaign with grep does not work
+
+Restating it because it keeps costing time. A `@dohc/workspace-engine` grep over
+`apps/desktop/src/workspaces/` matches 40 files but only 27 import the legacy
+package — the rest import `@dohc/workspace-engine-client`, a different package.
+An exact-string grep including the closing quote finds 45 across the repo, and
+that is a **floor**: `scripts/engine-sync-folder.ts` imports
+`packages/workspace-engine/src/syncFolder` by deep relative path, bypassing the
+`exports` map, and is invisible to any such search.
+
+### The packaging port, landed reduced
+
+`engineClient.ts`, `engineDaemonLifecycle.ts` and `engineWorkspaceSessions.ts`
+moved into `packages/workspace-engine-client/src/daemon/` so `services/sync-relay`
+can drive a real daemon. `engineRelayClient.ts` **stayed** in `apps/desktop`:
+it needs `probeRelayWorkspace`, which lives in a 974-line legacy `syncRelay.ts`
+that drags `versionedTextStore`, `syncReplication`, `syncApply` and the legacy
+`EngineSqliteDb` behind it, and its wrapper binds the route `mode: "typescript"`
+explicitly — a deliberate legacy leg, not a missing shim. Moving it would have
+made the new shared package depend on the package R16 deletes.
+
+A reduced port that keeps the new package legacy-free beats a complete port that
+entrenches the dependency. Tracked as #383, with a cheaper route than the daemon
+work recorded there: inject the probe, since its types already live in
+`@dohc/workspace-contracts/relay`.
+
+Key custody was verified unchanged: all moved modules are Electron-free and touch
+no raw key material, `workspaceKeyEnvelopeEnrollment.ts` and its raw
+`.dohc/engine/secret.key` read stay desktop-side, and the mutation-guarded
+sentinel test changed only its import specifiers.
+
+### Gate evidence
+
+#375 final head `2928f6ecd0`, all rows PASS, summary block parsed rather than the
+exit code (the gate can exit 0 while its summary says FAIL):
+
+- 2026-07-30T07:42:58.725Z | run-rust-checks | win32/x64 | PASS | fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
+
+JS suites on that head: `pnpm run typecheck` exit 0, `pnpm run test` exit 0, zero
+failures.
+
+### The port's own results, and a layering inversion the move created
+
+Port suites on the port head: `pnpm run typecheck` exit 0, `pnpm run test` exit 0,
+zero failures — 274 files and 3,701 tests passing across 20 packages.
+
+The move quietly created a defect worth naming, because the shape recurs whenever
+a test travels with its subject. `engineDaemonLifecycle.test.ts` moved into the
+shared package still carrying one test that climbed
+`resolve(..., "../../../../apps/desktop")` to assert on three Electron packaging
+artifacts — `scripts/require-workspace-engine.mjs`, `electron-builder.yml`, and
+`.github/workflows/desktop-release.yml`. It passed, so nothing failed; a
+shared-package test asserting on the Electron app's packaging config and a repo
+workflow is simply the dependency arrow pointing the wrong way. It also
+reintroduced the four-level climb out of `packages/` that the port banned in
+source — the guard grep only forbade `../../../../packages/`, so a climb into
+`apps/` walked straight through it.
+
+Fixed in the same PR rather than deferred, since the port caused it: that one test
+moved to `apps/desktop/src/enginePackagingGate.test.ts`, and the package's
+lifecycle suite lost its `desktopDir` and four now-unused imports. Counts confirm
+the test moved rather than vanished — the package went from 293 to 292 tests and
+desktop from 2,249 to 2,250.
+
+**Mutation-verified rather than assumed green:** rewriting `electron-builder.yml`'s
+`beforePack:` to a different hook makes it fail, so it genuinely guards that
+config. The mutation was reverted in a separate command, because a compound
+`mutate && test && restore` never reaches its restore leg when the middle step
+times out.

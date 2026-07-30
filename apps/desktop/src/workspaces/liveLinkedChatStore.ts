@@ -15,7 +15,7 @@ import type {
   EngineWorkspace,
   EngineWorkspaceRunOptions,
   EngineWorkspaceSessions,
-} from "./engineWorkspaceSessions";
+} from "@dohc/workspace-engine-client/daemon";
 import type { AwaitableLinkedChatStore } from "./awaitableLinkedChatStore";
 
 const PATH_HINT_ENRICHMENT_CONCURRENCY = 8;

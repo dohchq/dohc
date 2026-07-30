@@ -13,7 +13,11 @@ import {
   SharedChannelReadOnlyError,
 } from "@dohc/workspace-contracts/relay";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { EngineDaemonClient } from "./engineDaemonLifecycle";
+import {
+  EngineRequestError,
+  EngineWorkspaceSessions,
+  type EngineDaemonClient,
+} from "@dohc/workspace-engine-client/daemon";
 import {
   allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
@@ -23,8 +27,6 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
-import { EngineRequestError } from "./engineClient";
 import {
   createMountDirectory,
   refreshShareMountOnce,

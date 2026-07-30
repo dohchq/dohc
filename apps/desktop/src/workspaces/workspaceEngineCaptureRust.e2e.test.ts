@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import {
   EngineDaemonLifecycle,
-} from "./engineDaemonLifecycle";
-import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { nativeTmpdir } from "./testTemp";
 

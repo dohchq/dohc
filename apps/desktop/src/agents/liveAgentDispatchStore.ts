@@ -16,7 +16,7 @@ import type {
 import type {
   EngineWorkspace,
   EngineWorkspaceSessions,
-} from "../workspaces/engineWorkspaceSessions";
+} from "@dohc/workspace-engine-client/daemon";
 import {
   RUN_ID_LOG_TOKEN,
   type ChatDispatchRecovery,

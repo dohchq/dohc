@@ -11,8 +11,10 @@ import type {
   Response,
 } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it } from "vitest";
-import type { EngineDaemonClient } from "./engineDaemonLifecycle";
-import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import {
+  EngineWorkspaceSessions,
+  type EngineDaemonClient,
+} from "@dohc/workspace-engine-client/daemon";
 import {
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,

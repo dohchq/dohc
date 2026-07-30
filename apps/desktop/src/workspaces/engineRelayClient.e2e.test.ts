@@ -5,14 +5,16 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
+import {
+  EngineDaemonLifecycle,
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { afterEach, describe, expect, it } from "vitest";
-import { EngineDaemonLifecycle } from "./engineDaemonLifecycle";
 import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 
 const configuredBinary = process.env.DOHC_TEST_RUST_ENGINE_BIN?.trim() || null;
 const engineBinary =

@@ -4,8 +4,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { EngineDaemonLifecycle } from "./engineDaemonLifecycle";
-import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import {
+  EngineDaemonLifecycle,
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { nativeTmpdir } from "./testTemp";
 
