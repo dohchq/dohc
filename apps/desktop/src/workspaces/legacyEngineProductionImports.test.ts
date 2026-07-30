@@ -150,22 +150,32 @@ function isErasedImport(node: ts.ImportDeclaration): boolean {
   return false;
 }
 
-// A specifier that is statically knowable: a literal, a const bound to one, or
-// literals joined with `+`. Anything computed at runtime is beyond any static
-// guard and is not attempted.
-function resolveSpecifier(
+// Every specifier this expression could statically be: a literal, the values a
+// const of that name is bound to anywhere in the file, or literals joined by
+// `+`. Anything computed at runtime is beyond a static guard and is not
+// attempted.
+//
+// Deliberately NOT lexical scope analysis. Two functions may each declare
+// `const name = …` with different values, and a file-wide map would let the
+// last one visited decide — which can produce a FALSE NEGATIVE, the one
+// direction a ratchet must not have. Returning every candidate and flagging if
+// ANY is the legacy package biases the ambiguity toward a false positive
+// instead, which costs someone an allowlist edit rather than letting a real
+// dependency through. A symbol table would be more precise and is not worth it
+// for a guard whose realistic input is an ordinary import.
+function resolveSpecifiers(
   node: ts.Expression,
-  stringConsts: ReadonlyMap<string, string>,
-): string | undefined {
-  if (ts.isStringLiteralLike(node)) return node.text;
-  if (ts.isIdentifier(node)) return stringConsts.get(node.text);
+  stringConsts: ReadonlyMap<string, readonly string[]>,
+): readonly string[] {
+  if (ts.isStringLiteralLike(node)) return [node.text];
+  if (ts.isIdentifier(node)) return stringConsts.get(node.text) ?? [];
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    const left = resolveSpecifier(node.left, stringConsts);
-    const right = resolveSpecifier(node.right, stringConsts);
-    return left === undefined || right === undefined ? undefined : left + right;
+    const left = resolveSpecifiers(node.left, stringConsts);
+    const right = resolveSpecifiers(node.right, stringConsts);
+    return left.flatMap((l) => right.map((r) => l + r));
   }
-  if (ts.isParenthesizedExpression(node)) return resolveSpecifier(node.expression, stringConsts);
-  return undefined;
+  if (ts.isParenthesizedExpression(node)) return resolveSpecifiers(node.expression, stringConsts);
+  return [];
 }
 
 function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean {
@@ -184,22 +194,47 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
   // (linkedChatStore.ts:199). Matching only a callee literally named `require`
   // would leave the ratchet open along the path the codebase already prefers.
   const requireAliases = new Set<string>(["require"]);
+  // The LOCAL name bound to node:module's createRequire. `import { createRequire
+  // as makeRequire }` is legal and would defeat a check on the callee's text.
+  const createRequireNames = new Set<string>(["createRequire"]);
   // `const name = "@dohc/workspace-engine"; await import(name)` resolves the
   // package just the same, and factoring a specifier into a constant is a
-  // routine refactor — so a literal-node-only check would let one walk around
-  // the ratchet. Collected up front because a const may be declared after use.
-  const stringConsts = new Map<string, string>();
+  // routine refactor. Multi-valued so a name declared twice keeps BOTH — see
+  // resolveSpecifiers on why that direction is the safe one.
+  const stringConsts = new Map<string, readonly string[]>();
+  const addConst = (name: string, values: readonly string[]): void => {
+    if (values.length === 0) return;
+    stringConsts.set(name, [...(stringConsts.get(name) ?? []), ...values]);
+  };
+  // Two passes: import aliases and string consts first, so a const declared
+  // after its use — or a createRequire alias imported below it — still resolves.
+  const collectNames = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
+      const bindings = node.importClause?.namedBindings;
+      if (bindings !== undefined && ts.isNamedImports(bindings)) {
+        for (const element of bindings.elements) {
+          if ((element.propertyName ?? element.name).text === "createRequire") {
+            createRequireNames.add(element.name.text);
+          }
+        }
+      }
+    }
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      const init = node.initializer;
+      if (init !== undefined) addConst(node.name.text, resolveSpecifiers(init, stringConsts));
+    }
+    ts.forEachChild(node, collectNames);
+  };
+  collectNames(sourceFile);
   const collectAliases = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const init = node.initializer;
-      if (init !== undefined && ts.isStringLiteralLike(init)) {
-        stringConsts.set(node.name.text, init.text);
-      }
       if (init !== undefined && ts.isCallExpression(init)) {
         const callee = init.expression;
         const isCreateRequire =
-          (ts.isIdentifier(callee) && callee.text === "createRequire") ||
-          (ts.isPropertyAccessExpression(callee) && callee.name.text === "createRequire");
+          (ts.isIdentifier(callee) && createRequireNames.has(callee.text)) ||
+          (ts.isPropertyAccessExpression(callee) &&
+            createRequireNames.has(callee.name.text));
         if (isCreateRequire) requireAliases.add(node.name.text);
       }
     }
@@ -246,8 +281,11 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       }
     } else if (ts.isCallExpression(node)) {
       const arg = node.arguments[0];
-      const specifier = arg === undefined ? undefined : resolveSpecifier(arg, stringConsts);
-      const isStringArg = specifier !== undefined && isLegacySpecifier(specifier, fileName);
+      const isStringArg =
+        arg !== undefined &&
+        resolveSpecifiers(arg, stringConsts).some((candidate) =>
+          isLegacySpecifier(candidate, fileName),
+        );
       if (isStringArg) {
         // `import("pkg")`, and a BARE `require("pkg")` — but not a method call
         // such as `loader.require("pkg")`, which is not Node's require.
@@ -267,9 +305,9 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
         const calleeIsCreateRequireCall =
           ts.isCallExpression(node.expression) &&
           ((ts.isIdentifier(node.expression.expression) &&
-            node.expression.expression.text === "createRequire") ||
+            createRequireNames.has(node.expression.expression.text)) ||
             (ts.isPropertyAccessExpression(node.expression.expression) &&
-              node.expression.expression.name.text === "createRequire"));
+              createRequireNames.has(node.expression.expression.name.text)));
         if (isDynamicImport || isBareRequire || isModuleRequire || calleeIsCreateRequireCall) {
           found = true;
           return;
@@ -460,6 +498,55 @@ const m = require(scope + "workspace-engine");`;
       hasRuntimeLegacyImport(`const name = "${L}-client";
 const m = await import(name);`),
     ).toBe(false);
+  });
+
+  it("handles the loader and specifier spellings that need name tracking", () => {
+    const L = LEGACY_PACKAGE;
+    // createRequire imported under another name — legal, and a callee-text check
+    // would never record the binding.
+    const aliased = [
+      `import { createRequire as makeRequire } from "node:module";`,
+      `const load = makeRequire(import.meta.url);`,
+      `export const m = load("${L}");`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(aliased)).toBe(true);
+
+    // …and invoked directly under that alias.
+    const aliasedDirect = [
+      `import { createRequire as makeRequire } from "node:module";`,
+      `export const m = makeRequire(import.meta.url)("${L}");`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(aliasedDirect)).toBe(true);
+
+    // A const whose initializer is itself a concatenation.
+    const concatConst = [
+      `const name = "@dohc/" + "workspace-engine";`,
+      `const m = require(name);`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(concatConst)).toBe(true);
+
+    // A const built from another const.
+    const chained = [
+      `const scope = "@dohc/";`,
+      `const name = scope + "workspace-engine";`,
+      `const m = require(name);`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(chained)).toBe(true);
+
+    // SHADOWING is resolved conservatively: the same name bound to the legacy
+    // package in one scope and something else in another is treated as legacy,
+    // because a false negative is the one direction a ratchet must not have.
+    const shadowed = [
+      `function a() { const name = "${L}"; return require(name); }`,
+      `function b() { const name = "other-package"; return require(name); }`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(shadowed)).toBe(true);
+    // Reversed declaration order must reach the same answer.
+    const shadowedReversed = [
+      `function b() { const name = "other-package"; return require(name); }`,
+      `function a() { const name = "${L}"; return require(name); }`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(shadowedReversed)).toBe(true);
   });
 
   it("excuses config only at a package root, never shipping source", () => {
