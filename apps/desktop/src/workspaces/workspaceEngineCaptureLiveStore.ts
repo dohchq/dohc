@@ -1,15 +1,15 @@
-import {
-  VersionedTextStoreError,
-  type ActorNeutralWriteMetadata,
-  type FileObjectRecord,
-  type MomentAuthor,
-  type SecretFileMoment,
-  type SecretFileStore,
-  type TextFileSnapshot,
-  type VersionedTextFileState,
-  type VersionedTextMoment,
-  type VersionedTextMomentSummary,
-  type VersionedTextStore,
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
+import type {
+  ActorNeutralWriteMetadata,
+  FileObjectRecord,
+  MomentAuthor,
+  SecretFileMoment,
+  SecretFileStore,
+  TextFileSnapshot,
+  VersionedTextFileState,
+  VersionedTextMoment,
+  VersionedTextMomentSummary,
+  VersionedTextStore,
 } from "@dohc/workspace-engine";
 import {
   VersionedLiveAdapter,

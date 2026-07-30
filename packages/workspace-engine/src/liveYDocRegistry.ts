@@ -23,22 +23,7 @@
 
 import type * as Y from "yjs";
 
-// WS-G2-C1 / G2-C-2 HANDOFF CONTRACT — the reserved transaction origin for a
-// REMOTE replicated ydoc.update apply.
-//
-// When applyReplicationOp routes a remote update into a live in-memory Y.Doc, it
-// applies it with THIS origin (`Y.applyUpdate(liveDoc, update, origin)`). Today
-// the engine driver has no doc.on("update") observer, so nothing double-journals.
-// But the G2-C-2 editor provider WILL observe doc.on("update", (u, origin) => …)
-// to journal LOCAL edits — and it MUST ignore any update whose
-// `origin === REMOTE_YDOC_APPLY_ORIGIN`. That update is a remote op the store
-// already persisted, journaled, and acked via applyReplicationOp; re-journaling
-// it under the local origin would push it back to every peer (an echo storm).
-// Local/editor edits carry a null or editor origin and ARE journaled; remote
-// applies carry this reserved symbol and are NOT.
-export const REMOTE_YDOC_APPLY_ORIGIN: unique symbol = Symbol(
-  "dohc.remoteYDocApplyOrigin",
-);
+export { REMOTE_YDOC_APPLY_ORIGIN } from "@dohc/workspace-contracts/engine";
 
 // Keyed exactly like the driver's globalReservationKey so a store and a driver
 // on one physical engine.db agree on identity. The parts are joined with a NUL

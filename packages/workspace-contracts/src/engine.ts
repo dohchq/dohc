@@ -35,6 +35,9 @@ export type WorkspaceId = string;
 export type VersionedTextMomentId = string;
 export type VersionedTextConflictId = string;
 
+export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
+export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
+
 /**
  * Opaque key-envelope relay contracts.
  *
@@ -86,6 +89,16 @@ export type VersionedTextStoreErrorCode =
   | "version-not-found"
   | "workspace-mismatch"
   | "write-lane-reentry";
+
+export class VersionedTextStoreError extends Error {
+  readonly code: VersionedTextStoreErrorCode;
+
+  constructor(code: VersionedTextStoreErrorCode, message: string) {
+    super(message);
+    this.name = "VersionedTextStoreError";
+    this.code = code;
+  }
+}
 
 export type VersionKind = "main" | "named";
 
@@ -525,6 +538,39 @@ export interface ChatFeedReadSetPayload {
   lastSeenCreatedAtMs: number;
   lastSeenMessageId: ChatMessageId;
   atMs: number;
+}
+
+// WS-G2-C1 / G2-C-2 HANDOFF CONTRACT — the reserved transaction origin for a
+// REMOTE replicated ydoc.update apply.
+//
+// When applyReplicationOp routes a remote update into a live in-memory Y.Doc, it
+// applies it with THIS origin (`Y.applyUpdate(liveDoc, update, origin)`). Today
+// the engine driver has no doc.on("update") observer, so nothing double-journals.
+// But the G2-C-2 editor provider WILL observe doc.on("update", (u, origin) => …)
+// to journal LOCAL edits — and it MUST ignore any update whose
+// `origin === REMOTE_YDOC_APPLY_ORIGIN`. That update is a remote op the store
+// already persisted, journaled, and acked via applyReplicationOp; re-journaling
+// it under the local origin would push it back to every peer (an echo storm).
+// Local/editor edits carry a null or editor origin and ARE journaled; remote
+// applies carry this reserved symbol and are NOT.
+export const REMOTE_YDOC_APPLY_ORIGIN: unique symbol = Symbol(
+  "dohc.remoteYDocApplyOrigin",
+);
+
+export type YDocEngineDriverErrorCode =
+  | "state-corrupt"
+  | "not-found"
+  | "already-live"
+  | "session-closed"
+  | "invalid-input";
+
+export class YDocEngineDriverError extends Error {
+  readonly code: YDocEngineDriverErrorCode;
+  constructor(code: YDocEngineDriverErrorCode, message: string) {
+    super(message);
+    this.name = "YDocEngineDriverError";
+    this.code = code;
+  }
 }
 
 // The driver dimension for a replicated rich doc: does its projection read the
@@ -1110,6 +1156,8 @@ export type LinkedChatStoreErrorCode =
   | "thread-not-found"
   | "workspace-mismatch";
 
+export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
+
 export type ChatActor =
   | { kind: "human"; displayName: string }
   | { kind: "agent"; displayName: string };
@@ -1657,6 +1705,22 @@ export interface LinkedChatStore {
 export interface LinkedChatStoreOptions {
   nowMs?: () => number;
   createId?: (kind: "channel" | "message" | "thread") => string;
+}
+
+export type AgentDispatchStoreErrorCode =
+  | "invalid-input"
+  | "run-not-found"
+  | "run-state-mismatch"
+  | "state-corrupt";
+
+export class AgentDispatchStoreError extends Error {
+  readonly code: AgentDispatchStoreErrorCode;
+
+  constructor(code: AgentDispatchStoreErrorCode, message: string) {
+    super(message);
+    this.name = "AgentDispatchStoreError";
+    this.code = code;
+  }
 }
 
 export type AgentDispatchState = "pending" | "running" | "done" | "failed";
