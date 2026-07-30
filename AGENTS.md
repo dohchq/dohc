@@ -4,7 +4,7 @@ This is the repository for dohc, the easiest way for humans to work with their a
 
 The goal is a full end-to-end AI operating system for documents, data, dashboards, workflows, and decisions. The user stays in control, while agents do the heavy lifting of organizing, updating, and making the work ready.
 
-dohc is basically rethinking notion, obsidian, google docs, spreadsheets, jira, and other operations tools and packaging it into an obvious AI-native workspace by having text as the primitive for binding input/output communication methods between the agent and human/s. It's basically the vscode for the AI era. Hence, at its core dohc is a really powerful tool capable of turning many kinds of work into obvious inspectable systems- similar to what spreadsheets were like when it first came out.
+dohc is basically rethinking Notion, Obsidian, Google Docs, spreadsheets, Jira, and other operations tools and packaging it into an obvious AI-native workspace by having text as the primitive for binding input/output communication methods between agents and humans. It's basically VS Code for the AI era. Hence, at its core, dohc is a really powerful tool capable of turning many kinds of work into obvious, inspectable systems—similar to what spreadsheets were like when they first came out.
 
 ## Current status
 
@@ -18,11 +18,11 @@ This is meant to be a bold project. Going with the flow and using existing solut
 
 Quick glossary of relevant parties in this document:
 
-- _you_ - the agent reading this document and working on dohc directly.
-- _me_/_we_/_us_ - the humans contributing to dohc. This is the party talking to you as we build
-- _users_ - these are our users. We are assuming they won't need to program or be expert at prompting like someone technical would, rather they will have their own agents to build things using dohc.
+- _you_ — the agent reading this document and working on dohc directly.
+- _me_/_we_/_us_ — the humans contributing to dohc. This is the party talking to you as we build.
+- _users_ — these are our users. We are assuming they won't need to program or be expert at prompting like someone technical would; rather, they will have their own agents to build things using dohc.
 
-Here's some philosophical things to consider as we build and work together:
+Here are some philosophical things to consider as we build and work together:
 
 ### Boil the ocean
 
@@ -97,7 +97,7 @@ If a user had a folder of well-structured text files on their computer and a cap
 
 dohc exists to make that easy, reliable, and powerful.
 
-We provide the structure, conventions, UI, permissions, sync, organization management, source-backed apps, agent tools, review gates, etc and boilerplate that make a text-based workspace manageable for normal users/teams/orgs and efficient for agents.
+We provide the structure, conventions, UI, permissions, sync, organization management, source-backed apps, agent tools, review gates, etc., and boilerplate that make a text-based workspace manageable for normal users/teams/orgs and efficient for agents.
 
 The magic is not hidden state. The magic is giving agents and humans a shared text substrate they can both inspect, edit, and trust.
 
@@ -115,7 +115,7 @@ A folder of well-structured text files plus a capable agent can approximate this
 
 ### Individual first
 
-We should focus on dohc being magical and obvious for one person first before it is for a team. This might seem counter-intuitive as the benefit of dohc grows as more teammates adopt it, but without one person using it first and finding value in it on its own, then no one will use it and we won't even get to teams using it.
+We should focus on dohc being magical and obvious for one person before it is for a team. This might seem counter-intuitive as the benefit of dohc grows as more teammates adopt it, but without one person using it first and finding value in it on its own, then no one will use it and we won't even get to teams using it.
 
 A single user should be able to use dohc for personal life, work, projects, research, planning, finances, health, writing, learning, or anything else they want to organize with an agent.
 
@@ -297,7 +297,7 @@ the terms settle, next to the code it describes.
 
 ## Regarding long code comments
 
-If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong -- fix the code
+If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong—fix the code.
 
 ## Some general rules
 
