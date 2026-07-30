@@ -3,11 +3,15 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createVersionedTextStore,
   pullShareView,
 } from "@dohc/workspace-engine";
+import {
+  createShareViewDaemonHarness,
+  type ShareViewDaemonHarness,
+} from "../testing/shareViewLoopbackTransport";
 import {
   assertMountableSelector,
   createMountDirectory,
@@ -15,22 +19,46 @@ import {
   mountRootFor,
   mountStoreWorkspaceIdFor,
   refreshShareMountOnce as refreshShareMountOnceWithPull,
+  relayTargetForShareMount,
   removeMountFolder,
   validMountLabel,
 } from "./shareMounts";
+import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 
 const SHARE_ID = "share-1";
 const HOST_WORKSPACE = "host-workspace-1";
 const TOKEN = "test:recipient";
 
+// The daemon-backed refreshes assert they built no legacy store. The three
+// tests still on `refreshShareMountOnceOnLegacyStore` do build one, so the spy
+// delegates instead of throwing and is cleared before every test.
+const legacyStoreSpy = vi.hoisted(() => vi.fn());
+
+vi.mock("@dohc/workspace-engine", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@dohc/workspace-engine")>();
+  return {
+    ...actual,
+    createVersionedTextStore: (
+      ...args: Parameters<typeof actual.createVersionedTextStore>
+    ) => {
+      legacyStoreSpy(...args);
+      return actual.createVersionedTextStore(...args);
+    },
+  };
+});
+
 let roots: string[] = [];
+let harnesses: ShareViewDaemonHarness[] = [];
 
 beforeEach(() => {
   roots = [];
+  harnesses = [];
+  legacyStoreSpy.mockClear();
 });
 
 afterEach(async () => {
+  await Promise.all(harnesses.map((harness) => harness.closeAll()));
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -40,7 +68,58 @@ async function tempHostRoot(): Promise<string> {
   return root;
 }
 
-function refreshShareMountOnce(
+function daemonHarness(relay: FakeShareRelay): ShareViewDaemonHarness {
+  const harness = createShareViewDaemonHarness(relay.connection());
+  harnesses.push(harness);
+  return harness;
+}
+
+// Production `mountShare` creates the mount folder before the first refresh.
+// The legacy fixture got that for free — opening a SQLite store created its
+// parent directories — while a daemon `workspace.open` needs the directory to
+// already be a real one.
+async function ensureMountFolder(hostRoot: string, label: string): Promise<void> {
+  if (existsSync(mountRootFor(hostRoot, label))) return;
+  await createMountDirectory(hostRoot, label);
+}
+
+// One mount refresh over the production daemon path: EngineRelayClient's
+// share.view.pull for the pull, createCaptureLiveStores for the mount's nested
+// store. Binding the relay route before the refresh is what production does
+// too (see engineRelayClient.test.ts), and it is what makes `workspace.open`
+// carry the mount's relay configuration and captureMode.
+async function refreshShareMountOnce(
+  harness: ShareViewDaemonHarness,
+  input: {
+    hostRoot: string;
+    mount: { shareId: string; label: string };
+    openStore?: (workspace: {
+      workspaceId: string;
+      rootPath: string;
+    }) => CaptureVersionedTextStore;
+  },
+) {
+  await ensureMountFolder(input.hostRoot, input.mount.label);
+  const target = relayTargetForShareMount(
+    HOST_WORKSPACE,
+    input.hostRoot,
+    input.mount,
+  );
+  const pull = harness.pullFor(target);
+  return await refreshShareMountOnceWithPull({
+    hostWorkspaceId: HOST_WORKSPACE,
+    hostRoot: input.hostRoot,
+    mount: input.mount,
+    relay: harness.relay,
+    pull,
+    openStore: input.openStore ?? harness.openStore,
+  });
+}
+
+// The legacy TypeScript fixture, kept for the three tests that still need it:
+// one asserts the mount's pull state exists ON DISK inside the mount folder,
+// and two refuse before any store is opened at all.
+function refreshShareMountOnceOnLegacyStore(
   input: Omit<
     Parameters<typeof refreshShareMountOnceWithPull>[0],
     "openStore" | "pull" | "hostWorkspaceId"
@@ -209,13 +288,22 @@ describe("mount labels", () => {
 });
 
 describe("refreshShareMountOnce", () => {
+  // DELIBERATELY still on the legacy TypeScript store. The engine.db assertion
+  // below is the only proof anywhere that a mount's pull state is nested INSIDE
+  // the mount folder — which is why the host watcher ignores it and why
+  // removeMountFolder destroys it. An in-memory daemon double holds that state
+  // in the process, so it cannot reproduce the assertion; converting it to a
+  // daemon-observable substitute (workspace.open carried rootDir === mountRoot)
+  // would prove the daemon was ASKED to root a workspace there, not that the
+  // state lands there. Re-prove the on-disk form against a real daemon, then
+  // this test can move too.
   it("materializes shared files under shared-with-me/<label>/ and reports statuses", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
     relay.addWrite("docs/brief.md", "the brief");
     relay.addWrite("docs/deep/notes.md", "deep notes");
 
-    const first = await refreshShareMountOnce({
+    const first = await refreshShareMountOnceOnLegacyStore({
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
       relay: relay.connection(),
@@ -231,7 +319,7 @@ describe("refreshShareMountOnce", () => {
     // the host's tree/watcher (`.dohc` is ignored at any depth).
     expect(existsSync(join(mountRoot, ".dohc/engine/engine.db"))).toBe(true);
 
-    const second = await refreshShareMountOnce({
+    const second = await refreshShareMountOnceOnLegacyStore({
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
       relay: relay.connection(),
@@ -239,7 +327,7 @@ describe("refreshShareMountOnce", () => {
     expect(second).toEqual({ status: "unchanged", changedPaths: 0 });
 
     relay.addWrite("docs/brief.md", "the brief v2");
-    const third = await refreshShareMountOnce({
+    const third = await refreshShareMountOnceOnLegacyStore({
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
       relay: relay.connection(),
@@ -257,18 +345,16 @@ describe("refreshShareMountOnce", () => {
   it("keeps a successful refresh when closing the mount's store fails", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "the brief");
 
-    const outcome = await refreshShareMountOnceWithPull({
-      hostWorkspaceId: HOST_WORKSPACE,
+    const outcome = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
-      pull: pullShareView,
-      openStore: ({ rootPath }) => {
-        const store = createVersionedTextStore(rootPath);
-        // Release the real handle first (Windows refuses to remove an open
-        // db in afterEach), then fail the way a dying daemon would.
+      openStore: (workspace) => {
+        const store = harness.openStore(workspace);
+        // Release the session first, then fail the way a dying sidecar would
+        // once its close RPC has already landed.
         const realClose = store.close.bind(store);
         return Object.assign(store, {
           close: async () => {
@@ -283,30 +369,35 @@ describe("refreshShareMountOnce", () => {
     expect(
       await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex/docs/brief.md"), "utf8"),
     ).toBe("the brief");
+    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("reports ended on revocation and leaves the files untouched", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("plan.md", "keep me");
-    await refreshShareMountOnce({
+    await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
 
     relay.ended = true;
-    const outcome = await refreshShareMountOnce({
+    const outcome = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(outcome).toEqual({ status: "ended", changedPaths: 0 });
     expect(
       await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex", "plan.md"), "utf8"),
     ).toBe("keep me");
+    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
+  // Legacy fixture on purpose: the guard refuses before any store is opened or
+  // any pull runs, so the daemon wrapper's own mount-folder setup would be the
+  // first thing to throw and the test would stop proving that
+  // refreshShareMountOnce refuses.
   it("refuses a symlinked shared-with-me or label directory (real-path guard)", async () => {
     const elsewhere = await tempHostRoot();
     const relay = new FakeShareRelay();
@@ -316,7 +407,7 @@ describe("refreshShareMountOnce", () => {
     const hostA = await tempHostRoot();
     await symlink(elsewhere, join(hostA, SHARED_WITH_ME_FOLDER), "dir");
     await expect(
-      refreshShareMountOnce({
+      refreshShareMountOnceOnLegacyStore({
         hostRoot: hostA,
         mount: { shareId: SHARE_ID, label: "alex" },
         relay: relay.connection(),
@@ -329,7 +420,7 @@ describe("refreshShareMountOnce", () => {
     await mkdir(join(hostB, SHARED_WITH_ME_FOLDER), { recursive: true });
     await symlink(elsewhere, join(hostB, SHARED_WITH_ME_FOLDER, "alex"), "dir");
     await expect(
-      refreshShareMountOnce({
+      refreshShareMountOnceOnLegacyStore({
         hostRoot: hostB,
         mount: { shareId: SHARE_ID, label: "alex" },
         relay: relay.connection(),
@@ -342,11 +433,11 @@ describe("refreshShareMountOnce", () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMountOnce({
+    await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
 
@@ -356,10 +447,9 @@ describe("refreshShareMountOnce", () => {
     await rm(join(mountRoot, "docs/brief.md"));
     await symlink(join(elsewhere, "victim.md"), join(mountRoot, "docs/brief.md"), "file");
     relay.addWrite("docs/brief.md", "v2");
-    await refreshShareMountOnce({
+    await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v2");
@@ -370,33 +460,32 @@ describe("refreshShareMountOnce", () => {
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
     relay.addWrite("docs/brief.md", "v3");
-    const healed = await refreshShareMountOnce({
+    const healed = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(healed.status).toBe("updated");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v3");
     expect(existsSync(join(elsewhere, "brief.md"))).toBe(false);
+    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("repairs local tampering on refresh even when the relay has nothing new", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "authoritative");
-    await refreshShareMountOnce({
+    await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     const mounted = join(host, SHARED_WITH_ME_FOLDER, "alex", "docs/brief.md");
 
     // A rogue tool edits the mounted file directly; the relay is unchanged.
     await writeFile(mounted, "defaced");
-    const repaired = await refreshShareMountOnce({
+    const repaired = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(repaired.status).toBe("updated");
     expect(repaired.changedPaths).toBe(1);
@@ -404,33 +493,32 @@ describe("refreshShareMountOnce", () => {
 
     // Deleting the file locally is repaired the same way.
     await rm(mounted);
-    const restored = await refreshShareMountOnce({
+    const restored = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(restored.status).toBe("updated");
     expect(restored.changedPaths).toBe(1);
     expect(await readFile(mounted, "utf8")).toBe("authoritative");
 
     // An untouched projection stays "unchanged" — no busy repainting.
-    const quiet = await refreshShareMountOnce({
+    const quiet = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(quiet).toEqual({ status: "unchanged", changedPaths: 0 });
+    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("creates NOTHING outside the workspace when a dir symlink sits on a deep write path", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("docs/top.md", "v1");
-    await refreshShareMountOnce({
+    await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
@@ -439,16 +527,16 @@ describe("refreshShareMountOnce", () => {
     // link first, so the deep write lands inside the workspace and nothing
     // is ever created through the link.
     relay.addWrite("docs/deep/file.md", "payload");
-    const outcome = await refreshShareMountOnce({
+    const outcome = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(outcome.status).toBe("updated");
     expect(
       await readFile(join(mountRoot, "docs/deep/file.md"), "utf8"),
     ).toBe("payload");
     expect(existsSync(join(elsewhere, "deep"))).toBe(false);
+    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("unmount removes a tampered symlinked mount root as a link (never through it)", async () => {
@@ -467,11 +555,11 @@ describe("refreshShareMountOnce", () => {
   it("heals a FILE squatting on an ancestor directory path", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMountOnce({
+    await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
 
@@ -479,24 +567,24 @@ describe("refreshShareMountOnce", () => {
     // rebuild the real chain instead of wedging on ENOTDIR.
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await writeFile(join(mountRoot, "docs"), "squatter");
-    const healed = await refreshShareMountOnce({
+    const healed = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(healed.status).toBe("updated");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v1");
+    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("routes DELETE ops through the same real-parent containment", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMountOnce({
+    await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
 
@@ -507,14 +595,14 @@ describe("refreshShareMountOnce", () => {
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
     relay.addDelete("docs/brief.md");
-    const outcome = await refreshShareMountOnce({
+    const outcome = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(outcome.status).toBe("updated");
     expect(existsSync(join(mountRoot, "docs/brief.md"))).toBe(false);
     expect(await readFile(join(elsewhere, "brief.md"), "utf8")).toBe("victim");
+    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("createMountDirectory refuses a symlinked container BEFORE any write", async () => {
@@ -548,11 +636,15 @@ describe("refreshShareMountOnce", () => {
     ).not.toThrow();
   });
 
+  // Legacy fixture on purpose, for the same reason as the real-path guard
+  // above: refreshShareMountOnce must be the thing that refuses the label, and
+  // the daemon wrapper would have to resolve the mount root before it could
+  // bind a relay route.
   it("refuses to refresh a mount whose registry label was tampered into traversal", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
     await expect(
-      refreshShareMountOnce({
+      refreshShareMountOnceOnLegacyStore({
         hostRoot: host,
         mount: { shareId: SHARE_ID, label: "../../etc" },
         relay: relay.connection(),

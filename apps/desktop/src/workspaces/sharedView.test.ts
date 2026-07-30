@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  createVersionedTextStore,
-  pullShareView,
-} from "@dohc/workspace-engine";
+  createShareViewDaemonHarness,
+  type ShareViewDaemonHarness,
+} from "../testing/shareViewLoopbackTransport";
 import {
   materializeSharedViewPaths,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
@@ -16,13 +16,38 @@ const WORKSPACE = "shared-view-ws";
 const SHARE_ID = "share-1";
 const TOKEN = "test:recipient";
 
+// This file no longer references @dohc/workspace-engine at all — not by import
+// and not by vi.mock. That is a stronger guarantee than a not-called spy: the
+// module cannot be reached from here even indirectly. The production side is
+// held by the #402 ratchet, which fails if sharedView.ts ever gains a runtime
+// import of the legacy package.
+//
+// materializeSharedViewPaths touches exactly two store methods
+// (sharedView.ts:68 ensureMainVersion, :91-104 readTextFile/readBinaryFile), so
+// the two tests that drive it directly need nothing more than this.
+function stubStore(
+  readTextFile: () => Promise<{ text: string }>,
+): Parameters<typeof materializeSharedViewPaths>[3] {
+  return {
+    ensureMainVersion: async () => ({ id: "main" }),
+    readTextFile,
+    readBinaryFile: async () => {
+      throw new Error("stubStore: binary reads are not part of these two tests");
+    },
+    close: async () => undefined,
+  } as unknown as Parameters<typeof materializeSharedViewPaths>[3];
+}
+
 let roots: string[] = [];
+let harnesses: ShareViewDaemonHarness[] = [];
 
 beforeEach(() => {
   roots = [];
+  harnesses = [];
 });
 
 afterEach(async () => {
+  await Promise.all(harnesses.map((harness) => harness.closeAll()));
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -32,17 +57,31 @@ async function tempRoot(): Promise<string> {
   return root;
 }
 
+function daemonHarness(relay: FakeShareRelay): ShareViewDaemonHarness {
+  const harness = createShareViewDaemonHarness(relay.connection());
+  harnesses.push(harness);
+  return harness;
+}
+
+// One refresh pass over the production daemon path: EngineRelayClient's
+// share.view.pull for the pull, createCaptureLiveStores for the store. The
+// store is opened and closed per pass exactly as the legacy fixture did, so a
+// cursor that only survived inside one open session would fail the
+// "unchanged" assertions below.
 async function refreshSharedViewOnce(
-  input: Omit<
-    Parameters<typeof refreshSharedViewOnceWithPull>[0],
-    "pull" | "store"
-  >,
+  harness: ShareViewDaemonHarness,
+  input: { rootDir: string; workspaceId: string; shareId: string },
 ) {
-  const store = createVersionedTextStore(input.rootDir);
+  const target = { workspaceId: input.workspaceId, rootPath: input.rootDir };
+  const pull = harness.pullFor(target);
+  const store = harness.openStore(target);
   try {
     return await refreshSharedViewOnceWithPull({
-      ...input,
-      pull: pullShareView,
+      rootDir: input.rootDir,
+      workspaceId: input.workspaceId,
+      relay: harness.relay,
+      shareId: input.shareId,
+      pull,
       store,
     });
   } finally {
@@ -152,33 +191,36 @@ describe("shared view refresh", () => {
   it("pulls, materializes to disk, and reports honest statuses across refreshes", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("docs/a.md", "first body");
     relay.addWrite("docs/nested/deep.md", "deep body");
 
-    const first = await refreshSharedViewOnce({
+    const first = await refreshSharedViewOnce(harness, {
       rootDir,
       workspaceId: WORKSPACE,
-      relay: relay.connection(),
       shareId: SHARE_ID,
     });
     expect(first).toEqual({ status: "updated", changedPaths: 2 });
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("first body");
     expect(await readFile(join(rootDir, "docs/nested/deep.md"), "utf8")).toBe("deep body");
+    // The cursor moved because refreshSharedViewOnce committed it through
+    // sync.commitCursor — the ONLY thing that advances it. Without this the
+    // "unchanged" assertion below would pass on a pull that simply forgot to
+    // ask for the ops again.
+    expect(harness.transport.committedCursor(WORKSPACE)).toBe(2);
 
-    const idle = await refreshSharedViewOnce({
+    const idle = await refreshSharedViewOnce(harness, {
       rootDir,
       workspaceId: WORKSPACE,
-      relay: relay.connection(),
       shareId: SHARE_ID,
     });
     expect(idle).toEqual({ status: "unchanged", changedPaths: 0 });
 
     relay.addWrite("docs/a.md", "updated body");
     relay.addDelete("docs/nested/deep.md");
-    const second = await refreshSharedViewOnce({
+    const second = await refreshSharedViewOnce(harness, {
       rootDir,
       workspaceId: WORKSPACE,
-      relay: relay.connection(),
       shareId: SHARE_ID,
     });
     expect(second).toEqual({ status: "updated", changedPaths: 2 });
@@ -186,17 +228,24 @@ describe("shared view refresh", () => {
     await expect(stat(join(rootDir, "docs/nested/deep.md"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+    expect(harness.transport.committedCursor(WORKSPACE)).toBe(4);
 
     // Revocation: the next refresh reports "ended" and the local files stay.
     relay.ended = true;
-    const ended = await refreshSharedViewOnce({
+    const ended = await refreshSharedViewOnce(harness, {
       rootDir,
       workspaceId: WORKSPACE,
-      relay: relay.connection(),
       shareId: SHARE_ID,
     });
     expect(ended).toEqual({ status: "ended", changedPaths: 0 });
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("updated body");
+
+    // Provable migration: the pull really went through the daemon share RPC.
+    // (That no legacy store was built is structural here — this file has no
+    // reference to @dohc/workspace-engine at all.)
+    expect(
+      harness.transport.requests.map((request) => request.method),
+    ).toContain("share.view.pull");
   });
 
   // A read that fails must not cost the user the file they already had.
@@ -205,52 +254,45 @@ describe("shared view refresh", () => {
   // clean pass, every later refresh would replay into the same hole.
   it("leaves the existing projection intact when the content read fails", async () => {
     const rootDir = await tempRoot();
-    const store = createVersionedTextStore(rootDir);
     const target = join(rootDir, "docs/a.md");
-    try {
-      await materializeSharedViewPaths(
+    await materializeSharedViewPaths(
+      rootDir,
+      WORKSPACE,
+      [{ path: "docs/a.md", operation: "write", contentKind: "text" }],
+      stubStore(async () => ({ text: "good body" })),
+    );
+    expect(await readFile(target, "utf8")).toBe("good body");
+
+    await expect(
+      materializeSharedViewPaths(
         rootDir,
         WORKSPACE,
         [{ path: "docs/a.md", operation: "write", contentKind: "text" }],
-        Object.assign(store, {
-          readTextFile: async () => ({ text: "good body" }),
-        }) as unknown as Parameters<typeof materializeSharedViewPaths>[3],
-      );
-      expect(await readFile(target, "utf8")).toBe("good body");
+        stubStore(async () => {
+          throw new Error("over-cap text body");
+        }),
+      ),
+    ).rejects.toThrow(/over-cap text body/);
 
-      await expect(
-        materializeSharedViewPaths(
-          rootDir,
-          WORKSPACE,
-          [{ path: "docs/a.md", operation: "write", contentKind: "text" }],
-          Object.assign(store, {
-            readTextFile: async () => {
-              throw new Error("over-cap text body");
-            },
-          }) as unknown as Parameters<typeof materializeSharedViewPaths>[3],
-        ),
-      ).rejects.toThrow(/over-cap text body/);
-
-      expect(await readFile(target, "utf8")).toBe("good body");
-    } finally {
-      await store.close();
-    }
+    expect(await readFile(target, "utf8")).toBe("good body");
   });
 
   it("refuses to materialize a path that escapes the workspace root", async () => {
     const rootDir = await tempRoot();
-    const store = createVersionedTextStore(rootDir);
-    try {
-      await expect(
-        materializeSharedViewPaths(
-          rootDir,
-          WORKSPACE,
-          [{ path: "../escape.md", operation: "write", contentKind: "text" }],
-          store,
-        ),
-      ).rejects.toThrow(/escapes the workspace/);
-    } finally {
-      await store.close();
-    }
+    await expect(
+      materializeSharedViewPaths(
+        rootDir,
+        WORKSPACE,
+        [{ path: "../escape.md", operation: "write", contentKind: "text" }],
+        // The refusal happens before any CONTENT read, so a store whose
+        // readTextFile throws still yields the escape error. It is not before
+        // every store call — `ensureMainVersion` does run first; making that
+        // throw changes the error, which is how this was checked rather than
+        // assumed.
+        stubStore(async () => {
+          throw new Error("stubStore: must not be read for an escaping path");
+        }),
+      ),
+    ).rejects.toThrow(/escapes the workspace/);
   });
 });
