@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { AgentDispatchStoreError } from "@dohc/workspace-contracts/engine";
 import type {
   AgentDispatchClaim,
   AgentDispatchRecord,
   AgentDispatchState,
   AgentDispatchStore,
+  AgentDispatchStoreErrorCode,
   AgentRunRecord,
   ThreadDispatchPauseState,
   WorkspaceId,
@@ -15,29 +17,16 @@ export type {
   AgentDispatchRecord,
   AgentDispatchState,
   AgentDispatchStore,
+  AgentDispatchStoreErrorCode,
   AgentRunRecord,
   ThreadDispatchPauseState,
 } from "@dohc/workspace-contracts/engine";
 
+export { AgentDispatchStoreError } from "@dohc/workspace-contracts/engine";
+
 export interface AgentDispatchStoreOptions {
   nowMs?: () => number;
   createRunId?: () => string;
-}
-
-export type AgentDispatchStoreErrorCode =
-  | "invalid-input"
-  | "run-not-found"
-  | "run-state-mismatch"
-  | "state-corrupt";
-
-export class AgentDispatchStoreError extends Error {
-  readonly code: AgentDispatchStoreErrorCode;
-
-  constructor(code: AgentDispatchStoreErrorCode, message: string) {
-    super(message);
-    this.name = "AgentDispatchStoreError";
-    this.code = code;
-  }
 }
 
 function invalidInput(message: string): AgentDispatchStoreError {

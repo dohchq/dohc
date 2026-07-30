@@ -37,6 +37,8 @@ import * as Y from "yjs";
 import {
   REMOTE_YDOC_APPLY_ORIGIN,
   YDocEngineDriverError,
+} from "@dohc/workspace-contracts/engine";
+import {
   createYDocEngineDriver,
   type VersionedTextStore,
   type YDocContentKind,

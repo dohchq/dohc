@@ -12,11 +12,11 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // engine state — the same reason workspaceFiles/workspaceGraph/workspaceSearch
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import {
   createSecretFileStore,
   createVersionedTextStore,
-  MAX_VERSIONED_BINARY_FILE_BYTES,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type SecretFileMoment,

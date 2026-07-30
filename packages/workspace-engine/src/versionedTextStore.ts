@@ -2,6 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
+import {
+  MAX_VERSIONED_BINARY_FILE_BYTES,
+  VERSIONED_TEXT_STORE_RELATIVE_PATH,
+  VersionedTextStoreError,
+} from "@dohc/workspace-contracts/engine";
 import type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
@@ -74,9 +79,12 @@ import {
   type VersionCreatePayload,
 } from "./syncReplication";
 
-export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
+export {
+  MAX_VERSIONED_BINARY_FILE_BYTES,
+  VERSIONED_TEXT_STORE_RELATIVE_PATH,
+  VersionedTextStoreError,
+} from "@dohc/workspace-contracts/engine";
 export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
-export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_WRITE_METADATA_FIELD_BYTES = 16 * 1024;
 
 export type {
@@ -117,16 +125,6 @@ export type {
   WorkspaceId,
   WorkspaceObjectId,
 } from "@dohc/workspace-contracts/engine";
-
-export class VersionedTextStoreError extends Error {
-  readonly code: VersionedTextStoreErrorCode;
-
-  constructor(code: VersionedTextStoreErrorCode, message: string) {
-    super(message);
-    this.name = "VersionedTextStoreError";
-    this.code = code;
-  }
-}
 
 export interface VersionedTextStoreTestHooks {
   afterLoadWritableState?: () => void | Promise<void>;

@@ -6,6 +6,7 @@ import {
   AGENT_CHANNEL_WIRE_ID,
   GENERAL_CHANNEL_WIRE_ID,
 } from "@dohc/security-contract/chat-wire-ids";
+import { LINKED_CHAT_STORE_RELATIVE_PATH } from "@dohc/workspace-contracts/engine";
 import type {
   ChannelThreadSummary,
   ChatAgentReadState,
@@ -56,7 +57,6 @@ import {
   trackEngineDbHandleForTest,
 } from "./engineDbSchema";
 import {
-  VERSIONED_TEXT_STORE_RELATIVE_PATH,
   type WorkspaceId,
   type WorkspaceObjectId,
 } from "./versionedTextStore";
@@ -90,7 +90,7 @@ import {
   type ChatThreadCreatePayload,
 } from "./syncReplication";
 
-export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
+export { LINKED_CHAT_STORE_RELATIVE_PATH } from "@dohc/workspace-contracts/engine";
 export const LINKED_CHAT_PROJECTION_KIND = "thread";
 export const CHAT_FILE_MENTION_MAX_RESULTS = 2_000;
 const CHAT_HEADING_TEXT_MAX_LENGTH = 300;

@@ -18,13 +18,15 @@ import { validateUserReadPath } from "@dohc/workspace-core";
 import {
   AgentDispatchStoreError,
   LINKED_CHAT_STORE_RELATIVE_PATH,
-  type ChannelThreadSummary,
-  type ChatChannelSummary,
-  type ChatMessage,
-  type ChatThread,
-  type LinkedChatStore,
-  type VersionedTextMoment,
-  type VersionedTextMomentSummary,
+} from "@dohc/workspace-contracts/engine";
+import type {
+  ChannelThreadSummary,
+  ChatChannelSummary,
+  ChatMessage,
+  ChatThread,
+  LinkedChatStore,
+  VersionedTextMoment,
+  VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
 import {
   MAX_GRANULAR_CHAT_QUERY_CHARS,

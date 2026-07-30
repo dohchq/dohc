@@ -76,6 +76,7 @@ import {
   yDocToMarkdown,
 } from "@dohc/ydoc-projection";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
+import { YDocEngineDriverError } from "@dohc/workspace-contracts/engine";
 import type {
   ActorNeutralWriteMetadata,
   EngineWriteLaneConnection,
@@ -84,6 +85,7 @@ import type {
   VersionedTextMomentId,
   WorkspaceId,
   WorkspaceObjectId,
+  YDocEngineDriverErrorCode,
 } from "@dohc/workspace-contracts/engine";
 import {
   ENGINE_SQLITE_BUSY_TIMEOUT_MS,
@@ -103,21 +105,10 @@ import type { YDocUpdatePayload } from "@dohc/workspace-contracts/engine";
 
 export type YDocContentKind = "richdoc" | "plaintext";
 
-export class YDocEngineDriverError extends Error {
-  readonly code: YDocEngineDriverErrorCode;
-  constructor(code: YDocEngineDriverErrorCode, message: string) {
-    super(message);
-    this.name = "YDocEngineDriverError";
-    this.code = code;
-  }
-}
-
-export type YDocEngineDriverErrorCode =
-  | "state-corrupt"
-  | "not-found"
-  | "already-live"
-  | "session-closed"
-  | "invalid-input";
+export {
+  YDocEngineDriverError,
+  type YDocEngineDriverErrorCode,
+} from "@dohc/workspace-contracts/engine";
 
 // ---- Sqlite seam (mirrors versionedTextStore / linkedChatStore) ------------
 
