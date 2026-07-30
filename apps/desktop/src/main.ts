@@ -1585,11 +1585,7 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   captureFor: async (workspace, hooks) =>
     findWorkspace(workspace.workspaceId)?.shareView
       ? null
-      : captureForFlaggedWorkspace(
-          workspace,
-          hooks,
-          rustEngineWorkspaceSessions,
-        ),
+      : captureForFlaggedWorkspace(workspace, hooks, requireEngineSessions()),
 });
 const panelAgentRunSlots = new Map<string, string>();
 // Local agent integration: owns the per-workspace MCP child + active-run slot
@@ -1887,7 +1883,7 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
         activeAgentRun: () => null,
         onCaptureOutcome: () => undefined,
       },
-      rustEngineWorkspaceSessions,
+      requireEngineSessions(),
     );
     if (!capture) return false;
     try {
@@ -2611,6 +2607,18 @@ let rustEngineDaemon: EngineDaemonLifecycle | null = null;
 let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
 let rustEngineRelayClient: EngineRelayClient | null = null;
 const relayTransportRoutes = new RelayTransportRouteGuard();
+
+// Narrowing for the capture gate, matching the convention at :1703 and :2619.
+// The invariant is real: startRustEngineDaemon() quits the app on failure before
+// any window exists, and this handle is nulled only on that failure path. A
+// throw here would mean that invariant broke, which must be loud, not a silent
+// drop to the legacy engine.
+function requireEngineSessions(): EngineWorkspaceSessions {
+  if (!rustEngineWorkspaceSessions) {
+    throw new Error("Rust engine workspace sessions are unavailable.");
+  }
+  return rustEngineWorkspaceSessions;
+}
 
 function sharedViewStoreFor(workspace: {
   workspaceId: string;

@@ -12,13 +12,21 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 // moments and no legacy .dohc/history change set is written. The flag is read
 // at open; toggling it takes effect on the next open of the workspace.
 //
-// Shared by main.ts (production wiring) and scripts/phase0m-agent-engine-qa.ts
-// (the arc-gate QA harness) so the harness can never silently drift from the
-// real gate.
+// The daemon is REQUIRED, not optional. main.ts quits the app when
+// startRustEngineDaemon() fails — dialog, then app.quit(), before any window
+// exists (main.ts:7429-7440, gated at :7487-7488) — and the sessions handle has
+// exactly two writes: set on success, nulled on the failure path immediately
+// before that quit. So no running workspace can reach here without a daemon.
+//
+// It used to be `rustEngineSessions?: … | null` with a conditional spread, which
+// made a no-daemon workspace silently construct the LEGACY TypeScript engine.
+// That path was unreachable in production and reachable only from tests, but the
+// type invited it back. `cliServer.ts:796-799` had already deleted its own
+// version of this branch for the same reason.
 export async function captureForFlaggedWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   hooks: WorkspaceCaptureHooks,
-  rustEngineSessions?: EngineWorkspaceSessions | null,
+  rustEngineSessions: EngineWorkspaceSessions,
 ): Promise<WorkspaceEngineCapture | null> {
   if (!(await workspaceEngineEnabled(workspace.rootPath))) return null;
   return createWorkspaceEngineCapture({
@@ -31,9 +39,8 @@ export async function captureForFlaggedWorkspace(
     // PR 0N-1: batches settled while a dohc-tracked agent run is active are
     // stamped with agent authorship (History shows "<User Name>'s agent").
     activeAgentRun: hooks.activeAgentRun,
-    ...(rustEngineSessions
-      ? { rustEngineSessions, daemonOwnsCapture: true }
-      : {}),
+    rustEngineSessions,
+    daemonOwnsCapture: true,
   });
 }
 
