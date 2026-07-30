@@ -41,9 +41,21 @@ So the lifecycle is asymmetric on purpose:
 - **First creation**, no persisted lineage: seed from markdown, emit the
   full-state base exactly once.
 - **Every subsequent open**: resume from the persisted CRDT. Never re-seed.
-- **Close**: settle the projection but **do not prune** the CRDT rows. They must
-  stay durable both for the next resume and for a peer bootstrapping from the
-  log. A replicated document never prunes and never re-emits a base.
+- **Close**: settle the projection, and **do not prune the lineage**. The CRDT
+  state must stay durable both for the next resume and for a peer bootstrapping
+  from the log. A replicated document never re-emits a base.
+
+"Do not prune the lineage" is not "do not delete rows", and the distinction
+matters or a port retains an unbounded update log. **Bounded compaction is
+required, not forbidden.** Both implementations fold the update log into a fresh
+full-state snapshot and then delete the folded updates and now-superseded older
+snapshots — `compact` in the TypeScript reference, `maybe_compact` in Rust, which
+a replicated close calls with a threshold of `0` to force it. That is
+convergence-neutral: the snapshot is a full-state re-encode, so reconstructing
+from it yields the same converged content as replaying the un-compacted log.
+
+The invariant is that whatever remains must still reconstruct the lineage. Delete
+what is redundant; never delete the lineage itself.
 
 ## The local-only path, and why it may prune
 
@@ -70,18 +82,30 @@ locally and then be rejected by every peer on hydrate
 and no local signal that anything is wrong. Reject it locally *before* the blob
 put and before the journal write.
 
-**2. Re-check for an existing lineage inside the claim transaction.** A
-pre-read that says "no lineage" is not enough. Another process can win the
-first-open race between that read and the write. Inside the write transaction:
+**2. Re-check inside the claim transaction — on `base_claimed`, not on row
+existence.** A pre-read that says "no lineage" is not enough: another process can
+win the first-open race between that read and the write.
 
-```sql
-SELECT 1 FROM ydoc_docs
- WHERE workspace_id = ? AND version_id = ? AND object_id = ?
-```
+But the predicate matters, and the TypeScript reference gets it wrong for a port's
+purposes. It tests row existence in `ydoc_docs`. A bare marker row is *not* a
+claimed lineage — `ensure_marker` deliberately creates one with
+`base_claimed = 0`, so a document previously opened **local-only** already has a
+row. Following row-existence would return `exists` for it, and its base would
+never be promoted or journaled when it later becomes replicated.
 
-If a row exists, the concurrent writer already committed this lineage. Return
-`exists`, seed nothing, journal nothing, and resume the winner's state. Emitting
-a second base here is exactly the fork described above.
+Test the claimed-state predicate. The Rust side does this correctly
+(`claim_base_in_tx`, `durable.rs`): read the head, and branch on `base_claimed`.
+
+There is a second condition the TypeScript version does not have, and it is
+load-bearing: when a base *is* already claimed, resume the winner **only if the
+incoming base is the stored base**. Compare the stored snapshot sha. Silently
+resuming and acking a *different* base would drop a divergent lineage while the
+relay cursor advances past it, leaving that peer's later updates depending on an
+operation nobody can recover. Failing loudly on a base mismatch is the correct
+behaviour; treating it as an ordinary "someone else won" is not.
+
+Otherwise: seed nothing, journal nothing, resume. Emitting a second base is the
+fork described above.
 
 **3. Journal the base in the same transaction as the snapshot rows.** The
 snapshot blob lands in `binary_blobs` first, satisfying blob-before-log, and the
@@ -136,14 +160,20 @@ The storage and the emit condition exist. The origination does not.
   `claim_base_in_tx`.
 - `claim_base_in_tx` has exactly two non-test callers: `claim_base`
   (`durable.rs:719`), a public wrapper with **no** caller of its own, and the
-  **inbound** apply at `crates/dohc-engine-sync/src/ydoc_apply.rs:715`. So the
-  only live path into a replicated marker is a peer handing us one.
-- No RPC reaches the origination path. `YDOC_METHOD`
+  **inbound** apply at `crates/dohc-engine-sync/src/ydoc_apply.rs:715`.
+- **`ydoc.apply` does exist as a server RPC** — dispatched in
+  `crates/dohc-workspace-engine/src/lib.rs`, and its actor path calls
+  `record_local_update_creating_marker(..., Regime::Replicated, ...)`
+  (`crates/dohc-engine-runtime/src/actor.rs`), so it *does* create a replicated
+  marker. It does **not** claim a base, so the origination gap stands — but the
+  endpoint is live and must not be missed during the port or the deletion.
+- What is missing is the **TypeScript client** method. `YDOC_METHOD`
   (`packages/workspace-engine-client/src/ydoc/ydocWireContract.ts`) exposes
   `ydoc.open`, `ydoc.recordUpdate`, `ydoc.settle`,
-  `ydoc.applyExternalMarkdownEdit`, `ydoc.close` and `ydoc.resync` — there is no
-  `ydoc.apply`. (Do not confuse the two: `applyExternalMarkdownEdit` is a
-  different method and is wired.)
+  `ydoc.applyExternalMarkdownEdit`, `ydoc.close` and `ydoc.resync` — no
+  `ydoc.apply`. Do not confuse `ydoc.apply` with
+  `ydoc.applyExternalMarkdownEdit`; they are different methods and the latter is
+  wired on both sides. A grep for `ydoc.apply` matches both.
 - `crates/dohc-engine-collab/Cargo.toml` states it plainly: *"Dormant; not wired
   into the product."*
 
@@ -159,9 +189,23 @@ uniform nothing, because partial replication looks like working sync.
 The paired gap: only chat operations and the dead ydoc path write to the
 relay-visible `replication_log`. File, text and secret writes go to
 `replication_journal`, a different table, and nothing drains one into the other.
-Both belong to #356, and
-`apps/desktop/e2e/workspace-sync-rejoin.spec.ts` is the acceptance gate for the
-pair — currently disabled, which is how both gaps survived a cutover with no red
-test.
+Both belong to #356.
+
+**There is currently no acceptance gate for base origination, and the obvious
+candidate is not one.** `apps/desktop/e2e/workspace-sync-rejoin.spec.ts` is
+disabled and is often cited as the gate for the pair. It is a gate for the
+journal-drain gap only. It bootstraps `notes/plan.md` as an ordinary captured
+file and makes its second-machine edit through
+`createVersionedTextStore().writeTextFile`; it never opens a Y.Doc session and
+never asserts a base or delta operation. Its single mention of ydoc is a comment.
+
+So re-enabling that spec once the drain is fixed would go green and report **both**
+gaps closed while base origination remained entirely unimplemented — a green check
+that checks nothing, which is this program's dominant defect class arriving by the
+most plausible-looking route available.
+
+Closing #378 therefore needs a **new** assertion: two peers, a rich document, and
+a check that the base operation is emitted exactly once and that a delta follows
+it. Write that gate before writing the implementation.
 
 Before claiming any sync behaviour works, check which table the write landed in.
