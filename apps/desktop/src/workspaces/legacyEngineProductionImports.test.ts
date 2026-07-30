@@ -178,6 +178,19 @@ function resolveSpecifiers(
   return [];
 }
 
+// `{ eval: true }` in a Worker's options object literal.
+function workerRunsEval(node: ts.NewExpression): boolean {
+  const options = node.arguments?.[1];
+  if (options === undefined || !ts.isObjectLiteralExpression(options)) return false;
+  return options.properties.some(
+    (property) =>
+      ts.isPropertyAssignment(property) &&
+      (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) &&
+      property.name.text === "eval" &&
+      property.initializer.kind === ts.SyntaxKind.TrueKeyword,
+  );
+}
+
 function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean {
   const sourceFile = ts.createSourceFile(
     fileName,
@@ -279,8 +292,23 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
         found = true;
         return;
       }
-    } else if (ts.isCallExpression(node)) {
-      const arg = node.arguments[0];
+    } else if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+      const arg = node.arguments?.[0];
+      // `new Worker(SOURCE, { eval: true })` runs SOURCE as a real module, so a
+      // load inside it ships. cliServer.ts already defines such a body as a
+      // template literal (REGEX_WORKER_SOURCE) and evals it, which makes this a
+      // live shape rather than a hypothetical one. Recurse into the body when it
+      // is statically knowable.
+      if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
+        if (node.expression.text === "Worker" && workerRunsEval(node)) {
+          const body = node.arguments?.[0];
+          const sources = body === undefined ? [] : resolveSpecifiers(body, stringConsts);
+          if (sources.some((source) => hasRuntimeLegacyImport(source, fileName))) {
+            found = true;
+            return;
+          }
+        }
+      }
       const isStringArg =
         arg !== undefined &&
         resolveSpecifiers(arg, stringConsts).some((candidate) =>
@@ -355,6 +383,14 @@ describe("legacy engine production imports (R16 ratchet)", () => {
 
   it("matches the allowlist exactly, so the count can only shrink deliberately", () => {
     expect(importers).toEqual([...ALLOWED].sort());
+  });
+
+  it("holds the ceiling at two, so the allowlist cannot quietly grow", () => {
+    // Set equality alone passes if someone adds an importer AND its path to the
+    // list in one change. This pins the direction of travel: the number may only
+    // go DOWN, and raising it is a visible edit to a line that says so, rather
+    // than an append to a list that reviewers skim.
+    expect(ALLOWED.length).toBeLessThanOrEqual(2);
   });
 
   it("still detects a runtime import that hides among type-only specifiers", () => {
@@ -547,6 +583,38 @@ const m = await import(name);`),
       `function a() { const name = "${L}"; return require(name); }`,
     ].join("\n");
     expect(hasRuntimeLegacyImport(shadowedReversed)).toBe(true);
+  });
+
+  it("looks inside a worker body that is evaluated as source", () => {
+    const L = LEGACY_PACKAGE;
+    // cliServer.ts really does define an executable body as a template literal
+    // (REGEX_WORKER_SOURCE) and pass it to `new Worker(..., { eval: true })`, so
+    // a load added inside such a string would ship while the file's own imports
+    // stayed clean.
+    const evalWorker = [
+      "const SRC = `",
+      `const e = require("${L}");`,
+      "`;",
+      "export const w = new Worker(SRC, { eval: true, workerData: {} });",
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(evalWorker)).toBe(true);
+
+    // Without `eval: true` the first argument is a FILE PATH, not source, and
+    // must not be parsed as code.
+    const pathWorker = [
+      `const SRC = "./regexWorker.js";`,
+      "export const w = new Worker(SRC, { workerData: {} });",
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(pathWorker)).toBe(false);
+
+    // An eval worker with a clean body stays clean.
+    const cleanWorker = [
+      "const SRC = `",
+      `const { parentPort } = require("node:worker_threads");`,
+      "`;",
+      "export const w = new Worker(SRC, { eval: true });",
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(cleanWorker)).toBe(false);
   });
 
   it("excuses config only at a package root, never shipping source", () => {
