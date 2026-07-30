@@ -546,7 +546,7 @@ describe("EngineWorkspaceSessions", () => {
     expect(WORKSPACE_OPEN_DEADLINE_MS).toBe(2_000);
   });
 
-  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648])(
     "rejects %s as a workspace open deadline instead of silently substituting one",
     (deadline) => {
       // `??` accepts all of these. An exported option taking 0 or NaN would

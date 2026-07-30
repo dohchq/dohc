@@ -27,6 +27,14 @@ function isFile(path) {
   }
 }
 
+function mtimeMs(path) {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 export function requireE2eEngine({
   desktopTargetDir = join(desktopDir, "target", "debug"),
   cargoTargetDir = join(repoDir, "target", "debug"),
@@ -34,13 +42,28 @@ export function requireE2eEngine({
 } = {}) {
   const name = engineBinaryName(platform);
   const wanted = join(desktopTargetDir, name);
-  if (isFile(wanted)) return { binary: wanted, copied: false };
-
   const built = join(cargoTargetDir, name);
+
+  // A staged copy that exists is not necessarily the one you just built.
+  // `cargo build` refreshes only the workspace-root binary, so leaving an older
+  // staged file in place makes Electron launch stale daemon code — while the
+  // seed helper, which picks the newest candidate, uses the fresh one. The
+  // specs would then seed with one daemon version and exercise another: skew
+  // that either fails for no reason or passes while testing the wrong artifact.
+  if (isFile(wanted)) {
+    const stagedAt = mtimeMs(wanted);
+    const builtAt = isFile(built) ? mtimeMs(built) : null;
+    if (stagedAt !== null && builtAt !== null && builtAt > stagedAt) {
+      copyFileSync(built, wanted);
+      return { binary: wanted, copied: true, refreshed: true };
+    }
+    return { binary: wanted, copied: false, refreshed: false };
+  }
+
   if (isFile(built)) {
     mkdirSync(desktopTargetDir, { recursive: true });
     copyFileSync(built, wanted);
-    return { binary: wanted, copied: true };
+    return { binary: wanted, copied: true, refreshed: false };
   }
 
   throw new Error(

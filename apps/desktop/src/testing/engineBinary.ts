@@ -41,7 +41,13 @@ export const REQUIRE_ENGINE_ENV_VAR = "DOHC_REQUIRE_ENGINE_E2E";
  */
 export function engineBinaryCandidates(): string[] {
   const override = process.env[ENGINE_BINARY_ENV_VAR]?.trim();
-  if (override) return [override];
+  // Absolute, always. EngineDaemonLifecycle sets the child's cwd to
+  // dirname(command) and then spawns `command` from there, so a relative
+  // override like ./artifacts/engine.exe would be resolved a second time
+  // against its own directory — artifacts/artifacts/engine.exe — and fail the
+  // startup handshake. The relay suite used to call resolve() itself; that
+  // normalisation belongs here now that discovery is shared.
+  if (override) return [resolve(override)];
   const name = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
   return [
     join(desktopRoot, "target", "debug", name),

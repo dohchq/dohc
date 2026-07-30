@@ -66,6 +66,12 @@ export interface EngineWorkspaceSessionsOptions {
   workspaceOpenDeadlineMs?: number;
 }
 
+// Node's setTimeout silently converts a delay above this to 1ms, so a caller
+// asking for a 30-day deadline would get near-immediate transport timeouts —
+// the exact opposite of widening it. EngineClient passes this value straight to
+// setTimeout, so the ceiling has to be enforced here.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 const TRANSPORT_REBIND_ATTEMPTS = 6;
 const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
 const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
@@ -160,9 +166,14 @@ export class EngineWorkspaceSessions {
     // Reject rather than clamp: silently substituting a value is how a caller
     // ends up believing it widened a deadline it did not.
     const deadline = options.workspaceOpenDeadlineMs;
-    if (deadline !== undefined && (!Number.isFinite(deadline) || deadline <= 0)) {
+    if (
+      deadline !== undefined &&
+      (!Number.isFinite(deadline) ||
+        deadline <= 0 ||
+        deadline > MAX_TIMER_DELAY_MS)
+    ) {
       throw new TypeError(
-        `workspaceOpenDeadlineMs must be a finite positive number, received ${String(deadline)}.`,
+        `workspaceOpenDeadlineMs must be a finite positive number no greater than ${MAX_TIMER_DELAY_MS}, received ${String(deadline)}.`,
       );
     }
     this.workspaceOpenDeadlineMs = deadline ?? WORKSPACE_OPEN_DEADLINE_MS;

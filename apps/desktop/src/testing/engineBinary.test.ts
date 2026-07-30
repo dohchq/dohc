@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   ENGINE_BINARY_ENV_VAR,
   REQUIRE_ENGINE_ENV_VAR,
@@ -36,8 +36,20 @@ afterEach(() => {
 
 describe("engine binary discovery", () => {
   it("collapses the candidate list to an override, consulting nothing else", () => {
-    vi.stubEnv(ENGINE_BINARY_ENV_VAR, "C:/somewhere/custom-engine.exe");
-    expect(engineBinaryCandidates()).toEqual(["C:/somewhere/custom-engine.exe"]);
+    const override = resolve("custom-engine-override");
+    vi.stubEnv(ENGINE_BINARY_ENV_VAR, override);
+    expect(engineBinaryCandidates()).toEqual([override]);
+  });
+
+  it("resolves a RELATIVE override to an absolute path", () => {
+    // EngineDaemonLifecycle sets the child's cwd to dirname(command) and then
+    // spawns `command` from there, so a relative override would be resolved a
+    // second time against its own directory — artifacts/artifacts/engine — and
+    // fail the startup handshake.
+    vi.stubEnv(ENGINE_BINARY_ENV_VAR, "./artifacts/dohc-workspace-engine");
+    const [candidate] = engineBinaryCandidates();
+    expect(isAbsolute(candidate!)).toBe(true);
+    expect(candidate).toBe(resolve("./artifacts/dohc-workspace-engine"));
   });
 
   it("offers the desktop-relative path before the repo root, and names both", () => {

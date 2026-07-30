@@ -1,4 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -62,5 +69,58 @@ describe("requireE2eEngine", () => {
     });
 
     expect(result.copied).toBe(false);
+  });
+
+  it("REFRESHES a staged daemon that is older than the cargo-built one", () => {
+    // Without this, `cargo build` refreshes only the workspace-root binary and
+    // Electron keeps launching the stale staged copy — while the seed helper
+    // picks the newest candidate. The specs then seed with one daemon version
+    // and exercise another.
+    const root = tempRoot();
+    const cargoTargetDir = join(root, "cargo");
+    const desktopTargetDir = join(root, "desktop");
+    mkdirSync(cargoTargetDir, { recursive: true });
+    mkdirSync(desktopTargetDir, { recursive: true });
+    const staged = join(desktopTargetDir, "dohc-workspace-engine");
+    const built = join(cargoTargetDir, "dohc-workspace-engine");
+    writeFileSync(staged, "stale");
+    writeFileSync(built, "fresh");
+    utimesSync(staged, 1_700_000_000, 1_700_000_000);
+    utimesSync(built, 1_800_000_000, 1_800_000_000);
+
+    const result = requireE2eEngine({
+      desktopTargetDir,
+      cargoTargetDir,
+      platform: "linux",
+    });
+
+    expect(result.refreshed).toBe(true);
+    // Content, not just the flag — the flag alone would pass a no-op copy.
+    expect(readFileSync(staged, "utf8")).toBe("fresh");
+  });
+
+  it("keeps a staged daemon that is NEWER than the cargo-built one", () => {
+    // A developer who staged a deliberately-built artifact should not have it
+    // overwritten by an older workspace-root build.
+    const root = tempRoot();
+    const cargoTargetDir = join(root, "cargo");
+    const desktopTargetDir = join(root, "desktop");
+    mkdirSync(cargoTargetDir, { recursive: true });
+    mkdirSync(desktopTargetDir, { recursive: true });
+    const staged = join(desktopTargetDir, "dohc-workspace-engine");
+    const built = join(cargoTargetDir, "dohc-workspace-engine");
+    writeFileSync(staged, "deliberate");
+    writeFileSync(built, "older");
+    utimesSync(staged, 1_800_000_000, 1_800_000_000);
+    utimesSync(built, 1_700_000_000, 1_700_000_000);
+
+    const result = requireE2eEngine({
+      desktopTargetDir,
+      cargoTargetDir,
+      platform: "linux",
+    });
+
+    expect(result.refreshed).toBe(false);
+    expect(readFileSync(staged, "utf8")).toBe("deliberate");
   });
 });
