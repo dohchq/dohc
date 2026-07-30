@@ -65,10 +65,11 @@ function isProductionSource(posixPath: string): boolean {
   // scripts/ — electron.vite.config.ts, playwright.config.ts, vitest.config.ts.
   // These run on a developer's machine, never a user's.
   //
-  // Anchored outside src/ deliberately: an unanchored rule would also excuse
-  // shipping source merely NAMED like config (apps/desktop/src/engine.config.ts),
-  // and a runtime import there would never reach the scan.
-  if (!posixPath.includes("/src/") && /(^|\/)[^/]*\.config\.[cm]?[jt]s$/.test(posixPath)) {
+  // Anchored to a package root — exactly `<root>/<package>/<name>.config.ts`.
+  // An unanchored rule would excuse shipping source merely NAMED like config
+  // (src/engine.config.ts); a loose one would excuse it anywhere outside src/
+  // (lib/foo.config.ts). Neither is tooling.
+  if (/^(apps|packages|services)\/[^/]+\/[^/]*\.config\.[cm]?[jt]s$/.test(posixPath)) {
     return false;
   }
   // Declaration files carry no runtime import — everything in them is erased,
@@ -174,14 +175,35 @@ function resolveSpecifiers(
     const right = resolveSpecifiers(node.right, stringConsts);
     return left.flatMap((l) => right.map((r) => l + r));
   }
-  if (ts.isParenthesizedExpression(node)) return resolveSpecifiers(node.expression, stringConsts);
+  // Wrappers that TypeScript erases: (x), x as string, <string>x, x satisfies T,
+  // x!. None changes the runtime value, so none may hide the specifier.
+  if (
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) ||
+    ts.isSatisfiesExpression(node) ||
+    ts.isNonNullExpression(node)
+  ) {
+    return resolveSpecifiers(node.expression, stringConsts);
+  }
   return [];
 }
 
 // `{ eval: true }` in a Worker's options object literal.
-function workerRunsEval(node: ts.NewExpression): boolean {
-  const options = node.arguments?.[1];
-  if (options === undefined || !ts.isObjectLiteralExpression(options)) return false;
+function workerRunsEval(
+  node: ts.NewExpression,
+  optionObjects: ReadonlyMap<string, ts.ObjectLiteralExpression>,
+): boolean {
+  const argument = node.arguments?.[1];
+  if (argument === undefined) return false;
+  // Either inline, or a const holding the options object — `const opts = { eval:
+  // true }; new Worker(SRC, opts)` runs source just the same.
+  const options = ts.isObjectLiteralExpression(argument)
+    ? argument
+    : ts.isIdentifier(argument)
+      ? optionObjects.get(argument.text)
+      : undefined;
+  if (options === undefined) return false;
   return options.properties.some(
     (property) =>
       ts.isPropertyAssignment(property) &&
@@ -215,6 +237,9 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
   // routine refactor. Multi-valued so a name declared twice keeps BOTH — see
   // resolveSpecifiers on why that direction is the safe one.
   const stringConsts = new Map<string, readonly string[]>();
+  // Object literals bound to a name, so a Worker's options can be reached
+  // through a const rather than only inline.
+  const optionObjects = new Map<string, ts.ObjectLiteralExpression>();
   const addConst = (name: string, values: readonly string[]): void => {
     if (values.length === 0) return;
     stringConsts.set(name, [...(stringConsts.get(name) ?? []), ...values]);
@@ -235,6 +260,9 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const init = node.initializer;
       if (init !== undefined) addConst(node.name.text, resolveSpecifiers(init, stringConsts));
+      if (init !== undefined && ts.isObjectLiteralExpression(init)) {
+        optionObjects.set(node.name.text, init);
+      }
     }
     ts.forEachChild(node, collectNames);
   };
@@ -300,7 +328,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       // live shape rather than a hypothetical one. Recurse into the body when it
       // is statically knowable.
       if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
-        if (node.expression.text === "Worker" && workerRunsEval(node)) {
+        if (node.expression.text === "Worker" && workerRunsEval(node, optionObjects)) {
           const body = node.arguments?.[0];
           const sources = body === undefined ? [] : resolveSpecifiers(body, stringConsts);
           if (sources.some((source) => hasRuntimeLegacyImport(source, fileName))) {
@@ -385,12 +413,13 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     expect(importers).toEqual([...ALLOWED].sort());
   });
 
-  it("holds the ceiling at two, so the allowlist cannot quietly grow", () => {
-    // Set equality alone passes if someone adds an importer AND its path to the
-    // list in one change. This pins the direction of travel: the number may only
-    // go DOWN, and raising it is a visible edit to a line that says so, rather
-    // than an append to a list that reviewers skim.
-    expect(ALLOWED.length).toBeLessThanOrEqual(2);
+  it("pins the allowlist size at exactly two", () => {
+    // Set equality alone passes if someone adds an importer AND its path in one
+    // change, so this is a second, louder tripwire. EXACT rather than an upper
+    // bound: a ceiling that only caps drifts loose as the list shrinks, and
+    // shrinking is the whole point — removing an importer should have to edit
+    // this number, which is how the win gets recorded instead of assumed.
+    expect(ALLOWED.length).toBe(2);
   });
 
   it("still detects a runtime import that hides among type-only specifiers", () => {
@@ -585,6 +614,17 @@ const m = await import(name);`),
     expect(hasRuntimeLegacyImport(shadowedReversed)).toBe(true);
   });
 
+  it("sees through erased expression wrappers on a specifier", () => {
+    const L = LEGACY_PACKAGE;
+    // None of these changes the runtime value, so none may hide the specifier.
+    expect(hasRuntimeLegacyImport(`const m = await import("${L}" as string);`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`const m = await import(("${L}"));`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`const m = require("${L}"!);`)).toBe(true);
+    const viaConst = `const name = "${L}" as const;
+const m = require(name);`;
+    expect(hasRuntimeLegacyImport(viaConst)).toBe(true);
+  });
+
   it("looks inside a worker body that is evaluated as source", () => {
     const L = LEGACY_PACKAGE;
     // cliServer.ts really does define an executable body as a template literal
@@ -607,6 +647,16 @@ const m = await import(name);`),
     ].join("\n");
     expect(hasRuntimeLegacyImport(pathWorker)).toBe(false);
 
+    // The options object reached through a const, not inline.
+    const namedOptions = [
+      "const SRC = `",
+      `const e = require("${L}");`,
+      "`;",
+      "const opts = { eval: true };",
+      "export const w = new Worker(SRC, opts);",
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(namedOptions)).toBe(true);
+
     // An eval worker with a clean body stays clean.
     const cleanWorker = [
       "const SRC = `",
@@ -624,6 +674,9 @@ const m = await import(name);`),
     expect(isProductionSource("packages/cli/vitest.config.ts")).toBe(false);
     expect(isProductionSource("apps/desktop/src/engine.config.ts")).toBe(true);
     expect(isProductionSource("packages/mcp/src/tools.config.ts")).toBe(true);
+    // Outside src/ but NOT at a package root — still shipping code.
+    expect(isProductionSource("apps/desktop/lib/engine.config.ts")).toBe(true);
+    expect(isProductionSource("packages/cli/internal/build.config.ts")).toBe(true);
   });
 
   it("counts a syntactically-untyped import as runtime, by documented choice", () => {
