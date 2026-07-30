@@ -1,38 +1,29 @@
-# dohc — manifesto
+# dohc manifesto
 
-dohc (spoken "dock") is a quiet AI workspace for documents and real work.
-It turns the work you already do into something clear, traceable, and
-ready — without turning into an engineering console.
+dohc is a local-first workspace where people and their agents build documents,
+data, dashboards, and workflows from files they control.
 
-The key distinction: dohc is not a builder-first document platform where
-the user has to assemble apps by hand before value appears. The user stays
-at the center as author, owner, and decision maker, while the AI builds and
-maintains the useful documents, views, and workflows around their
-intent. See `docs/product/ai-native-positioning.md`.
+People should not have to assemble a custom operating system before an agent
+can help them. They should be able to state what they need, inspect the result,
+and keep control of every important decision.
 
 ## What dohc is
 
-- A **document-first workspace**. Your work lives as plain-text atoms
-  (markdown files) you own, backed by a flexible entity store (people,
-  projects, clients, bookings — types you declare).
-- A **calm operator**, not a hype engine. The agent explains what it
-  found, what changed, what is ready, and what needs a decision.
-- **Inspectable.** Numbers on a dashboard trace back to real files and
-  real values. Nothing is magic; everything can be checked.
-
-## Who it is for
-
-Founders, operators, PMs, and business users who work around AI — not
-only engineers. The product stays approachable: clear labels, helpful
-empty states, trustworthy controls, and a first run that builds
-confidence.
+- A local-first workspace made of ordinary files.
+- An agent that organizes work instead of hiding it in chat history.
+- A document editor, chat surface, search tool, site builder, and history
+  system over the same workspace.
+- A product for individuals first, with sharing and collaboration available
+  when the user asks for them.
 
 ## Principles
 
-1. **Plainspoken and precise.** No "AI magic", no over-promising.
-2. **You own your work.** Plain-text atoms, portable, editable directly.
-3. **Show the work.** Source state, what changed, the next useful action.
-4. **Calm by default.** Dense, technical surfaces are reserved for power
-   tools — daily surfaces are friendly and readable at a glance.
-5. **Safety is not negotiable.** Authorization, data ownership, and the
-   Convex safety gates hold regardless of what the agent is asked to do.
+1. Text is the primitive.
+2. The user owns the files.
+3. Agents show what changed and why.
+4. Local work does not require a cloud service.
+5. Shared work keeps explicit identity, access, and provenance boundaries.
+6. The daily interface stays calm while advanced controls remain available.
+
+The product succeeds when a person can leave dohc, open the workspace folder,
+and still understand their work.

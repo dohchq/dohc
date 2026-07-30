@@ -1,26 +1,38 @@
 # Testing
 
+Run the checks from the repository root.
+
 ```bash
-cd /home/ice/dev/dohc
-pnpm typecheck          # tsc --noEmit across workspaces
-pnpm test               # vitest run across workspaces
-pnpm test:desktop:e2e   # desktop Playwright suite (builds first)
+pnpm typecheck
+pnpm test
+pnpm check:debt
+node tools/rust-engine-program/run-rust-checks.mjs
 ```
 
-## Test surfaces
+Read the Rust gate’s `== summary ==` block. Its exit code alone is not the
+verdict.
 
-- **`packages/*/src/**/*.test.ts`** — engine, contracts, core/fs/history/
-  sync, and MCP unit/integration suites (the workspace engine suite is the
-  data-integrity backbone; run it for any engine-adjacent change).
-- **`apps/desktop/src/**/*.test.ts(x)`** — desktop main-process and
-  renderer units (vitest, jsdom for renderer components).
-- **`apps/desktop/e2e/*.spec.ts`** — Playwright E2E against the built
-  Electron app (hermetic temp workspaces under the OS tmpdir).
-- **`packages/brand`** — the rebrand guard; keep its whitelist empty.
+## Focused checks
 
-## Conventions
+```bash
+pnpm --filter @dohc/desktop test
+pnpm --filter @dohc/workspace-engine-client test
+pnpm --filter @dohc/sync-relay test
+pnpm test:desktop:e2e
+```
 
-- Security/authz gate tests are structural — do not weaken them.
-- When renaming a runtime namespace (CSS class, plugin key, MIME type,
-  postMessage type), update the source and its test assertions in the
-  same change so senders, receivers, and tests stay in lockstep.
+The Electron E2E suite requires a debug workspace-engine binary. Build it with:
+
+```bash
+cargo build -p dohc-workspace-engine --bin dohc-workspace-engine
+```
+
+## Rules
+
+- Keep authorization and workspace-isolation tests strict.
+- Test behavior at the boundary that owns it.
+- Do not replace engine or relay integration coverage with mocked success.
+- Update sender, receiver, schema, and tests together when a wire contract
+  changes.
+- Add a regression test for every fixed data-loss, isolation, or stale-response
+  defect.

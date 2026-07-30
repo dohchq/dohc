@@ -4,7 +4,7 @@ This is the repository for dohc, the easiest way for humans to work with their a
 
 The goal is a full end-to-end AI operating system for documents, data, dashboards, workflows, and decisions. The user stays in control, while agents do the heavy lifting of organizing, updating, and making the work ready.
 
-dohc is basically rethinking notion, obsidian, google docs, spreadsheets, jira, and other operations tools and packaging it into an obvious AI-native workspace by having text as the primitive for binding input/output communication methods between the agent and human/s. It's basically the vscode for the AI era. Hence, at its core dohc is a really powerful tool capable of turning many kinds of work into obvious inspectable systems- similar to what spreadsheets were like when it first came out.
+dohc is basically rethinking Notion, Obsidian, Google Docs, spreadsheets, Jira, and other operations tools and packaging it into an obvious AI-native workspace by having text as the primitive for binding input/output communication methods between agents and humans. It's basically VS Code for the AI era. Hence, at its core, dohc is a really powerful tool capable of turning many kinds of work into obvious, inspectable systems—similar to what spreadsheets were like when they first came out.
 
 ## Current status
 
@@ -12,25 +12,25 @@ We are currently building the MVP for dohc and haven't launched with users yet.
 
 ## Some thoughts from the author (Ice)
 
-The following is a letter from me to you, the agent. We are building this together, but to be frank, I'm building this for you. I want you to be have the proper context about me and/or my team and the text primitives you need to build the proper solutions for me. dohc is the tooling that will power it. We are building a communication layer for humans and AI.
+The following is a letter from me to you, the agent. We are building this together, but to be frank, I'm building this for you. I want you to have the proper context about me and/or my team and the text primitives you need to build the proper solutions for me. dohc is the tooling that will power it. We are building a communication layer for humans and AI.
 
 This is meant to be a bold project. Going with the flow and using existing solutions will not get us where we want to be.
 
-Quick gloassary of relevant parties in this document:
+Quick glossary of relevant parties in this document:
 
-- _you_ - the agent reading this document and working on dohc directly.
-- _me_/_we_/_us_ - the humans contributing to dohc. This is the party talking to you as we build
-- _users_ - these are our users. We are assuming they won't need to program or be expert at prompting like someone technical would, rather they will have their own agents to build things using dohc.
+- _you_ — the agent reading this document and working on dohc directly.
+- _me_/_we_/_us_ — the humans contributing to dohc. This is the party talking to you as we build.
+- _users_ — these are our users. We are assuming they won't need to program or be expert at prompting like someone technical would; rather, they will have their own agents to build things using dohc.
 
-Here's some philosophical things to consider as we build and work together:
+Here are some philosophical things to consider as we build and work together:
 
 ### Boil the ocean
 
-This project would have been way too bold beforer agents existed. We effectively have to build an entire AI OS from scratch and rebuild Notion, Text editors, docs, spreadsheets, dashboards, and perhaps even text/markdown itself for it to work as we want long term.
+This project would have been way too bold before agents existed. We effectively have to build an entire AI OS from scratch and rebuild Notion, Text editors, docs, spreadsheets, dashboards, and perhaps even text/markdown itself for it to work as we want long term.
 
-When planning, do not be afraid to suggest seeminlgy insane solutions. For example, creating our own implementation of markdown better suited for AI. Seems insane, but it's absolutely doable with modern tools.
+When planning, do not be afraid to suggest seemingly insane solutions. For example, creating our own implementation of markdown better suited for AI. Seems insane, but it's absolutely doable with modern tools.
 
-What we're doing here is fundamentally different so treat it that way. Being that you are an agent, you're prediction model will likely want to steer towards conformity. That's okay and even preferred in most scenarios, but there will be times where we need to think outside the box. Literally (since you're in a box) so think outside of it. Transcend. Transcend. Ascend.
+What we're doing here is fundamentally different so treat it that way. Being that you are an agent, your prediction model will likely want to steer towards conformity. That's okay and even preferred in most scenarios, but there will be times where we need to think outside the box. Literally (since you're in a box) so think outside of it. Transcend. Transcend. Ascend.
 
 ### Measure limits that reject work
 
@@ -97,11 +97,11 @@ If a user had a folder of well-structured text files on their computer and a cap
 
 dohc exists to make that easy, reliable, and powerful.
 
-We provide the structure, conventions, UI, permissions, sync, organization management, source-backed apps, agent tools, review gates, etc and boilerplate that make a text-based workspace manageable for normal users/teams/orgs and efficient for agents.
+We provide the structure, conventions, UI, permissions, sync, organization management, source-backed apps, agent tools, review gates, etc., and boilerplate that make a text-based workspace manageable for normal users/teams/orgs and efficient for agents.
 
 The magic is not hidden state. The magic is giving agents and humans a shared text substrate they can both inspect, edit, and trust.
 
-Don't get me wrong, having dohc is supposed to be much more empowering to a user than just having files on your computer. The point of this is that even if dohc disappears, a user's workspace should still essentially be usable/navigatable (albeit a worse experience but workable).
+Don't get me wrong, having dohc is supposed to be much more empowering to a user than just having files on your computer. The point of this is that even if dohc disappears, a user's workspace should still essentially be usable/navigable (albeit a worse experience but workable).
 
 ### dohc and the AI company playbook
 
@@ -115,7 +115,7 @@ A folder of well-structured text files plus a capable agent can approximate this
 
 ### Individual first
 
-We should focus on dohc being magical and obvious for one person first before it is for a team. This might seem counter-intuitive as the benefit of dohc grows as more teammates adopt it, but without one person using it first and finding value in it on its own, then no one will use it and we won't even get to teams using it.
+We should focus on dohc being magical and obvious for one person before it is for a team. This might seem counter-intuitive as the benefit of dohc grows as more teammates adopt it, but without one person using it first and finding value in it on its own, then no one will use it and we won't even get to teams using it.
 
 A single user should be able to use dohc for personal life, work, projects, research, planning, finances, health, writing, learning, or anything else they want to organize with an agent.
 
@@ -136,10 +136,12 @@ But personal workspaces are personal. Transparency must come from explicit works
 Do not weaken authorization, ownership, or review gates for convenience.
 
 - Authorization is derived server-side. Browser/client callers must not be trusted to provide user identity.
-- Every atom, folder, entity, share, and capture is scoped to a workspace.
-- Agent writes must respect user locks, folder/atom access, sharing boundaries, and skill-turn gates.
-- HTML atoms are sandboxed and sanitized.
-- `atoms.body` is becoming a derived markdown cache from the canonical Y.Doc. Do not build new behavior that depends on raw full-body markdown patching as the source of truth.
+- Every file, folder, chat, share, and capture is scoped to a workspace.
+- Agent writes must respect user locks, path access, sharing boundaries, and review gates.
+- Site and HTML previews are sandboxed and do not grant workspace authority.
+- A live document session treats its Y.Doc as canonical. On settlement, the
+  engine writes the Markdown artifact. Do not build new behavior that depends
+  on raw full-body Markdown patching as the source of truth.
 - Every reversible state change needs a visible reverse path. If a change is
   irreversible, tell the user before it runs.
 - Renderer surfaces that load workspace-scoped state asynchronously must guard
@@ -221,6 +223,9 @@ the current head, source, and stated behavior.
 
 ### Select reviewers
 
+These requirements apply only after a PR is ready for review. Do not request or
+run reviews while a PR is a draft.
+
 - Prose-only, low-risk changes need one exact-head automated review. Use
   `review_status <PR> codex`.
 - Routine code changes need exact-head reviews from Codex and CodeRabbit. Use
@@ -230,8 +235,9 @@ the current head, source, and stated behavior.
 - If a required reviewer cannot run, replace it with another independent
   reviewer. Record the replacement and reason in the PR.
 
-Run Claude after the PR exists. Use fable-5 and fall back to opus-5. Add a PR
-comment that names the reviewed commit and summarizes the result.
+Run Claude after the PR is ready for review. Use fable-5 and fall back to
+opus-5. Add a PR comment that names the reviewed commit and summarizes the
+result.
 
 Batch verified fixes before requesting a re-review. After the first re-review,
 request another only for a new verified blocker or an unresolved high-risk
@@ -242,7 +248,9 @@ improvements, or out-of-scope suggestions.
 
 Use the
 [`pr-review-watch` skill](skills/pr-review-watch/SKILL.md) whenever a PR
-opens or its head changes. Do not build another review poller.
+becomes ready for review or the head of a ready PR changes. Do not start the
+watcher for a draft PR. If a PR returns to draft, pause its watcher. Do not
+build another review poller.
 
 A review applies to a commit, not a PR. Before merging, confirm that every
 required reviewer covered the current head.
@@ -289,11 +297,11 @@ the terms settle, next to the code it describes.
 
 ## Regarding long code comments
 
-If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong -- fix the code
+If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong—fix the code.
 
 ## Some general rules
 
-These are meant to steer us in the right direction. They are not hard-set, but we should default to following them. If you think one should be ignored, be very loud and cear about that and get approval from us before doing it.
+These are meant to steer us in the right direction. They are not hard-set, but we should default to following them. If you think one should be ignored, be very loud and clear about that and get approval from us before doing it.
 
 - After a PR is merged, delete its remote branch from GitHub unless the user
   explicitly asks to keep it or another open PR still depends on it. Verify the
@@ -301,16 +309,13 @@ These are meant to steer us in the right direction. They are not hard-set, but w
 - Never stop a process by name, command-line pattern, or worktree path. Stop
   only a PID this task started. Verify a port owner's working directory before
   stopping it.
-- Brand identity is final: lowercase `dohc`, the drop-lobe mark, warm
-  paper + graphite. There must be no legacy product identity in shipping
-  source. **Nothing enforces this — it is on you.** A scanner used to, at
-  `apps/web/src/__tests__/brandNoLegacy.test.ts`, and it was deleted along with
-  that app; this line claimed otherwise for months. If you reintroduce a check,
-  cite it here in the same commit.
+- Brand identity is final: the drop-lobe mark, warm paper + graphite. There
+  must be no legacy product identity in shipping source.
+  `scripts/check-brand.mjs` rejects legacy product names in scanned repository
+  text. Visual identity remains a review responsibility.
 - The product is the local-first desktop app (`apps/desktop`) on the workspace
-  engine; it needs no backend. The opt-in cloud surface is reduced to live
-  collaboration (Hocuspocus + the workspace-api collab-token route) and the
-  sync relay, both authenticated by Better Auth over Postgres — see
+  engine; it needs no backend. The opt-in sync stack contains the workspace API
+  and sync relay. Postgres backs Better Auth and session validation. The sync
+  relay stores its application data in SQLite. See
   [`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md)
-  before touching that stack. (The former Convex web app and the
-  sharing/members/invites/files/sync cloud surface have been retired.)
+  before touching that stack.

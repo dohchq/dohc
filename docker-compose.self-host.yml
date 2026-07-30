@@ -19,7 +19,7 @@ services:
 
   # Schema bootstrap: a one-shot init container that applies every Postgres
   # migration (idempotently) BEFORE the auth stack starts — notably
-  # 0002_better_auth, the Better Auth user/session/deviceCode schema that
+  # the Better Auth user/session/deviceCode schema that
   # workspace-api and sync-relay query. Without this, a fresh Postgres would
   # start the auth services against tables that do not exist yet. It exits 0 on
   # success; workspace-api and sync-relay gate on that completion.
@@ -40,10 +40,9 @@ services:
     volumes:
       - .:/workspace
 
-  # The auth surface: Better Auth on /api/auth (the desktop device sign-in flow
-  # that mints the bearer tokens the sync-relay validates). Live co-editing was
-  # retired with Hocuspocus (G2-C-3) and is now engine-native over the relay, so
-  # this service owns no application routes.
+  # Better Auth on /api/auth supports desktop device sign-in and mints the
+  # bearer tokens that the sync relay validates. This service owns no
+  # application routes.
   workspace-api:
     image: node:22-bookworm-slim
     working_dir: /workspace
@@ -94,40 +93,6 @@ services:
       - .:/workspace
       - dohc_self_host_sync_relay:/data
 
-  sqlite-worker:
-    image: node:22-bookworm-slim
-    working_dir: /workspace
-    environment:
-      SQLITE_WORKER_ALLOW_INSECURE_LOCAL: ${SQLITE_WORKER_ALLOW_INSECURE_LOCAL:-0}
-      SQLITE_WORKER_PORT: "1787"
-      SQLITE_WORKER_TOKEN: ${SQLITE_WORKER_TOKEN}
-    command: >
-      sh -lc "corepack enable &&
-      corepack prepare pnpm@10.24.0 --activate &&
-      pnpm install --frozen-lockfile &&
-      pnpm --filter @dohc/sqlite-worker dev"
-    ports:
-      - "${SQLITE_WORKER_BIND:-127.0.0.1}:${SQLITE_WORKER_PORT:-1787}:1787"
-    volumes:
-      - .:/workspace
-
-  agent-sandbox:
-    image: node:22-bookworm-slim
-    working_dir: /workspace
-    environment:
-      AGENT_SANDBOX_ROOT: /tmp/dohc-agent-sandbox
-      SANDBOX_SAFE_PATH: /usr/local/bin:/usr/bin:/bin
-    command: >
-      sh -lc "corepack enable &&
-      corepack prepare pnpm@10.24.0 --activate &&
-      pnpm install --frozen-lockfile &&
-      pnpm --filter @dohc/agent-sandbox typecheck &&
-      sleep infinity"
-    volumes:
-      - .:/workspace
-      - dohc_self_host_agent_sandbox:/tmp/dohc-agent-sandbox
-
 volumes:
   dohc_self_host_postgres:
   dohc_self_host_sync_relay:
-  dohc_self_host_agent_sandbox:

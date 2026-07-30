@@ -15,7 +15,7 @@ const workspaceQuotaBytes =
   process.env.SYNC_RELAY_WORKSPACE_QUOTA_BYTES === undefined
     ? DEFAULT_WORKSPACE_QUOTA_BYTES
     : Number(process.env.SYNC_RELAY_WORKSPACE_QUOTA_BYTES);
-const defaultPostgresUrl = "postgres://dohc:dohc@localhost:54329/dohc_v2";
+const defaultPostgresUrl = "postgres://dohc:dohc@localhost:54329/dohc";
 const secret = process.env.BETTER_AUTH_SECRET ?? "";
 const nodeEnv = process.env.NODE_ENV;
 const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";

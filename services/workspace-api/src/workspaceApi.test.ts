@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createWorkspaceApiHandler } from "./server";
 
-// The reduced service exposes NO application routes: it is the Better Auth
-// server only (mounted in main.ts on /api/auth/*). The collab-token endpoint
-// was retired with Hocuspocus (G2-C-3). This handler is the catch-all that
-// 404s everything that is not an auth/health/test route in main.ts.
+// The service exposes no application routes. It serves Better Auth from
+// /api/auth/*; this catch-all returns 404 for every other route.
 
 async function json(response: Response) {
   return (await response.json()) as { ok: boolean; error?: string };

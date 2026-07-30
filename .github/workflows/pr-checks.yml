@@ -135,7 +135,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     # packages/workspace-auth exercises Better Auth against a REAL Postgres: it
-    # applies the actual 0002_better_auth.sql migration and drives session and
+    # applies the actual 0001_better_auth.sql migration and drives session and
     # authorization behaviour through it. Its suite self-skips when no database
     # is reachable, which is right for local dev and WRONG for CI -- a Postgres
     # that failed to start would silently skip the collab surface's
@@ -147,11 +147,11 @@ jobs:
         env:
           POSTGRES_USER: dohc
           POSTGRES_PASSWORD: dohc
-          POSTGRES_DB: dohc_v2
+          POSTGRES_DB: dohc
         ports:
           - 54329:5432
         options: >-
-          --health-cmd "pg_isready -U dohc -d dohc_v2"
+          --health-cmd "pg_isready -U dohc -d dohc"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20

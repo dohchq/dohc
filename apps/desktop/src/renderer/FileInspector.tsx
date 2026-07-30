@@ -49,8 +49,8 @@ import {
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
 // The engine Y.Doc frontmatter map field name — the same key PageIdentity and
-// PropertiesPanel write title/icon/properties into (v2 schema). Read directly
-// here so engine-mode export/copy reflects live frontmatter edits.
+// PropertiesPanel use for title, icon, and properties. Read it directly so
+// engine-mode export/copy reflects live frontmatter edits.
 const ENGINE_FRONTMATTER_FIELD = "frontmatter";
 
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
@@ -793,9 +793,9 @@ function MarkdownView(props: {
     : undefined;
 
   // WS-G2-C-2: a rich (markdown) file on an engine-flagged workspace binds
-  // Tiptap to the engine-native Y.Doc (recordUpdate + debounced settle),
-  // replacing the old HocuspocusProvider path — solo runs entirely on the
-  // engine with no relay, and a shared workspace co-edits through the same
+  // Tiptap to the engine-native Y.Doc (recordUpdate + debounced settle). Solo
+  // runs entirely on the engine with no relay, and a shared workspace co-edits
+  // through the same
   // ydoc.update replication. available:false (unflagged workspace, secret path,
   // missing file, already live) keeps the plain local autosave editor.
   const engine = useEngineDoc({
@@ -1169,7 +1169,7 @@ function MarkdownView(props: {
   // There is no read/source/Edit gate here — the CRDT is canonical the whole
   // time the doc is open — but a settle indicator keeps the editing feel
   // unchanged, and undo/redo stays intact through the Collaboration extension's
-  // Yjs UndoManager. This replaces the old HocuspocusProvider collab branch.
+  // Yjs UndoManager.
   // "Source" flips to a read-only projection of the Y.Doc's markdown — a VIEW,
   // never a second editing surface (see the showSource comment above).
   if (engine.available && engine.doc) {

@@ -3,10 +3,8 @@
 // The live engine Y.Doc lives in MAIN (the engine driver is node-only). The
 // renderer's Tiptap editor binds to a MIRROR Y.Doc that this provider keeps
 // convergent with the main session over a transport (IPC in production, a mock
-// in tests). This is the drop-in replacement for HocuspocusProvider in the
-// editor's collab binding — it exposes a Y.Doc the Collaboration extension
-// binds to via its "body" XmlFragment, exactly like the Hocuspocus path, but
-// with no websocket, no token, and no server: solo editing runs purely on the
+// in tests). It exposes a Y.Doc that the Collaboration extension binds to via
+// its "body" XmlFragment. Solo editing runs purely on the
 // engine, and co-editing rides the same channel because main forwards remote
 // ydoc.update deltas through onRemoteUpdate.
 //

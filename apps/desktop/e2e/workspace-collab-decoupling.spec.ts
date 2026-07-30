@@ -13,10 +13,9 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-G2-C-2 / G2-C-3 pinning E2E: the desktop editor is DECOUPLED from
-// Hocuspocus — Hocuspocus (and its collab-token IPC) no longer exist at all
-// (G2-C-3 deleted them). An engine-flagged personal/local workspace edits a
-// rich doc THROUGH the engine Y.Doc provider (recordUpdate + debounced settle)
+// The desktop editor does not need a collaboration server. An engine-flagged
+// personal workspace edits a rich doc through the engine Y.Doc provider
+// (recordUpdate + debounced settle)
 // with no relay — the editor loads, editing lands on the .md and in engine.db
 // as ydoc.update ops, with ZERO collab-server involvement: no WebSocket is ever
 // opened for the whole session. The engine.db SQLite readers
@@ -24,7 +23,7 @@ import {
 // workspace-engine-editor.spec via ./helpers/engineDb — one source of truth for
 // the load-bearing "no double-journal" scaffolding.
 
-test("engine-flagged local workspace edits a rich doc through the engine provider — no Hocuspocus, editing lands", async () => {
+test("engine-flagged local workspace edits a rich doc through the engine provider without a collaboration server", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const sentinel = "Typed with no collab server anywhere.";
@@ -41,7 +40,7 @@ test("engine-flagged local workspace edits a rich doc through the engine provide
     const { page } = desktop;
 
     // Record every WebSocket the renderer opens for the whole session. Solo
-    // rich-doc editing must never open one (Hocuspocus is WebSocket-only).
+    // rich-doc editing must never open one.
     const webSockets: string[] = [];
     page.on("websocket", (ws) => {
       webSockets.push(ws.url());
@@ -105,9 +104,7 @@ test("engine-flagged local workspace edits a rich doc through the engine provide
       )
       .toBeGreaterThan(0);
 
-    // The explicit decoupling pin: there is no collab server and no collab-token
-    // IPC anymore (G2-C-3 deleted them), so the editor can only be engine-native
-    // — and no WebSocket was ever opened for the whole editing session.
+    // The editor is engine-native and opens no WebSocket during the session.
     expect(webSockets).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

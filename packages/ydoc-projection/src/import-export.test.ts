@@ -52,7 +52,7 @@ function expectStableMarkdownRoundTrip(
   return once
 }
 
-describe('hocuspocus markdown import/export', () => {
+describe('Y.Doc markdown import/export', () => {
   it('keeps malformed frontmatter visible instead of dropping it', () => {
     const input = [
       '---',

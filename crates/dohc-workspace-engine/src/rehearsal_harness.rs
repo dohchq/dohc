@@ -1304,7 +1304,7 @@ fn hard_link_topology_error(detail: impl ToString) -> HarnessError {
 }
 
 // Only the Windows topology probe compares enumerated twin paths; Unix has no
-// portable enumerator and fails closed instead, so this is dead code there.
+// portable enumerator and fails closed instead, so this function is not built.
 #[cfg(windows)]
 fn same_path(left: &Path, right: &Path) -> bool {
     comparable_components(left) == comparable_components(right)

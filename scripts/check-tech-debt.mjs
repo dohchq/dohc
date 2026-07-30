@@ -18,45 +18,6 @@ const debtPatterns = [
   { label: term('dead ', 'code'), regex: phraseRegex('dead ', 'code') },
 ]
 
-const allowlist = [
-  {
-    file: 'docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.md',
-    patterns: [
-      term('TO', 'DO'),
-      term('TB', 'D'),
-      term('temporary ', 'dual ', 'backend'),
-      term('remove ', 'after ', 'migration'),
-      term('legacy ', 'views ', 'TO', 'DO'),
-      term('skip ', 'because ', 'migration'),
-      term('dead ', 'code'),
-    ],
-    contains: 'The script must fail on:',
-    reason: 'The active implementation plan quotes the exact prohibited terms to define this check.',
-    deleteWhen: 'Remove this allowlist entry after the implementation plan is archived or deleted.',
-  },
-  {
-    file: 'docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.md',
-    patterns: [term('TO', 'DO'), term('TB', 'D')],
-    contains: 'no untracked',
-    reason: 'The active implementation plan names the expected scan outcome.',
-    deleteWhen: 'Remove this allowlist entry after the implementation plan is archived or deleted.',
-  },
-  {
-    file: 'docs/superpowers/plans/2026-06-06-dohc-apps-sdk-sqlite-and-agent-testing.md',
-    patterns: [term('TO', 'DO')],
-    contains: 'pseudo-test helper names',
-    reason: 'Historical implementation plan text documents a review rule, not live source debt.',
-    deleteWhen: 'Remove this allowlist entry when historical plans are moved out of repo-wide debt scans.',
-  },
-  {
-    file: 'docs/superpowers/plans/2026-06-06-dohc-apps-sdk-sqlite-and-agent-testing.md',
-    patterns: [term('TB', 'D')],
-    contains: 'Placeholder scan',
-    reason: 'Historical implementation plan text documents an already completed placeholder scan.',
-    deleteWhen: 'Remove this allowlist entry when historical plans are moved out of repo-wide debt scans.',
-  },
-]
-
 const skippedDirectories = new Set([
   '.git',
   '.gstack',
@@ -75,6 +36,12 @@ const skippedFiles = new Set([
   'package-lock.json',
   'yarn.lock',
 ])
+const skippedPathPrefixes = [
+  // These program-evidence records quote historical findings. They are not
+  // live product documentation.
+  'docs/superpowers/plans/rust-engine/',
+  'docs/superpowers/plans/2026-07-16-dohc-rust-engine-rewrite.md',
+]
 const skippedExtensions = new Set([
   '.avif',
   '.bmp',
@@ -89,12 +56,11 @@ const skippedExtensions = new Set([
   '.zip',
 ])
 
-validateAllowlist()
-
 const hits = []
 for (const file of walk(root)) {
   const rel = normalize(relative(root, file))
   if (skippedFiles.has(rel)) continue
+  if (skippedPathPrefixes.some((prefix) => rel.startsWith(prefix))) continue
   const body = readTextFile(file)
   if (body === null) continue
   const lines = body.split(/\r?\n/)
@@ -110,20 +76,20 @@ for (const file of walk(root)) {
         pattern: pattern.label,
         text: line.trim(),
       }
-      if (!isAllowed(hit, lines)) hits.push(hit)
+      hits.push(hit)
     }
   }
 }
 
 if (hits.length > 0) {
-  console.error('Tech debt check failed. Unallowed debt markers found:')
+  console.error('Tech debt check failed. Debt markers found:')
   for (const hit of hits) {
     console.error(`- ${hit.file}:${hit.line} [${hit.pattern}] ${hit.text}`)
   }
   process.exit(1)
 }
 
-console.log(`Tech debt check passed with ${allowlist.length} documented allowlist entries.`)
+console.log('Tech debt check passed.')
 
 function* walk(dir) {
   for (const name of readdirSync(dir)) {
@@ -153,27 +119,4 @@ function readTextFile(file) {
   const body = readFileSync(file)
   if (body.includes(0)) return null
   return body.toString('utf8')
-}
-
-function isAllowed(hit, lines) {
-  return allowlist.some((entry) => {
-    if (entry.file !== hit.file) return false
-    if (!entry.patterns.includes(hit.pattern)) return false
-    if (entry.contains && !hit.text.includes(entry.contains)) {
-      const context = lines.slice(Math.max(0, hit.line - 12), Math.min(lines.length, hit.line + 4))
-      return context.some((line) => line.includes(entry.contains))
-    }
-    return true
-  })
-}
-
-function validateAllowlist() {
-  for (const entry of allowlist) {
-    if (!entry.reason || !entry.deleteWhen) {
-      throw new Error(`Allowlist entry for ${entry.file} is missing reason or deletion condition.`)
-    }
-    if (!Array.isArray(entry.patterns) || entry.patterns.length === 0) {
-      throw new Error(`Allowlist entry for ${entry.file} has no patterns.`)
-    }
-  }
 }

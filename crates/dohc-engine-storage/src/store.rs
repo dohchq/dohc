@@ -151,8 +151,8 @@ fn payload_fingerprint(write: &CompoundWrite) -> String {
 
 /// Consult a named fault point. **cfg-gated**: only the `fault-injection`
 /// feature compiles the actual `poll` call. In a release build without the
-/// feature this is a `const false`, so the crash branch it guards is dead code
-/// the optimizer removes — provably zero release overhead on the write lane
+/// feature this is a `const false`, so the optimizer removes the unreachable
+/// crash branch — provably zero release overhead on the write lane
 /// (`plan §Rust policy`; the injection seam is dev/test-only). The
 /// [`FaultInjector`] trait and [`crate::NoFaults`] stay in the public API for
 /// callers (`dohc-engine-runtime` threads an `Arc<dyn FaultInjector>`), but

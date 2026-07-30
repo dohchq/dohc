@@ -1,75 +1,87 @@
 # dohc
 
-The quiet AI workspace for documents and real work — where work becomes
-clear, traceable, and ready. Spoken "dock"; always written lowercase.
+dohc is a local-first workspace where you and your agents build documents,
+data, dashboards, and workflows from files you control.
 
-## Layout
+A workspace is an ordinary folder. The Rust workspace engine records versions,
+moments, chats, search state, and sync data in `.dohc/engine/engine.db`.
+
+## Repository layout
 
 ```text
-apps/desktop          Electron desktop app (the product; local-first)
-packages              workspace engine, contracts, core/fs/history/sync,
-                      workspace-auth, workspace-postgres (schema migrations),
-                      ydoc-projection, MCP server, SDK, brand, performance
-services              workspace API (auth), sync relay (engine-native
-                      co-editing), SQLite worker, agent sandbox
-crates                Rust workspace kernel (supervised sidecar)
-docs                  product, brand, development, qa, security
+apps/desktop          Electron desktop app
+apps/site             marketing site and interactive product demo
+crates                Rust workspace engine and supporting crates
+packages              shared TypeScript contracts, clients, tools, and UI code
+services              opt-in auth, sync relay, and local SQLite tooling
+docs                  current product, architecture, security, and development docs
+tools                  repository gates and Rust engine evidence tools
 ```
 
-## Quick start
+## Local development
+
+Install the JavaScript dependencies and build the development engine once:
 
 ```bash
 pnpm install
-pnpm dev:desktop     # run the desktop app
+cargo build -p dohc-workspace-engine --bin dohc-workspace-engine
+pnpm dev:desktop
 ```
 
-The desktop app is local-first: workspaces are folders on disk, and the
-workspace engine (per-workspace SQLite under `.dohc/engine/`) records
-history, versions, chats, and search with no backend.
+The desktop app does not need a server or environment file.
 
-## Cloud stack (opt-in)
+## Opt-in sync services
 
-The engine is the default: the desktop app needs no backend. The opt-in cloud
-stack is now a reduced surface — the **sync relay** (engine-native co-editing +
-blob transport) and an **auth** server, both authenticated by Better Auth over
-Postgres (Postgres survives for the auth user/session tables). Co-editing is
-engine-native over the relay — Hocuspocus was retired at a clean cutover
-(G2-C-3). The former sharing/members/invites/files/sync web surface has been
-retired. See
-[`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md) and
-[`docs/self-hosting.md`](docs/self-hosting.md).
+Multi-device sync, sharing, presence, and co-editing use two services:
+
+- `services/workspace-api` provides Better Auth.
+- `services/sync-relay` carries engine operations, blobs, shares, and presence.
+
+Postgres stores Better Auth data. The relay stores its own data in SQLite.
+
+Start Postgres. After it is ready, run the migrations:
 
 ```bash
-pnpm dev:postgres        # local Postgres + MinIO
-pnpm dev:workspace-api   # workspace API (auth)
-pnpm check:self-host     # validate the self-host compose/service matrix
-pnpm reset:postgres      # reset local Postgres dev data
+pnpm dev:postgres
+pnpm migrate
 ```
 
-## Commands
+In both service terminals, set `NODE_ENV=development` and the same
+`BETTER_AUTH_SECRET` of at least 32 characters. Then start the workspace API in
+one terminal:
 
 ```bash
-pnpm typecheck          # tsc --noEmit across workspaces
-pnpm test               # vitest across workspaces
-pnpm build              # build all packages/apps
-pnpm test:desktop:e2e   # desktop Playwright suite (builds first)
+pnpm dev:workspace-api
 ```
 
-## Docs
+Start the sync relay in another terminal:
 
-- Product: [`docs/product/manifesto.md`](docs/product/manifesto.md),
-  [`docs/product/spec.md`](docs/product/spec.md),
-  [`docs/product/ai-native-positioning.md`](docs/product/ai-native-positioning.md)
-- Brand: [`docs/brand/design-system.md`](docs/brand/design-system.md)
-- Development: [`docs/development/local-dev.md`](docs/development/local-dev.md),
-  [`testing.md`](docs/development/testing.md)
-- QA: [`docs/qa/playwright-checklist.md`](docs/qa/playwright-checklist.md)
-- Security: [`docs/security/authz-boundaries.md`](docs/security/authz-boundaries.md)
-- Architecture: [`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md),
-  [`docs/architecture/local-files-and-cloud-sandbox.md`](docs/architecture/local-files-and-cloud-sandbox.md)
+```bash
+pnpm --filter @dohc/sync-relay dev
+```
+
+See [backend modes](docs/architecture/backend-modes.md) and
+[self-hosting](docs/self-hosting.md).
+
+## Checks
+
+```bash
+pnpm typecheck
+pnpm test
+pnpm check:debt
+node tools/rust-engine-program/run-rust-checks.mjs
+```
+
+The Rust gate prints its own verdict. Read the `== summary ==` block instead
+of relying on the process exit code.
+
+## Documentation
+
+Start with [the docs index](docs/README.md). Product direction lives in
+[the manifesto](docs/product/manifesto.md), and current behavior lives in
+[the product spec](docs/product/spec.md).
 
 ## Stack
 
-Electron, React 19, Vite, Tailwind CSS v4, Tiptap, SQLite (`node:sqlite`),
-Rust (workspace kernel), Yjs (engine-native co-editing), Better Auth on
-Postgres (cloud auth), Vitest, Playwright.
+Electron, React, Vite, Tailwind CSS, Tiptap, Yjs, Rust, SQLite, Better Auth,
+Postgres, Vitest, and Playwright.

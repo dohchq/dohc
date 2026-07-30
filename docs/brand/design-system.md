@@ -10,8 +10,6 @@ words inside them in `docs/brand/copy.md`. This is the working summary.
 
 ## Identity
 
-- **Name:** always lowercase `dohc` in UI, docs, and package labels
-  (spoken "dock"). Never DOHC/Dohc in the wordmark.
 - **Mark:** the drop-lobe — a single stroked lobe contour with a central
   datum dot. SVG only, `currentColor` for both stroke and dot, no
   gradient, no shadow, no automotive badge. Source of truth:

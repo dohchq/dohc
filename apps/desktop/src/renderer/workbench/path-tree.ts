@@ -1,6 +1,5 @@
-// Path-tree model for the desktop explorer. Copied + slimmed from the old
-// web app's path-tree lib (apps/web/src/lib/path-tree.ts) — the desktop never
-// imports across apps. The workspace is path-addressed (flat relative paths);
+// Path-tree model for the desktop explorer. The workspace is path-addressed
+// with flat relative paths;
 // the explorer reads as a real recursive tree — buildTree bridges the two.
 // Slimmed: rows are the desktop's WorkspaceFileEntry shape ({path, kind}),
 // folders are plain path strings (pins/cosmetics live in ui-state, not here),
