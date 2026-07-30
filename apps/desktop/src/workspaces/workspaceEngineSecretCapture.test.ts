@@ -57,16 +57,27 @@ async function readText(root: string, path: string): Promise<string | null> {
   }
 }
 
-// Deterministic clocks shared by both injected stores so interleave windows
-// in listMoments are stable under test.
+// Deterministic COLLIDING clock shared by both injected stores. The daemon
+// stamps one wall time per reconcile pass, so TIED timestamps are the normal
+// regime, not an edge case. A strictly increasing counter makes every
+// timestamp distinct, which leaves the half-open interleave window in
+// listMoments ([lowerMs, upperMs)) untested: invert either of its comparisons
+// and the interleave test below still passes.
+// Each logical write reads the clock exactly once, so holding one value for
+// two reads ties every secret moment to an adjacent text moment — including
+// one on a page seam, which is the only place the two comparisons differ.
+const READS_PER_CLOCK_TICK = 2;
+
 function stores(root: string): {
   store: VersionedTextStore;
   secretStore: SecretFileStore;
   tick: () => number;
 } {
   let now = 1_000_000;
+  let reads = 0;
   const tick = () => {
-    now += 10;
+    if (reads % READS_PER_CLOCK_TICK === 0) now += 10;
+    reads += 1;
     return now;
   };
   return {
@@ -337,6 +348,7 @@ describe("secret capture through the desktop pipeline", () => {
 
     // Page through with a small limit and collect every moment id.
     const seen: string[] = [];
+    const seamMs: number[] = [];
     let cursor: number | undefined;
     for (let guard = 0; guard < 10; guard += 1) {
       const page = await engine.listMoments({
@@ -345,6 +357,11 @@ describe("secret capture through the desktop pipeline", () => {
       });
       seen.push(...page.moments.map((moment) => moment.id));
       if (page.nextBeforeMomentOrder === null) break;
+      // A page's oldest TEXT moment is its own inclusive lower bound and the
+      // next page's exclusive upper bound: the seam between two windows.
+      const textOnPage = page.moments.filter((moment) => !moment.protected);
+      const oldestText = textOnPage[textOnPage.length - 1];
+      if (oldestText) seamMs.push(oldestText.recordedAtMs);
       cursor = page.nextBeforeMomentOrder;
     }
     // No duplicates across pages.
@@ -355,6 +372,15 @@ describe("secret capture through the desktop pipeline", () => {
       .filter((moment) => moment.protected)
       .map((moment) => moment.id);
     expect(protectedIds).toHaveLength(3);
+    // A protected moment sits ON a seam, so the assertions below exercise both
+    // window comparisons: `> lowerMs` would drop it from every page and
+    // `<= upperMs` would put it on two. Without this tie the checks are blind
+    // to either inversion, so guard the tie rather than trust the clock.
+    expect(
+      all.moments.filter(
+        (moment) => moment.protected && seamMs.includes(moment.recordedAtMs),
+      ).length,
+    ).toBeGreaterThan(0);
     for (const id of protectedIds) {
       expect(seen.filter((seenId) => seenId === id)).toHaveLength(1);
     }
