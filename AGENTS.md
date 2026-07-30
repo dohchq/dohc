@@ -35,12 +35,15 @@ What we're doing here is fundamentally different so treat it that way. Being tha
 ### Justify operational limits
 
 Classify a limit by what happens when code reaches it, not by its name.
+These categories guide the justification. They are not names to copy into
+code; use the existing term on that surface.
 
 A defect tripwire rejects work outside supported healthy behavior. Before
 adding one, measure a representative workload. Set the tripwire beyond the
-measured healthy behavior. Record the measurement in a focused test, benchmark,
-or decision document that names the limit. If healthy behavior reaches the
-tripwire, measure again. Then revisit the limit.
+measured healthy behavior with a recorded safety margin. Record the measurement
+and margin in a focused test, benchmark, or decision document that names the
+limit. If healthy behavior reaches the tripwire, measure again. Then revisit
+the limit.
 
 A backpressure or load-shedding limit rejects work temporarily when a finite
 resource is saturated. Set it from measured capacity and latency targets. Give
@@ -51,12 +54,15 @@ and healthy work can cross it.
 
 Protocol versions and fixed schema values are contract values, not workload
 limits. Justify them with a compatibility or interoperability requirement.
+If none of these categories fits, stop and make the contract explicit before
+changing the limit.
 
 ### Show agents the limits they hit
 
 This section governs developer- and agent-facing failures, including build,
-check, daemon, and API errors. For any error a user reads, also follow
-[`docs/brand/copy.md`](docs/brand/copy.md).
+check, daemon, and API errors. For any error a user reads,
+[`docs/brand/copy.md`](docs/brand/copy.md) controls the visible wording. Keep
+the constraint, limit, unit, and usage in the structured error fields.
 
 Developers will not always read the code. Their agents will read the errors. An
 agent can fix `richdoc node count: limit 128 nodes, requested 129 nodes`; it
@@ -93,7 +99,8 @@ PR or a decision document. Do not hide them in patches or follow-up work.
 When one of us prompts you, never hesitate to push back and suggest ways we
 could make things more obvious. An obvious solution can have more parts. Obvious
 solutions are the defaults that agents and the next reader expect. The next
-reader decides whether a design is obvious.
+reader decides whether a design is obvious. Do not declare your own design
+obvious. Ask another reader when uncertain.
 
 ### Don't be afraid to lie (to agents) if it makes working easier
 
@@ -187,16 +194,24 @@ older unconditional local-gate reminder. A manual `workflow_dispatch` still
 runs all gates by design.
 
 - If `rust` matches, run the canonical Rust gate
-  (`node tools/rust-engine-program/run-rust-checks.mjs`). Read its
-  `== summary ==` block. Require every required step to report `PASS`; do not
-  trust the process exit code alone.
-- If `js` matches, reproduce the `javascript` job's required services,
-  environment variables, and daemon prebuild locally. Then run
-  `pnpm run typecheck` and `pnpm run test`.
-- Run both when both filters match. Rust source matches both because the desktop
-  end-to-end tests drive the daemon.
+  (`node tools/rust-engine-program/run-rust-checks.mjs 2>&1 | tee pr-engine-gate.log`).
+  Then run `node tools/rust-engine-program/require-ci-pass-verdict.mjs pr-engine-gate.log`.
+  The verifier is the verdict. Do not trust the runner's process exit code.
+- If `js` matches, complete all of these prerequisites:
+  - Start the repository's Postgres 17 service with
+    `docker compose -f docker-compose.dev.yml up -d postgres`.
+  - Set `DOHC_REQUIRE_POSTGRES=1` and `DOHC_REQUIRE_ENGINE_E2E=1`.
+  - Run
+    `cargo build -p dohc-workspace-engine --bin dohc-workspace-engine`.
+  - Set `DOHC_TEST_RUST_ENGINE_BIN` to the absolute path of the built daemon.
+    Include the `.exe` suffix on Windows.
+  - Run `pnpm run typecheck` and `pnpm run test`.
+- Run both when both filters match. Changes under `crates/**` match both because
+  the desktop end-to-end tests drive the daemon.
 - Prose-only changes can skip code gates only when neither filter matches. Some
   documents are test inputs and therefore match `js`.
+- If a test or build step reads a changed file, run its gate even when the
+  filter does not list that file.
 - If it is unclear whether a file is a test or build input, run both gates.
 - In the PR, state which gates ran or why no code gate applies.
 
