@@ -14,6 +14,9 @@ The relay stores its application data in a mounted SQLite file.
 
 ## Start
 
+Back up Postgres and the relay SQLite file before an upgrade. The migration
+container starts automatically and can remove data.
+
 ```bash
 cp .env.self-host.example .env.self-host
 # replace every change-me value

@@ -3,7 +3,7 @@
 // packages/workspace-postgres/src/db/migrations so a fresh Postgres has the
 // Better Auth tables the workspace-api auth
 // server and the sync-relay query BEFORE either service serves an auth request.
-// Non-destructive: creates/records schema only, never truncates.
+// Migrations can remove data. Back up Postgres before an upgrade.
 import pg from "pg";
 import { applyMigrations } from "./lib/apply-migrations.mjs";
 
@@ -12,6 +12,9 @@ const url = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/do
 const client = new pg.Client({ connectionString: url });
 await client.connect();
 try {
+  console.warn(
+    "[migrate] Back up Postgres before upgrading. Pending migrations can remove data.",
+  );
   const ran = await applyMigrations(client);
   if (ran.length === 0) {
     console.log("[migrate] Postgres is up to date — no migrations to apply.");
