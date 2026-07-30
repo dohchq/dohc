@@ -9,9 +9,7 @@ import type { Pool } from "pg";
 // device-authorization grant for desktop login (the desktop shows a code, the
 // browser approves, and the desktop polls).
 //
-// This package owns ONLY the auth surface. It has no edge into workspace-api's
-// routes: the post-verification workspace-invitation claim is injected by the
-// caller via `onEmailVerified` so nothing here imports application code.
+// This package owns only the auth surface and has no application callbacks.
 export interface WorkspaceAuthOptions {
   pool: Pool;
   baseURL: string;
@@ -27,11 +25,6 @@ export interface WorkspaceAuthOptions {
   // Dev/self-host email delivery is console logging; production providers
   // plug in here later without touching callers.
   sendEmail?: (to: string, subject: string, body: string) => Promise<void>;
-  // Invoked from the emailVerification.afterEmailVerification hook once a
-  // signer has PROVEN control of the address. The relay wires today's
-  // behavior by passing claimWorkspaceInvitations; unset means no claim step.
-  // A rejected callback logs but never fails the auth flow (see below).
-  onEmailVerified?: (user: { id: string; email: string }) => Promise<void>;
 }
 
 export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
@@ -40,45 +33,19 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
     (async (to: string, subject: string, body: string) => {
       console.log(`[workspace-auth] email to ${to}: ${subject}\n${body}`);
     });
-  // A failed post-verification hook logs but never fails the auth flow itself.
-  const onEmailVerified = async (user: { id: string; email: string }) => {
-    if (!options.onEmailVerified) return;
-    try {
-      await options.onEmailVerified(user);
-    } catch (error) {
-      console.error("[workspace-auth] afterEmailVerification hook failed:", error);
-    }
-  };
   return betterAuth({
     baseURL: options.baseURL,
     secret: options.secret,
     basePath: "/api/auth",
     database: options.pool,
     emailAndPassword: { enabled: true },
-    // Claim-on-VERIFICATION (security review P2): pending workspace
-    // invitations become workspace_members rows only once the signer has
-    // proven control of the invited address — claiming in user.create.after
-    // let anyone who signed up with an invited-but-unregistered email hijack
-    // the membership without ever receiving mail at that address.
     emailVerification: {
       sendOnSignUp: true,
       sendVerificationEmail: async ({ user, url }) => {
         await sendEmail(user.email, "Verify your dohc email", url);
       },
-      afterEmailVerification: async (user) => {
-        await onEmailVerified(user);
-      },
     },
     ...(options.trustedOrigins ? { trustedOrigins: options.trustedOrigins } : {}),
-    // Deliberately NO user.create.after auto-claim hook (security review P3):
-    // none of the enabled providers (email/password, bearer, device,
-    // organization) creates born-verified users, so a create-time claim is
-    // unreachable today and a hazard tomorrow — a future provider that mints
-    // emailVerified=true users (social login, magic link, email OTP, admin
-    // import) would silently claim every pending invitation for that address.
-    // Re-add ONLY behind an explicit allowlist of providers whose
-    // verified-email semantics have been reviewed, with provider-specific
-    // tests; until then afterEmailVerification above is the single claim path.
     plugins: [
       // The desktop authenticates API calls with `Authorization: Bearer
       // <session token>` (the device flow's access_token IS a session token).

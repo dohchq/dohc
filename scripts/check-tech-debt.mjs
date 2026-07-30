@@ -82,7 +82,7 @@ for (const file of walk(root)) {
 }
 
 if (hits.length > 0) {
-  console.error('Tech debt check failed. Unallowed debt markers found:')
+  console.error('Tech debt check failed. Debt markers found:')
   for (const hit of hits) {
     console.error(`- ${hit.file}:${hit.line} [${hit.pattern}] ${hit.text}`)
   }

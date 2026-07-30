@@ -133,11 +133,9 @@ function checkChatSurfaceSelfHostable() {
       : `missing served route kind(s): ${missingRoutes.join(', ') || 'route union not found'}`,
   )
 
-  // (b) No chat/presence/DM feature may pull in a service outside
-  // REQUIRED_SERVICES. The relay's runtime dependencies must resolve entirely to
-  // the self-host matrix: the in-repo workspace packages, plus better-auth + pg
-  // (which ride the `postgres` + `workspace-api` auth core). Anything else would
-  // be a new service the compose stack does not run.
+  // (b) Keep the relay's runtime dependency set explicit. A new dependency
+  // needs review to confirm that it is a library, not a service missing from
+  // REQUIRED_SERVICES.
   const relayPkgPath = 'services/sync-relay/package.json'
   if (!existsSync(relayPkgPath)) {
     record('chat surface: relay runtime deps stay within the self-host matrix', false, relayPkgPath)
@@ -159,7 +157,7 @@ function checkChatSurfaceSelfHostable() {
     foreignDeps.length === 0,
     foreignDeps.length === 0
       ? deps.join(', ') || 'no runtime deps'
-      : `unexpected runtime dep(s) imply a service outside REQUIRED_SERVICES: ${foreignDeps.join(', ')}`,
+      : `runtime dep(s) are outside the audited self-host set: ${foreignDeps.join(', ')}`,
   )
 
 }

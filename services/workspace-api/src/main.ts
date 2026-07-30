@@ -47,12 +47,6 @@ const webOrigin = process.env.DOHC_WEB_ORIGIN;
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
 });
-// No `onEmailVerified` callback is passed here on purpose. The
-// invitation-claim-on-verify seam was intentionally retired alongside the
-// deleted members/invites routes, so there is no application hook to run when
-// an email is verified. The callback stays OPTIONAL in @dohc/workspace-auth
-// (the sync-relay still supplies it) and is deliberately left unset here.
-// Cloud collab membership is now seeded out-of-band in this reduced surface.
 const auth = createWorkspaceAuth({
   pool,
   baseURL,

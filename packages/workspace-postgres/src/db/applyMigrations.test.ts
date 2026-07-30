@@ -1,4 +1,5 @@
 import pg from "pg";
+import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // The shared migration runner used by `pnpm migrate`, the dev-data reset, and
 // the self-host compose init container. A fresh Postgres must gain the Better
@@ -7,6 +8,26 @@ import { applyMigrations, listMigrations } from "../../../../scripts/lib/apply-m
 
 const POSTGRES_URL =
   process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
+const RETIRED_TABLES = [
+  "agent_approvals",
+  "agent_runs",
+  "app_trust_grants",
+  "app_packages",
+  "database_operations",
+  "database_files",
+  "assets",
+  "document_states",
+  "atom_revisions",
+  "atoms",
+  "locks",
+  "shares",
+  "permissions",
+  "folders",
+  "workspace_events",
+  "workspace_members",
+  "workspaces",
+  "users",
+] as const;
 
 // Runs against the live dev Postgres (same requirement as the workspace-auth
 // betterAuth conformance test: `pnpm dev:postgres` first). When no Postgres is
@@ -84,5 +105,62 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
   it("is idempotent: a second run applies nothing", async () => {
     const ranAgain = await applyMigrations(client);
     expect(ranAgain).toEqual([]);
+  });
+
+  it("upgrades an earlier schema without deleting Better Auth data", async () => {
+    const upgradeSchema = `${schema}_upgrade`;
+    const upgradeClient = new pg.Client({ connectionString: POSTGRES_URL });
+    await upgradeClient.connect();
+    try {
+      await upgradeClient.query(`create schema "${upgradeSchema}"`);
+      await upgradeClient.query(`set search_path to "${upgradeSchema}"`);
+
+      const migrations = await listMigrations();
+      const authMigration = migrations.find((migration) => migration.id === "0001_better_auth");
+      expect(authMigration).toBeDefined();
+      await upgradeClient.query(await readFile(authMigration!.path, "utf8"));
+      await upgradeClient.query(
+        `insert into "user" ("id", "name", "email", "emailVerified", "createdAt", "updatedAt")
+         values ('kept-user', 'Kept User', 'kept@example.test', true, now(), now())`,
+      );
+
+      for (const table of RETIRED_TABLES) {
+        await upgradeClient.query(`create table "${table}" (id text primary key)`);
+        await upgradeClient.query(`insert into "${table}" (id) values ('retired-row')`);
+      }
+      await upgradeClient.query(`
+        create table dohc_migrations (
+          id text primary key,
+          applied_at timestamptz not null default now()
+        )
+      `);
+      await upgradeClient.query(
+        `insert into dohc_migrations (id)
+         values ('0001_initial'), ('0002_better_auth'), ('0003_partial_path_unique')`,
+      );
+
+      const ran = await applyMigrations(upgradeClient);
+      expect(ran).toEqual([
+        "0001_better_auth",
+        "0002_remove_retired_workspace_schema",
+      ]);
+
+      for (const table of RETIRED_TABLES) {
+        const result = await upgradeClient.query<{ table_name: string | null }>(
+          "select to_regclass($1) as table_name",
+          [`"${upgradeSchema}"."${table}"`],
+        );
+        expect(result.rows[0].table_name).toBeNull();
+      }
+      const keptUser = await upgradeClient.query<{ email: string }>(
+        `select "email" from "user" where "id" = 'kept-user'`,
+      );
+      expect(keptUser.rows).toEqual([{ email: "kept@example.test" }]);
+    } finally {
+      await upgradeClient
+        .query(`drop schema if exists "${upgradeSchema}" cascade`)
+        .catch(() => undefined);
+      await upgradeClient.end().catch(() => undefined);
+    }
   });
 });
