@@ -32,19 +32,22 @@ When planning, do not be afraid to suggest seeminlgy insane solutions. For examp
 
 What we're doing here is fundamentally different so treat it that way. Being that you are an agent, you're prediction model will likely want to steer towards conformity. That's okay and even preferred in most scenarios, but there will be times where we need to think outside the box. Literally (since you're in a box) so think outside of it. Transcend. Transcend. Ascend.
 
-### Measure rejection budgets
+### Justify operational limits
 
-A budget that rejects otherwise valid work needs measurement evidence. Before
-adding one, measure a representative workload and record the evidence near the
-budget.
+A hard limit that rejects otherwise valid work needs measurement evidence.
+Before adding one, measure a representative workload and record the evidence
+near the limit.
 
-Set a rejection budget beyond measured healthy work. It should expose broken
-behavior without constraining healthy work. If healthy work reaches the budget,
-measure again and revisit it.
+A defect tripwire belongs beyond measured healthy behavior. If healthy behavior
+reaches it, measure again and revisit the limit.
 
-A routing threshold is not a rejection budget. It selects another supported
-path, so healthy work can cross it. Protocol versions and fixed schema values
-also need their own justification, not a workload measurement.
+A backpressure or load-shedding limit can reject healthy work temporarily.
+Justify it with measured capacity and latency targets. Give callers an explicit
+retry or degradation path.
+
+A routing threshold selects another supported path instead of rejecting work.
+Healthy work can cross it. Protocol versions and fixed schema values need their
+own justification, not workload measurements.
 
 ### Show agents the limits they hit
 
@@ -52,10 +55,11 @@ Developers will not always read the code. Their agents will read the errors. An
 agent can fix `limit 128 nodes, requested 129 nodes`; it cannot fix a blank
 window.
 
-Every budget rejection must name the budget, its configured limit, and the
-unit. When available, include the requested or observed usage in the same unit.
-Report the rejection during a build or check when possible. Otherwise, expose a
-structured runtime error. Do not catch a budget rejection silently.
+A hard-limit error must name the constraint, its configured limit, and the unit.
+When available, include the requested or observed usage in the same unit. A
+backpressure error must name the saturated resource and tell the caller how to
+retry or degrade. Report the error during a build or check when possible.
+Otherwise, expose a structured runtime error. Do not catch the error silently.
 
 ### Let their agents shape the workspace they need
 
@@ -166,15 +170,17 @@ gate (`.github/workflows/pr-checks.yml`) is dispatch-only while we are
 pre-launch; it will be re-enabled when it makes more sense (approaching
 launch / first users). Do not "fix" the missing checks.
 
-Choose local gates from the files and behavior the PR can change:
+Choose local gates with the `rust` and `js` path filters under `jobs.changes` in
+`.github/workflows/pr-checks.yml`. Use those filters as the source of truth
+while PR CI is disabled:
 
-- Run the canonical Rust gate
-  (`node tools/rust-engine-program/run-rust-checks.mjs`) for changes to Rust
-  source, Cargo configuration, Rust fixtures, or cross-engine contracts.
-- Run the JS `typecheck` and `test` suites for changes to JS/TS source, package
-  configuration, build or test configuration, or cross-language contracts.
-- Prose-only changes do not require code gates. If the impact is unclear, run
-  all three gates.
+- If `rust` matches, run the canonical Rust gate
+  (`node tools/rust-engine-program/run-rust-checks.mjs`).
+- If `js` matches, run the JS `typecheck` and `test` suites.
+- Run both when both filters match. Rust source matches both because the desktop
+  end-to-end tests drive the daemon.
+- Prose-only changes can skip code gates only when neither filter matches. Some
+  documents are test inputs and therefore match `js`.
 - In the PR, state which gates ran or why no code gate applies.
 
 When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. These are setup (coderabbit and codex) to review every PR reliably.
