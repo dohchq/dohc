@@ -147,11 +147,27 @@ function configuredCargoTarget() {
     // Walk sections: only a build-scoped `target` is a default. A
     // [target.<triple>] section configures that triple, it does not select it.
     let inBuild = false;
+    let inKnownSection = true; // top level: build.target / build={} are handled below
     for (const line of text.split(/\r?\n/u)) {
       const section = /^\s*\[([^\]]+)\]/u.exec(line);
       if (section) {
-        inBuild = section[1].trim() === "build";
+        // Normalise the table name: cargo accepts [build], [ build ] and the
+        // QUOTED ["build"]. Comparing raw section text missed the quoted form and
+        // reported "no target configured", certifying the host for a cross build.
+        const name = section[1]
+          .trim()
+          .replace(/^["'](.*)["']$/u, "$1")
+          .trim();
+        inBuild = name === "build";
+        // [target.<triple>] legitimately carries linker/runner/rustflags, never a
+        // build default. Any OTHER table carrying a `target =` is a spelling this
+        // parser does not know, and after seven of those on this PR the answer is
+        // to refuse rather than guess.
+        inKnownSection = inBuild || name === "target" || name.startsWith("target.");
         continue;
+      }
+      if (!inBuild && !inKnownSection && /^\s*target\s*=/u.test(line)) {
+        return { unparseable: `${path}: target assigned in an unrecognised table — ${line.trim()}` };
       }
       // Cargo accepts all of: [build] + target=, the dotted key build.target=,
       // and the inline table build={target=...}. Missing any spelling meant
