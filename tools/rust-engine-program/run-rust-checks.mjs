@@ -21,6 +21,9 @@
 //
 // Usage:
 //   node tools/rust-engine-program/run-rust-checks.mjs
+//   node tools/rust-engine-program/run-rust-checks.mjs --expect-arch=x64
+//     (hard-pins the host arch so a cross-built run cannot be recorded as
+//      native evidence; aborts with exit 2 on a mismatch)
 // Exit code is non-zero if any REQUIRED step fails (optional tool skips do not
 // fail the run).
 
@@ -87,8 +90,10 @@ console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}\n`);
 
 // Inherited from run-native-suite.mjs when that runner was retired (R16). This
-// gate is now the native evidence, so the pin that stops a cross-built or
-// emulated run being recorded as native belongs here.
+// gate is now the native evidence, so the pin that stops a cross-built run
+// being recorded as native belongs here. It compares os.arch(), which IS
+// process.arch — the arch Node was built for — so it cannot detect emulation:
+// an emulated x64 Node on arm64 reports x64 and satisfies --expect-arch=x64.
 const expectArch = process.argv
   .slice(2)
   .filter((a) => a.startsWith("--expect-arch="))
@@ -96,7 +101,7 @@ const expectArch = process.argv
 if (expectArch && expectArch !== arch()) {
   console.error(
     `ABORT: --expect-arch=${expectArch} but host arch is ${arch()}. ` +
-      `Cross-built/emulated runs must not be recorded as native evidence.`,
+      `Cross-built runs must not be recorded as native evidence.`,
   );
   process.exit(2);
 }

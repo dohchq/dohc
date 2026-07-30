@@ -37,7 +37,7 @@ From the repo root, in **PowerShell or Git Bash** (Windows-first; both work):
 node tools/rust-engine-program/run-rust-checks.mjs
 ```
 
-Each prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
+It prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
 
 ```
 - 2026-07-28T10:11:10.183Z | run-rust-checks | win32/x64 | PASS | fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
@@ -50,17 +50,17 @@ Copy that line into `EXECUTION_LOG.md` under the relevant shard entry.
 Per Gate 0, the per-platform GitHub Actions matrix is retired. Evidence is
 collected on the founder's machine:
 
-1. **Windows x64 (native, primary).** Run both scripts in PowerShell or Git
+1. **Windows x64 (native, primary).** Run the gate in PowerShell or Git
    Bash on the dev machine. This is the primary dogfood platform and the one a
    cutover candidate may ship to.
-2. **Linux x64 (via WSL).** Open WSL against the same checkout and run both
-   scripts again:
+2. **Linux x64 (via WSL).** Open WSL against the same checkout and run it
+   again:
    ```sh
    wsl
    cd /mnt/c/Users/ice/dev/dohc   # or the WSL-native clone
    node tools/rust-engine-program/run-rust-checks.mjs
    ```
-   Record the resulting `linux/x64` evidence lines. (Prefer a WSL-native clone
+   Record the resulting `linux/x64` evidence line. (Prefer a WSL-native clone
    over `/mnt/c` for realistic filesystem semantics.)
 3. **macOS x64 / arm64 — NOT covered during construction.** Producing macOS
    native evidence is a **mandatory pre-release obligation** before any Mac
@@ -68,8 +68,11 @@ collected on the founder's machine:
    supported platform" claim is scoped to `{Windows, Linux-WSL}`.
 
 Pass `--expect-arch=<x64|arm64>` to hard-pin which platform a run represents;
-the gate aborts if the host does not match, so a cross-built or emulated run
-cannot masquerade as native evidence. (This pin used to live in
+the gate aborts when the running Node's architecture does not match, so a
+cross-built run cannot masquerade as native evidence. It cannot detect
+emulation: `os.arch()` is `process.arch`, the architecture Node itself was
+built for, so an emulated x64 Node on arm64 reports `x64` and satisfies
+`--expect-arch=x64`. (This pin used to live in
 `run-native-suite.mjs`; it moved here when that runner was retired in R16,
 because this gate is now the native evidence.)
 

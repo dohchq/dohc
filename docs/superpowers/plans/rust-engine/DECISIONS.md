@@ -99,7 +99,8 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
   macOS untested during construction and MUST be revisited before any Mac
   release (recorded as pre-release obligation, replaces old open
   decision 2). PR #139's workflow is retired; native-suite evidence moves
-  to R02's local runner scripts.
+  to R02's local runner scripts. **(SUPERSEDED 2026-07-29 — see
+  "Native-suite evidence RETIRED (R16)" below; that runner is deleted.)**
 - **Freeze**: Ice enforces no further TS-engine changes on main. In-flight
   engine changes already on main are IMPORTANT FEATURES and are
   **integrated, not discarded**: every engine commit since the inventory
@@ -517,8 +518,18 @@ Consequences, all owned by R16:
 
 - delete the two filter steps in `run-native-suite.mjs` (and the runner itself if
   nothing else remains in it)
-- delete the two `pnpm --filter @dohc/workspace-engine test|typecheck` steps in
-  `.github/workflows/desktop-release.yml`
+- ~~delete the two `pnpm --filter @dohc/workspace-engine test|typecheck` steps in
+  `.github/workflows/desktop-release.yml`~~ **NOT done in #375, deliberately.**
+  The reason given for doing it early was that an unmatched `--filter` would
+  hard-fail. That is false: pnpm 10.24.0 prints `No projects matched the
+  filters` and **exits 0**, so the steps would merely become no-ops. Meanwhile
+  they are the only *automatically triggered* CI run of the still-live legacy
+  package — `pr-checks.yml` and `rust-engine-macos-evidence.yml` are
+  dispatch-only, and preflight's remaining steps never enter
+  `packages/workspace-engine`. Removing them ahead of the package deletion
+  would drop real coverage of code still imported by `main.ts`, `cliServer.ts`,
+  `ydocEngineProviderSession.ts` and `services/sync-relay`. They go with the
+  package, not before it.
 - rewrite `tools/rust-engine-program/README.md`, which currently calls this "the
   native evidence GATE0/TS-NATIVE-CI depends on" and a "mandatory pre-release
   obligation"
