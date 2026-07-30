@@ -101,6 +101,21 @@ const BARE_IMPORT_RE = new RegExp(
     String.raw`(?:/[^"']*)?["']`,
   "g",
 );
+// `await import(...)`, `require(...)` and `import x = require(...)`. All three
+// load at runtime and none of them can be type-only, so no clause analysis is
+// needed — the call form alone is the answer.
+//
+// Nothing imports the legacy engine this way today. It is covered because the
+// codebase does use dynamic import to keep heavy modules off the launch path
+// (`workspaceDatabase.ts:333` does exactly that for `@dohc/sqlite-worker`), so
+// it is a form a future change would plausibly reach for — and a guard that a
+// one-line change can walk around is not a guard.
+const DYNAMIC_RE = new RegExp(
+  String.raw`\b(?:import|require)\s*\(\s*["']` +
+    LEGACY_PACKAGE.replace(/[/\\^$*+?.()|[\]{}]/g, "\\$&") +
+    String.raw`(?:/[^"']*)?["']\s*\)`,
+  "g",
+);
 
 function hasRuntimeLegacyImport(source: string): boolean {
   if (BARE_IMPORT_RE.test(source)) {
@@ -108,6 +123,11 @@ function hasRuntimeLegacyImport(source: string): boolean {
     return true;
   }
   BARE_IMPORT_RE.lastIndex = 0;
+  if (DYNAMIC_RE.test(source)) {
+    DYNAMIC_RE.lastIndex = 0;
+    return true;
+  }
+  DYNAMIC_RE.lastIndex = 0;
   IMPORT_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = IMPORT_RE.exec(source)) !== null) {
@@ -141,10 +161,28 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     )
     .sort();
 
-  it("finds the repo — a scan that matched nothing would pass vacuously", () => {
+  it("actually reached every scan root — a scan that matched nothing would pass vacuously", () => {
     // Without this, a broken REPO_ROOT or an over-eager skip list turns the
     // assertion below into [] === [] the moment the allowlist empties.
-    expect(files.length).toBeGreaterThan(500);
+    //
+    // One sentinel per scan root rather than a total file count. A count is a
+    // proxy for "did the walk work" that also rejects legitimate deletion once
+    // the repo shrinks past whatever number you picked, and there is no measured
+    // healthy range to pick from. These three prove each root was walked, and
+    // they fail loudly if one is ever renamed — which is the correct outcome,
+    // since a renamed sentinel means this guard is no longer checking that root.
+    const scanned = new Set(
+      files.map((f) => relative(REPO_ROOT, f).split(sep).join("/")),
+    );
+    for (const sentinel of [
+      "apps/desktop/src/main.ts",
+      "packages/workspace-contracts/src/engine.ts",
+      "services/sync-relay/src/errorCodes.ts",
+    ]) {
+      expect(scanned, `scan root for ${sentinel} was not walked`).toContain(
+        sentinel,
+      );
+    }
   });
 
   it("matches the allowlist exactly, so the count can only shrink deliberately", () => {
@@ -199,5 +237,31 @@ describe("legacy engine production imports (R16 ratchet)", () => {
       `} from "${LEGACY_PACKAGE}";`,
     ].join("\n");
     expect(hasRuntimeLegacyImport(source)).toBe(true);
+  });
+
+  it("detects runtime loads that are not static imports", () => {
+    // A guard a one-line change can walk around is not a guard. None of these
+    // forms can be type-only, so the call form alone settles it.
+    expect(
+      hasRuntimeLegacyImport(`const m = await import("${LEGACY_PACKAGE}");`),
+    ).toBe(true);
+    expect(
+      hasRuntimeLegacyImport(`const m = require("${LEGACY_PACKAGE}");`),
+    ).toBe(true);
+    expect(
+      hasRuntimeLegacyImport(`import m = require("${LEGACY_PACKAGE}");`),
+    ).toBe(true);
+    expect(
+      hasRuntimeLegacyImport(
+        `const { x } = await import("${LEGACY_PACKAGE}/testing");`,
+      ),
+    ).toBe(true);
+    expect(
+      hasRuntimeLegacyImport(`const m = await import( '${LEGACY_PACKAGE}' );`),
+    ).toBe(true);
+    // Must not fire on a different package that merely shares the prefix.
+    expect(
+      hasRuntimeLegacyImport(`await import("@dohc/workspace-engine-client");`),
+    ).toBe(false);
   });
 });
