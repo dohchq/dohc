@@ -18,3 +18,15 @@ test-results/
 # In-worktree cargo target dirs (WINDOWS_DEV prefers out-of-repo CARGO_TARGET_DIR)
 target-*/
 **/target-*/
+
+# Agent state that must never be committed. These were only ignored by
+# machine-local rules (~/.config/git/ignore, .git/info/exclude), which protect
+# one checkout and travel with nobody.
+/.claude/settings.local.json
+/.claude/worktrees/
+/CLAUDE.local.md
+
+# One home for throwaway agent prompts, reports, and CLI logs. Anything worth
+# keeping goes to docs/ under a real name instead of sitting at the repo root.
+/.agent-artifacts/
+/codex-*.log

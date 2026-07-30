@@ -17,7 +17,7 @@ import {
   type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
 import type { AwaitableLinkedChatStore } from "./workspaces/awaitableLinkedChatStore";
-import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "./workspaces/liveLinkedChatStore";
 import { nativeTmpdir } from "./workspaces/testTemp";
 

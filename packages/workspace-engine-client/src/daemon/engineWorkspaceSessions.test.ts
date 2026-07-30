@@ -9,12 +9,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  type Request,
-  type Response,
-  type WorkspaceHandle,
-} from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Request } from "../ydoc/generated/Request";
+import type { Response } from "../ydoc/generated/Response";
+import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
 import {
   EngineDaemonUnavailableError,
   type EngineDaemonClient,

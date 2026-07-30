@@ -32,7 +32,7 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import { startWorkspaceWatch } from "./workspaceWatcher";
-import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import type {
   EngineYdocProviderSessionRust,
   EngineYdocProviderSessionRustOptions,

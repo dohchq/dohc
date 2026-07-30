@@ -15,8 +15,10 @@ import type {
   EngineYdocProviderSessionRust,
   EngineYdocProviderSessionRustOptions,
 } from "../collab/ydocEngineProviderSessionRust";
-import type { EngineDaemonClient } from "./engineDaemonLifecycle";
-import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import {
+  EngineWorkspaceSessions,
+  type EngineDaemonClient,
+} from "@dohc/workspace-engine-client/daemon";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,

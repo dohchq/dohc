@@ -355,18 +355,20 @@ import {
   SharedChannelReadOnlyError,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import type {
+  ChannelThreadSummary,
+  ChatChannelSummary,
+  ChatMessage,
+  ChatBookmark,
+  ChatReaction,
+  ChatThread,
+  VersionedTextMomentSummary,
+} from "@dohc/workspace-contracts/engine";
 import {
   installWorkspaceDataKey,
-  GENERAL_CHANNEL_WIRE_ID,
   fetchShareViewInfo,
   fetchSharedChannelInfo,
-  type ChannelThreadSummary,
-  type ChatChannelSummary,
-  type ChatMessage,
-  type ChatBookmark,
-  type ChatReaction,
-  type ChatThread,
-  type VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
 import {
@@ -386,7 +388,7 @@ import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
   type EngineDaemonLifecycle,
-} from "./workspaces/engineDaemonLifecycle";
+} from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
 import {
   EngineRelayClient,
@@ -395,7 +397,7 @@ import {
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
 } from "./workspaces/engineRelayClient";
-import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   createDesktopLinkedChatStore,
   type DesktopLinkedChatStore,

@@ -11,14 +11,16 @@ import type {
   Retryability,
 } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it } from "vitest";
-import type { EngineDaemonClient } from "./engineDaemonLifecycle";
+import {
+  EngineWorkspaceSessions,
+  type EngineDaemonClient,
+} from "@dohc/workspace-engine-client/daemon";
 import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
 } from "./engineRelayClient";
-import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 import { enrollWorkspaceKeyEnvelope } from "./workspaceKeyEnvelopeEnrollment";
 
 const WORKSPACE_ID = "sentinel-key-envelope-workspace";

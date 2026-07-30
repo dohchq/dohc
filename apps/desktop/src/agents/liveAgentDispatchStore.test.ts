@@ -12,7 +12,7 @@ import {
   EngineWorkspaceRebindError,
   EngineWorkspaceSessions,
   WORKSPACE_OPEN_DEADLINE_MS,
-} from "../workspaces/engineWorkspaceSessions";
+} from "@dohc/workspace-engine-client/daemon";
 import {
   TERMINAL_DISPATCH_DEADLINE_MS,
   createLiveAgentDispatchStore,

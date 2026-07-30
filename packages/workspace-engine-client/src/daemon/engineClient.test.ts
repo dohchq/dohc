@@ -1,7 +1,8 @@
 import { Buffer } from "node:buffer";
 import { Duplex, PassThrough } from "node:stream";
-import type { Envelope, Request } from "@dohc/workspace-engine-client";
 import { describe, expect, it, vi } from "vitest";
+import type { Envelope } from "../ydoc/generated/Envelope";
+import type { Request } from "../ydoc/generated/Request";
 import {
   EngineClient,
   DuplexEngineClientConnection,

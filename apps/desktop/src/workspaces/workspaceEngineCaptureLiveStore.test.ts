@@ -1,12 +1,12 @@
 import type {
   EngineDaemonClient,
-} from "./engineDaemonLifecycle";
+} from "@dohc/workspace-engine-client/daemon";
 import type {
   EngineWorkspaceBinding,
   EngineWorkspaceRunOptions,
   EngineWorkspace,
   EngineWorkspaceSessions,
-} from "./engineWorkspaceSessions";
+} from "@dohc/workspace-engine-client/daemon";
 import {
   VERSIONED_METHOD,
   WORKSPACE_METHOD,

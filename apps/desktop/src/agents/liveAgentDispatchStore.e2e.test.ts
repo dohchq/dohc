@@ -7,8 +7,8 @@ import { ChatsLiveAdapter } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
 import {
   EngineDaemonLifecycle,
-} from "../workspaces/engineDaemonLifecycle";
-import { EngineWorkspaceSessions } from "../workspaces/engineWorkspaceSessions";
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { nativeTmpdir } from "../workspaces/testTemp";
 import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 

@@ -11,7 +11,6 @@ local evidence pipeline.
 | Script | What it does |
 | --- | --- |
 | `run-rust-checks.mjs` | Rust policy gate: fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
-| `run-native-suite.mjs` | TS-NATIVE-CI local equivalent: runs the reference `@dohc/workspace-engine` `typecheck` + `test` suites natively, asserts host arch, prints an evidence line. This is the native evidence GATE0/TS-NATIVE-CI depends on. |
 | `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 
 Banked soak artifacts live in `soak-evidence/`; see
@@ -26,7 +25,7 @@ every artifact carries, which files predate it, and the residual gap.
   fails the verdict (required steps may not skip).
 - Rust toolchain pinned by `rust-toolchain.toml` (channel 1.96.1, with
   `rustfmt` + `clippy`).
-- `pnpm` on PATH (JS workspace install above, plus the native suite).
+- `pnpm` on PATH (for the JS workspace install above).
 - Optional: `cargo install cargo-deny --locked` and
   `cargo install cargo-audit --locked` to enable the supply-chain checks.
 
@@ -36,10 +35,9 @@ From the repo root, in **PowerShell or Git Bash** (Windows-first; both work):
 
 ```sh
 node tools/rust-engine-program/run-rust-checks.mjs
-node tools/rust-engine-program/run-native-suite.mjs
 ```
 
-Each prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
+It prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
 
 ```
 - 2026-07-28T10:11:10.183Z | run-rust-checks | win32/x64 | PASS | fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
@@ -52,27 +50,56 @@ Copy that line into `EXECUTION_LOG.md` under the relevant shard entry.
 Per Gate 0, the per-platform GitHub Actions matrix is retired. Evidence is
 collected on the founder's machine:
 
-1. **Windows x64 (native, primary).** Run both scripts in PowerShell or Git
-   Bash on the dev machine. This is the primary dogfood platform and the one a
-   cutover candidate may ship to.
-2. **Linux x64 (via WSL).** Open WSL against the same checkout and run both
-   scripts again:
+**Run the JS suites too.** The runner retired in R16 was not a second Rust gate — its
+entire step list was `pnpm --filter @dohc/workspace-engine typecheck` and `test`, i.e. JS
+checks. Deleting it must not quietly drop JS coverage from this procedure, so from the
+repo root:
+
+```sh
+pnpm run typecheck
+pnpm run test
+```
+
+Those replace what the retired runner covered, and cover more than it did: the whole
+workspace rather than one package that R16 deletes. AGENTS.md already requires both before
+any merge; this is the same obligation stated where the evidence procedure lives, because
+CI is dispatch-only and nothing else will catch it.
+
+1. **Windows x64 (native, primary).** Run the Rust gate plus the two JS suites above, in
+   PowerShell or Git Bash on the dev machine. This is the primary dogfood platform and
+   the one a cutover candidate may ship to.
+2. **Linux x64 (via WSL).** Open WSL against the same checkout and run it
+   again:
    ```sh
    wsl
    cd /mnt/c/Users/ice/dev/dohc   # or the WSL-native clone
-   node tools/rust-engine-program/run-native-suite.mjs
    node tools/rust-engine-program/run-rust-checks.mjs
+   pnpm run typecheck
+   pnpm run test
    ```
-   Record the resulting `linux/x64` evidence lines. (Prefer a WSL-native clone
-   over `/mnt/c` for realistic filesystem semantics.)
+   Record the resulting `linux/x64` evidence line. (Prefer a WSL-native clone
+   over `/mnt/c` for realistic filesystem semantics.) The JS suites belong here
+   too: the retired runner ran its `pnpm` steps on **both** platforms, so
+   omitting them here would drop Linux-side JS coverage as well.
 3. **macOS x64 / arm64 — NOT covered during construction.** Producing macOS
    native evidence is a **mandatory pre-release obligation** before any Mac
    distribution (DECISIONS.md Gate 0 item 2). Until it exists, Gate 7's "every
    supported platform" claim is scoped to `{Windows, Linux-WSL}`.
 
-Every native run asserts the host architecture so a cross-built or emulated
-run cannot masquerade as native evidence. `run-native-suite.mjs` accepts
-`--expect-arch=<x64|arm64>` to hard-pin which platform a given run represents.
+**There is no architecture guard on this gate — and the retired runner's one did not
+work either.** `run-native-suite.mjs` accepted `--expect-arch=<x64|arm64>` and compared
+`os.arch()`, the architecture *Node* was built for. It never checked what the Rust
+toolchain targeted; in fact it ran no cargo at all, only the two `pnpm` steps above. So
+the capability that left with that runner was a check that could not do its job.
+
+Rebuilding it properly is tracked separately. Ten distinct channels can set cargo's
+effective target, and neither parsing `.cargo/config.toml` nor watching for
+`target/<triple>/` directories covers all of them — a `--target` injected through
+`RUSTFLAGS` reaches rustc while cargo still writes to `target/debug`, so it is invisible
+to both.
+
+Until that lands, **a run's platform is whatever the operator asserts when pasting the
+evidence line.** The gate prints `platform()/arch()` from Node and does not verify it.
 
 ## Rust policy enforced here
 

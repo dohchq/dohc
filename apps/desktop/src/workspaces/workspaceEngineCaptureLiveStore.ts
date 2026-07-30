@@ -28,7 +28,7 @@ import {
   EngineWorkspaceSessions,
   type EngineWorkspace,
   type EngineWorkspaceBinding,
-} from "./engineWorkspaceSessions";
+} from "@dohc/workspace-engine-client/daemon";
 
 // A manifest rebuild after a version switch costs ONE unsettled pass, so this
 // budget is generous by two orders of magnitude. It is bounded rather than

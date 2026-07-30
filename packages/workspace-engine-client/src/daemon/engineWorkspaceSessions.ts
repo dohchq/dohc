@@ -1,12 +1,14 @@
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
-  WORKSPACE_METHOD,
   WorkspaceDaemonRequester,
+} from "../live/daemonLiveAdapter";
+import type { AgentAuthor } from "../versioned/versionedWireContract";
+import {
+  WORKSPACE_METHOD,
   decodeWorkspaceResult,
-  type AgentAuthor,
-  type WorkspaceHandle,
-} from "@dohc/workspace-engine-client";
+} from "../workspace/workspaceWireContract";
+import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
 import { randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";

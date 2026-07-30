@@ -28,14 +28,12 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import type {
-  EngineDaemonClient,
-} from "./engineDaemonLifecycle";
+import type { EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import {
   EngineWorkspaceSessions,
   type EngineDaemonClientSource,
   type EngineWorkspace,
-} from "./engineWorkspaceSessions";
+} from "@dohc/workspace-engine-client/daemon";
 
 export type RelayTransportMode = "typescript" | "daemon";
 

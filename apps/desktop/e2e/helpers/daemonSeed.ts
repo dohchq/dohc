@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { EngineDaemonLifecycle } from "../../src/workspaces/engineDaemonLifecycle";
-import { EngineWorkspaceSessions } from "../../src/workspaces/engineWorkspaceSessions";
+import {
+  EngineDaemonLifecycle,
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import {
   createLiveLinkedChatStore,
   type DesktopLinkedChatStore,

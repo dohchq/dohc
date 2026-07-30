@@ -153,6 +153,27 @@ When a user likes how an agent handled something, dohc should make it easy to tu
 
 The best version of dohc does not just complete tasks. It helps users and teams compound how they work. Every repeated process is a candidate to become clearer, more inspectable, and easier for agents to run next time.
 
+### Where this repo's own skills live
+
+Claude Code and Codex each scan their own directory and neither scans the
+other's, so a shared skill needs one body and two adapters:
+
+| Path | Purpose |
+| --- | --- |
+| `skills/<name>/SKILL.md` | The skill. Canonical, tool-neutral. Edit only here. |
+| `.claude/skills/<name>/SKILL.md` | Generated adapter — the root Claude Code scans |
+| `.agents/skills/<name>/SKILL.md` | Generated adapter — the root Codex scans |
+
+Adapters are generated, never hand-edited: `pnpm skills:sync` writes them and
+`pnpm test` fails when one drifts or is missing. They carry the canonical
+frontmatter verbatim, because the `description` is what makes a host trigger the
+skill — a stale copy means one tool silently stops offering it.
+
+A skill only one host should see needs no adapter and lives directly in that
+host's root. The `codex-*` skills are the case to reason from: they sit in
+`.claude/skills/` because **Claude** runs them and Codex is only the worker they
+invoke. Classify by which tool consumes the skill, not by the tool it names.
+
 ## Agents wrap tools, not the other way around
 
 dohc should feel like an agent operating a set of reliable tools, not old software with a little AI sprinkled inside.
@@ -167,6 +188,9 @@ pre-launch; it will be re-enabled when it makes more sense (approaching
 launch / first users). Do not "fix" the missing checks.
 
 ### Select local gates
+
+Read the Rust gate's `== summary ==` block, never its exit code. It can exit 0
+while its own summary says FAIL.
 
 Before merging, use the `rust` and `js` filters in the workflow's `changes` job
 to select local gates for the exact PR head. This is the canonical local policy.
@@ -217,7 +241,7 @@ improvements, or out-of-scope suggestions.
 ### Verify review coverage
 
 Use the
-[`pr-review-watch` skill](.claude/skills/pr-review-watch/SKILL.md) whenever a PR
+[`pr-review-watch` skill](skills/pr-review-watch/SKILL.md) whenever a PR
 opens or its head changes. Do not build another review poller.
 
 A review applies to a commit, not a PR. Before merging, confirm that every
@@ -235,6 +259,9 @@ Document each declined finding in the PR with a brief technical reason.
 Merge when the required reviewers covered the current head and no verified
 blocking finding remains. Reviewer unanimity and a comment-free PR are not
 required.
+
+`gh api --jq` does not accept `--arg`. Embed values in the program string.
+Treat a failed query as unknown instead of reading empty output as no match.
 
 ## How we write
 
