@@ -142,7 +142,7 @@ Agent activity gets the olive `agent` voice visually. In words:
 | `Something went wrong. Please try again later.` | `dohc could not reach the sync relay. Check your connection.` — with a `Retry` action | Names the failing actor, one instruction per sentence, and the retry is a control rather than a second instruction. |
 | `Seamlessly sync your workspace across all your devices` | `When you turn on sync, this workspace stays current on every machine you join it from.` | Marketing word out, and the opt-in stays visible — sync is off by default and signing in alone does not enable it. |
 | `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, the noun the UI uses, shorter. |
-| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/trash if that fails, and can be restored.` | States the count and the true recovery path including the fallback — dohc deletes are recoverable, so `This cannot be undone` would be false. |
+| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/trash if that fails, and you can restore them.` | States the count and the true recovery path including the fallback — dohc deletes are recoverable, so `This cannot be undone` would be false. |
 | `AI is analyzing your workspace…` | `Agent is reading 40 files.` | Concrete, countable, no magic. |
 
 ## Where shipping copy disagrees with itself
@@ -156,17 +156,25 @@ surface: the editor says `page`, Settings says `document`, the file tree says
 `file`. Changing one string inside a consistent surface makes drift worse, not
 better.
 
-**Fix a surface, never a string.** And check whether a name is pinned by e2e
-before touching it — `ui-language.md` treats every `aria-*` and accessible name
-as pinned, so renaming one is a test change, not a copy change.
+**Fix a surface, never a string.** Some surfaces are mixed within themselves,
+so settling one means choosing its vocabulary deliberately — not renaming
+whichever string looks like the odd one out.
+
+**Never touch a pinned name.** `ui-language.md` states it as a hard invariant:
+every `data-testid`, `aria-*`, `role`, and accessible name is pinned by e2e and
+must never be renamed, removed, or restructured away. Updating the tests does
+not buy you permission. Change the visible copy and leave the accessible name
+as it is.
 
 Known so far:
 
-- The editor and linking surface says `page` throughout — `Link another page`
-  (`slashCommands.tsx:83`), `aria-label="page links"`
-  (`WikilinkPicker.tsx:210`), `aria-label="Page title"`
-  (`PageIdentity.tsx:260`) — where the rest of the UI says `file`. Two of those
-  are pinned `aria-label`s.
+- The editor and linking surface is **mixed, and the term is unsettled**. It
+  says `page` in `Link another page` (`slashCommands.tsx:83`),
+  `aria-label="page links"` (`WikilinkPicker.tsx:210`) and
+  `aria-label="Page title"` (`PageIdentity.tsx:260`) — but `file` in
+  `No files match "…"` (`WikilinkPicker.tsx:218`), inside the very same
+  component. Decide the vocabulary before changing anything, and leave the two
+  pinned `aria-label`s alone regardless.
 - `apps/desktop/src/renderer/settings/SettingsDialog.tsx` says `document`
   throughout (`:487`, `:662`, `:669`) where the rest of the UI says `file`.
 - `apps/desktop/src/renderer/workbench/Explorer.tsx:1528` — the delete dialog
