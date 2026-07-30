@@ -158,12 +158,33 @@ function liveCapture(
 // `ORDER BY moment_order` query. PROTECTED (secret) rows are dropped here
 // exactly as a query against the text `moments` table dropped them.
 async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMomentRow[]> {
-  const page = await engine.listMoments({ limit: 500 });
+  // DRAINED, not capped. An earlier draft asked for one 500-row page, which
+  // returns the NEWEST 500 — so the moment a test recorded more, the reversed
+  // array stopped being oldest-first and every count and sequence assertion
+  // below would have compared against a truncated page without saying so. A cap
+  // here is a limit rejecting valid work; paging costs nothing and removes the
+  // question. (Same correction as the moments reader on #417.)
+  const summaries: Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"] = [];
+  let beforeMomentOrder: number | undefined;
+  for (;;) {
+    const page = await engine.listMoments({
+      ...(beforeMomentOrder === undefined ? {} : { beforeMomentOrder }),
+    });
+    summaries.push(...page.moments);
+    if (page.nextBeforeMomentOrder === null) break;
+    beforeMomentOrder = page.nextBeforeMomentOrder;
+  }
   const rows: EngineMomentRow[] = [];
-  for (const summary of [...page.moments].reverse()) {
+  for (const summary of [...summaries].reverse()) {
     if (summary.protected) continue;
     const detail = await engine.readMoment(summary.id);
-    const payload = detail?.protected === false ? detail.moment.payload : undefined;
+    // A null detail must FAIL, not collapse to an empty body: `text: ""` for a
+    // missing read makes a readMoment regression look like an empty file, which
+    // several assertions below would accept.
+    if (detail === null) {
+      throw new Error(`readMoment returned null for ${summary.id} (${summary.path})`);
+    }
+    const payload = detail.protected === false ? detail.moment.payload : undefined;
     rows.push({
       path: summary.path,
       operation: summary.operation,
