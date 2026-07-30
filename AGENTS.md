@@ -176,7 +176,7 @@ while PR CI is disabled:
 
 - If `rust` matches, run the canonical Rust gate
   (`node tools/rust-engine-program/run-rust-checks.mjs`).
-- If `js` matches, run the JS `typecheck` and `test` suites.
+- If `js` matches, run `pnpm run typecheck` and `pnpm run test`.
 - Run both when both filters match. Rust source matches both because the desktop
   end-to-end tests drive the daemon.
 - Prose-only changes can skip code gates only when neither filter matches. Some
