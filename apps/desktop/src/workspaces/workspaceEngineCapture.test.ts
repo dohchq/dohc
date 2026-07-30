@@ -142,6 +142,7 @@ function capture(root: string, options: {
   onCaptureOutcome?: (outcome: { ok: boolean }) => void;
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
   rustEngineSessions?: EngineWorkspaceSessions;
+  useRustEngine?: boolean;
   daemonOwnsCapture?: boolean;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionRustOptions,
@@ -2128,5 +2129,106 @@ describe("workspaceEngineCapture agent attribution", () => {
       ["offline.md", "Reconciled offline edits"],
     ]);
     expect(readEngineMomentAuthors(root)).toEqual([null]);
+  });
+});
+
+describe("engine selection is stated, not inferred", () => {
+  // The provider-session engine used to be derived from `!options.store`, so
+  // injecting a store to observe it silently selected the legacy engine — and the
+  // injectable openRustYDocProviderSession seam became unreachable in exactly the
+  // tests that wanted it. These two cases pin the flag, and the second is the
+  // control: without it the assertion in the first would pass for the wrong reason.
+  async function openWith(
+    root: string,
+    extra: { useRustEngine?: boolean },
+  ): Promise<{ providerOpened: number; storeReads: number }> {
+    const loopback = new VersionedLoopbackEngine();
+    const legacyStore = createVersionedTextStore(root);
+    await legacyStore.ensureMainVersion({ workspaceId: "engine-capture-test" });
+    let storeReads = 0;
+    const observedStore: VersionedTextStore = {
+      ...legacyStore,
+      async readTextFile(input) {
+        storeReads += 1;
+        return await legacyStore.readTextFile(input);
+      },
+    };
+    let providerOpened = 0;
+    const engine = capture(root, {
+      store: observedStore,
+      rustEngineSessions: mockLiveSessions(loopback),
+      ...extra,
+      openRustYDocProviderSession: async () => {
+        providerOpened += 1;
+        const doc = new Y.Doc();
+        doc.getText("content").insert(0, "daemon");
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext",
+          path: "note.md",
+          lineage: "present" as const,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () =>
+            ({ sha256: "b".repeat(64), markdown: "daemon" }) as never,
+          close: async () => undefined,
+        } as never;
+      },
+    });
+    try {
+      const session = await engine.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+      });
+      await session.close({ settle: false });
+    } catch {
+      // The legacy branch may refuse this fixture; providerOpened is the signal.
+    }
+    await engine.stop();
+    return { providerOpened, storeReads };
+  }
+
+  it("reaches the daemon provider session WITH a store injected when told to", async () => {
+    const root = await tempRoot();
+    const { providerOpened } = await openWith(root, { useRustEngine: true });
+    // Before this option existed, injecting `store` forced the legacy branch and
+    // this seam was never called.
+    expect(providerOpened).toBe(1);
+  });
+
+  it("defaults to the daemon when sessions are supplied, store injected or not", async () => {
+    // The new default. Previously an injected store would have forced the legacy
+    // branch here, which is the coupling this change removes.
+    const root = await tempRoot();
+    const { providerOpened } = await openWith(root, {});
+    expect(providerOpened).toBe(1);
+  });
+
+  it("refuses daemon-owned capture on a store it builds itself, rather than no-op flushing", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    // daemonOwnsCapture quiesces via `flushCapture`, which the legacy store this
+    // would construct does not implement — every call site is `?.()`, so the
+    // pairing would skip the flush silently and still report success. An
+    // INJECTED store may implement it, so the guard must not refuse that case:
+    // the health test above injects a legacy store augmented with flushCapture.
+    expect(() =>
+      capture(root, {
+        rustEngineSessions: mockLiveSessions(loopback),
+        useRustEngine: false,
+        daemonOwnsCapture: true,
+      }),
+    ).toThrow(/daemonOwnsCapture requires the Rust engine/);
+  });
+
+  it("CONTROL: an explicit false selects the legacy engine and does NOT reach it", async () => {
+    // Proves the flag is what decides, not the fixture. My first draft used the
+    // absence of the flag as the control and it failed immediately — with sessions
+    // supplied, absence now means daemon. Without a case that reaches ZERO, both
+    // assertions above would pass against an implementation that ignored the flag
+    // and always used the daemon seam.
+    const root = await tempRoot();
+    const { providerOpened } = await openWith(root, { useRustEngine: false });
+    expect(providerOpened).toBe(0);
   });
 });
