@@ -12,13 +12,14 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 // moments and no legacy .dohc/history change set is written. The flag is read
 // at open; toggling it takes effect on the next open of the workspace.
 //
-// Shared by main.ts (production wiring) and scripts/phase0m-agent-engine-qa.ts
-// (the arc-gate QA harness) so the harness can never silently drift from the
-// real gate.
+// The daemon is REQUIRED, not optional: `startRustEngineDaemon` quits the app
+// when it cannot start, before any window exists, so no running workspace can
+// reach here without one. Accepting a null would mean silently recording history
+// through the legacy TypeScript engine instead.
 export async function captureForFlaggedWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   hooks: WorkspaceCaptureHooks,
-  rustEngineSessions?: EngineWorkspaceSessions | null,
+  rustEngineSessions: EngineWorkspaceSessions,
 ): Promise<WorkspaceEngineCapture | null> {
   if (!(await workspaceEngineEnabled(workspace.rootPath))) return null;
   return createWorkspaceEngineCapture({
@@ -31,9 +32,8 @@ export async function captureForFlaggedWorkspace(
     // PR 0N-1: batches settled while a dohc-tracked agent run is active are
     // stamped with agent authorship (History shows "<User Name>'s agent").
     activeAgentRun: hooks.activeAgentRun,
-    ...(rustEngineSessions
-      ? { rustEngineSessions, daemonOwnsCapture: true }
-      : {}),
+    rustEngineSessions,
+    daemonOwnsCapture: true,
   });
 }
 

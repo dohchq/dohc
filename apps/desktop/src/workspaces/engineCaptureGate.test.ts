@@ -8,8 +8,22 @@ import {
 } from "./engineCaptureGate";
 import type { WorkspaceCaptureHooks } from "./workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
+import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { DEFAULT_WORKSPACE_SETTINGS } from "./workspaceSettings";
 import { writeWorkspaceSettingsFile } from "./workspaceSettingsFile";
+
+// The gate now REQUIRES daemon sessions, matching production, where main.ts
+// quits the app if the daemon does not start. These tests only assert null vs
+// non-null and never invoke an engine operation, so the sessions throw on any
+// use: if that ever changes, the test says so loudly instead of quietly
+// exercising a stub.
+const unusedSessions = new Proxy({} as EngineWorkspaceSessions, {
+  get(_target, property) {
+    throw new Error(
+      `engineCaptureGate.test: sessions.${String(property)} was used, but these tests must not reach the engine`,
+    );
+  },
+});
 
 const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
@@ -56,7 +70,7 @@ describe("dispatchScanEligible", () => {
     // forever; only the reopen — where captureFor reads the flag — opts out.
     const root = await tempRoot();
     const workspace = { workspaceId: "ws-gate", rootPath: root };
-    const openCapture = await captureForFlaggedWorkspace(workspace, hooks);
+    const openCapture = await captureForFlaggedWorkspace(workspace, hooks, unusedSessions);
     expect(openCapture).not.toBeNull();
 
     await writeOptOut(root);
@@ -64,7 +78,7 @@ describe("dispatchScanEligible", () => {
       dispatchScanEligible(workspace, activityWith(openCapture, ["ws-gate"])),
     ).resolves.toBe(true);
 
-    const reopenCapture = await captureForFlaggedWorkspace(workspace, hooks);
+    const reopenCapture = await captureForFlaggedWorkspace(workspace, hooks, unusedSessions);
     expect(reopenCapture).toBeNull();
     await expect(
       dispatchScanEligible(workspace, activityWith(reopenCapture, ["ws-gate"])),
