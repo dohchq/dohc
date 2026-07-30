@@ -1,10 +1,16 @@
 # The replicated Y.Doc lineage, and how its base is claimed
 
-This records an algorithm whose only worked implementation is scheduled for
-deletion. `packages/workspace-engine/src/ydocEngineDriver.ts` is the legacy
-TypeScript engine's Y.Doc driver; R16 removes that package. The Rust daemon has
-the storage columns and the emit condition, but **no working origination path** —
-so when the TypeScript driver goes, the reference goes with it.
+This is a **constraint record**, not an algorithm. It exists because the closest
+thing to a reference is scheduled for deletion:
+`packages/workspace-engine/src/ydocEngineDriver.ts` is the legacy TypeScript
+engine's Y.Doc driver, and R16 removes that package. The Rust daemon has the
+storage columns and the emit condition, but **no working origination path**.
+
+Read the legacy driver as *one narrower implementation*, not a recipe. It gets
+several things right that are recorded below, and it is wrong or silent on several
+others — the `base_claimed` predicate, promotion of a lineage that already holds
+updates, and the reservation identity among them. A porter who treats it as a
+complete design will reproduce its gaps.
 
 Written down here rather than left in a deleted file's history, because the
 oracle case that proves this behaviour (`ydoc.before-base-claim`,
@@ -101,6 +107,15 @@ cache; and closing prunes it, so reopening reseeds from the file with no loss.
 Prune-on-close is correct **only** here. A document that never replicated cannot
 diverge a peer. Do not generalise the pruning path to replicated documents — that
 is the same forked-lineage bug arriving by another route.
+
+**And even here, pruning is conditional on a durable settle.** "Reopening reseeds
+from the file with zero loss" is only true once the file actually holds the latest
+edits. If the settle failed, or its materialization job is still pending, then
+pruning discards the only copy of those edits and the reopen reads an older file —
+lossy, quietly. Rust encodes this: `close_session` returns `UnsettledClose` until
+the projected sha matches and no materialization job is outstanding
+(`durable.rs`). So local-only pruning is permitted only **after the projection is
+durably materialized**, never merely because the session is closing.
 
 The storage is deliberately additive-compatible: flipping
 `persistClosedSessionState` makes even a local-only close keep its CRDT bytes,
@@ -216,6 +231,33 @@ reconstruct them, and later deltas that depend on them can stay pending forever.
 The comment there states the projection requirement — "or the visible snapshot
 would drop local content that is still durably part of the CRDT" — and that is
 exactly the narrower guarantee it delivers. Origination has to go further.
+
+**2d. Promotion must commit the base and every lineage-preserving delta
+together.** The "journal the pre-existing rows as deltas" alternative above is only
+safe if those deltas land in the *same* transaction as the base claim. A crash
+after `base_claimed` commits but before the pre-existing rows reach
+`replication_log` leaves a retry that resumes the already-claimed base — and those
+private rows are then lost to every clean peer, permanently, with no path that
+republishes them. Commit them together, or persist a recoverable
+incomplete-promotion state that a retry can finish.
+
+**2e. Re-check the encoded head inside the claim transaction, not just
+`base_claimed`.** Two processes are enough to lose a row. A encodes an existing
+unclaimed lineage; B appends an update, sees `base_claimed = 0` and therefore
+journals nothing; A then enters its claim transaction, finds `base_claimed` still
+false, and commits its *stale* encoding as the claimed base. Nothing afterwards
+publishes B's row and clean peers diverge. Validate the head sequence or state
+token the encoding was taken from, inside the transaction — or reconstruct and
+publish all rows under it.
+
+**2f. Redelivery must stay idempotent, which is not the same as failing loudly.**
+The divergence check above must not turn a *valid* retry into an error. A base
+commit whose acknowledgement is lost will be redelivered on the same coordinate,
+and that redelivery is correct. Rust already handles this with coordinate-admission
+deduplication and the equal-SHA `Resumed` branch. So: exactly-once falls out of the
+claim's structure rather than a counter, **and** import and acknowledgement retries
+must remain idempotent. Read literally without this, the "fail on mismatch" rule
+rejects a legitimate second delivery.
 
 **2c. A base must be self-contained — validate that, not just its size.** An
 incoming payload flagged as a base state can actually be a *delta* whose
@@ -409,6 +451,22 @@ Without step 4 against a clean peer, the origin reconstructs from its own privat
 rows and the gate goes green on precisely the silent divergence 2b warns about.
 This is the same trap as the disabled rejoin spec above, one level deeper: a gate
 written to cover a fixed bug that never exercises the bug's precondition.
+
+**A third scenario is needed for the unresolved-update branch.** Both scenarios
+above can be satisfied using only *integrated* local updates — so an
+implementation that always full-state-encodes, silently dropping pending rows,
+passes them both. That is exactly the branch constraint 2b's second condition
+exists to force. So:
+
+1. Persist a **dependent** update before its predecessor arrives, leaving
+   `has_missing_updates()` true.
+2. Crash-exit and promote the lineage.
+3. Deliver the predecessor.
+4. Assert the clean peer converges on the full content.
+
+Without step 4 following step 3, a promotion that discarded the pending row looks
+identical to one that preserved it — the origin resolves the dependency from rows
+the peer never received.
 
 **And the fresh-creation scenario needs a clean peer too.** Base-once plus
 delta-follows is satisfied by a base that is empty, stale, or from the wrong
