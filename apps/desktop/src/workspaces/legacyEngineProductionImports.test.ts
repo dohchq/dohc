@@ -16,6 +16,16 @@ import ts from "typescript";
 //
 // Type-only imports are fine — they carry no runtime dependency and vanish at
 // build time — so they are not listed and not counted.
+//
+// "Type-only" here means SYNTACTICALLY type-only: `import type { X }`, or named
+// bindings that are each `type`. A plain `import { X }` whose bindings happen to
+// be used only in type positions is ALSO erased under this tsconfig
+// (isolatedModules, no verbatimModuleSyntax), but this guard counts it as
+// runtime on purpose. Deciding otherwise needs whole-file binding-usage
+// analysis, and the syntactic form is the one convention worth having: all
+// eleven type-only importers in the repo already write it that way. If this ever
+// rejects legitimate work, the fix is to add the `type` keyword, not to loosen
+// the guard.
 
 const REPO_ROOT = resolve(__dirname, "..", "..", "..", "..");
 const LEGACY_PACKAGE = "@dohc/workspace-engine";
@@ -51,10 +61,16 @@ function isProductionSource(posixPath: string): boolean {
   if (posixPath.includes("/e2e/")) return false;
   if (posixPath.includes("/scripts/")) return false;
   if (posixPath.includes("/testing/")) return false;
-  // Build and test tooling that happens to sit at a package root rather than
-  // under scripts/ — electron.vite.config.ts, playwright.config.ts,
-  // vitest.config.ts. These run on a developer's machine, never a user's.
-  if (/(^|\/)[^/]*\.config\.[cm]?[jt]s$/.test(posixPath)) return false;
+  // Build and test tooling that sits at a PACKAGE ROOT rather than under
+  // scripts/ — electron.vite.config.ts, playwright.config.ts, vitest.config.ts.
+  // These run on a developer's machine, never a user's.
+  //
+  // Anchored outside src/ deliberately: an unanchored rule would also excuse
+  // shipping source merely NAMED like config (apps/desktop/src/engine.config.ts),
+  // and a runtime import there would never reach the scan.
+  if (!posixPath.includes("/src/") && /(^|\/)[^/]*\.config\.[cm]?[jt]s$/.test(posixPath)) {
+    return false;
+  }
   // Declaration files carry no runtime import — everything in them is erased,
   // including `import Engine = require(…)`.
   if (/\.d\.[cm]?ts$/.test(posixPath)) return false;
@@ -134,6 +150,24 @@ function isErasedImport(node: ts.ImportDeclaration): boolean {
   return false;
 }
 
+// A specifier that is statically knowable: a literal, a const bound to one, or
+// literals joined with `+`. Anything computed at runtime is beyond any static
+// guard and is not attempted.
+function resolveSpecifier(
+  node: ts.Expression,
+  stringConsts: ReadonlyMap<string, string>,
+): string | undefined {
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isIdentifier(node)) return stringConsts.get(node.text);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = resolveSpecifier(node.left, stringConsts);
+    const right = resolveSpecifier(node.right, stringConsts);
+    return left === undefined || right === undefined ? undefined : left + right;
+  }
+  if (ts.isParenthesizedExpression(node)) return resolveSpecifier(node.expression, stringConsts);
+  return undefined;
+}
+
 function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean {
   const sourceFile = ts.createSourceFile(
     fileName,
@@ -150,9 +184,17 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
   // (linkedChatStore.ts:199). Matching only a callee literally named `require`
   // would leave the ratchet open along the path the codebase already prefers.
   const requireAliases = new Set<string>(["require"]);
+  // `const name = "@dohc/workspace-engine"; await import(name)` resolves the
+  // package just the same, and factoring a specifier into a constant is a
+  // routine refactor — so a literal-node-only check would let one walk around
+  // the ratchet. Collected up front because a const may be declared after use.
+  const stringConsts = new Map<string, string>();
   const collectAliases = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       const init = node.initializer;
+      if (init !== undefined && ts.isStringLiteralLike(init)) {
+        stringConsts.set(node.name.text, init.text);
+      }
       if (init !== undefined && ts.isCallExpression(init)) {
         const callee = init.expression;
         const isCreateRequire =
@@ -204,8 +246,8 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       }
     } else if (ts.isCallExpression(node)) {
       const arg = node.arguments[0];
-      const isStringArg =
-          arg !== undefined && ts.isStringLiteralLike(arg) && isLegacySpecifier(arg.text, fileName);
+      const specifier = arg === undefined ? undefined : resolveSpecifier(arg, stringConsts);
+      const isStringArg = specifier !== undefined && isLegacySpecifier(specifier, fileName);
       if (isStringArg) {
         // `import("pkg")`, and a BARE `require("pkg")` — but not a method call
         // such as `loader.require("pkg")`, which is not Node's require.
@@ -390,6 +432,56 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     expect(scriptKindFor("a/b.jsx")).toBe(ts.ScriptKind.JSX);
     expect(scriptKindFor("a/b.mjs")).toBe(ts.ScriptKind.JS);
     expect(scriptKindFor("a/b.ts")).toBe(ts.ScriptKind.TS);
+  });
+
+  it("resolves a specifier factored into a constant", () => {
+    const L = LEGACY_PACKAGE;
+    // Factoring a specifier into a const is a routine refactor, so a
+    // literal-node-only check would let one walk around the ratchet.
+    expect(
+      hasRuntimeLegacyImport(`const name = "${L}";
+export const m = await import(name);`),
+    ).toBe(true);
+    // Declared AFTER use — the const map is collected in a separate pass.
+    expect(
+      hasRuntimeLegacyImport(`export const m = await import(name);
+const name = "${L}";`),
+    ).toBe(true);
+    // Concatenated literals.
+    expect(hasRuntimeLegacyImport(`const m = require("@dohc/" + "workspace-engine");`)).toBe(true);
+    const scoped = `const scope = "@dohc/";
+const m = require(scope + "workspace-engine");`;
+    expect(hasRuntimeLegacyImport(scoped)).toBe(true);
+    // A genuinely runtime-computed specifier is beyond any static guard, and is
+    // not claimed to be covered.
+    expect(hasRuntimeLegacyImport(`const m = await import(pickPackage());`)).toBe(false);
+    // A constant for a DIFFERENT package must not match.
+    expect(
+      hasRuntimeLegacyImport(`const name = "${L}-client";
+const m = await import(name);`),
+    ).toBe(false);
+  });
+
+  it("excuses config only at a package root, never shipping source", () => {
+    // An unanchored rule would also excuse source merely NAMED like config.
+    expect(isProductionSource("apps/desktop/electron.vite.config.ts")).toBe(false);
+    expect(isProductionSource("apps/desktop/playwright.config.ts")).toBe(false);
+    expect(isProductionSource("packages/cli/vitest.config.ts")).toBe(false);
+    expect(isProductionSource("apps/desktop/src/engine.config.ts")).toBe(true);
+    expect(isProductionSource("packages/mcp/src/tools.config.ts")).toBe(true);
+  });
+
+  it("counts a syntactically-untyped import as runtime, by documented choice", () => {
+    // `import { X }` used only in type positions is erased under this tsconfig,
+    // but deciding that needs binding-usage analysis. The syntactic form is the
+    // convention — all eleven type-only importers already use it — so this is a
+    // deliberate false positive, pinned here so nobody "fixes" it by accident.
+    expect(hasRuntimeLegacyImport(`import { VersionedTextStore } from "${LEGACY_PACKAGE}";`)).toBe(
+      true,
+    );
+    expect(
+      hasRuntimeLegacyImport(`import type { VersionedTextStore } from "${LEGACY_PACKAGE}";`),
+    ).toBe(false);
   });
 
   it("detects the loader spellings a name-only check misses", () => {
