@@ -34,9 +34,16 @@ function splitFrontmatter(text, file) {
   if (!text.startsWith("---\n") && !text.startsWith("---\r\n")) {
     throw new Error(`${file}: no YAML frontmatter (must start with '---')`);
   }
-  const end = text.indexOf("\n---", 3);
-  if (end === -1) throw new Error(`${file}: unterminated frontmatter`);
-  const close = text.indexOf("\n", end + 1);
+  // The terminator is a line that is exactly `---`. Searching for "\n---" alone
+  // accepts `---oops`, and the adapter built from it carries that as its closing
+  // delimiter — so its frontmatter never parses and the skill disappears from
+  // both hosts, with --check passing because it compares generated to generated.
+  const term = /\r?\n---[ \t]*(?=\r?\n|$)/g;
+  term.lastIndex = 3;
+  const m = term.exec(text);
+  if (!m) throw new Error(`${file}: unterminated frontmatter (no standalone '---' line)`);
+  const end = m.index + m[0].length;
+  const close = text.indexOf("\n", end);
   return { frontmatter: text.slice(0, close === -1 ? text.length : close + 1) };
 }
 
