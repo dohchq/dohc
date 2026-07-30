@@ -1,28 +1,11 @@
 #!/usr/bin/env node
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { extname, join, relative } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { basename, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..')
 const scanner = 'scripts/check-brand.mjs'
-const skippedDirectories = new Set([
-  '.git',
-  '.next',
-  '.output',
-  '.turbo',
-  '.vercel',
-  '.cache',
-  '.venv',
-  '.vite',
-  'build',
-  'coverage',
-  'dist',
-  'node_modules',
-  'out',
-  'playwright-report',
-  'target',
-  'test-results',
-])
 const skippedFiles = new Set(['Cargo.lock', 'pnpm-lock.yaml'])
 const textExtensions = new Set([
   '.css',
@@ -58,10 +41,22 @@ const forbidden = [
 ]
 
 const violations = []
-for (const file of walk(root)) {
-  const path = normalize(relative(root, file))
+const trackedFiles = execFileSync('git', ['ls-files', '-z'], {
+  cwd: root,
+  encoding: 'utf8',
+})
+  .split('\0')
+  .filter(Boolean)
+
+for (const path of trackedFiles) {
   if (path === scanner || skippedFiles.has(path)) continue
-  const body = readFileSync(file)
+  const name = basename(path)
+  const extension = extname(name).toLowerCase()
+  const isEnvironmentExample =
+    name.startsWith('.env') && name.endsWith('.example')
+  if (!textExtensions.has(extension) && !isEnvironmentExample) continue
+
+  const body = readFileSync(join(root, path))
   if (body.includes(0)) {
     violations.push(`${path}: contains a NUL byte`)
     continue
@@ -83,26 +78,3 @@ if (violations.length > 0) {
 }
 
 console.log('Brand check passed.')
-
-function* walk(directory) {
-  for (const name of readdirSync(directory)) {
-    if (skippedDirectories.has(name) || name.startsWith('target-')) continue
-    const path = join(directory, name)
-    const stat = statSync(path)
-    if (stat.isDirectory()) {
-      yield* walk(path)
-      continue
-    }
-    const extension = extname(name).toLowerCase()
-    if (
-      stat.isFile() &&
-      (textExtensions.has(extension) || name.startsWith('.env.'))
-    ) {
-      yield path
-    }
-  }
-}
-
-function normalize(path) {
-  return path.replace(/\\/g, '/')
-}
