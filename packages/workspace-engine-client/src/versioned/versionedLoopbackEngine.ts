@@ -766,7 +766,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: origin,
       momentLog: before ? [...before.momentLog] : [],
     };
-    const moment = this.makeMoment(version, path, momentId, "write", file, before, now);
+    const moment = this.makeMoment(
+      version,
+      path,
+      momentId,
+      "write",
+      file,
+      before,
+      now,
+      this.momentMetadataFields(params),
+    );
     const internal = { wire: moment, before: before && copyFile(before), after: copyFile(file) };
     file.momentLog.push(internal);
     version.files.set(path, file);
