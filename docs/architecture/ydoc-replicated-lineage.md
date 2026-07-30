@@ -97,12 +97,31 @@ Test the claimed-state predicate. The Rust side does this correctly
 (`claim_base_in_tx`, `durable.rs`): read the head, and branch on `base_claimed`.
 
 There is a second condition the TypeScript version does not have, and it is
-load-bearing: when a base *is* already claimed, resume the winner **only if the
-incoming base is the stored base**. Compare the stored snapshot sha. Silently
-resuming and acking a *different* base would drop a divergent lineage while the
-relay cursor advances past it, leaving that peer's later updates depending on an
-operation nobody can recover. Failing loudly on a base mismatch is the correct
-behaviour; treating it as an ordinary "someone else won" is not.
+load-bearing. When a base *is* already claimed, look up the stored seq-0 snapshot
+sha and branch **three** ways — not two:
+
+| Stored sha | Action |
+| --- | --- |
+| present and **equal** to the incoming base | resume |
+| present and **different** | **fail loudly** — the lineage has diverged |
+| **absent** | resume |
+
+The middle arm is the one the TypeScript reference lacks: silently resuming and
+acking a *different* base drops a divergent lineage while the relay cursor
+advances past it, leaving that peer's later updates depending on an operation
+nobody can recover.
+
+The third arm is not an oversight, and getting it wrong is worse than the bug the
+second arm fixes. Compaction legitimately folds the seq-0 base away once later
+updates supersede it (see the compaction note above), so a missing snapshot is the
+*normal* state of a long-lived document. At that point divergence is no longer
+verifiable, base-once still holds, and refusing would wedge the relay cursor on a
+**valid** replica. Resume.
+
+So the sha comparison is conditional on the original snapshot still existing.
+Stating the rule unconditionally — "resume only if the incoming base is the stored
+base" — would make an implementation reject every base delivery after the first
+compaction.
 
 Otherwise: seed nothing, journal nothing, resume. Emitting a second base is the
 fork described above.
@@ -174,8 +193,15 @@ The storage and the emit condition exist. The origination does not.
   `ydoc.apply`. Do not confuse `ydoc.apply` with
   `ydoc.applyExternalMarkdownEdit`; they are different methods and the latter is
   wired on both sides. A grep for `ydoc.apply` matches both.
-- `crates/dohc-engine-collab/Cargo.toml` states it plainly: *"Dormant; not wired
-  into the product."*
+**Do not trust `dohc-engine-collab`'s manifest description.** It ends *"Dormant;
+not wired into the product"*, and that sentence is **stale**.
+`dohc-engine-runtime`, `dohc-engine-sync` and `dohc-workspace-engine` all depend
+on the crate, and live daemon paths call it for Y.Doc open, update, settle, close,
+resync and inbound apply — the `ydoc.apply` bullet above is itself one such call.
+Treating that description as an architectural fact would let a deletion or port
+handle a live product dependency as dead code.
+
+What is dormant is the **origination path specifically**, not the crate.
 
 So the Rust side can mark a lineage replicated when a **peer** hands it one, and
 cannot originate one itself. That gap is #378.
