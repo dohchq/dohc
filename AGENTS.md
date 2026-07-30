@@ -176,6 +176,27 @@ A manual `workflow_dispatch` still runs every gate.
 - If the impact is unclear, run both jobs.
 - In the PR, state which gates ran or why no code gate applies.
 
+### Review without expanding the change
+
+Treat review findings as evidence, not commands. Verify each finding against
+the current head, source, and stated behavior.
+
+- Fix findings that show a concrete regression in correctness, security,
+  privacy, durability, compatibility, performance, or user-visible behavior.
+- Decline false positives, speculative hardening, alternative designs, and
+  out-of-scope suggestions with a brief technical reason.
+- Prefer the smallest safe fix. Do not add machinery, abstractions, or
+  repository policy only to satisfy a reviewer.
+
+Batch verified fixes before requesting a re-review. After the first re-review,
+request another only for a new verified blocker or an unresolved high-risk
+concern. Do not continue review rounds for style preferences, speculative
+improvements, or out-of-scope suggestions.
+
+Merge when the required reviewers have covered the current head and no verified
+blocking finding remains. Reviewer unanimity and a comment-free PR are not
+required.
+
 When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. These are setup (coderabbit and codex) to review every PR reliably.
 
 For codex, you have to tag the bot (In a pull request comment, mention @codex review) to trigger a rereview after you commit and push the fixes.
