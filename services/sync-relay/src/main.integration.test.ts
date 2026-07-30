@@ -33,7 +33,15 @@ import {
   uploadKeyEnvelope,
   type SyncReplicationEnvelope,
 } from "@dohc/workspace-engine";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// This file's spawn helper allows 45s for the relay to report a port (tsx compiles
+// on startup), and the package default is 30s — so a slow launch would be killed by
+// vitest before its own deadline could fire, and even a 20s launch would eat the
+// budget the assertions need. File-level rather than package-level: only 3 of the
+// 11 test files here spawn a relay child, and the other 8 keep the tighter default
+// (#372).
+vi.setConfig({ testTimeout: 90_000, hookTimeout: 30_000 });
 
 interface RawSqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
@@ -804,7 +812,10 @@ describe("sync relay main process", () => {
       await bStore.close();
       await aStore.close();
     }
-  }, 30_000);
+    // No explicit budget: an inline one OVERRIDES the file-level testTimeout, and
+    // 30s here could not contain this file's 45s relay-startup deadline — the same
+    // deadline-outside-its-container bug, reintroduced by a leftover override (#372).
+  });
 
   it("sends and stores secret ciphertext over the relay transport without plaintext or raw key", async (context) => {
     const relayRoot = await tempRoot("relay-secret");

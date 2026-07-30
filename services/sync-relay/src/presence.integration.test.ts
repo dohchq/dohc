@@ -3,12 +3,19 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Two DIFFERENT clients over a REAL relay child process (the SYNC_RELAY_TEST_AUTH
 // bearer seam), proving the ephemeral awareness transport end to end: client A
 // sees client B come online + type, and B leaving clears B for A — all with no
 // durable log write.
+
+// The teardown can need the full 5s SIGTERM grace per child AND up to 5.5s of
+// linear rm() backoff (100+200+…+1000) once SQLite handles are still busy — over
+// vitest's stock 10s hook budget before filesystem overhead. Leaving it at the
+// default would fail teardown with a generic hook timeout in exactly the
+// contention the retries exist for: a deadline outside its container again (#372).
+vi.setConfig({ hookTimeout: 30_000 });
 
 let roots: string[] = [];
 let children: ChildProcess[] = [];
