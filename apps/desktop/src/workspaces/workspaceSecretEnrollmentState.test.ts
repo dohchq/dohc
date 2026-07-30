@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import {
   SECRET_FILE_STORE_RELATIVE_PATH,
   installWorkspaceDataKey,
-} from "@dohc/workspace-engine";
+} from "./workspaceDataKey";
 import type {
   Request,
   Response,

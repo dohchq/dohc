@@ -2,19 +2,17 @@ import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   type PendingConflictResolve,
+  type PullWorkspaceFromRelayResult,
+  type PushWorkspaceToRelayResult,
+  type RecoverRelayOriginResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import {
-  type pullWorkspaceFromRelay,
-  type pushWorkspaceToRelay,
-  type recoverRelayOrigin,
-} from "@dohc/workspace-engine";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 export interface RelaySyncOperations {
-  push(): ReturnType<typeof pushWorkspaceToRelay>;
-  pull(): ReturnType<typeof pullWorkspaceFromRelay>;
-  recoverOrigin(): ReturnType<typeof recoverRelayOrigin>;
+  push(): Promise<PushWorkspaceToRelayResult>;
+  pull(): Promise<PullWorkspaceFromRelayResult>;
+  recoverOrigin(): Promise<RecoverRelayOriginResult>;
 }
 
 export interface CloudSyncEngineOptions {

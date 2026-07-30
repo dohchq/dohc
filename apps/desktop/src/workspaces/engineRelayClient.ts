@@ -16,7 +16,7 @@ import {
   type RecoverRelayOriginResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import { probeRelayWorkspace } from "@dohc/workspace-engine";
+import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 import {
   DaemonRefusalError,
   decodeKeyEnvelopeResult,

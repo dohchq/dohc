@@ -4,12 +4,11 @@ import {
   SECRET_FILE_STORE_RELATIVE_PATH,
   SECRET_KEY_RELATIVE_PATH,
   loadSecretDataKey,
-  type WorkspaceSecretState,
-} from "@dohc/workspace-engine";
+} from "./workspaceDataKey";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 
-export type { WorkspaceSecretState };
+export type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
 
 // `rootDir` must be the registry's rootPath VERBATIM, never a resolved copy:
 // the relay route table is keyed by exact string (`relayForOpen` ->
