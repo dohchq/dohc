@@ -145,25 +145,38 @@ Agent activity gets the olive `agent` voice visually. In words:
 | `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/trash if that fails, and can be restored.` | States the count and the true recovery path including the fallback — dohc deletes are recoverable, so `This cannot be undone` would be false. |
 | `AI is analyzing your workspace…` | `Agent is reading 40 files.` | Concrete, countable, no magic. |
 
-## Known violations in shipping copy
+## Where shipping copy disagrees with itself
 
 This file is new and the app predates it. Existing strings are not
-automatically conformant. Confirmed so far:
+automatically conformant.
 
-- `apps/desktop/src/renderer/editor/slashCommands.tsx:83` — `Link another page`
-  says `page` where the rest of the UI says `file`.
-- `apps/desktop/src/renderer/settings/SettingsDialog.tsx` — this dialog says
-  `document` throughout (`:487`, `:662`, `:669`) where the rest of the UI says
-  `file`. Settle the whole dialog in one change; fixing a single string here
-  would create local drift rather than remove it.
+But most apparent violations are not one bad string. They are **surfaces with
+their own internally consistent vocabulary** that differs from the next
+surface: the editor says `page`, Settings says `document`, the file tree says
+`file`. Changing one string inside a consistent surface makes drift worse, not
+better.
+
+**Fix a surface, never a string.** And check whether a name is pinned by e2e
+before touching it — `ui-language.md` treats every `aria-*` and accessible name
+as pinned, so renaming one is a test change, not a copy change.
+
+Known so far:
+
+- The editor and linking surface says `page` throughout — `Link another page`
+  (`slashCommands.tsx:83`), `aria-label="page links"`
+  (`WikilinkPicker.tsx:210`), `aria-label="Page title"`
+  (`PageIdentity.tsx:260`) — where the rest of the UI says `file`. Two of those
+  are pinned `aria-label`s.
+- `apps/desktop/src/renderer/settings/SettingsDialog.tsx` says `document`
+  throughout (`:487`, `:662`, `:669`) where the rest of the UI says `file`.
 - `apps/desktop/src/renderer/workbench/Explorer.tsx:1528` — the delete dialog
   says the trash fallback happens "on drives without one", but `deletePath`
   falls back on *any* `trashItem` rejection. The stated condition is narrower
   than the real one.
 
-Fix these when you next touch the surface. Do not read existing copy as an
-example of the rules — and note that `${confirmDelete.length} items` in that
-same dialog is *correct*, because the selection can mix files and folders.
+Do not read existing copy as an example of the rules. And note that
+`${confirmDelete.length} items` in that same delete dialog is *correct* —
+the selection can mix files and folders, so `files` would be false.
 
 ## Checklist per string
 
