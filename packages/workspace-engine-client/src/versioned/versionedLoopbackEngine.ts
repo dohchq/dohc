@@ -2006,6 +2006,52 @@ export class VersionedLoopbackEngine implements EngineTransport {
    * so on its snapshots. This loopback does not, because nothing reads it here
    * yet — the history row is what moments.list serves.
    */
+  // Mirrors the daemon's `validated_author` (lib.rs), which is the WRITE path:
+  // a malformed author is REFUSED with `invalid-metadata` before any mutation.
+  // An earlier draft mirrored `parsed_moment_author` instead and recorded
+  // `{ corrupt: true }` — but that marker exists for READING malformed
+  // historical rows, so recording it here let the fake accept writes production
+  // refuses. Same class as copying the author raw: permissive where the daemon
+  // is strict.
+  //
+  // Returns the normalized author to store. `agentRunId` is OPTIONAL in the
+  // contract and never nullable, so it is omitted rather than nulled.
+  private validatedAuthorValue(params: JsonObject): JsonValue | undefined {
+    const raw = params.author;
+    const legacy = params.authorJson;
+    const refuse = (): never => {
+      throw new Error("invalid-metadata");
+    };
+    if (raw !== undefined && raw !== null && typeof legacy === "string") refuse();
+    let value: JsonValue;
+    if (raw !== undefined && raw !== null) {
+      value = raw;
+    } else if (typeof legacy === "string") {
+      try {
+        value = JSON.parse(legacy) as JsonValue;
+      } catch {
+        return refuse();
+      }
+    } else {
+      return undefined;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) refuse();
+    const object = value as JsonObject;
+    const nonEmpty = (key: string): boolean =>
+      typeof object[key] === "string" && (object[key] as string).length > 0;
+    const runId = object.agentRunId;
+    const runOk = runId === undefined || (typeof runId === "string" && runId.length > 0);
+    if (object.kind !== "agent" || !nonEmpty("agentId") || !nonEmpty("onBehalfOf") || !runOk) {
+      refuse();
+    }
+    return {
+      kind: "agent",
+      agentId: object.agentId,
+      onBehalfOf: object.onBehalfOf,
+      ...(runId === undefined ? {} : { agentRunId: runId }),
+    } as unknown as JsonValue;
+  }
+
   private momentMetadataFields(params: JsonObject): JsonObject {
     const summary = optionalString(params, "summary");
     const correlationId = optionalString(params, "correlationId");
@@ -2014,6 +2060,25 @@ export class VersionedLoopbackEngine implements EngineTransport {
       ...(correlationId !== undefined
         ? { metadataCorrelationId: correlationId }
         : {}),
+      // The daemon stamps the write's AUTHOR on the moment it records and
+      // returns it from moments.list/get (store.rs `author_json`); a write
+      // without one gets null. Dropping it here made every moment look
+      // actor-neutral, so a caller could not tell agent-authored history from
+      // the user's own.
+      //
+      // NORMALIZED, not copied. AgentAuthor is `JsonObject & {...}`, so a
+      // caller may pass extension fields; the daemon accepts them and
+      // `parsed_moment_author` returns only the recognized ones. Copying raw
+      // made the loopback STRICTER than the daemon — the response failed the
+      // client's own `strictObjectValue` on the extra key, so a write that
+      // works against the engine broke against the fake.
+      ...(() => {
+        // Validated, not merely normalized — see validatedAuthorValue. Throws
+        // `invalid-metadata` for a malformed author, exactly as the daemon
+        // refuses the request before mutating anything.
+        const author = this.validatedAuthorValue(params);
+        return author === undefined ? {} : { author };
+      })(),
     };
   }
 
@@ -2048,7 +2113,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
       beforeBinarySha256: before?.binarySha ?? null,
       beforeLatestMomentId: before?.latestMomentId ?? null,
       metadataOrigin: after.metadataOrigin,
-      author: null,
+      // Supplied through `metadata` by the write paths that carry one (see
+      // momentMetadataFields); absent means actor-neutral, never undefined.
+      author: (metadata.author as MomentRecord["author"] | undefined) ?? null,
       syncRecordOnly: false,
       afterText,
       afterByteLength: deleted

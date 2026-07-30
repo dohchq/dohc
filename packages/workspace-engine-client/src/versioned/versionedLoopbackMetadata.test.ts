@@ -85,6 +85,112 @@ describe("loopback moment metadata", () => {
     expect(moments[0].metadataCorrelationId).toBe("corr-binary");
   });
 
+  it("normalizes an author to the daemon's output shape", async () => {
+    // AgentAuthor is `JsonObject & {...}`, so a caller may pass extension
+    // fields. The daemon accepts them and returns only the recognized ones
+    // (parsed_moment_author). A loopback that copied the author raw would be
+    // STRICTER than the daemon: its own response fails the client's
+    // strictObjectValue on the extra key, so a write that works against the
+    // engine breaks against the fake.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "notes.md",
+      text: "hello",
+      origin: "local-file",
+      author: {
+        kind: "agent",
+        agentId: "agent-1",
+        onBehalfOf: "user-1",
+        agentRunId: "run-1",
+        somethingExtra: "must not survive",
+      },
+    });
+    const page = await send(engine, VERSIONED_METHOD.momentsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const moments = page.moments as Array<Record<string, unknown>>;
+    expect(moments[0].author).toEqual({
+      kind: "agent",
+      agentId: "agent-1",
+      onBehalfOf: "user-1",
+      agentRunId: "run-1",
+    });
+  });
+
+  it("REFUSES a malformed author instead of recording it", async () => {
+    // The daemon's write path (`validated_author`) rejects with
+    // `invalid-metadata` before any mutation. An earlier draft of this suite
+    // expected `{ corrupt: true }` on the recorded moment, mirroring
+    // `parsed_moment_author` — but that marker is for READING malformed
+    // historical rows, so expecting it here let the fake accept a write
+    // production refuses.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await expect(
+      send(engine, VERSIONED_METHOD.textWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "notes.md",
+        text: "hello",
+        origin: "local-file",
+        author: { kind: "agent", agentId: "", onBehalfOf: "user-1" },
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+
+    // And nothing was recorded — a refusal that still mutated would be worse
+    // than accepting the author.
+    const page = await send(engine, VERSIONED_METHOD.momentsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    expect(page.moments as unknown[]).toHaveLength(0);
+  });
+
+  it("REFUSES author and authorJson together, as the daemon does", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await expect(
+      send(engine, VERSIONED_METHOD.textWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "notes.md",
+        text: "hello",
+        origin: "local-file",
+        author: { kind: "agent", agentId: "a", onBehalfOf: "u" },
+        authorJson: JSON.stringify({ kind: "agent", agentId: "a", onBehalfOf: "u" }),
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+  });
+
+  it("omits agentRunId when the caller does not supply it", async () => {
+    // Contract field is `agentRunId?: string` — optional, never nullable.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "notes.md",
+      text: "hello",
+      origin: "local-file",
+      author: { kind: "agent", agentId: "agent-1", onBehalfOf: "user-1" },
+    });
+    const page = await send(engine, VERSIONED_METHOD.momentsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const moments = page.moments as Array<Record<string, unknown>>;
+    expect(moments[0].author).toEqual({
+      kind: "agent",
+      agentId: "agent-1",
+      onBehalfOf: "user-1",
+    });
+    expect(Object.keys(moments[0].author as object)).not.toContain("agentRunId");
+  });
+
   it("leaves both null when the caller supplies neither", async () => {
     // A write without metadata must produce exactly the shape it did before this
     // was threaded through, so no existing consumer changes.
