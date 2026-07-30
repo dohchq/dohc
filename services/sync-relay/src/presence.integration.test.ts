@@ -450,19 +450,31 @@ describe("two-client presence over a real relay child", () => {
     ).catch(() => undefined);
     await waitForWaiters(baseUrl, 1);
     controller.abort(); // client vanishes mid-park
+    // Observe the release BEFORE awaiting `parked`, and inside a budget below the
+    // 20s hold. Both matter. Awaiting `parked` first would absorb the whole hold,
+    // after which zero waiters is guaranteed however the release happened — and a
+    // budget at or above the hold is satisfied by the hold expiring on its own.
+    // Either mistake makes this go green when abort propagation is broken.
+    await waitForWaiters(baseUrl, 0, 15_000);
     await parked;
-    await waitForWaiters(baseUrl, 0);
   }, 90_000);
 });
 
 // Poll the test-seam health endpoint until the hub reports `expected` parked
 // waiters (bounded; fails the test with a clear message on timeout).
-async function waitForWaiters(baseUrl: string, expected: number): Promise<void> {
-  // 10s lost the race under contention — this polls a real relay child over
-  // HTTP, so it is wall-clock bound (#372). 25s, and the callers raise their own
-  // budget to contain a slow spawn plus two of these waits; a waiter deadline
+async function waitForWaiters(
+  baseUrl: string,
+  expected: number,
+  budgetMs = 25_000,
+): Promise<void> {
+  // 10s lost the race under contention — this polls a real relay child over HTTP,
+  // so it is wall-clock bound (#372). 25s by default, and the callers raise their
+  // own `it` budget to contain a slow spawn plus two of these waits; a deadline
   // longer than its test budget would be killed before its diagnostic fires.
-  const deadline = Date.now() + 25_000;
+  //
+  // Callers proving something happened BEFORE a server-side timeout must pass a
+  // budget shorter than that timeout — see the disconnect test.
+  const deadline = Date.now() + budgetMs;
   let last: unknown;
   while (Date.now() < deadline) {
     const health = (await (await fetch(`${baseUrl}/health`)).json()) as {
