@@ -135,8 +135,15 @@ function configuredCargoTarget() {
         continue;
       }
       if (!inBuild) continue;
-      const found = /^\s*target\s*=\s*"([^"]+)"/u.exec(line)?.[1];
-      if (found) return found;
+      // [build].target is a string OR an array of strings, per cargo's config
+      // reference. A scalar-only match silently fell back to the host triple on
+      // `target = ["x86_64-apple-darwin"]` and certified a cross run as native.
+      const raw = /^\s*target\s*=\s*(.+?)\s*(?:#.*)?$/u.exec(line)?.[1];
+      if (!raw) continue;
+      const triples = [...raw.matchAll(/"([^"]+)"/gu)].map((m) => m[1]);
+      // More than one target is never a single native run.
+      if (triples.length > 1) return triples.join(",");
+      if (triples.length === 1) return triples[0];
     }
   }
   return null;
