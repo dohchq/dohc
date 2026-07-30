@@ -16,7 +16,6 @@ export const mainBundledWorkspaceDeps = [
   "@dohc/workspace-engine",
   "@dohc/workspace-engine-client",
   "@dohc/workspace-fs",
-  "@dohc/workspace-kernel-client",
   "@dohc/sqlite-worker",
 ];
 

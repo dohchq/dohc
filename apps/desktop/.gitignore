@@ -1,10 +1,9 @@
 # electron-builder output (directories.output in electron-builder.yml).
 release/
 
-# Host-built workspace kernel sidecar staged for packaging by
-# scripts/build-workspace-kernel.mjs. Platform-specific and rebuilt per
-# machine/CI job, so it must never be committed. electron-builder ships it
-# from here as an unpacked extraResource when present.
-resources/workspace-kernel/
+# Host-built binaries staged for packaging by scripts/build-workspace-engine.mjs
+# and scripts/build-cli-bin.mjs. Platform-specific and rebuilt per machine/CI
+# job, so they must never be committed. electron-builder ships them from here as
+# unpacked extraResources.
 resources/workspace-engine/
 resources/cli-bin/

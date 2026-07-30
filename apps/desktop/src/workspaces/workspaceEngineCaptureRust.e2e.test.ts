@@ -33,7 +33,6 @@ if (!engineBinaryPresent && process.env.DOHC_REQUIRE_ENGINE_E2E === "1") {
       "Build it with: cargo build -p dohc-workspace-engine --bin dohc-workspace-engine",
   );
 }
-const originalKernelSidecar = process.env.DOHC_KERNEL_SIDECAR;
 const roots: string[] = [];
 
 async function waitForPathMoments(
@@ -63,11 +62,6 @@ async function waitForPathMoments(
 }
 
 afterEach(async () => {
-  if (originalKernelSidecar === undefined) {
-    delete process.env.DOHC_KERNEL_SIDECAR;
-  } else {
-    process.env.DOHC_KERNEL_SIDECAR = originalKernelSidecar;
-  }
   await Promise.all(
     roots.splice(0).map(
       async (root) => await rm(root, { recursive: true, force: true }),
@@ -78,7 +72,6 @@ afterEach(async () => {
 it.skipIf(!engineBinaryPresent)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
-    process.env.DOHC_KERNEL_SIDECAR = "0";
     const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-e2e-"));
     roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");

@@ -36,7 +36,6 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
 const WS = "engine-ydoc-session-test";
 const PATH = "notes/solo.md";
 const roots: string[] = [];
-const ORIGINAL_KERNEL_SIDECAR = process.env.DOHC_KERNEL_SIDECAR;
 let root: string;
 let store: VersionedTextStore;
 let versionId: string;
@@ -112,9 +111,6 @@ async function seedDiskFile(path: string, contents: string): Promise<void> {
 }
 
 beforeEach(async () => {
-  // No kernel sidecar in unit tests (matches workspaceEngineCapture.test.ts):
-  // otherwise a reconcile scan spawns a real binary with a 30s timeout.
-  process.env.DOHC_KERNEL_SIDECAR = "0";
   root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-ydoc-session-"));
   roots.push(root);
   store = createVersionedTextStore(root);
@@ -133,8 +129,6 @@ beforeEach(async () => {
 afterEach(async () => {
   await store.close().catch(() => undefined);
   closeTrackedEngineDbHandlesForTest();
-  if (ORIGINAL_KERNEL_SIDECAR === undefined) delete process.env.DOHC_KERNEL_SIDECAR;
-  else process.env.DOHC_KERNEL_SIDECAR = ORIGINAL_KERNEL_SIDECAR;
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
 

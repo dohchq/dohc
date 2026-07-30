@@ -50,15 +50,6 @@ extraResources:
     filter:
       - "dohc"
       - "dohc.cmd"
-  # Native sidecars must stay outside app.asar. This directory is always
-  # created by scripts/build-workspace-kernel.mjs; when cargo is unavailable it
-  # is empty and packaging still succeeds. macOS/Windows binaries are produced
-  # by running that script on those platforms; a CI matrix that uploads each
-  # OS's own binary is a follow-up, not implemented here.
-  - from: resources/workspace-kernel
-    to: workspace-kernel
-    filter:
-      - "**/*"
   # The opt-in Rust engine is staged by build-workspace-engine.mjs and kept
   # outside app.asar so the main process can execute it directly.
   - from: resources/workspace-engine

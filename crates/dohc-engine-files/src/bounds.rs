@@ -61,8 +61,8 @@ pub struct ScanBounds {
 
 impl Default for ScanBounds {
     /// Tuned defaults for a desktop workspace: 200k files, 64 MiB per file,
-    /// 64 KiB read buffer (matching the TS/kernel scan buffer,
-    /// `workspace-kernel/src/main.rs`), 4 hash workers, 200k diff entries.
+    /// 64 KiB read buffer (matching the TS/accelerator scan buffer), 4 hash
+    /// workers, 200k diff entries.
     fn default() -> Self {
         ScanBounds {
             max_files: 200_000,

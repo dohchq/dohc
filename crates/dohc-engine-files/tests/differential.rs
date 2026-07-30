@@ -1,15 +1,15 @@
 //! Differential harness (CAL-3 calibration signal).
 //!
-//! The goldens are the reference accelerator's own committed fixtures
+//! The goldens are the retired reference accelerator's own committed fixtures
 //! (`fixtures/workspace-kernel/*.json`). Note the honest scope of what each
 //! field proves:
 //!
 //! - `size` and `sha256` are **engine-independent** ground truth — any correct
 //!   implementation computes the same bytes, so agreement confirms this crate
 //!   computes them correctly, but it is NOT itself a cross-engine parity check.
-//!   The real cross-engine check is the TS `workspace-kernel-client` test suite
-//!   that validates these SAME fixtures against the TS/kernel path; keeping both
-//!   engines pinned to one fixture set is what makes them comparable.
+//!   The accelerator and its TS client are gone (the Rust daemon owns capture),
+//!   so these fixtures are now a pinned independent oracle rather than one half
+//!   of a two-engine comparison.
 //! - The **engine-SPECIFIC** surface — media-type classification and every
 //!   path-floor decision (reserved segments, nested reserved, write-temp
 //!   prefix, db-sidecar keep-vs-exclude) — is where a divergence actually

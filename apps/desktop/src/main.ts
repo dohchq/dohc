@@ -400,7 +400,6 @@ import {
 } from "./workspaces/liveLinkedChatStore";
 import {
   captureForFlaggedWorkspace,
-  configureWorkspaceKernelRuntime,
   dispatchScanEligible,
 } from "./workspaces/engineCaptureGate";
 import {
@@ -1566,11 +1565,6 @@ function engineForWorkspace(
     ...testSyncTimingOverrides(),
   });
 }
-
-configureWorkspaceKernelRuntime({
-  isPackaged: app.isPackaged,
-  resourcesPath: (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
-});
 
 const activity = createWorkspaceActivity(notifyRenderer, {
   cloudStateFor: (workspaceId) => {
