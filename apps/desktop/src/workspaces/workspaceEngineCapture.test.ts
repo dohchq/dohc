@@ -1,3 +1,4 @@
+import type { MomentAuthor } from "@dohc/workspace-contracts";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import type { VersionedTextStore } from "@dohc/workspace-engine";
 import { createVersionedTextStore } from "@dohc/workspace-engine";
@@ -23,6 +24,7 @@ import {
   assertGeneratedMarkdownPath,
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
+  type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { createChangeSetStore } from "@dohc/workspace-engine";
 import {
@@ -99,32 +101,6 @@ function readEngineMoments(rootPath: string): EngineMomentRow[] {
   }
 }
 
-function readBinaryBlobRows(rootPath: string): Array<{ sha256: string; byteLength: number }> {
-  const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
-    readOnly: true,
-  });
-  try {
-    return db
-      .prepare("SELECT sha256, byte_length AS byteLength FROM binary_blobs ORDER BY sha256")
-      .all() as Array<{ sha256: string; byteLength: number }>;
-  } finally {
-    db.close();
-  }
-}
-
-function readSnapshotKinds(rootPath: string): Array<{ path: string; contentKind: string }> {
-  const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
-    readOnly: true,
-  });
-  try {
-    return db
-      .prepare("SELECT path, content_kind AS contentKind FROM snapshots ORDER BY path")
-      .all() as Array<{ path: string; contentKind: string }>;
-  } finally {
-    db.close();
-  }
-}
-
 async function write(root: string, path: string, contents: string | Uint8Array) {
   const absolute = join(root, path);
   await mkdir(dirname(absolute), { recursive: true });
@@ -135,7 +111,9 @@ function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-function capture(root: string, options: {
+const WORKSPACE_ID = "engine-capture-test";
+
+interface CaptureOptions {
   store?: VersionedTextStore;
   now?: () => number;
   createId?: () => string;
@@ -148,32 +126,132 @@ function capture(root: string, options: {
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionRustOptions,
   ) => Promise<EngineYdocProviderSessionRust>;
-} = {}) {
+}
+
+function capture(root: string, options: CaptureOptions = {}) {
   return createWorkspaceEngineCapture({
-    workspaceId: "engine-capture-test",
+    workspaceId: WORKSPACE_ID,
     rootPath: root,
     ...options,
   });
 }
 
-
-// PR 0N-1: the author a persisted moment carries (NULL = actor-neutral).
-function readEngineMomentAuthors(rootPath: string): Array<Record<string, unknown> | null> {
-  const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
-    readOnly: true,
+// Daemon-path capture: `rustEngineSessions` selects the Rust engine, and the
+// VersionedLoopbackEngine behind it holds real state and real sha256 — so the
+// history these tests read back is recorded engine state, not a hand-written
+// responder. Passing the SAME loopback to two captures models two sessions
+// against one workspace, the way two sessions shared one engine.db before.
+function liveCapture(
+  root: string,
+  loopback: VersionedLoopbackEngine,
+  options: Omit<CaptureOptions, "rustEngineSessions"> & { requests?: Request[] } = {},
+): WorkspaceEngineCapture {
+  const { requests, ...rest } = options;
+  return capture(root, {
+    rustEngineSessions: mockLiveSessions(loopback, requests),
+    ...rest,
   });
-  try {
-    return db
-      .prepare("SELECT m.author_json AS author FROM moments m ORDER BY m.moment_order")
-      .all()
-      .map((row) =>
-        typeof row.author === "string"
-          ? (JSON.parse(row.author) as Record<string, unknown>)
-          : null,
-      );
-  } finally {
-    db.close();
+}
+
+// The daemon-path equivalent of readEngineMoments: the same six facts, read
+// through the engine's own timeline API. Oldest first, matching the raw
+// `ORDER BY moment_order` query. PROTECTED (secret) rows are dropped here
+// exactly as a query against the text `moments` table dropped them.
+async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMomentRow[]> {
+  const page = await engine.listMoments({ limit: 500 });
+  const rows: EngineMomentRow[] = [];
+  for (const summary of [...page.moments].reverse()) {
+    if (summary.protected) continue;
+    const detail = await engine.readMoment(summary.id);
+    const payload = detail?.protected === false ? detail.moment.payload : undefined;
+    rows.push({
+      path: summary.path,
+      operation: summary.operation,
+      text: payload?.after.text ?? "",
+      origin: summary.metadata.origin,
+      summary: summary.metadata.summary ?? null,
+      correlationId: summary.metadata.correlationId ?? null,
+    });
   }
+  return rows;
+}
+
+// A loopback whose versioned requests reject while `failing` is true — the
+// daemon-path stand-in for a broken engine store. Only the calls that carry
+// history fail: workspace open/close, capture flush, and watcher status are
+// answered by mockLiveSessions before the request reaches here, exactly as a
+// live daemon whose store is failing would still answer its lifecycle calls.
+function failableLoopback(match: (request: Request) => boolean = () => true): {
+  loopback: VersionedLoopbackEngine;
+  state: { failing: boolean };
+} {
+  const real = new VersionedLoopbackEngine();
+  const state = { failing: true };
+  const loopback = new Proxy(real, {
+    get(target, prop, receiver) {
+      if (prop !== "sendRequest") return Reflect.get(target, prop, receiver);
+      return async (request: Request) => {
+        if (state.failing && match(request)) {
+          throw new Error("engine store unavailable");
+        }
+        return await target.sendRequest(request);
+      };
+    },
+  });
+  return { loopback, state };
+}
+
+// The daemon-path equivalent of readSnapshotKinds and readBinaryBlobRows: the
+// tracked head of every file in a version, read straight off the wire. Unlike
+// the timeline it survives the capture's stop(), so it also answers "was the
+// last capture really recorded" after shutdown.
+async function liveTrackedFiles(
+  loopback: VersionedLoopbackEngine,
+  versionId = "main",
+  workspace = WORKSPACE_ID,
+): Promise<Array<{ path: string; contentKind: string; sha256: string; byteLength: number }>> {
+  const response = await loopback.sendRequest({
+    id: -1,
+    method: VERSIONED_METHOD.textList,
+    workspace,
+    params: { workspaceId: workspace, versionId, limit: 500 },
+  });
+  const files = (response.result as { files: Array<Record<string, JsonValue>> }).files;
+  return files.map((file) => ({
+    path: String(file.path),
+    contentKind: String(file.contentKind),
+    sha256: String(file.sha256),
+    byteLength: Number(file.byteLength),
+  }));
+}
+
+// The daemon-path equivalent of readEngineMomentAuthors: the author each
+// recorded moment carries, oldest first, with null for actor-neutral.
+async function liveMomentAuthors(
+  engine: WorkspaceEngineCapture,
+): Promise<Array<MomentAuthor | null>> {
+  const page = await engine.listMoments({ limit: 500 });
+  return [...page.moments]
+    .reverse()
+    .filter((moment) => !moment.protected)
+    .map((moment) => moment.author ?? null);
+}
+
+// Recorded moment paths read off the wire, which — unlike the timeline API —
+// still answers after the capture has stopped. That is what makes it the
+// replacement for a post-shutdown engine.db query.
+async function liveMomentPaths(
+  loopback: VersionedLoopbackEngine,
+  workspace = WORKSPACE_ID,
+): Promise<string[]> {
+  const response = await loopback.sendRequest({
+    id: -1,
+    method: VERSIONED_METHOD.momentsList,
+    workspace,
+    params: { workspaceId: workspace, limit: 500 },
+  });
+  const moments = (response.result as { moments: Array<Record<string, JsonValue>> }).moments;
+  return moments.map((moment) => String(moment.path));
 }
 
 describe("workspaceEngineCapture batch capture", () => {
@@ -600,30 +678,35 @@ describe("workspaceEngineCapture batch capture", () => {
     const root = await tempRoot();
     const pngLike = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
     await write(root, "logo.png", pngLike);
-    const engine = capture(root, {});
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
 
-    expect(readSnapshotKinds(root)).toEqual([{ path: "logo.png", contentKind: "binary" }]);
-    expect(readBinaryBlobRows(root)).toEqual([
+    expect(await liveTrackedFiles(loopback)).toEqual([
       {
+        path: "logo.png",
+        contentKind: "binary",
         sha256: createHash("sha256").update(pngLike).digest("hex"),
         byteLength: pngLike.byteLength,
       },
     ]);
-    expect(readEngineMoments(root)).toHaveLength(1);
+    expect(await liveMoments(engine)).toHaveLength(1);
     await engine.stop();
   });
 
   it("skips oversized binary content exactly like other untracked content", async () => {
     const root = await tempRoot();
     await write(root, "huge.png", new Uint8Array(MAX_ENGINE_CAPTURE_BINARY_BYTES + 1));
-    const engine = capture(root, {});
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "huge.png", operation: "update" }]);
     await engine.flush();
 
-    expect(readEngineMoments(root)).toHaveLength(0);
-    expect(readBinaryBlobRows(root)).toHaveLength(0);
+    expect(await liveMoments(engine)).toHaveLength(0);
+    // Nothing tracked means nothing stored: a binary blob only exists as some
+    // moment's payload, which is what the row count above pins.
+    expect(await liveTrackedFiles(loopback)).toEqual([]);
     await engine.stop();
   });
 
@@ -634,24 +717,28 @@ describe("workspaceEngineCapture batch capture", () => {
     // must not retire it before the binary path can claim it.
     const bytes = Buffer.alloc(1024 * 1024, 0xff);
     await write(root, "blob.md", bytes);
-    const engine = capture(root, {});
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "blob.md", operation: "update" }]);
-    await engine.stop();
+    await engine.flush();
 
-    expect(readSnapshotKinds(root)).toEqual([{ path: "blob.md", contentKind: "binary" }]);
-    expect(readBinaryBlobRows(root)).toEqual([
+    expect(await liveTrackedFiles(loopback)).toEqual([
       {
+        path: "blob.md",
+        contentKind: "binary",
         sha256: createHash("sha256").update(bytes).digest("hex"),
         byteLength: bytes.byteLength,
       },
     ]);
-    expect(readEngineMoments(root)).toHaveLength(1);
+    expect(await liveMoments(engine)).toHaveLength(1);
+    await engine.stop();
   });
 
   it("retires an over-text-cap valid-UTF-8 text file instead of demoting it to binary", async () => {
     const root = await tempRoot();
     await write(root, "big.md", "small\n");
-    const engine = capture(root, {});
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "big.md", operation: "update" }]);
     await engine.flush();
 
@@ -660,38 +747,52 @@ describe("workspaceEngineCapture batch capture", () => {
     // binary bytes.
     await write(root, "big.md", "x".repeat(1024 * 1024));
     engine.captureBatch([{ path: "big.md", operation: "update" }]);
-    await engine.stop();
+    await engine.flush();
 
-    expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+    expect((await liveMoments(engine)).map((m) => [m.path, m.operation])).toEqual([
       ["big.md", "write"],
       ["big.md", "delete"],
     ]);
-    expect(readBinaryBlobRows(root)).toHaveLength(0);
+    // Never stored as bytes: no moment on this path carried a binary payload,
+    // which is the only way binary bytes enter the store at all.
+    expect(
+      (await engine.listMoments()).moments.map((moment) => moment.contentKind),
+    ).toEqual(["text", "text"]);
+    await engine.stop();
   });
 
   it("does not record a duplicate moment for unchanged binary recapture", async () => {
     const root = await tempRoot();
     const bytes = Buffer.from([0, 1, 2, 255]);
     await write(root, "logo.png", bytes);
-    const engine = capture(root, {});
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
     engine.captureBatch([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
 
-    expect(readEngineMoments(root)).toHaveLength(1);
-    expect(readBinaryBlobRows(root)).toHaveLength(1);
+    expect(await liveMoments(engine)).toHaveLength(1);
+    expect(await liveTrackedFiles(loopback)).toEqual([
+      {
+        path: "logo.png",
+        contentKind: "binary",
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        byteLength: bytes.byteLength,
+      },
+    ]);
     await engine.stop();
   });
 
   it("captures a settled write into the engine main version", async () => {
     const root = await tempRoot();
     await write(root, "notes/today.md", "# Today\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "notes/today.md", operation: "update" }]);
-    await engine.stop();
+    await engine.flush();
 
-    expect(readEngineMoments(root)).toEqual([
+    expect(await liveMoments(engine)).toEqual([
       {
         path: "notes/today.md",
         operation: "write",
@@ -701,11 +802,13 @@ describe("workspaceEngineCapture batch capture", () => {
         correlationId: null,
       },
     ]);
+    await engine.stop();
   });
 
   it("coalesces rapid writes to one file into one engine record per physical state", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
 
     // Two rapid writes settle into ONE watcher batch carrying the final
     // content — the engine records exactly one moment for it.
@@ -713,26 +816,28 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, "a.md", "draft 2\n");
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
     await engine.flush();
-    expect(readEngineMoments(root)).toHaveLength(1);
-    expect(readEngineMoments(root)[0].text).toBe("draft 2\n");
+    expect(await liveMoments(engine)).toHaveLength(1);
+    expect((await liveMoments(engine))[0].text).toBe("draft 2\n");
 
     // A second batch observing the SAME content (e.g. touch, re-save) is a
     // no-op — never a duplicate engine record for one physical state.
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
     await engine.flush();
-    expect(readEngineMoments(root)).toHaveLength(1);
+    expect(await liveMoments(engine)).toHaveLength(1);
 
     // New content records again.
     await write(root, "a.md", "draft 3\n");
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
+    await engine.flush();
+    expect(await liveMoments(engine)).toHaveLength(2);
     await engine.stop();
-    expect(readEngineMoments(root)).toHaveLength(2);
   });
 
   it("captures deletes for engine-tracked files and skips deletes for unknown paths", async () => {
     const root = await tempRoot();
     await write(root, "a.md", "gone soon\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
     await engine.flush();
 
@@ -741,13 +846,14 @@ describe("workspaceEngineCapture batch capture", () => {
       { path: "a.md", operation: "delete" },
       { path: "never-tracked.md", operation: "delete" },
     ]);
-    await engine.stop();
+    await engine.flush();
 
-    const moments = readEngineMoments(root);
+    const moments = await liveMoments(engine);
     expect(moments.map((m) => [m.path, m.operation])).toEqual([
       ["a.md", "write"],
       ["a.md", "delete"],
     ]);
+    await engine.stop();
   });
 
   it("skips secret, ignored, and oversized files while capturing in-cap binary content", async () => {
@@ -761,7 +867,8 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, "huge.md", "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1));
     await write(root, "ok.md", "tracked\n");
 
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([
       { path: ".env", operation: "update" },
       { path: "config/.env", operation: "update" },
@@ -772,18 +879,30 @@ describe("workspaceEngineCapture batch capture", () => {
       { path: "huge.md", operation: "update" },
       { path: "ok.md", operation: "update" },
     ]);
-    await engine.stop();
+    await engine.flush();
 
-    expect(readEngineMoments(root).map((m) => m.path)).toEqual([
+    expect((await liveMoments(engine)).map((m) => m.path)).toEqual([
       "logo.png",
       "not-utf8.md",
       "ok.md",
     ]);
-    expect(readSnapshotKinds(root)).toEqual([
-      { path: "logo.png", contentKind: "binary" },
-      { path: "not-utf8.md", contentKind: "binary" },
-      { path: "ok.md", contentKind: "text" },
+    expect(
+      (await liveTrackedFiles(loopback)).map((file) => [file.path, file.contentKind]),
+    ).toEqual([
+      ["logo.png", "binary"],
+      ["not-utf8.md", "binary"],
+      ["ok.md", "text"],
     ]);
+    // The secret paths went to the SECRET side, never into text history: the
+    // timeline's protected rows are where .env edits live, and liveMoments
+    // drops them exactly as the text-moments query did.
+    expect(
+      (await engine.listMoments())
+        .moments.filter((moment) => moment.protected)
+        .map((moment) => moment.path)
+        .sort(),
+    ).toEqual([".env", "config/.env", "prod.env"]);
+    await engine.stop();
   });
 
   // Symlink containment (CodeRabbit arc gate): the live watcher can emit a
@@ -799,19 +918,21 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, "inside.md", "real inside text\n");
     await symlink(join(root, "inside.md"), join(root, "alias.md"));
 
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([
       { path: "notes/today.md", operation: "update" },
       { path: "alias.md", operation: "update" },
       { path: "inside.md", operation: "update" },
     ]);
-    await engine.stop();
+    await engine.flush();
 
     // Only the real file was captured; neither symlink (outside-pointing or
     // workspace-internal) produced an engine moment.
-    expect(readEngineMoments(root).map((m) => [m.path, m.text])).toEqual([
+    expect((await liveMoments(engine)).map((m) => [m.path, m.text])).toEqual([
       ["inside.md", "real inside text\n"],
     ]);
+    await engine.stop();
   });
 
   it("retires a tracked path that later becomes a symlink", async () => {
@@ -819,72 +940,83 @@ describe("workspaceEngineCapture batch capture", () => {
     const outside = await tempRoot();
     await write(outside, "secret.md", "outside secret\n");
     await write(root, "notes.md", "honest text\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "notes.md", operation: "update" }]);
     await engine.flush();
 
     await unlink(join(root, "notes.md"));
     await symlink(join(outside, "secret.md"), join(root, "notes.md"));
     engine.captureBatch([{ path: "notes.md", operation: "update" }]);
-    await engine.stop();
+    await engine.flush();
 
-    const moments = readEngineMoments(root);
+    const moments = await liveMoments(engine);
     expect(moments.map((m) => [m.path, m.operation])).toEqual([
       ["notes.md", "write"],
       ["notes.md", "delete"],
     ]);
     // The symlink target's content never entered the store.
     expect(moments.some((m) => m.text.includes("outside secret"))).toBe(false);
+    await engine.stop();
   });
 
   it("preserves identity when a tracked text path becomes in-cap binary content", async () => {
     const root = await tempRoot();
     await write(root, "data.md", "text at first\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "data.md", operation: "update" }]);
     await engine.flush();
 
     await write(root, "data.md", new Uint8Array([0x00, 0x01, 0x02, 0xff]));
     engine.captureBatch([{ path: "data.md", operation: "update" }]);
-    await engine.stop();
+    await engine.flush();
 
-    const moments = readEngineMoments(root);
+    const moments = await liveMoments(engine);
     expect(moments.map((m) => [m.path, m.operation])).toEqual([
       ["data.md", "write"],
       ["data.md", "write"],
     ]);
     // The transition is an honest moment, not a generic update.
     expect(moments[1].summary).toBe("Became a binary file");
-    expect(readSnapshotKinds(root)).toEqual([{ path: "data.md", contentKind: "binary" }]);
+    expect(
+      (await liveTrackedFiles(loopback)).map((file) => [file.path, file.contentKind]),
+    ).toEqual([["data.md", "binary"]]);
+    await engine.stop();
   });
 
   it("records an honest moment when a binary path becomes text again", async () => {
     const root = await tempRoot();
     await write(root, "data.md", new Uint8Array([0x00, 0x01, 0x02, 0xff]));
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "data.md", operation: "update" }]);
     await engine.flush();
 
     await write(root, "data.md", "text again\n");
     engine.captureBatch([{ path: "data.md", operation: "update" }]);
-    await engine.stop();
+    await engine.flush();
 
-    const moments = readEngineMoments(root);
+    const moments = await liveMoments(engine);
     expect(moments.map((m) => [m.path, m.operation])).toEqual([
       ["data.md", "write"],
       ["data.md", "write"],
     ]);
     expect(moments[1].summary).toBe("Became a text file");
-    expect(readSnapshotKinds(root)).toEqual([{ path: "data.md", contentKind: "text" }]);
+    expect(
+      (await liveTrackedFiles(loopback)).map((file) => [file.path, file.contentKind]),
+    ).toEqual([["data.md", "text"]]);
+    await engine.stop();
   });
 
   it("honors files policy tracked false without deleting prior moments", async () => {
     const root = await tempRoot();
     await write(root, "kept.md", "v1\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "kept.md", operation: "update" }]);
     await engine.flush();
-    expect(readEngineMoments(root).map((m) => [m.path, m.text])).toEqual([
+    expect((await liveMoments(engine)).map((m) => [m.path, m.text])).toEqual([
       ["kept.md", "v1\n"],
     ]);
 
@@ -899,17 +1031,21 @@ describe("workspaceEngineCapture batch capture", () => {
       { path: "kept.md", operation: "update" },
       { path: "new.md", operation: "update" },
     ]);
-    await engine.stop();
+    await engine.flush();
 
-    expect(readEngineMoments(root).map((m) => [m.path, m.text])).toEqual([
+    expect((await liveMoments(engine)).map((m) => [m.path, m.text])).toEqual([
       ["kept.md", "v1\n"],
     ]);
+    await engine.stop();
   });
 
   it("retires a policy-untracked path on the next reconcile pass without touching disk", async () => {
     const root = await tempRoot();
     await write(root, "kept.md", "v1\n");
-    const first = capture(root);
+    // One loopback across both captures: two sessions, one workspace — the
+    // role the shared engine.db played before.
+    const loopback = new VersionedLoopbackEngine();
+    const first = liveCapture(root, loopback);
     first.captureBatch([{ path: "kept.md", operation: "update" }]);
     await first.stop();
 
@@ -917,17 +1053,18 @@ describe("workspaceEngineCapture batch capture", () => {
     // reconciliation must retire the engine snapshot (never-stale rule) with
     // an honest summary while leaving the disk file alone.
     await write(root, ".dohc/files.toml", '[[rule]]\npath = "kept.md"\ntracked = false\n');
-    const second = capture(root);
+    const second = liveCapture(root, loopback);
     second.start();
-    await second.stop();
+    await second.flush();
 
-    const moments = readEngineMoments(root);
+    const moments = await liveMoments(second);
     expect(moments.map((m) => [m.path, m.operation])).toEqual([
       ["kept.md", "write"],
       ["kept.md", "delete"],
     ]);
     expect(moments[1].summary).toBe("Stopped tracking by policy");
     await expect(readFile(join(root, "kept.md"), "utf8")).resolves.toBe("v1\n");
+    await second.stop();
   });
 
   it("surfaces malformed policy through onError without breaking other files", async () => {
@@ -936,7 +1073,8 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, "a.md", "alpha\n");
     await write(root, "b.md", "beta\n");
     const errors: Array<{ context: string; error: unknown }> = [];
-    const engine = capture(root, {
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback, {
       onError: (context, error) => {
         errors.push({ context, error });
       },
@@ -946,19 +1084,21 @@ describe("workspaceEngineCapture batch capture", () => {
       { path: "a.md", operation: "update" },
       { path: "b.md", operation: "update" },
     ]);
-    await engine.stop();
+    await engine.flush();
 
     expect(errors.some((entry) => entry.context.includes("policy validation"))).toBe(true);
-    expect(readEngineMoments(root).map((m) => m.path)).toEqual(["a.md", "b.md"]);
+    expect((await liveMoments(engine)).map((m) => m.path)).toEqual(["a.md", "b.md"]);
+    await engine.stop();
   });
 
   it("refreshes policy files on the next capture pass without watcher invalidation", async () => {
     const root = await tempRoot();
     await write(root, "policy-target.md", "v1\n");
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.captureBatch([{ path: "policy-target.md", operation: "update" }]);
     await engine.flush();
-    expect(readEngineMoments(root).map((m) => m.text)).toEqual(["v1\n"]);
+    expect((await liveMoments(engine)).map((m) => m.text)).toEqual(["v1\n"]);
 
     await write(
       root,
@@ -967,16 +1107,18 @@ describe("workspaceEngineCapture batch capture", () => {
     );
     await write(root, "policy-target.md", "v2\n");
     engine.captureBatch([{ path: "policy-target.md", operation: "update" }]);
-    await engine.stop();
+    await engine.flush();
 
-    expect(readEngineMoments(root).map((m) => m.text)).toEqual(["v1\n"]);
+    expect((await liveMoments(engine)).map((m) => m.text)).toEqual(["v1\n"]);
+    await engine.stop();
   });
 });
 
 describe("workspaceEngineCapture expected engine events", () => {
   it("suppresses engine re-capture of a registered engine-originated write, once", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     await write(root, "restored.md", "engine wrote this\n");
 
     engine.registerExpectedEngineEvents([
@@ -988,17 +1130,19 @@ describe("workspaceEngineCapture expected engine events", () => {
     ]);
     engine.captureBatch([{ path: "restored.md", operation: "update" }]);
     await engine.flush();
-    expect(readEngineMoments(root)).toHaveLength(0);
+    expect(await liveMoments(engine)).toHaveLength(0);
 
     // Consumed: the same observation again is a real capture.
     engine.captureBatch([{ path: "restored.md", operation: "update" }]);
+    await engine.flush();
+    expect(await liveMoments(engine)).toHaveLength(1);
     await engine.stop();
-    expect(readEngineMoments(root)).toHaveLength(1);
   });
 
   it("does not suppress a later USER edit with different content", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     engine.registerExpectedEngineEvents([
       { path: "a.md", operation: "write", sha256: sha256Utf8("engine content\n") },
     ]);
@@ -1006,16 +1150,18 @@ describe("workspaceEngineCapture expected engine events", () => {
     // so the registration must NOT swallow the user's edit.
     await write(root, "a.md", "user content\n");
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
-    await engine.stop();
-    const moments = readEngineMoments(root);
+    await engine.flush();
+    const moments = await liveMoments(engine);
     expect(moments).toHaveLength(1);
     expect(moments[0].text).toBe("user content\n");
+    await engine.stop();
   });
 
   it("expires registrations and honors cancellation", async () => {
     const root = await tempRoot();
     let nowMs = 1_000_000;
-    const engine = capture(root, { now: () => nowMs });
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback, { now: () => nowMs });
     await write(root, "expired.md", "stale\n");
 
     engine.registerExpectedEngineEvents([
@@ -1024,7 +1170,7 @@ describe("workspaceEngineCapture expected engine events", () => {
     nowMs += EXPECTED_ENGINE_EVENT_EXPIRY_MS + 1;
     engine.captureBatch([{ path: "expired.md", operation: "update" }]);
     await engine.flush();
-    expect(readEngineMoments(root)).toHaveLength(1);
+    expect(await liveMoments(engine)).toHaveLength(1);
 
     await write(root, "cancelled.md", "cancelled\n");
     const cancel = engine.registerExpectedEngineEvents([
@@ -1032,16 +1178,18 @@ describe("workspaceEngineCapture expected engine events", () => {
     ]);
     cancel();
     engine.captureBatch([{ path: "cancelled.md", operation: "update" }]);
-    await engine.stop();
-    expect(readEngineMoments(root).map((m) => m.path)).toEqual([
+    await engine.flush();
+    expect((await liveMoments(engine)).map((m) => m.path)).toEqual([
       "expired.md",
       "cancelled.md",
     ]);
+    await engine.stop();
   });
 
   it("suppresses a registered engine-originated delete", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     await write(root, "a.md", "content\n");
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
     await engine.flush();
@@ -1051,29 +1199,28 @@ describe("workspaceEngineCapture expected engine events", () => {
     await unlink(join(root, "a.md"));
     engine.registerExpectedEngineEvents([{ path: "a.md", operation: "delete" }]);
     engine.captureBatch([{ path: "a.md", operation: "delete" }]);
+    await engine.flush();
+    expect((await liveMoments(engine)).map((m) => m.operation)).toEqual(["write"]);
     await engine.stop();
-    expect(readEngineMoments(root).map((m) => m.operation)).toEqual(["write"]);
   });
 });
 
 describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
   it("materializes pull-fast-forwarded paths to disk and suppresses the watcher echo", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
-    // Simulate the post-pull state: the engine store holds remote content the
-    // folder does not have yet (pull applies ops to the store; runRelaySync
-    // owns getting them onto disk).
-    const store = createVersionedTextStore(root);
-    await store.ensureMainVersion({ workspaceId: "engine-capture-test" });
-    await store.writeTextFile({
-      workspaceId: "engine-capture-test",
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
+    // Simulate the post-pull state: the engine holds remote content the folder
+    // does not have yet (pull applies ops to the engine; runRelaySync owns
+    // getting them onto disk).
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
       versionId: "main",
       path: "notes/remote.md",
       text: "remote machine wrote this\n",
-      metadata: { origin: "sync", summary: "remote write" },
+      origin: "sync",
     });
-    await store.close();
-    const momentsBefore = readEngineMoments(root).length;
+    const momentsBefore = (await liveMoments(engine)).length;
 
     const result = await engine.runRelaySync(async () => ({
       fastForwardedPaths: [
@@ -1089,34 +1236,40 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     // must swallow it — materializing remote state is not a new local moment.
     engine.captureBatch([{ path: "notes/remote.md", operation: "update" }]);
     await engine.flush();
-    expect(readEngineMoments(root)).toHaveLength(momentsBefore);
+    expect(await liveMoments(engine)).toHaveLength(momentsBefore);
 
     // A later REAL user edit on the same path is still captured.
     await write(root, "notes/remote.md", "user follow-up\n");
     engine.captureBatch([{ path: "notes/remote.md", operation: "update" }]);
-    await engine.stop();
-    const moments = readEngineMoments(root);
+    await engine.flush();
+    const moments = await liveMoments(engine);
     expect(moments).toHaveLength(momentsBefore + 1);
     expect(moments[moments.length - 1].text).toBe("user follow-up\n");
+    await engine.stop();
   });
 
   it("materializes a remote delete and reports no disk work when nothing fast-forwarded", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     await write(root, "doomed.md", "here today\n");
     engine.captureBatch([{ path: "doomed.md", operation: "update" }]);
     await engine.flush();
 
-    // Remote deleted the file; pull already applied the delete to the store.
-    const store = createVersionedTextStore(root);
-    await store.deleteTextFile({
-      workspaceId: "engine-capture-test",
-      versionId: "main",
-      path: "doomed.md",
-      metadata: { origin: "sync", summary: "remote delete" },
+    // Remote deleted the file; pull already applied the delete to the engine.
+    await loopback.sendRequest({
+      id: -2,
+      method: VERSIONED_METHOD.textDelete,
+      workspace: WORKSPACE_ID,
+      params: {
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "doomed.md",
+        origin: "sync",
+        summary: "remote delete",
+      },
     });
-    await store.close();
-    const momentsBefore = readEngineMoments(root).length;
+    const momentsBefore = (await liveMoments(engine)).length;
 
     await engine.runRelaySync(async () => ({
       fastForwardedPaths: [
@@ -1126,12 +1279,13 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     expect(existsSync(join(root, "doomed.md"))).toBe(false);
     engine.captureBatch([{ path: "doomed.md", operation: "delete" }]);
     await engine.flush();
-    expect(readEngineMoments(root)).toHaveLength(momentsBefore);
+    expect(await liveMoments(engine)).toHaveLength(momentsBefore);
 
     // A quiescent pass (no fast-forwarded paths) touches nothing.
     await engine.runRelaySync(async () => ({ fastForwardedPaths: [] }));
+    await engine.flush();
+    expect(await liveMoments(engine)).toHaveLength(momentsBefore);
     await engine.stop();
-    expect(readEngineMoments(root)).toHaveLength(momentsBefore);
   });
 
   // Data-safety gate finding: the relay fetch cursor must only commit AFTER
@@ -1139,17 +1293,15 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
   // cursor un-advanced so the next pass retries the same ops.
   it("commits the relay fetch cursor only after disk materialization succeeds", async () => {
     const root = await tempRoot();
-    const engine = capture(root);
-    const store = createVersionedTextStore(root);
-    await store.ensureMainVersion({ workspaceId: "engine-capture-test" });
-    await store.writeTextFile({
-      workspaceId: "engine-capture-test",
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
       versionId: "main",
       path: "notes/remote.md",
       text: "remote machine wrote this\n",
-      metadata: { origin: "sync", summary: "remote write" },
+      origin: "sync",
     });
-    await store.close();
 
     // Block materialization: a directory squats on the file path.
     await mkdir(join(root, "notes/remote.md"), { recursive: true });
@@ -1193,25 +1345,28 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     await write(root, "deleted.md", "doomed\n");
     await write(root, ".env", "SECRET=1\n");
 
-    // First session: engine learns the workspace via reconciliation.
-    const first = capture(root);
+    // First session: engine learns the workspace via reconciliation. One
+    // loopback across all three captures: three sessions, one workspace.
+    const loopback = new VersionedLoopbackEngine();
+    const first = liveCapture(root, loopback);
     first.start();
-    await first.stop();
-    expect(readEngineMoments(root).map((m) => m.path).sort()).toEqual([
+    await first.flush();
+    expect((await liveMoments(first)).map((m) => m.path).sort()).toEqual([
       "deleted.md",
       "edited.md",
       "kept.md",
     ]);
+    await first.stop();
 
     // Closed period: one edit, one delete, one new file.
     await write(root, "edited.md", "after\n");
     await unlink(join(root, "deleted.md"));
     await write(root, "created.md", "new\n");
 
-    const second = capture(root);
+    const second = liveCapture(root, loopback);
     second.start();
-    await second.stop();
-    const afterSecond = readEngineMoments(root);
+    await second.flush();
+    const afterSecond = await liveMoments(second);
     const reconciled = afterSecond.slice(3);
     expect(
       reconciled.map((m) => [m.path, m.operation]).sort(),
@@ -1227,32 +1382,36 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       expect(moment.correlationId).toMatch(/^reconcile-/);
     }
     expect(new Set(reconciled.map((m) => m.correlationId)).size).toBe(1);
+    await second.stop();
 
     // Idempotent: running reconciliation again adds nothing new.
-    const third = capture(root);
+    const third = liveCapture(root, loopback);
     third.start();
+    await third.flush();
+    expect(await liveMoments(third)).toHaveLength(afterSecond.length);
     await third.stop();
-    expect(readEngineMoments(root)).toHaveLength(afterSecond.length);
   });
 
   it("stamps reconcile correlation ids from an injected createId seam", async () => {
     const root = await tempRoot();
     await write(root, "kept.md", "before\n");
-    const first = capture(root, { createId: () => "corr-fixed-0001" });
+    const loopback = new VersionedLoopbackEngine();
+    const first = liveCapture(root, loopback, { createId: () => "corr-fixed-0001" });
     first.start();
     await first.stop();
 
     // Closed-period edit so the next session reconciles a change.
     await write(root, "kept.md", "after\n");
-    const second = capture(root, { createId: () => "corr-fixed-0001" });
+    const second = liveCapture(root, loopback, { createId: () => "corr-fixed-0001" });
     second.start();
-    await second.stop();
+    await second.flush();
 
-    const stamped = readEngineMoments(root).filter((m) => m.correlationId !== null);
+    const stamped = (await liveMoments(second)).filter((m) => m.correlationId !== null);
     expect(stamped.length).toBeGreaterThan(0);
     for (const moment of stamped) {
       expect(moment.correlationId).toBe("reconcile-corr-fixed-0001");
     }
+    await second.stop();
   });
 
   it("serializes reconciliation before a live watcher batch on one chain", async () => {
@@ -1276,6 +1435,17 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       },
     };
 
+    // LEFT ON THE LEGACY FIXTURE deliberately. This asserts an exact three-step
+    // sequence that starts with reconciliation, and on the daemon path
+    // reconciliation joins the capture chain after an async preflight (opening
+    // the daemon workspace), so a batch enqueued from the test's next turn is
+    // scheduled FIRST: the observed daemon order is
+    // write:live.md, write:offline.md, listTextFiles. Nothing interleaves —
+    // each pass still runs contiguously, which is the actual guarantee — but
+    // the enqueue order this test pins does not survive the move, and
+    // rewriting the expectation to "contiguous, either order" would drop the
+    // very thing it was written to catch. The daemon's own ordering is covered
+    // by the request-order assertions on the migrated daemon tests above.
     const engine = capture(root, { store: trackedStore });
     engine.start();
     await write(root, "live.md", "live edit\n");
@@ -1302,23 +1472,27 @@ describe("workspaceEngineCapture startup reconciliation", () => {
 
     const outcomes: boolean[] = [];
     const errors: Array<{ context: string; error: unknown }> = [];
+    const loopback = new VersionedLoopbackEngine();
     try {
-      const engine = capture(root, {
+      const engine = liveCapture(root, loopback, {
         onCaptureOutcome: ({ ok }) => outcomes.push(ok),
         onError: (context, error) => errors.push({ context, error }),
       });
       engine.start();
+      await engine.flush();
+      // Every readable file seeded — one bad directory no longer starves the
+      // whole first reconciliation.
+      expect((await liveMoments(engine)).map((m) => [m.path, m.operation]).sort()).toEqual(
+        [
+          ["docs/deep/nested.md", "write"],
+          ["notes/adopted.md", "write"],
+        ],
+      );
       await engine.stop();
     } finally {
       await restoreRead(join(root, "locked"), 0o755);
     }
 
-    // Every readable file seeded — one bad directory no longer starves the
-    // whole first reconciliation.
-    expect(readEngineMoments(root).map((m) => [m.path, m.operation]).sort()).toEqual([
-      ["docs/deep/nested.md", "write"],
-      ["notes/adopted.md", "write"],
-    ]);
     // ...and the failure surfaced as a DEGRADED outcome (raises the capture
     // notice), never silently.
     expect(outcomes).toEqual([false]);
@@ -1332,33 +1506,36 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     await write(root, "locked/inside.md", "tracked earlier\n");
 
     // First session seeds both files while everything is readable.
-    const first = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const first = liveCapture(root, loopback);
     first.start();
-    await first.stop();
-    expect(readEngineMoments(root).map((m) => m.path).sort()).toEqual([
+    await first.flush();
+    expect((await liveMoments(first)).map((m) => m.path).sort()).toEqual([
       "kept.md",
       "locked/inside.md",
     ]);
+    await first.stop();
 
     // Second session: the directory is unreadable. Absent-from-a-degraded-
     // listing is NOT deletion evidence — no delete moment may be recorded.
     await denyRead(join(root, "locked"), "dir");
     const outcomes: boolean[] = [];
+    let recorded: EngineMomentRow[] = [];
     try {
-      const second = capture(root, {
+      const second = liveCapture(root, loopback, {
         onCaptureOutcome: ({ ok }) => outcomes.push(ok),
         onError: () => {},
       });
       second.start();
+      await second.flush();
+      recorded = await liveMoments(second);
       await second.stop();
     } finally {
       await restoreRead(join(root, "locked"), 0o755);
     }
 
     expect(outcomes).toEqual([false]);
-    expect(
-      readEngineMoments(root).filter((m) => m.operation === "delete"),
-    ).toEqual([]);
+    expect(recorded.filter((m) => m.operation === "delete")).toEqual([]);
   });
 
   it("a file deleted between the scan and the pass reconciles as a real delete, not a degraded pass", async () => {
@@ -1366,7 +1543,8 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     await write(root, "stays.md", "stays\n");
     await write(root, "vanishes.md", "gone soon\n");
 
-    const first = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const first = liveCapture(root, loopback);
     first.start();
     await first.stop();
 
@@ -1374,18 +1552,19 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     // delete moment and reports OK (nothing was unreadable).
     await unlink(join(root, "vanishes.md"));
     const outcomes: boolean[] = [];
-    const second = capture(root, {
+    const second = liveCapture(root, loopback, {
       onCaptureOutcome: ({ ok }) => outcomes.push(ok),
     });
     second.start();
-    await second.stop();
+    await second.flush();
 
     expect(outcomes).toEqual([true]);
     expect(
-      readEngineMoments(root)
+      (await liveMoments(second))
         .filter((m) => m.operation === "delete")
         .map((m) => m.path),
     ).toEqual(["vanishes.md"]);
+    await second.stop();
   });
 });
 
@@ -1428,7 +1607,8 @@ describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
     };
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     let resolveRecorded: (() => void) | null = null;
     const recorded = new Promise<void>((resolve) => {
       resolveRecorded = resolve;
@@ -1442,12 +1622,12 @@ describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
     await write(root, "notes.md", "# Notes\n");
     await recorded;
     await handle.stop();
-    await engine.stop();
 
-    const moments = readEngineMoments(root);
+    const moments = await liveMoments(engine);
     expect(moments.map((moment) => moment.path)).toEqual(["notes.md"]);
     expect(moments[0].text).toBe("# Notes\n");
     expect(await createChangeSetStore(root).list()).toHaveLength(0);
+    await engine.stop();
   });
 
   it("records NOTHING without an engine capture (retirement Phase C: opt-out has no recorder)", async () => {
@@ -1496,15 +1676,8 @@ describe("workspaceEngineCapture failure isolation", () => {
       mode: defaultWorkspaceMode("personal"),
     };
     const errors: string[] = [];
-    const failingStore = new Proxy({} as VersionedTextStore, {
-      get:
-        () =>
-        async () => {
-          throw new Error("engine store unavailable");
-        },
-    });
-    const engine = capture(root, {
-      store: failingStore,
+    const { loopback } = failableLoopback();
+    const engine = liveCapture(root, loopback, {
       onError: (context) => {
         errors.push(context);
       },
@@ -1541,17 +1714,15 @@ describe("workspaceEngineCapture failure isolation", () => {
     const root = await tempRoot();
     await write(root, "good.md", "fine\n");
     await write(root, "bad.md", "poison\n");
-    const store = createVersionedTextStore(root);
-    const poisonedStore: VersionedTextStore = {
-      ...store,
-      async writeTextFile(input) {
-        if (input.path === "bad.md") throw new Error("poisoned path");
-        return store.writeTextFile(input);
-      },
-    };
+    // One path poisoned on the wire: the daemon refuses this write and only
+    // this write.
+    const { loopback } = failableLoopback(
+      (request) =>
+        request.method === VERSIONED_METHOD.textWrite &&
+        (request.params as { path?: string }).path === "bad.md",
+    );
     const errors: string[] = [];
-    const engine = capture(root, {
-      store: poisonedStore,
+    const engine = liveCapture(root, loopback, {
       onError: (context) => {
         errors.push(context);
       },
@@ -1560,39 +1731,21 @@ describe("workspaceEngineCapture failure isolation", () => {
       { path: "bad.md", operation: "update" },
       { path: "good.md", operation: "update" },
     ]);
-    await engine.stop();
+    await engine.flush();
 
-    expect(readEngineMoments(root).map((m) => m.path)).toEqual(["good.md"]);
+    expect((await liveMoments(engine)).map((m) => m.path)).toEqual(["good.md"]);
     expect(errors).toEqual(["batch capture of bad.md"]);
+    await engine.stop();
   });
 });
 
 describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
-  // A real store wrapped so every method throws while `failing` is true —
-  // flip it to simulate an engine store that recovers.
-  function flakyStore(root: string) {
-    const real = createVersionedTextStore(root);
-    const state = { failing: true };
-    const store = new Proxy(real, {
-      get(target, prop, receiver) {
-        const value = Reflect.get(target, prop, receiver);
-        if (typeof value !== "function") return value;
-        return (...args: unknown[]) => {
-          if (state.failing) throw new Error("engine store unavailable");
-          return (value as (...callArgs: unknown[]) => unknown).apply(target, args);
-        };
-      },
-    }) as VersionedTextStore;
-    return { store, state };
-  }
-
   it("reports a failed outcome per failing capture pass and success on recovery", async () => {
     const root = await tempRoot();
     await write(root, "note.md", "v1\n");
-    const { store, state } = flakyStore(root);
+    const { loopback, state } = failableLoopback();
     const outcomes: boolean[] = [];
-    const engine = capture(root, {
-      store,
+    const engine = liveCapture(root, loopback, {
       onError: () => {},
       onCaptureOutcome: ({ ok }) => outcomes.push(ok),
     });
@@ -1603,16 +1756,17 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
 
     state.failing = false;
     engine.captureBatch([{ path: "note.md", operation: "update" }]);
-    await engine.stop();
+    await engine.flush();
     expect(outcomes).toEqual([false, true]);
     // The recovered pass really captured: a transient open failure must not
     // be cached forever.
-    expect(readEngineMoments(root).map((m) => m.path)).toEqual(["note.md"]);
+    expect((await liveMoments(engine)).map((m) => m.path)).toEqual(["note.md"]);
+    await engine.stop();
   });
 
   it("mutation proof: daemon startup open failure raises the capture outcome", async () => {
     const root = await tempRoot();
-    const { store, state } = flakyStore(root);
+    const { loopback, state } = failableLoopback();
     const outcomes: boolean[] = [];
     const errors: string[] = [];
     let resolveOutcome!: () => void;
@@ -1623,8 +1777,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     const errorReported = new Promise<void>((resolve) => {
       resolveError = resolve;
     });
-    const engine = capture(root, {
-      store,
+    const engine = liveCapture(root, loopback, {
       daemonOwnsCapture: true,
       onCaptureOutcome: ({ ok }) => {
         outcomes.push(ok);
@@ -1649,17 +1802,13 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     const root = await tempRoot();
     await write(root, "good.md", "fine\n");
     await write(root, "bad.md", "poison\n");
-    const real = createVersionedTextStore(root);
-    const poisonedStore: VersionedTextStore = {
-      ...real,
-      async writeTextFile(input) {
-        if (input.path === "bad.md") throw new Error("poisoned path");
-        return real.writeTextFile(input);
-      },
-    };
+    const { loopback } = failableLoopback(
+      (request) =>
+        request.method === VERSIONED_METHOD.textWrite &&
+        (request.params as { path?: string }).path === "bad.md",
+    );
     const outcomes: boolean[] = [];
-    const engine = capture(root, {
-      store: poisonedStore,
+    const engine = liveCapture(root, loopback, {
       onError: () => {},
       onCaptureOutcome: ({ ok }) => outcomes.push(ok),
     });
@@ -1680,7 +1829,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
     };
-    const { store, state } = flakyStore(root);
+    const { loopback, state } = failableLoopback();
     let notifyCount = 0;
     const activity = createWorkspaceActivity(
       () => {
@@ -1691,7 +1840,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
           createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
-            store,
+            rustEngineSessions: mockLiveSessions(loopback),
             onError: () => {},
             onCaptureOutcome: hooks.onCaptureOutcome,
           }),
@@ -1756,6 +1905,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     const recorded = new Promise<void>((resolve) => {
       resolveRecorded = resolve;
     });
+    const loopback = new VersionedLoopbackEngine();
     const activity = createWorkspaceActivity(
       () => resolveRecorded?.(),
       {
@@ -1764,6 +1914,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
           return createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
+            rustEngineSessions: mockLiveSessions(loopback),
           });
         },
       },
@@ -1777,11 +1928,14 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     await write(root, "flushed.md", "must survive shutdown\n");
     await recorded;
     // stopAll joins the shutdown chain: watcher final flush, then capture
-    // drain — the last capture is durably in engine.db when it resolves.
+    // drain — the last capture is recorded in the engine when it resolves.
     await activity.stopAll();
 
-    const moments = readEngineMoments(root);
-    expect(moments.some((m) => m.path === "flushed.md")).toBe(true);
+    // Read AFTER stopAll, off the wire: the capture is gone, so this can only
+    // pass if the drain really landed the moment before shutdown finished.
+    expect(await liveMomentPaths(loopback, workspace.workspaceId)).toContain(
+      "flushed.md",
+    );
   }, 15_000);
 
   it("registerExpectedEngineEvents reaches the open workspace's capture", async () => {
@@ -1792,11 +1946,13 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
     };
+    const loopback = new VersionedLoopbackEngine();
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (w) =>
         createWorkspaceEngineCapture({
           workspaceId: w.workspaceId,
           rootPath: w.rootPath,
+          rustEngineSessions: mockLiveSessions(loopback),
         }),
     });
     await activity.open(workspace);
@@ -2010,7 +2166,8 @@ describe("workspaceEngineCapture agent attribution", () => {
     const root = await tempRoot();
     await write(root, "notes/plan.md", "# Plan\n");
     await write(root, "notes/scratch.md", "scratch\n");
-    const engine = capture(root, { activeAgentRun: () => run });
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback, { activeAgentRun: () => run });
     engine.captureBatch([
       { path: "notes/plan.md", operation: "update" },
       { path: "notes/scratch.md", operation: "update" },
@@ -2018,7 +2175,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     await engine.flush();
     await unlink(join(root, "notes/scratch.md"));
     engine.captureBatch([{ path: "notes/scratch.md", operation: "delete" }]);
-    await engine.stop();
+    await engine.flush();
 
     const authored = {
       kind: "agent",
@@ -2026,64 +2183,68 @@ describe("workspaceEngineCapture agent attribution", () => {
       onBehalfOf: "local",
       agentRunId: "run-1",
     };
-    expect(readEngineMomentAuthors(root)).toEqual([authored, authored, authored]);
-    expect(readEngineMoments(root).map((m) => m.operation)).toEqual([
-      "write",
-      "write",
-      "delete",
-    ]);
+    expect(await liveMomentAuthors(engine)).toEqual([authored, authored, authored]);
+    const moments = await liveMoments(engine);
+    expect(moments.map((m) => m.operation)).toEqual(["write", "write", "delete"]);
     // Attribution is a moment fact only: origin metadata stays actor-neutral.
-    expect(readEngineMoments(root).map((m) => m.origin)).toEqual([
+    expect(moments.map((m) => m.origin)).toEqual([
       "local-file",
       "local-file",
       "local-file",
     ]);
+    await engine.stop();
   });
 
   it("keeps ordinary batches actor-neutral when no run is active", async () => {
     const root = await tempRoot();
     await write(root, "a.md", "one\n");
-    const engine = capture(root, { activeAgentRun: () => null });
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback, { activeAgentRun: () => null });
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
+    await engine.flush();
+    expect(await liveMomentAuthors(engine)).toEqual([null]);
     await engine.stop();
-    expect(readEngineMomentAuthors(root)).toEqual([null]);
   });
 
   it("reads the slot at settle: a run ending before the chain drains still owns its batch, later batches are neutral", async () => {
     const root = await tempRoot();
     await write(root, "a.md", "one\n");
     let active: typeof run | null = run;
-    const engine = capture(root, { activeAgentRun: () => active });
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback, { activeAgentRun: () => active });
 
     // Batch settles (captureBatch called) while the run is active...
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
     // ...and the run ends BEFORE the capture chain executes the batch.
     active = null;
     await engine.flush();
-    expect(readEngineMomentAuthors(root)).toEqual([
+    expect(await liveMomentAuthors(engine)).toEqual([
       { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" },
     ]);
 
     // A batch that settles after the run ended is the local user's.
     await write(root, "a.md", "two\n");
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
-    await engine.stop();
-    expect(readEngineMomentAuthors(root)).toEqual([
+    await engine.flush();
+    expect(await liveMomentAuthors(engine)).toEqual([
       { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" },
       null,
     ]);
+    await engine.stop();
   });
 
   it("keeps reconciliation actor-neutral even while a run is active", async () => {
     const root = await tempRoot();
     await write(root, "offline.md", "edited while closed\n");
-    const engine = capture(root, { activeAgentRun: () => run });
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback, { activeAgentRun: () => run });
     engine.start();
-    await engine.stop();
-    expect(readEngineMoments(root).map((m) => [m.path, m.summary])).toEqual([
+    await engine.flush();
+    expect((await liveMoments(engine)).map((m) => [m.path, m.summary])).toEqual([
       ["offline.md", "Reconciled offline edits"],
     ]);
-    expect(readEngineMomentAuthors(root)).toEqual([null]);
+    expect(await liveMomentAuthors(engine)).toEqual([null]);
+    await engine.stop();
   });
 });
 

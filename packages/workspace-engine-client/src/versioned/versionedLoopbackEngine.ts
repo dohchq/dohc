@@ -2014,6 +2014,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
       ...(correlationId !== undefined
         ? { metadataCorrelationId: correlationId }
         : {}),
+      // The daemon stamps the write's AUTHOR on the moment it records and
+      // returns it from moments.list/get (store.rs `author_json`); a write
+      // without one gets null. Dropping it here made every moment look
+      // actor-neutral, so a caller could not tell agent-authored history from
+      // the user's own.
+      ...(params.author !== undefined && params.author !== null
+        ? { author: params.author }
+        : {}),
     };
   }
 
@@ -2048,7 +2056,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
       beforeBinarySha256: before?.binarySha ?? null,
       beforeLatestMomentId: before?.latestMomentId ?? null,
       metadataOrigin: after.metadataOrigin,
-      author: null,
+      // Supplied through `metadata` by the write paths that carry one (see
+      // momentMetadataFields); absent means actor-neutral, never undefined.
+      author: (metadata.author as MomentRecord["author"] | undefined) ?? null,
       syncRecordOnly: false,
       afterText,
       afterByteLength: deleted
