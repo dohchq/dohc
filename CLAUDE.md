@@ -8,10 +8,12 @@
 
 ## Commands
 
-- Don't run dev server commands (e.g., `bun run dev`) - assume it's already
+- Don't run dev server commands (e.g., `pnpm dev`) - assume it's already
   running.
-- Don't run build commands unless specifically told to.
-- Focus on checking commands like `bun run typecheck`, `bun run lint`, etc.
+- Don't run build commands unless the task or an applicable repository gate
+  requires them.
+- Focus on checking commands like `pnpm typecheck`, `pnpm test`, and
+  `pnpm lint`.
 
 ## Package Managers
 
@@ -48,7 +50,7 @@ How to apply:
   if a cheaper model's output doesn't meet the bar, rerun or redo the work with
   a smarter model without asking. Judge the output, not the price tag.
   Escalating costs less than shipping mediocre work.
-- Don't let cost prevent you from using the rigt model for the job. Instead, take advantage of cheaper options to get more information and try thhings before moving the work to a more expensive option.
+- Don't let cost prevent you from using the right model for the job. Instead, take advantage of cheaper options to get more information and try things before moving the work to a more expensive option.
 - Bulk/mechanical work (clear-spec implementation, data analysis, migrations):
   gpt-5.6-sol - it's effectively free.
 - Anything user-facing (UI, copy, API design) needs taste >= 7.
