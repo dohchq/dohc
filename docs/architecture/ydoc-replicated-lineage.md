@@ -126,6 +126,26 @@ compaction.
 Otherwise: seed nothing, journal nothing, resume. Emitting a second base is the
 fork described above.
 
+**2b. A promoted lineage's base must encode the persisted state, not a fresh
+seed.** This follows directly from the case above and is easy to miss, because
+"first creation" suggests there is nothing to preserve.
+
+An unclaimed marker is not necessarily an empty one. A `base_claimed = 0`
+local-only document can already hold durable update rows — a crash before
+settle/close leaves exactly that. Those rows were never written to
+`replication_log`, so if promotion journals a *fresh markdown seed* as the base,
+the origin still reconstructs its content from its own private rows while every
+new peer is permanently missing it. The divergence is invisible from the machine
+that has the data.
+
+So the base must be the **reconstructed lineage plus** the incoming bytes. The
+Rust inbound path already does this for the analogous case
+(`crates/dohc-engine-sync/src/ydoc_apply.rs`): load the persisted document, apply
+the base bytes onto it, and refuse if they fail validation. Its own comment states
+the requirement — the projection must be the reconstructed lineage *plus* the
+base, "or the visible snapshot would drop local content that is still durably part
+of the CRDT."
+
 **3. Journal the base in the same transaction as the snapshot rows.** The
 snapshot blob lands in `binary_blobs` first, satisfying blob-before-log, and the
 `ydoc.update` base operation is journaled in that same transaction. Split them
@@ -162,10 +182,17 @@ dominant defect class — tests that pass while checking nothing — gets introd
   re-check observes it: resume the winner, journal no second base. This is the
   harness for oracle case `ydoc.before-base-claim`. Without an equivalent seam,
   property 2 above has no test.
-- **`onAfterReserveForTest`** fires inside `openSession` after the global
-  reservation is taken and persisted state is reset, but before the live session
-  is installed. It lets a test simulate a mid-open failure in a later step and
-  prove the reservation is released on *any* throw, never stranded "live".
+- **`onAfterReserveForTest`** fires inside `openSession` at the **shared point
+  after the open branch is selected** — after reset, or claim, or resume — and
+  before the live session is installed. It lets a test simulate a mid-open failure
+  and prove the reservation is released on *any* throw, never stranded "live".
+
+  The placement is the whole point, so do not describe it as "after the state is
+  reset". A resumed open never resets persisted state at all, and a fresh
+  replicated open reaches the seam only after the base *claim*. A replacement hook
+  placed inside the reset branch would leave reservation cleanup after claim and
+  after resume untested — and the existing seam's own comment says it exists to
+  cover "the whole open path (not just the reset step)".
 
 Both are undefined in production.
 
@@ -203,8 +230,18 @@ handle a live product dependency as dead code.
 
 What is dormant is the **origination path specifically**, not the crate.
 
-So the Rust side can mark a lineage replicated when a **peer** hands it one, and
-cannot originate one itself. That gap is #378.
+Keep two things separate here, or an inventory of Rust entry points will
+contradict itself — and the local apply path is the one that gets dropped:
+
+- **Creating a replicated marker** happens locally today. `ydoc.apply` reaches
+  `record_local_update_creating_marker(..., Regime::Replicated, ...)`.
+- **Claiming a base** does not. The only live caller of `claim_base_in_tx` is the
+  inbound apply, so a peer-delivered base is currently the only way a lineage
+  gets one.
+
+The gap is therefore narrower and more specific than "Rust cannot originate":
+Rust can mark a lineage replicated on its own, and cannot *claim its base*
+without a peer. That gap is #378.
 
 ## Do not fix base origination on its own
 
