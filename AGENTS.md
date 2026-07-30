@@ -22,6 +22,18 @@ Quick gloassary of relevant parties in this document:
 - _me_/_we_/_us_ - the humans contributing to dohc. This is the party talking to you as we build
 - _users_ - these are our users. We are assuming they won't need to program or be expert at prompting like someone technical would, rather they will have their own agents to build things using dohc.
 
+And some words we use when we work:
+
+- _landmine_ - a decision that costs little now but becomes load-bearing before
+  it fails. Unmeasured limits and silent catches are common landmines.
+- _receipt_ - the measurement behind a number. No receipt, no number.
+- _tripwire_ - a limit set beyond healthy behavior so that normal work never
+  touches it and broken behavior cannot pass it.
+- _simple_ - logic that breaks into clear steps. Each step follows from the
+  last, and no step does two jobs.
+- _obvious_ - the next reader does not have to ask why something is there.
+  Obviousness belongs to the reader, and the obvious design can have more parts.
+
 Here's some philosophical things to consider as we build and work together:
 
 ### Boil the ocean
@@ -31,6 +43,26 @@ This project would have been way too bold beforer agents existed. We effectively
 When planning, do not be afraid to suggest seeminlgy insane solutions. For example, creating our own implementation of markdown better suited for AI. Seems insane, but it's absolutely doable with modern tools.
 
 What we're doing here is fundamentally different so treat it that way. Being that you are an agent, you're prediction model will likely want to steer towards conformity. That's okay and even preferred in most scenarios, but there will be times where we need to think outside the box. Literally (since you're in a box) so think outside of it. Transcend. Transcend. Ascend.
+
+### Every number needs a receipt
+
+A limit without a measurement is a landmine. Before adding a node limit, byte
+cap, timeout, or other budget, measure a representative workload and record the
+receipt near the number.
+
+Set the limit as a tripwire: beyond healthy behavior, but close enough to catch
+a real failure. When the system allocates capacity lazily, reserve generously
+and commit lazily. Do not eagerly initialize unused capacity. If healthy work
+hits the budget, the budget is wrong. Measure again and update the receipt.
+
+### A limit an agent can hit is a limit it must see
+
+Developers will not always read the code. Their agents will read the errors. An
+agent can fix `limit 128, requested 129`; it cannot fix a blank window.
+
+Every budget failure must name the budget, the limit, and the request. Report
+the failure during a build or check when possible. Otherwise, report it loudly
+at runtime. A silent budget is worse than no budget.
 
 ### Let their agents shape the workspace they need
 
@@ -46,9 +78,15 @@ Should dohc ship a hardcoded CRM for every possible team? Probably not. A user's
 
 We should avoid being clever and doing things because it feels smart. We want everything we build to be so obvious it feels kind of stupid.
 
-When one of us prompts you, never hesitate to push back and suggest ways we could make things more obvious. Note that "simple" and "obvious" are not always the same. Sometimes the obvious solution is more complex.
+Measure twice and cut once: understand the problem before building. Cleverness
+fills gaps in understanding. The best code is the simplest design that
+preserves the full function and performance, with nothing traded away and
+nothing bolted on.
 
-"Obvious" solutions are the defaults that agents would assume are the case.
+When one of us prompts you, never hesitate to push back and suggest ways we
+could make things more obvious. "Simple" and "obvious" are not always the same.
+Sometimes the obvious solution has more parts. Obvious solutions are the
+defaults that agents and the next reader expect.
 
 ### Don't be afraid to lie (to agents) if it makes working easier
 
