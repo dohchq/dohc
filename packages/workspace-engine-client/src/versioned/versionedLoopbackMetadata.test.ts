@@ -464,6 +464,51 @@ describe("loopback moment metadata", () => {
     expect(deduped.deduped).toBe(true);
   });
 
+  it("accepts null metadata on a DEDUPED write, which the daemon does too", async () => {
+    // These fields deserialize as `Option<String>`, so JSON null is the absent
+    // value and the daemon answers normally. Hoisting the parse ahead of the
+    // dedup return exposed that `optionalString` threw on null: a same-content
+    // write with `summary: null` had never reached the parse before, so moving it
+    // made the fake REJECT a request production accepts. The opposite direction
+    // from the hole the hoist was fixing, introduced by the fix itself.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const bytesBase64 = Buffer.from([4, 5, 6]).toString("base64");
+    const write = {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "logo.png",
+      bytesBase64,
+      origin: "local-file",
+      summary: null,
+      correlationId: null,
+    };
+    const first = await send(engine, VERSIONED_METHOD.binaryWrite, write);
+    expect(first.deduped).toBeFalsy();
+    const second = await send(engine, VERSIONED_METHOD.binaryWrite, write);
+    expect(second.deduped).toBe(true);
+
+    // And on a text write, where null must simply be omitted from the moment.
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "notes.md",
+      text: "hello",
+      origin: "local-file",
+      summary: null,
+      correlationId: null,
+    });
+    const page = await send(engine, VERSIONED_METHOD.momentsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const moments = page.moments as Array<Record<string, unknown>>;
+    const text = moments.find((moment) => moment.path === "notes.md");
+    expect(text).toBeDefined();
+    expect(text?.metadataSummary).toBeUndefined();
+    expect(text?.metadataCorrelationId).toBeUndefined();
+  });
+
   it("refuses bad BYTES before bad metadata, in the daemon's order", async () => {
     // Hoisting the metadata parse to fix the dedup hole first put it above the
     // byte decode, which inverted the refusal precedence: a request with both

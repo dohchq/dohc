@@ -189,15 +189,23 @@ function utf8Length(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 
-// The daemon validates `summary`/`correlationId` against MAX_METADATA_FIELD_BYTES
-// on EVERY write handler (`validate_metadata_fields`), not just the secret ones,
-// and refuses with the bare code below. Enforcing it only on the secret paths
-// left text and binary writes certifying an over-cap request production refuses.
-function cappedMetadataField<T extends string | null | undefined>(value: T): T {
-  if (typeof value === "string" && utf8Length(value) > MAX_METADATA_FIELD_BYTES) {
-    throw new Error("invalid-metadata");
-  }
-  return value;
+// One reading of a metadata field, matching the daemon on all three points.
+//
+// JSON `null` is the ABSENT value, not a type error: these deserialize as
+// `Option<String>`, so the daemon accepts null and answers normally. Treating it
+// as invalid made the fake reject requests production accepts — which only
+// surfaced once the parse moved ahead of the dedup return, because before that a
+// same-content write never reached it.
+//
+// A non-string IS a refusal. And either field over MAX_METADATA_FIELD_BYTES is
+// `invalid-metadata`, which `validate_metadata_fields` enforces on EVERY write
+// handler, not just the secret ones.
+function metadataField(params: JsonObject, key: string): string | undefined {
+  const raw = params[key];
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string") throw new Error(`${key} is invalid.`);
+  if (utf8Length(raw) > MAX_METADATA_FIELD_BYTES) throw new Error("invalid-metadata");
+  return raw;
 }
 
 /**
@@ -1522,17 +1530,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     summary: string | null;
     correlationId: string | null;
   } {
-    // JSON `null` is the VALID absent value, not a type error: the daemon
-    // deserializes these as `Option<String>`. Passing null straight to
-    // optionalString made the fake reject requests production accepts — the
-    // opposite of the no-op hole below, and in one helper.
-    const field = (key: string): string | null => {
-      const raw = params[key];
-      if (raw === undefined || raw === null) return null;
-      if (typeof raw !== "string") throw new Error(`${key} is invalid.`);
-      return cappedMetadataField(raw);
+    // Same validation as every other write path; secret moments just spell
+    // "absent" as null rather than by omitting the field.
+    return {
+      summary: metadataField(params, "summary") ?? null,
+      correlationId: metadataField(params, "correlationId") ?? null,
     };
-    return { summary: field("summary"), correlationId: field("correlationId") };
   }
 
   private secretWrite(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
@@ -2158,10 +2161,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private momentMetadataFields(params: JsonObject): JsonObject {
-    const summary = cappedMetadataField(optionalString(params, "summary"));
-    const correlationId = cappedMetadataField(
-      optionalString(params, "correlationId"),
-    );
+    const summary = metadataField(params, "summary");
+    const correlationId = metadataField(params, "correlationId");
     return {
       ...(summary !== undefined ? { metadataSummary: summary } : {}),
       ...(correlationId !== undefined
