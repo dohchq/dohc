@@ -3465,8 +3465,12 @@ gate is dispatch-only, so on a Windows dev machine they always skipped and a loc
 matches legacy behaviour here" claim rested on tests nobody had executed.
 
 Executed on Linux at `a8be8dd1`: **128 passed, 5 skipped** against Windows' 19 passed, 114
-skipped. 109 of the 114 pass; the remaining 5 are the win32-only half. Nothing failed. #420
-records the recipe.
+skipped. **All 114 pass.** I first wrote "109 of 114, the other 5 are win32-only" and that
+arithmetic is wrong — codex caught it reviewing this entry. The suite is 133 tests; the 5 Linux
+skips are win32-only tests drawn from the **19 that pass on Windows**, not from the 114. So
+Linux ran 114 Linux-gated plus 14 always-run = 128. Nothing failed. I understated my own
+result, which is a more interesting error than overstating it: the check I ran was better than
+the number I published. #420 records the recipe.
 
 **The setup was the whole difficulty, and the first attempt produced a spectacular false
 negative.** WSL had Node 18 and no version manager and no passwordless sudo; Node 18 cannot run
@@ -3497,8 +3501,15 @@ Only the plain-write case genuinely survives in `cargo test`. Filed as #425.
 The at-rest cryptography proofs — IV freshness, tamper detection, AAD binding, wrong-key
 rejection, key custody — live in `secretFileStore.test.ts`, inside the package being deleted. A
 property-by-property audit against the Rust crates: 19 properties, **11 covered at equal-or-
-greater strength**, and Rust is genuinely *stronger* on two (it tests tag tampering, which the TS
-file never did despite a test title implying it, and it asserts IV-verbatim copying on fork).
+greater strength**, and Rust is stronger on tag tampering, which the TS file never tested despite a
+test title implying it.
+
+One overstatement in that audit, caught reviewing this entry: I recorded Rust as also stronger
+on IV-verbatim copying "on fork". The direct IV-equality assertions cover cross-version **apply
+and restore**; `fork_copies_secret_tips_verbatim` only decrypts the destination to the same
+plaintext and checks a fork-base row exists, so **re-encrypting during a fork would satisfy both
+assertions**. Fork IV-verbatim is not directly asserted on either side, and retiring the TS proof
+would leave it unpinned.
 
 **But IV/nonce freshness has no Rust equivalent of any kind.** TS asserts it directly by writing
 the same plaintext three times and comparing rows. In Rust the only IV assertion anywhere is
@@ -3576,8 +3587,18 @@ The finding count per round went 2, 4, 5, 6, 7, 9, 10, 15. That is divergence, n
 returns, and it is inherent: every spelling of "load a module" is a new finding. Landed at
 thirteen with seven deferred and reasoned, and filed #421 proposing a module-graph check instead.
 
-**#421 should then be closed as superseded, and the reasoning is a correction to my own
-recommendation.** I first said the graph check matters most once the allowlist reaches zero. That
-is backwards: once the package is **deleted**, importing it fails at build time. The compiler
-becomes the guard, and it is stronger than anything a test could approximate. #421's value exists
-only in the window before deletion.
+**#421 must NOT be closed as superseded, and that is my third position on it.** I first said
+the graph check matters most once the allowlist reaches zero; then that deletion supersedes it,
+because importing a deleted package fails at build time. **Both were wrong, and codex caught the
+second one reviewing this entry.**
+
+The compiler only resolves STATIC imports. The guard exists because thirteen rounds established
+that the interesting forms are not static — `createRequire(...)`, const-bound and computed dynamic
+imports, and specifiers embedded in evaluated worker source. TypeScript does not resolve those
+module strings at typecheck, so they compile cleanly and fail only when a user executes the path.
+Deleting the package AND the guard would let the dependency return as a runtime-only regression —
+exactly the class the guard was built for, and exactly the class the compiler cannot see.
+
+So the guard should survive the deletion, re-pointed at "nothing may load this name" rather than
+"this package has two importers". Twice I reasoned from "the compiler will catch it" without
+asking which forms the compiler actually resolves.
