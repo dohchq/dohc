@@ -43,16 +43,16 @@ fi
 cd "$(git rev-parse --show-toplevel)"
 echo "== macOS evidence ($MODE) — $(uname -mrs) =="
 
-# package.json engines: ^20.19.0 || ^22.13.0 || >=24.0.0
+# package.json engines: >=24.14.0. This script certifies bankable macOS cutover
+# evidence, so accepting a runtime the repo declares unsupported would let it
+# vouch for a run nobody can reproduce. Kept in sync with the manifest by hand —
+# there is no shared source, and this copy had already gone stale once.
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
 NODE_MINOR="$(node -p 'process.versions.node.split(".")[1]' 2>/dev/null || echo 0)"
-if [ "$NODE_MAJOR" -lt 20 ] \
-  || { [ "$NODE_MAJOR" -eq 20 ] && [ "$NODE_MINOR" -lt 19 ]; } \
-  || { [ "$NODE_MAJOR" -eq 21 ]; } \
-  || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 13 ]; } \
-  || { [ "$NODE_MAJOR" -eq 23 ]; }; then
+if [ "$NODE_MAJOR" -lt 24 ] \
+  || { [ "$NODE_MAJOR" -eq 24 ] && [ "$NODE_MINOR" -lt 14 ]; }; then
   echo "ERROR: node $(node --version) does not satisfy package.json engines" >&2
-  echo "       (^20.19.0 || ^22.13.0 || >=24.0.0)." >&2
+  echo "       (>=24.14.0). The repo pins 24.14.0 in .node-version and .nvmrc." >&2
   exit 2
 fi
 

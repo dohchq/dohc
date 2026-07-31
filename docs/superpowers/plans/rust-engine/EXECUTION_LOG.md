@@ -3499,6 +3499,19 @@ arm never described a working install of anything. Narrowed to `">=24.14.0"`, ma
 place the version is written down. Deleting the legacy package does not make the old range correct
 again, since the production `node:sqlite` imports outlive it.
 
+**Narrowing one manifest is not the whole change, because the range was copied into five places.**
+Review found the self-host Compose stack still on `node:22-bookworm-slim` for all three JavaScript
+containers, each running the root `pnpm install` — so the declaration made the repo's own documented
+self-host runtime unsupported. And `tools/rust-engine-program/macos-evidence.sh` carried its own
+hand-written copy of the old range, which would have kept certifying bankable macOS evidence on a
+runtime the repo no longer supports. Two workflow comments and `crates/yrs-spike/scripts/harvest.mjs`
+held stale copies too, the last of which asserted the range "allows Node 20", now false. All five
+updated; a grep for the old range across `*.sh`, `*.mjs`, `*.json` and `*.yml` now returns nothing.
+
+The lesson is the duplication, not the versions: a declared constraint with five hand-maintained
+copies will be wrong in at least one of them, and the copy inside an evidence-certifying script is
+the expensive one.
+
 ### The blocker that verification found instead
 
 The three secret-capture tests that cannot migrate — they read raw `engine.db` bytes to prove

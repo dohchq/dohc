@@ -127,7 +127,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          # package.json engines: ^20.19.0 || ^22.13.0 || >=24.0.0
+          # package.json engines: >=24.14.0; "24" resolves to the latest 24.x
           node-version: "24"
           cache: pnpm
 
