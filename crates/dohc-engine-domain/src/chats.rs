@@ -2799,7 +2799,6 @@ impl<'a> LinkedChatStore<'a> {
                     ChatDecisionState::Open,
                     None,
                     now,
-                    replicate,
                 )?;
             }
             let message_attachments = add_local_attachments(
@@ -3053,7 +3052,6 @@ impl<'a> LinkedChatStore<'a> {
                     ChatDecisionState::Open,
                     None,
                     now,
-                    replicate,
                 )?;
             }
             let message_attachments = add_local_attachments(
@@ -3364,13 +3362,6 @@ impl<'a> LinkedChatStore<'a> {
                     reason: "chat decision timestamp overflowed",
                 });
             }
-            let replicate = relay_log_has_entity(
-                tx,
-                &input.workspace_id,
-                "chat.message.append",
-                "$.messageId",
-                &input.message_id,
-            )?;
             journal_decision_set(
                 tx,
                 &input.workspace_id,
@@ -3379,7 +3370,6 @@ impl<'a> LinkedChatStore<'a> {
                 ChatDecisionState::Resolved,
                 Some(&input.resolved_by_message_id),
                 at_ms,
-                replicate,
             )?;
             record_request(tx, Some(&input.request_id), &payload_hash, at_ms)?;
             require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)
@@ -8278,7 +8268,6 @@ fn journal_decision_set(
     state: ChatDecisionState,
     resolved_by_message_id: Option<&str>,
     at_ms: i64,
-    replicate: bool,
 ) -> Result<(), DomainError> {
     let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, at_ms)?;
     upsert_decision_lww(
@@ -8307,7 +8296,13 @@ fn journal_decision_set(
                 serde_json::json!(resolver),
             );
     }
-    if replicate {
+    if relay_log_has_entity(
+        tx,
+        workspace_id,
+        "chat.message.append",
+        "$.messageId",
+        message_id,
+    )? {
         insert_local_replication_op(
             tx,
             workspace_id,
