@@ -211,14 +211,17 @@ describe("sync relay main process", () => {
       recordedAtMs: 5_000 + originSeq,
     });
 
-    const logLength = async (): Promise<number> => {
+    const logOps = async (): Promise<Array<{ payload: Record<string, unknown> }>> => {
       const response = await fetch(`${baseUrl}/sync/${ws}/log?since=0`, {
         headers: { authorization: `Bearer test:${alice}` },
       });
       expect(response.status).toBe(200);
-      const body = (await response.json()) as { ops: unknown[] };
-      return body.ops.length;
+      const body = (await response.json()) as {
+        ops: Array<{ payload: Record<string, unknown> }>;
+      };
+      return body.ops;
     };
+    const logLength = async (): Promise<number> => (await logOps()).length;
 
     // Alice forging Mallory's authorship on a message → 403, log unchanged.
     const forgedMessage = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
@@ -247,13 +250,25 @@ describe("sync relay main process", () => {
     expect(mixed.status).toBe(403);
     expect(await logLength()).toBe(0);
 
+    // A message created in Alice's workspace before sign-in stays
+    // unattributed. The authenticated owner may upload it, but the relay must
+    // not stamp or otherwise change the replicated payload.
+    const localMessageOp = messageOp(0, undefined);
+    const localMessage = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
+      originId: "origin-before-sign-in",
+      ops: [localMessageOp],
+    });
+    expect(localMessage.status).toBe(200);
+    const [storedLocalMessage] = await logOps();
+    expect(storedLocalMessage.payload).toEqual(localMessageOp.payload);
+
     // Alice authoring as HERSELF is admitted.
     const honest = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
       originId: "origin-alice",
       ops: [messageOp(0, alice), reactionOp(1, alice)],
     });
     expect(honest.status).toBe(200);
-    expect(await logLength()).toBe(2);
+    expect(await logLength()).toBe(3);
   });
 
   // Gate finding: the transport must cap request bodies AT THE STREAM. A
