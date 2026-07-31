@@ -205,6 +205,72 @@ describe("grantDmRecipients", () => {
     ).rejects.toThrow(/original grant error/u);
   });
 
+  it("rolls back with the pinned grant client when the account changes", async () => {
+    let current = true;
+    const revoked: string[] = [];
+    await expect(
+      grantDmRecipients({
+        recipients: ["a@x.com"],
+        covered: new Set(),
+        createGrant: async (email) => {
+          current = false;
+          return `share-${email}`;
+        },
+        revokeGrant: async (shareId) => {
+          revoked.push(shareId);
+        },
+        assertCurrent: () => {
+          if (!current) {
+            throw new Error("Your dohc Cloud session changed. Try again.");
+          }
+        },
+      }),
+    ).rejects.toThrow("Your dohc Cloud session changed. Try again.");
+    expect(revoked).toEqual(["share-a@x.com"]);
+  });
+
+  it("rolls back when the session changes during post-grant preparation", async () => {
+    let current = true;
+    const revoked: string[] = [];
+    await expect(
+      grantDmRecipients({
+        recipients: ["a@x.com"],
+        covered: new Set(),
+        createGrant: async (email) => `share-${email}`,
+        revokeGrant: async (shareId) => {
+          revoked.push(shareId);
+        },
+        assertCurrent: () => {
+          if (!current) {
+            throw new Error("Your dohc Cloud session changed. Try again.");
+          }
+        },
+        beforeCommit: async () => {
+          current = false;
+        },
+      }),
+    ).rejects.toThrow("Your dohc Cloud session changed. Try again.");
+    expect(revoked).toEqual(["share-a@x.com"]);
+  });
+
+  it("rolls back when the first message mutation fails", async () => {
+    const revoked: string[] = [];
+    await expect(
+      grantDmRecipients({
+        recipients: ["a@x.com"],
+        covered: new Set(),
+        createGrant: async (email) => `share-${email}`,
+        revokeGrant: async (shareId) => {
+          revoked.push(shareId);
+        },
+        commit: async () => {
+          throw new Error("journal write failed");
+        },
+      }),
+    ).rejects.toThrow("journal write failed");
+    expect(revoked).toEqual(["share-a@x.com"]);
+  });
+
   it("treats a null shareId as a failed grant and rolls back the rest", async () => {
     // The relay accepting a grant but withholding its id leaves an untrackable
     // grant we could never revoke — so it must fail the call (and roll back the

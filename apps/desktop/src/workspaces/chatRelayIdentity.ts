@@ -107,8 +107,14 @@ export function assertSharedChannelMessageIdentity(input: {
   joinedChannel: JoinedSharedChannel | null;
   credentials: CloudCredentials | null;
   authorUserId?: string;
+  resolvedAuthorUserId: string | undefined;
 }): void {
-  if (!input.joinedChannel) return;
+  if (!input.joinedChannel) {
+    if (input.authorUserId !== input.resolvedAuthorUserId) {
+      throw new Error("Your dohc Cloud session changed. Try again.");
+    }
+    return;
+  }
   if (!input.credentials) {
     throw new Error("Sign in to dohc Cloud to send a message in this shared channel.");
   }

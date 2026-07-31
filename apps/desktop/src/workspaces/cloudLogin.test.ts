@@ -36,6 +36,14 @@ function fakeFetch(routes: Record<string, Route>) {
   return { impl, calls };
 }
 
+function deferred<Value>() {
+  let resolve!: (value: Value) => void;
+  const promise = new Promise<Value>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 const DEVICE = {
   device_code: "dev-123",
   user_code: "ABCD1234",
@@ -266,5 +274,153 @@ describe("cloud device-flow login", () => {
     await login.logout();
     expect(store.saved).toBeNull();
     expect(await login.status()).toEqual({ connected: false });
+  });
+
+  it("orders logout after an in-flight save so poll cannot restore the session", async () => {
+    const saveStarted = deferred<void>();
+    const releaseSave = deferred<void>();
+    const store = memoryStore();
+    store.save = async (credentials) => {
+      saveStarted.resolve(undefined);
+      await releaseSave.promise;
+      store.saved = credentials;
+    };
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({
+        body: { access_token: "session-token-after-logout" },
+      }),
+      "/api/auth/get-session": () => ({
+        body: { user: { email: "ice@dohc.test", id: "usr_ice" } },
+      }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+
+    await login.start();
+    const polling = login.poll();
+    await saveStarted.promise;
+    const loggingOut = login.logout();
+    releaseSave.resolve(undefined);
+
+    await expect(polling).resolves.toEqual({
+      status: "complete",
+      email: "ice@dohc.test",
+    });
+    await loggingOut;
+    expect(store.saved).toBeNull();
+    await expect(login.credentials()).resolves.toBeNull();
+  });
+
+  it("orders a superseding start after an in-flight credential save", async () => {
+    const saveStarted = deferred<void>();
+    const releaseSave = deferred<void>();
+    const store = memoryStore();
+    store.save = async (credentials) => {
+      saveStarted.resolve(undefined);
+      await releaseSave.promise;
+      store.saved = credentials;
+    };
+    let tokenCalls = 0;
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => {
+        tokenCalls += 1;
+        return tokenCalls === 1
+          ? { body: { access_token: "first-session-token" } }
+          : { status: 400, body: { error: "access_denied" } };
+      },
+      "/api/auth/get-session": () => ({
+        body: { user: { email: "first@dohc.test", id: "usr_first" } },
+      }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+
+    await login.start();
+    const firstPoll = login.poll();
+    await saveStarted.promise;
+    const secondStart = login.start();
+    releaseSave.resolve(undefined);
+
+    await expect(firstPoll).resolves.toEqual({
+      status: "complete",
+      email: "first@dohc.test",
+    });
+    await expect(secondStart).resolves.toMatchObject({ userCode: "ABCD1234" });
+    await expect(login.poll()).resolves.toEqual({ status: "denied" });
+    expect(store.saved).toMatchObject({
+      userId: "usr_first",
+      token: "first-session-token",
+    });
+  });
+
+  it("keeps a same-tick logout newer than a start with a delayed response body", async () => {
+    const deviceBody = deferred<typeof DEVICE>();
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/device/code")) {
+        return {
+          ok: true,
+          status: 200,
+          json: () => deviceBody.promise,
+        } as Response;
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+    const login = createCloudLogin({
+      store: memoryStore(),
+      defaultServerUrl: "http://cloud.test",
+      fetch: fetchImpl,
+    });
+
+    const starting = login.start();
+    const loggingOut = login.logout();
+    await loggingOut;
+    deviceBody.resolve(DEVICE);
+
+    await expect(starting).rejects.toThrow(/cancelled/i);
+    await expect(login.poll()).rejects.toThrow(/no cloud login in progress/i);
+  });
+
+  it("shares one in-flight poll for a device-code attempt", async () => {
+    const tokenResponse = deferred<Response>();
+    let tokenCalls = 0;
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/device/code")) {
+        return Response.json(DEVICE);
+      }
+      if (url.endsWith("/api/auth/device/token")) {
+        tokenCalls += 1;
+        return tokenResponse.promise;
+      }
+      if (url.endsWith("/api/auth/get-session")) {
+        return Response.json({
+          user: { email: "ice@dohc.test", id: "usr_ice" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+    const login = createCloudLogin({
+      store: memoryStore(),
+      defaultServerUrl: "http://cloud.test",
+      fetch: fetchImpl,
+    });
+
+    await login.start();
+    const first = login.poll();
+    const second = login.poll();
+    expect(first).toBe(second);
+    expect(tokenCalls).toBe(1);
+
+    tokenResponse.resolve(Response.json({ access_token: "session-token-xyz" }));
+    await expect(first).resolves.toMatchObject({ status: "complete" });
   });
 });

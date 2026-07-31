@@ -444,8 +444,6 @@ describe("mcp tools operate on allowed paths", () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx, { credentials: false });
       vi.stubEnv("DOHC_MCP_CLOUD_SERVER_URL", "http://cloud.test");
-      vi.stubEnv("DOHC_MCP_CLOUD_EMAIL", "ice@example.test");
-      vi.stubEnv("DOHC_MCP_CLOUD_TOKEN", "device-token");
       vi.stubEnv("DOHC_MCP_CLOUD_USER_ID", "");
       try {
         expect(await workspaceStatus(ctx)).toMatchObject({

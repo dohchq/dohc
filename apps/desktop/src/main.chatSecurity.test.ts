@@ -115,12 +115,20 @@ describe("main-process chat authorization", () => {
     expect(mainSource).toContain(
       "workspaceRemoteMatchesCredentials(workspace.remote, credentials)",
     );
-    expect(handlerSource("cloudLoginPoll")).toContain(
-      "previousUserId !== cachedCredentials.userId",
-    );
-    expect(handlerSource("cloudLoginPoll")).toContain(
-      "if (relayChanged || accountChanged)",
-    );
+    const loginPoll = handlerSource("cloudLoginPoll");
+    const loginReplacementSteps = [
+      "clearCachedCredentials();",
+      "await activity.stopEngines();",
+      "await closeAllRelayTransportWorkspaces();",
+      "await refreshCredentialCache();",
+      "activity.reconcileCloud(engineForWorkspace);",
+    ];
+    let previousStep = -1;
+    for (const step of loginReplacementSteps) {
+      const index = loginPoll.indexOf(step);
+      expect(index, step).toBeGreaterThan(previousStep);
+      previousStep = index;
+    }
     expect(mainSource).not.toContain("pinLegacyWorkspaceRemotesForCurrentAccount");
     expect(handlerSource("cloudEnableSync")).toContain(
       "syncEnrollmentRemoteWorkspaceId(",

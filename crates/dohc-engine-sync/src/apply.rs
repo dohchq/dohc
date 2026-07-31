@@ -557,6 +557,7 @@ struct DecisionSet {
     message_id: String,
     state: String,
     at_ms: i64,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
     resolved_by_message_id: Option<String>,
 }
 
@@ -634,11 +635,23 @@ fn apply_chat_mutation(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result
         "chat.channel.create" => apply_channel(tx, op, decode(&op.payload)?),
         "chat.thread.create" => apply_thread(tx, op, decode(&op.payload)?),
         "chat.message.append" => apply_message(tx, op, decode(&op.payload)?),
+        "chat.decision.set" | "chat.reaction.set" | "chat.follow.set" | "chat.feed.read.set" => {
+            apply_chat_lww_projection_tx(tx, op)
+        }
+        "chat.attachment.add" => apply_attachment(tx, op, decode(&op.payload)?),
+        _ => Err(SyncError::UnsupportedOperation),
+    }
+}
+
+pub(crate) fn apply_chat_lww_projection_tx(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    match op.op_kind.as_str() {
         "chat.decision.set" => apply_decision(tx, op, decode(&op.payload)?),
         "chat.reaction.set" => apply_reaction(tx, op, decode(&op.payload)?),
         "chat.follow.set" => apply_follow(tx, op, decode(&op.payload)?),
         "chat.feed.read.set" => apply_feed_read(tx, op, decode(&op.payload)?),
-        "chat.attachment.add" => apply_attachment(tx, op, decode(&op.payload)?),
         _ => Err(SyncError::UnsupportedOperation),
     }
 }
@@ -1295,7 +1308,7 @@ fn apply_decision(
         || p.resolved_by_message_id
             .as_ref()
             .is_some_and(String::is_empty)
-        || (p.state == "resolved") != p.resolved_by_message_id.is_some()
+        || (p.state == "open" && p.resolved_by_message_id.is_some())
     {
         return Err(SyncError::InvalidInput {
             reason: "chat decision payload is invalid",

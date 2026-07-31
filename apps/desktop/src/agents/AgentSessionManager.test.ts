@@ -100,7 +100,7 @@ describe("AgentSessionManager", () => {
       mcpFor: () => ({
         command: "dohc-mcp",
         args: ["--workspace", "/tmp/workspace"],
-        env: { DOHC_MCP_CLOUD_TOKEN: "tok" },
+        env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
       }),
       async startSession(input) {
         captured.push(input);
@@ -117,7 +117,7 @@ describe("AgentSessionManager", () => {
     expect(captured[0]?.mcp).toEqual({
       command: "dohc-mcp",
       args: ["--workspace", "/tmp/workspace"],
-      env: { DOHC_MCP_CLOUD_TOKEN: "tok" },
+      env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
     });
   });
 

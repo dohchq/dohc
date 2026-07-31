@@ -1010,9 +1010,7 @@ type CloudCredentialLoad =
       ok: true;
       status: "available";
       serverUrl: string;
-      email: string;
       userId: string;
-      token: string;
     }
   | { ok: false; status: "missing" | "encrypted" | "invalid"; reason: string };
 
@@ -1066,13 +1064,10 @@ async function remoteForCurrentWorkspace(
 
 async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLoad> {
   if (
-    process.env.DOHC_MCP_CLOUD_TOKEN ||
     process.env.DOHC_MCP_CLOUD_SERVER_URL ||
-    process.env.DOHC_MCP_CLOUD_EMAIL ||
     process.env.DOHC_MCP_CLOUD_USER_ID
   ) {
     if (
-      nonEmptyString(process.env.DOHC_MCP_CLOUD_TOKEN) &&
       nonEmptyString(process.env.DOHC_MCP_CLOUD_SERVER_URL) &&
       nonEmptyString(process.env.DOHC_MCP_CLOUD_USER_ID)
     ) {
@@ -1080,9 +1075,7 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
         ok: true,
         status: "available",
         serverUrl: process.env.DOHC_MCP_CLOUD_SERVER_URL,
-        email: process.env.DOHC_MCP_CLOUD_EMAIL ?? "desktop",
         userId: process.env.DOHC_MCP_CLOUD_USER_ID,
-        token: process.env.DOHC_MCP_CLOUD_TOKEN,
       };
     }
     return {
@@ -1119,9 +1112,7 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
       ok: true,
       status: "available",
       serverUrl: credentials.serverUrl,
-      email: credentials.email,
       userId: credentials.userId,
-      token,
     };
   }
 

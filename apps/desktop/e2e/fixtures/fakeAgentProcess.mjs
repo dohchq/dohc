@@ -219,7 +219,7 @@ input.on("line", (line) => {
       } else if (message.method === "session/new") {
         if (
           requireMcpEnv &&
-          message.params?.mcpServers?.[0]?.env?.DOHC_MCP_CLOUD_TOKEN !== "env-token"
+          message.params?.mcpServers?.[0]?.env?.DOHC_MCP_CLOUD_USER_ID !== "user-1"
         ) {
           respondError(message.id, "missing MCP env");
           return;
@@ -254,7 +254,7 @@ input.on("line", (line) => {
       }
       if (
         requireMcpEnv &&
-        message.params?.config?.mcp_servers?.dohc?.env?.DOHC_MCP_CLOUD_TOKEN !== "env-token"
+        message.params?.config?.mcp_servers?.dohc?.env?.DOHC_MCP_CLOUD_USER_ID !== "user-1"
       ) {
         respondError(message.id, "missing MCP env");
         return;

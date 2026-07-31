@@ -204,11 +204,11 @@ export async function peekReceivedGrantKind(input: {
 // matchDmChannelByRecipients requires an EXACT recipient-set match, so a
 // half-granted channel would be missed on the retry and a DUPLICATE DM minted
 // (with a split conversation). Rolling back to zero grants keeps the retry
-// clean: the caller sends the first message only AFTER this resolves, so a
-// thrown rollback means nothing was said yet. A revoke failure never masks the
-// original error (the lingering grant is the owner's to revoke; the local
-// channel stays hidden while it has no committed thread).
-export async function grantDmRecipients(input: {
+// clean. The commit callback writes the first message inside the same rollback
+// scope, so a thrown rollback means nothing was said yet. A revoke failure
+// never masks the original error (the lingering grant is the owner's to revoke;
+// the local channel stays hidden while it has no committed thread).
+export async function grantDmRecipients<Result = void>(input: {
   // Normalized recipient set (parseDmRecipients output).
   recipients: string[];
   // Recipients that already hold a live grant (skip — don't re-grant).
@@ -219,17 +219,31 @@ export async function grantDmRecipients(input: {
   // than left dangling.
   createGrant: (email: string) => Promise<string | null>;
   revokeGrant: (shareId: string) => Promise<void>;
-}): Promise<void> {
+  // A thrown identity check aborts after the new share id is tracked, so the
+  // pinned revoke client can roll it back.
+  assertCurrent?: () => void;
+  // Finish all awaited work that must succeed before the caller starts the
+  // first message mutation. A failure here revokes this call's grants too.
+  beforeCommit?: () => Promise<void>;
+  // The first durable message mutation. A storage or journal failure still
+  // belongs to grant setup and revokes this call's grants.
+  commit?: () => Promise<Result>;
+}): Promise<Result | undefined> {
   const created: string[] = [];
   try {
     for (const email of input.recipients) {
       if (input.covered.has(email)) continue;
+      input.assertCurrent?.();
       const shareId = await input.createGrant(email);
       if (shareId === null) {
         throw new Error(`DM grant for ${email} returned no share id`);
       }
       created.push(shareId);
+      input.assertCurrent?.();
     }
+    await input.beforeCommit?.();
+    input.assertCurrent?.();
+    return await input.commit?.();
   } catch (error) {
     for (const shareId of created) {
       try {

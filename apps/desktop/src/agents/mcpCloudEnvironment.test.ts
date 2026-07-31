@@ -22,13 +22,9 @@ describe("mcpCloudEnvironment", () => {
           },
         },
         credentials,
-        ownerName: "Ice",
       }),
     ).toEqual({
       DOHC_MCP_CLOUD_SERVER_URL: "https://cloud.test",
-      DOHC_MCP_CLOUD_EMAIL: "ice@dohc.test",
-      DOHC_MCP_OWNER_NAME: "Ice",
-      DOHC_MCP_CLOUD_TOKEN: "token-1",
       DOHC_MCP_CLOUD_USER_ID: "user-1",
     });
   });
@@ -42,20 +38,18 @@ describe("mcpCloudEnvironment", () => {
       },
     };
     expect(
-      mcpCloudEnvironment({ workspace, credentials: null, ownerName: "Ice" }),
+      mcpCloudEnvironment({ workspace, credentials: null }),
     ).toBeUndefined();
     expect(
       mcpCloudEnvironment({
         workspace,
         credentials: { ...credentials, serverUrl: "https://other-cloud.test" },
-        ownerName: "Ice",
       }),
     ).toBeUndefined();
     expect(
       mcpCloudEnvironment({
         workspace,
         credentials: { ...credentials, userId: "user-2" },
-        ownerName: "Ice",
       }),
     ).toBeUndefined();
   });

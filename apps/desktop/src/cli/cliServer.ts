@@ -1562,6 +1562,7 @@ async function dispatch(
         const target = { channelId: channel.id };
         const identity = await options.identity(context.workspaceId, target);
         await context.assertMessageWritable(target, identity.authorUserId);
+        await revalidateCliWrite(context, options, target, identity);
         const started = await context.store.startChannelThread({
           workspaceId: context.workspaceId,
           channelId: channel.id,
@@ -1599,6 +1600,7 @@ async function dispatch(
         const target = { threadId: request.args.threadId };
         const identity = await options.identity(context.workspaceId, target);
         await context.assertMessageWritable(target, identity.authorUserId);
+        await revalidateCliWrite(context, options, target, identity);
         const message = await context.store.sendMessage({
           workspaceId: context.workspaceId,
           threadId: request.args.threadId,
@@ -1898,6 +1900,7 @@ async function dispatch(
       let resolutionFailure: string | null = null;
       if (decisionMessage) {
         try {
+          await revalidateCliWrite(context, options, target, identity);
           const resolution = await context.store.resolveChatDecision({
             workspaceId: context.workspaceId,
             threadId: thread.thread.id,
@@ -1973,29 +1976,71 @@ async function dispatch(
         identity,
         true,
       );
-      const reactionAuthorId =
-        identity.authorUserId ?? identity.reactionAuthorId;
-      const active = existing.some(
+      const matchesCell = (reaction: (typeof existing)[number]) =>
+        reaction.messageId === target.rootMessage?.id &&
+        reaction.emoji === request.args.emoji;
+      const hasLocalAlias = existing.some(
         (reaction) =>
-          reaction.messageId === target.rootMessage?.id &&
-          reaction.emoji === request.args.emoji &&
-          reaction.author.authorId === reactionAuthorId,
+          matchesCell(reaction) &&
+          reaction.author.authorId === identity.reactionAuthorId,
       );
+      const hasCurrentIdentity =
+        identity.authorUserId !== undefined &&
+        existing.some(
+          (reaction) =>
+            matchesCell(reaction) &&
+            reaction.author.authorId === identity.authorUserId,
+        );
+      const active = hasLocalAlias || hasCurrentIdentity;
       const state = active ? "removed" : "added";
-      await context.store.setReaction({
-        workspaceId: context.workspaceId,
-        threadId: target.thread.thread.id,
-        messageId: target.rootMessage.id,
-        emoji: request.args.emoji,
-        author: {
-          authorId: reactionAuthorId,
-          ...authorForActor(identity, request.args.actor),
-        },
-        ...(identity.authorUserId
-          ? { replicationAuthorId: identity.authorUserId }
-          : {}),
-        state,
-      });
+      if (
+        state === "removed" &&
+        identity.authorUserId &&
+        identity.authorUserId !== identity.reactionAuthorId &&
+        hasLocalAlias
+      ) {
+        await context.store.setReaction({
+          workspaceId: context.workspaceId,
+          threadId: target.thread.thread.id,
+          messageId: target.rootMessage.id,
+          emoji: request.args.emoji,
+          author: {
+            authorId: identity.reactionAuthorId,
+            ...authorForActor(identity, request.args.actor),
+          },
+          state: "removed",
+        });
+        await revalidateCliWrite(
+          context,
+          options,
+          writeTarget,
+          identity,
+          true,
+        );
+      }
+      if (
+        state === "added" ||
+        !identity.authorUserId ||
+        !hasLocalAlias ||
+        hasCurrentIdentity
+      ) {
+        const reactionAuthorId =
+          identity.authorUserId ?? identity.reactionAuthorId;
+        await context.store.setReaction({
+          workspaceId: context.workspaceId,
+          threadId: target.thread.thread.id,
+          messageId: target.rootMessage.id,
+          emoji: request.args.emoji,
+          author: {
+            authorId: reactionAuthorId,
+            ...authorForActor(identity, request.args.actor),
+          },
+          ...(identity.authorUserId
+            ? { replicationAuthorId: identity.authorUserId }
+            : {}),
+          state,
+        });
+      }
       await notifyWrite(options, context);
       return {
         threadId: cliThreadId(target.thread.thread.id),

@@ -226,6 +226,18 @@ export async function chatViewerAuthorId(input: {
   );
 }
 
+export async function awaitCredentialGeneration<Result>(input: {
+  capturedGeneration: number;
+  currentGeneration: () => number;
+  run: () => Promise<Result>;
+}): Promise<Result> {
+  const result = await input.run();
+  if (input.currentGeneration() !== input.capturedGeneration) {
+    throw new Error("Your dohc Cloud session changed. Try again.");
+  }
+  return result;
+}
+
 export function reactionsForViewer<
   Reaction extends {
     reactionId: string;

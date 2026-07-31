@@ -801,6 +801,64 @@ describe("phase-one linked chat model", () => {
     ).rejects.toMatchObject({ code: "state-corrupt" });
   });
 
+  it("applies resolved decisions without a relay-visible resolver", async () => {
+    const engine = await makeEngine("decision-with-local-resolver");
+    const resolvedWithoutResolver: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "resolved-with-local-resolver",
+      originSeq: 0,
+      opKind: "chat.decision.set",
+      payload: {
+        threadId: "thread-decision",
+        messageId: "message-decision",
+        state: "resolved",
+        atMs: 6000,
+      },
+      recordedAtMs: 6000,
+    };
+    await expect(engine.store.applyReplicationOp(resolvedWithoutResolver)).resolves.toMatchObject({
+      status: "applied",
+    });
+    const state = () =>
+      rawDbFor(engine, (db) =>
+        db
+          .prepare("SELECT state, resolved_by_message_id FROM chat_decisions WHERE workspace_id = ? AND message_id = ?")
+          .get(WORKSPACE_ID, "message-decision"),
+      );
+    expect(state()).toEqual({ state: "resolved", resolved_by_message_id: null });
+
+    const openWithResolver: SyncReplicationEnvelope = {
+      ...resolvedWithoutResolver,
+      originId: "open-with-resolver",
+      payload: {
+        ...resolvedWithoutResolver.payload,
+        state: "open",
+        resolvedByMessageId: "local-resolver",
+        atMs: 7000,
+      },
+      recordedAtMs: 7000,
+    };
+    await expect(engine.store.applyReplicationOp(openWithResolver)).rejects.toMatchObject({
+      code: "state-corrupt",
+    });
+    expect(state()).toEqual({ state: "resolved", resolved_by_message_id: null });
+
+    const resolvedWithNull = {
+      ...resolvedWithoutResolver,
+      originId: "resolved-with-null",
+      payload: {
+        ...resolvedWithoutResolver.payload,
+        resolvedByMessageId: null,
+        atMs: 8000,
+      },
+      recordedAtMs: 8000,
+    } as unknown as SyncReplicationEnvelope;
+    await expect(engine.store.applyReplicationOp(resolvedWithNull)).rejects.toMatchObject({
+      code: "state-corrupt",
+    });
+    expect(state()).toEqual({ state: "resolved", resolved_by_message_id: null });
+  });
+
   it("replicates deterministic file attachments and exposes them on messages", async () => {
     const source = await makeEngine("attachment-source");
     const receiver = await makeEngine("attachment-receiver");

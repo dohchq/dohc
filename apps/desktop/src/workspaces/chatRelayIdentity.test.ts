@@ -174,6 +174,7 @@ describe("assertSharedChannelMessageIdentity", () => {
       assertSharedChannelMessageIdentity({
         joinedChannel,
         credentials: null,
+        resolvedAuthorUserId: undefined,
       }),
     ).toThrowError("Sign in to dohc Cloud to send a message in this shared channel.");
   });
@@ -184,6 +185,7 @@ describe("assertSharedChannelMessageIdentity", () => {
         joinedChannel,
         credentials: { ...credentials, relayUrl: "https://other-relay.test" },
         authorUserId: "user-1",
+        resolvedAuthorUserId: "user-1",
       }),
     ).toThrowError("Sign in to the cloud server this shared channel uses.");
   });
@@ -193,6 +195,7 @@ describe("assertSharedChannelMessageIdentity", () => {
       assertSharedChannelMessageIdentity({
         joinedChannel,
         credentials: { ...credentials, userId: "user-2" },
+        resolvedAuthorUserId: undefined,
       }),
     ).toThrowError("Sign in to the account that joined this shared channel.");
   });
@@ -203,14 +206,27 @@ describe("assertSharedChannelMessageIdentity", () => {
         joinedChannel,
         credentials,
         authorUserId: "user-1",
+        resolvedAuthorUserId: "user-1",
       }),
     ).not.toThrow();
     expect(() =>
       assertSharedChannelMessageIdentity({
         joinedChannel: null,
         credentials: null,
+        resolvedAuthorUserId: undefined,
       }),
     ).not.toThrow();
+  });
+
+  it("rejects a stale author outside joined channels", () => {
+    expect(() =>
+      assertSharedChannelMessageIdentity({
+        joinedChannel: null,
+        credentials,
+        authorUserId: "user-1",
+        resolvedAuthorUserId: "user-2",
+      }),
+    ).toThrowError("Your dohc Cloud session changed. Try again.");
   });
 });
 

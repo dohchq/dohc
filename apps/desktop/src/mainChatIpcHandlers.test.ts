@@ -8,6 +8,7 @@ import {
   createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
   reactionsForViewer,
+  awaitCredentialGeneration,
   setChatReactionFromMain,
   writeChatMessageFromMain,
   type MainChatIpcHandler,
@@ -59,6 +60,26 @@ function boundaryDeps(contexts: Map<string, TestContext>) {
 }
 
 describe("runtime main chat IPC boundaries", () => {
+  it("rejects an identity resolved across a credential-generation change", async () => {
+    let resolveIdentity!: (value: { authorUserId: string }) => void;
+    const pendingIdentity = new Promise<{ authorUserId: string }>((resolve) => {
+      resolveIdentity = resolve;
+    });
+    let generation = 1;
+    const resolving = awaitCredentialGeneration({
+      capturedGeneration: generation,
+      currentGeneration: () => generation,
+      run: () => pendingIdentity,
+    });
+
+    generation += 1;
+    resolveIdentity({ authorUserId: "old-user-id" });
+
+    await expect(resolving).rejects.toThrow(
+      "Your dohc Cloud session changed. Try again.",
+    );
+  });
+
   it("passes the authenticated relay identity into the reaction mutation", async () => {
     const setReaction = vi.fn(async () => ({ reactionId: "reaction-1" }));
 

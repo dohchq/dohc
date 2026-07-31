@@ -4590,7 +4590,7 @@ export function createLinkedChatStore(
             (payload.resolvedByMessageId !== undefined &&
               (typeof payload.resolvedByMessageId !== "string" ||
                 payload.resolvedByMessageId.length === 0)) ||
-            (payload.state === "resolved") !== (payload.resolvedByMessageId !== undefined)
+            (payload.state === "open" && payload.resolvedByMessageId !== undefined)
           ) {
             throw corruptStore();
           }
