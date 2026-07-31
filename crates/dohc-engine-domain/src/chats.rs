@@ -8279,22 +8279,24 @@ fn journal_decision_set(
         &origin_id,
         origin_seq,
     )?;
-    let mut payload = serde_json::json!({
-        "threadId": thread_id,
-        "messageId": message_id,
-        "state": state.as_str(),
-        "atMs": at_ms,
-    });
-    if let Some(resolver) = resolved_by_message_id {
-        payload
-            .as_object_mut()
-            .expect("decision payload is an object")
-            .insert(
-                "resolvedByMessageId".to_owned(),
-                serde_json::json!(resolver),
-            );
-    }
     if relay_log_has_authored_message(tx, workspace_id, thread_id, message_id)? {
+        let mut payload = serde_json::json!({
+            "threadId": thread_id,
+            "messageId": message_id,
+            "state": state.as_str(),
+            "atMs": at_ms,
+        });
+        if let Some(resolver) = resolved_by_message_id
+            && relay_log_has_authored_message(tx, workspace_id, thread_id, resolver)?
+        {
+            payload
+                .as_object_mut()
+                .expect("decision payload is an object")
+                .insert(
+                    "resolvedByMessageId".to_owned(),
+                    serde_json::json!(resolver),
+                );
+        }
         insert_local_replication_op(
             tx,
             workspace_id,

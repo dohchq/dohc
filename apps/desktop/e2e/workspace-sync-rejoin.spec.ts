@@ -186,6 +186,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
         workspaceId,
         threadId: thread.id,
         author: { kind: "human", displayName: "Ice" },
+        authorUserId: "e2e-user",
         body: "Let's settle the quasar sync cadence this week.",
       });
     } finally {

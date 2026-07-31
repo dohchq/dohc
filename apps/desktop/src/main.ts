@@ -341,6 +341,7 @@ import {
   createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
+  reactionsForViewer,
   setChatReactionFromMain,
   writeChatMessageFromMain,
 } from "./mainChatIpcHandlers";
@@ -2367,7 +2368,7 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       return {
         displayName: localUserDisplayName(),
         ...(authorUserId ? { authorUserId } : {}),
-        reactionAuthorId: localUserId(),
+        reactionAuthorId: localReactorFallbackId(),
       };
     },
     onWrite: (workspace) => {
@@ -6274,7 +6275,10 @@ function registerIpcHandlers(
       threadId: input.threadId,
     });
     return ListChatReactionsResult.parse({
-      reactions: reactions.map(chatReactionForIpc),
+      reactions: reactionsForViewer(reactions.map(chatReactionForIpc), {
+        viewerAuthorId,
+        localFallbackAuthorId: localReactorFallbackId(),
+      }),
       viewerAuthorId,
     });
   });
@@ -6309,6 +6313,11 @@ function registerIpcHandlers(
             verifiedChatAuthorUserIdFor(workspace.workspaceId, target),
           revalidateReplicationAuthorId: (authorUserId) =>
             revalidateChatWrite(workspace, target, authorUserId),
+          listReactions: () =>
+            linkedChatStoreFor(workspace).listReactions({
+              workspaceId: workspace.workspaceId,
+              threadId: input.threadId,
+            }),
           setReaction: (mutation) =>
             linkedChatStoreFor(workspace).setReaction(mutation),
           state: input.state,

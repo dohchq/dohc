@@ -68,9 +68,7 @@ export function CloudLogin(props: {
       .then((status) => {
         if (session !== sessionRef.current) return;
         setWorkspaceSynced(status.workspaceSynced ?? false);
-        setWorkspaceSyncConnected(
-          status.workspaceSyncConnected ?? status.workspaceSynced ?? false,
-        );
+        setWorkspaceSyncConnected(status.workspaceSyncConnected ?? false);
         setWorkspaceSecretState(status.workspaceSecretState ?? "none");
         if (status.serverUrl) setServerUrl(status.serverUrl);
         if (status.relayUrl) setRelayUrl(status.relayUrl);
@@ -147,8 +145,24 @@ export function CloudLogin(props: {
           if (session !== sessionRef.current) return;
           if (result.status === "pending") return pollUntilDone(session);
           if (result.status === "complete") {
-            setPhase({ kind: "connected", email: result.email ?? "" });
-            props.onConnected?.();
+            void bridge()
+              .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
+              .then((status) => {
+                if (session !== sessionRef.current) return;
+                setWorkspaceSynced(status.workspaceSynced ?? false);
+                setWorkspaceSyncConnected(status.workspaceSyncConnected ?? false);
+                setWorkspaceSecretState(status.workspaceSecretState ?? "none");
+                if (status.serverUrl) setServerUrl(status.serverUrl);
+                if (status.relayUrl) setRelayUrl(status.relayUrl);
+                setPhase({ kind: "connected", email: result.email ?? status.email ?? "" });
+                props.onConnected?.();
+              })
+              .catch(() => {
+                if (session !== sessionRef.current) return;
+                setWorkspaceSyncConnected(false);
+                setPhase({ kind: "connected", email: result.email ?? "" });
+                props.onConnected?.();
+              });
           } else {
             setPhase({
               kind: "failed",

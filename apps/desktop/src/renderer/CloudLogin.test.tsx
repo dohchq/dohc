@@ -54,11 +54,12 @@ describe("CloudLogin", () => {
     bridgeMock.cloudStatus.mockImplementation((payload?: { workspaceId?: string }) =>
       payload?.workspaceId === "old"
         ? oldStatus.promise
-        : Promise.resolve({
-            connected: true,
-            email: "new@dohc.dev",
-            workspaceSynced: true,
-          }),
+          : Promise.resolve({
+              connected: true,
+              email: "new@dohc.dev",
+              workspaceSynced: true,
+              workspaceSyncConnected: true,
+            }),
     );
 
     const { rerender } = render(<CloudLogin workspaceId="old" />);
@@ -103,6 +104,7 @@ describe("CloudLogin", () => {
       connected: true,
       email: "ice@dohc.dev",
       workspaceSynced: true,
+      workspaceSyncConnected: true,
     });
     bridgeMock.cloudLogout.mockRejectedValueOnce(new Error("offline"));
 
@@ -145,6 +147,7 @@ describe("CloudLogin", () => {
       connected: true,
       email: "ice@dohc.dev",
       workspaceSynced: true,
+      workspaceSyncConnected: true,
       serverUrl: "http://localhost:1786",
       relayUrl: "http://localhost:1788",
     });
@@ -189,11 +192,45 @@ describe("CloudLogin", () => {
     expect(await screen.findByTestId("cloud-workspace-synced")).toBeTruthy();
   });
 
+  it("refreshes fail-closed workspace verification after login completes", async () => {
+    vi.useFakeTimers();
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce({
+        connected: false,
+        workspaceSynced: true,
+      })
+      .mockResolvedValueOnce({
+        connected: true,
+        email: "ice@dohc.dev",
+        workspaceSynced: true,
+        workspaceSyncConnected: false,
+        relayUrl: "http://localhost:1788",
+      });
+    bridgeMock.cloudLoginPoll.mockResolvedValueOnce({
+      status: "complete",
+      email: "ice@dohc.dev",
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    await act(async () => {});
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    await act(async () => {});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByTestId("cloud-workspace-relink")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
+    expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  });
+
   it("omits the sync code when the session has no relay (nothing to join through)", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: true,
       email: "ice@dohc.dev",
       workspaceSynced: true,
+      workspaceSyncConnected: true,
       serverUrl: "http://localhost:1786",
     });
     render(<CloudLogin workspaceId="ws-1" />);
@@ -206,6 +243,7 @@ describe("CloudLogin", () => {
       connected: true,
       email: "ice@dohc.dev",
       workspaceSynced: true,
+      workspaceSyncConnected: true,
       workspaceSecretState: "protected-key-present",
     });
 
@@ -237,6 +275,7 @@ describe("CloudLogin", () => {
       connected: true,
       email: "ice@dohc.dev",
       workspaceSynced: payload?.workspaceId === "old",
+      workspaceSyncConnected: payload?.workspaceId === "old",
       ...(payload?.workspaceId === "old"
         ? { workspaceSecretState: "protected-key-present" as const }
         : {}),
@@ -266,6 +305,7 @@ describe("CloudLogin", () => {
       connected: true,
       email: "ice@dohc.dev",
       workspaceSynced: true,
+      workspaceSyncConnected: true,
       workspaceSecretState: "protected-key-missing",
     });
 
@@ -293,6 +333,7 @@ describe("CloudLogin", () => {
       connected: true,
       email: "ice@dohc.dev",
       workspaceSynced: true,
+      workspaceSyncConnected: true,
       workspaceSecretState: "protected-key-missing",
     });
     // The main-process wording the renderer keys off (/passphrase/ + /could not/).

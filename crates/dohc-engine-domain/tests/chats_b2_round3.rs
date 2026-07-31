@@ -621,6 +621,63 @@ fn decision_resolve_uses_monotonic_time_and_exact_journal_coordinate() {
 }
 
 #[test]
+fn decision_resolution_omits_a_local_only_resolver_from_relay_payload() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "decision", 20, true);
+    LinkedChatStore::new(&mut store)
+        .send_message(
+            &SendMessage {
+                workspace_id: WS.to_owned(),
+                thread_id: "thread".to_owned(),
+                message_id: "local-resolver".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Local user".to_owned(),
+                author_user_id: None,
+                parent_message_id: None,
+                origin: None,
+                body: "Resolved while signed out".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 30,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("local resolver");
+
+    let decision = resolve(
+        &mut store,
+        "resolve-local",
+        "thread",
+        "decision",
+        "local-resolver",
+        40,
+    )
+    .expect("resolve");
+    assert_eq!(
+        decision.resolved_by_message_id.as_deref(),
+        Some("local-resolver")
+    );
+
+    let payload: serde_json::Value = store
+        .read_with(|conn| {
+            let payload: String = conn.query_row(
+                "SELECT payload_json FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.decision.set' \
+                 ORDER BY origin_seq DESC LIMIT 1",
+                [WS],
+                |row| row.get(0),
+            )?;
+            serde_json::from_str(&payload)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+        })
+        .expect("replicated decision payload");
+    assert_eq!(payload["state"], "resolved");
+    assert!(payload.get("resolvedByMessageId").is_none());
+}
+
+#[test]
 fn decision_resolve_returns_existing_winner_idempotently() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);

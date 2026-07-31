@@ -139,6 +139,13 @@ export async function setChatReactionFromMain<Result>(input: {
   revalidateReplicationAuthorId: (
     replicationAuthorId: string | undefined,
   ) => Promise<void>;
+  listReactions?: () => Promise<
+    readonly {
+      messageId: string;
+      emoji: string;
+      author: { authorId: string };
+    }[]
+  >;
   setReaction: (mutation: {
     workspaceId: string;
     threadId: string;
@@ -155,6 +162,45 @@ export async function setChatReactionFromMain<Result>(input: {
 }): Promise<Result> {
   const replicationAuthorId = await input.resolveReplicationAuthorId();
   await input.revalidateReplicationAuthorId(replicationAuthorId);
+  if (
+    input.state === "removed" &&
+    replicationAuthorId &&
+    replicationAuthorId !== input.localFallbackAuthorId &&
+    input.listReactions
+  ) {
+    const reactions = await input.listReactions();
+    await input.revalidateReplicationAuthorId(replicationAuthorId);
+    const matchesCell = (reaction: (typeof reactions)[number]) =>
+      reaction.messageId === input.messageId && reaction.emoji === input.emoji;
+    const hasLocalAlias = reactions.some(
+      (reaction) =>
+        matchesCell(reaction) &&
+        reaction.author.authorId === input.localFallbackAuthorId,
+    );
+    const hasCurrentIdentity = reactions.some(
+      (reaction) =>
+        matchesCell(reaction) && reaction.author.authorId === replicationAuthorId,
+    );
+    let localRemoval: { result: Result } | undefined;
+    if (hasLocalAlias) {
+      localRemoval = {
+        result: await input.setReaction({
+          workspaceId: input.workspaceId,
+          threadId: input.threadId,
+          messageId: input.messageId,
+          emoji: input.emoji,
+          author: {
+            authorId: input.localFallbackAuthorId,
+            kind: "human",
+            displayName: input.localAuthorDisplayName,
+          },
+          state: "removed",
+        }),
+      };
+      await input.revalidateReplicationAuthorId(replicationAuthorId);
+    }
+    if (localRemoval && !hasCurrentIdentity) return localRemoval.result;
+  }
   const authorId = replicationAuthorId ?? input.localFallbackAuthorId;
   return input.setReaction({
     workspaceId: input.workspaceId,
@@ -178,6 +224,41 @@ export async function chatViewerAuthorId(input: {
   return (
     (await input.resolveReplicationAuthorId()) ?? input.localFallbackAuthorId
   );
+}
+
+export function reactionsForViewer<
+  Reaction extends {
+    reactionId: string;
+    threadId: string;
+    messageId: string;
+    emoji: string;
+    authorId: string;
+  },
+>(
+  reactions: readonly Reaction[],
+  input: { viewerAuthorId: string; localFallbackAuthorId: string },
+): Reaction[] {
+  if (input.viewerAuthorId === input.localFallbackAuthorId) return [...reactions];
+
+  const byCell = new Map<string, { reaction: Reaction; isCurrentIdentity: boolean }>();
+  for (const reaction of reactions) {
+    const isCurrentIdentity = reaction.authorId === input.viewerAuthorId;
+    const mapped =
+      reaction.authorId === input.localFallbackAuthorId
+        ? { ...reaction, authorId: input.viewerAuthorId }
+        : reaction;
+    const key = [
+      mapped.threadId,
+      mapped.messageId,
+      mapped.emoji,
+      mapped.authorId,
+    ].join("\u0000");
+    const current = byCell.get(key);
+    if (!current || (isCurrentIdentity && !current.isCurrentIdentity)) {
+      byCell.set(key, { reaction: mapped, isCurrentIdentity });
+    }
+  }
+  return [...byCell.values()].map(({ reaction }) => reaction);
 }
 
 export async function writeChatMessageFromMain<Attachment, Result>(input: {

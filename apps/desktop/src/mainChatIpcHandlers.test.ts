@@ -7,6 +7,7 @@ import {
   createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
+  reactionsForViewer,
   setChatReactionFromMain,
   writeChatMessageFromMain,
   type MainChatIpcHandler,
@@ -122,6 +123,78 @@ describe("runtime main chat IPC boundaries", () => {
         resolveReplicationAuthorId: async () => undefined,
       }),
     ).resolves.toBe("local-user-id");
+  });
+
+  it("keeps signed-out reaction cells reversible after sign-in", async () => {
+    expect(
+      reactionsForViewer(
+        [
+          {
+            reactionId: "local",
+            threadId: "thread-1",
+            messageId: "message-1",
+            emoji: "👍",
+            authorId: "local-user-id",
+          },
+          {
+            reactionId: "verified",
+            threadId: "thread-1",
+            messageId: "message-1",
+            emoji: "👍",
+            authorId: "verified-user-id",
+          },
+        ],
+        {
+          viewerAuthorId: "verified-user-id",
+          localFallbackAuthorId: "local-user-id",
+        },
+      ),
+    ).toEqual([
+      {
+        reactionId: "verified",
+        threadId: "thread-1",
+        messageId: "message-1",
+        emoji: "👍",
+        authorId: "verified-user-id",
+      },
+    ]);
+
+    const setReaction = vi.fn(
+      async (mutation: {
+        author: { authorId: string };
+        replicationAuthorId?: string;
+      }) => ({ reactionId: "reaction-1", mutation }),
+    );
+    await setChatReactionFromMain({
+      workspaceId: "workspace-1",
+      threadId: "thread-1",
+      messageId: "message-1",
+      emoji: "👍",
+      state: "removed",
+      localFallbackAuthorId: "local-user-id",
+      localAuthorDisplayName: "Ice",
+      resolveReplicationAuthorId: async () => "verified-user-id",
+      revalidateReplicationAuthorId: async () => undefined,
+      listReactions: async () => [
+        {
+          messageId: "message-1",
+          emoji: "👍",
+          author: { authorId: "local-user-id" },
+        },
+      ],
+      setReaction,
+    });
+
+    expect(setReaction).toHaveBeenCalledOnce();
+    expect(setReaction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        author: expect.objectContaining({ authorId: "local-user-id" }),
+        state: "removed",
+      }),
+    );
+    expect(setReaction.mock.calls[0]![0]).not.toHaveProperty(
+      "replicationAuthorId",
+    );
   });
 
   it("checks message identity before attachments and passes one captured author to the writer", async () => {
