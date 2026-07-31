@@ -3477,9 +3477,14 @@ negative.** WSL had Node 18 and no version manager and no passwordless sudo; Nod
 these tests at all, because the legacy engine reaches `node:sqlite` through `createRequire`. A
 no-sudo tarball install of Node **22.14** then produced `25 files failed / 408 failed | 29
 passed` — which looks exactly like catastrophic product breakage and is nothing of the kind. The
-cause was `no such module: fts5`: that tarball's bundled SQLite lacks FTS5, which the Node 24.16
-the repo runs on Windows has. **Match the Node version exactly.** Verified the difference
-directly with a two-line `CREATE VIRTUAL TABLE ... USING fts5` probe.
+cause was `no such module: fts5`: that tarball's bundled SQLite lacks FTS5.
+
+**Match the version the repo pins, which is 24.14.0** — `.node-version`, `.nvmrc`,
+`docs/development/local-dev.md` and the desktop-release workflow all say so. The evidence above
+was produced on 24.16.0, which is what this machine happens to run; an earlier draft of this
+entry told the reader to match 24.16.0 "exactly", which would have sent them to a
+non-canonical environment. Verified the FTS5 difference directly with a two-line
+`CREATE VIRTUAL TABLE ... USING fts5` probe.
 
 ### The blocker that verification found instead
 
@@ -3511,12 +3516,19 @@ plaintext and checks a fork-base row exists, so **re-encrypting during a fork wo
 assertions**. Fork IV-verbatim is not directly asserted on either side, and retiring the TS proof
 would leave it unpinned.
 
-**But IV/nonce freshness has no Rust equivalent of any kind.** TS asserts it directly by writing
-the same plaintext three times and comparing rows. In Rust the only IV assertion anywhere is
-`assert_eq!(sealed.iv().len(), SECRET_IV_BYTES)` — a length check, which is the textbook
-non-proof. Every `assert_ne!` in the workspace was searched: 43 hits, none on an IV or a
-ciphertext. The two IV assertions that do exist run the opposite direction, asserting IVs are
-*identical* to prove verbatim copy.
+**But nothing in Rust asserts IV/nonce FRESHNESS.** TS asserts it directly by writing the same
+plaintext three times and comparing rows. Rust does have IV assertions — a length check,
+`assert_eq!(sealed.iv().len(), SECRET_IV_BYTES)`, and equality assertions that prove verbatim
+copying on apply and restore — but **none asserts that two seals of the same plaintext produce
+different IVs**, which is the property that matters.
+
+Being exact about this took two corrections, both fair for a security audit. An earlier draft
+said "the only IV assertion anywhere is a length check", which contradicted the very next
+sentence acknowledging the equality assertions. It also cited "43 `assert_ne!` hits, none on an
+IV or ciphertext". The real count is **50**, and a naive grep appears to find four IV matches —
+all substring artifacts of *derive*, *driver* and *receive*. The accurate claim is the narrow
+one: of 50 `assert_ne!` calls, **zero assert IV or ciphertext difference**. A number that is
+wrong in an audit cannot support deleting the proof it is auditing.
 
 Nonce reuse under AES-GCM with one key leaks the GHASH authentication key and the XOR of the two
 plaintexts. It is catastrophic **and silent**: encryption still succeeds and every existing test
@@ -3571,7 +3583,13 @@ occurrences is a habit, not an accident.
   fix — which is the new e2e guard doing exactly its job, across worktrees.
 - The Node/FTS5 false negative above.
 
-Read the per-package `Tests` line. The exit code is not the verdict, and neither is a grep.
+Scoped narrowly, because the general version of this lesson is dangerous: for the canonical
+JavaScript job, `pnpm run test`'s **nonzero exit IS the verdict**, and setup scripts or
+non-Vitest tests can fail without ever emitting a per-package `Tests` line. "Read the Tests
+line, not the exit code" would therefore discard real failures. The correct rules are narrower:
+**do not put a failure-counting `grep` last in a pipeline** (it inverts the exit status), **use
+a pnpm-prefix-aware pattern** when counting failures, and **for the Rust gate specifically**,
+read the `== summary ==` block, because that gate can exit 0 while its own summary says FAIL.
 
 ### The import ratchet, and why it stops where it does
 
