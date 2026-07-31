@@ -349,6 +349,41 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/summary is invalid/);
   });
 
+  it("refuses a metadata field over the daemon's 16 KiB cap", async () => {
+    // validate_metadata_fields in the daemon rejects either field past 16 KiB.
+    // Accepting a longer one let the fake certify a write production refuses —
+    // the third way this helper was more permissive than the engine.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const justOver = "s".repeat(16 * 1024 + 1);
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: ".env",
+        text: "API_KEY=capped\n",
+        origin: "local-file",
+        momentId: "moment-capped",
+        summary: justOver,
+      }),
+    ).rejects.toThrow(/summary is invalid/);
+
+    // Exactly at the cap is accepted — an off-by-one here would reject valid work.
+    const atCap = "s".repeat(16 * 1024);
+    const ok = await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=capped\n",
+      origin: "local-file",
+      momentId: "moment-at-cap",
+      summary: atCap,
+    });
+    expect((ok.moment as Record<string, unknown>).metadata).toMatchObject({
+      summary: atCap,
+    });
+  });
+
   it("refuses malformed secret metadata WITHOUT changing the secret", async () => {
     // The daemon refuses a malformed request atomically, before touching state.
     // An earlier draft of this fix evaluated `optionalString` inside the

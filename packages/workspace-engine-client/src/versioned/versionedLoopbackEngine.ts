@@ -44,6 +44,9 @@ function refusalFrom(error: unknown): unknown {
 const INBAND_LIMIT_BYTES = 48 * 1024;
 const COMPARE_PAGE_SIZE = 200;
 const MAX_MERGE_LINES = 2_000;
+// Mirrors MAX_METADATA_FIELD_BYTES in crates/dohc-workspace-engine/src/lib.rs.
+const MAX_METADATA_FIELD_BYTES = 16 * 1024;
+
 const ACCEPTED_ORIGINS = new Set<string>([
   "api",
   "local-file",
@@ -1484,6 +1487,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       const raw = params[key];
       if (raw === undefined || raw === null) return null;
       if (typeof raw !== "string") throw new Error(`${key} is invalid.`);
+      // The daemon caps each metadata field at 16 KiB in validate_metadata_fields
+      // and refuses the request. Accepting a longer one made the fake certify a
+      // write production rejects — the third time this helper has been too
+      // permissive, so the cap is enforced here rather than assumed.
+      if (utf8Length(raw) > MAX_METADATA_FIELD_BYTES) {
+        throw new Error(`${key} is invalid.`);
+      }
       return raw;
     };
     return { summary: field("summary"), correlationId: field("correlationId") };
