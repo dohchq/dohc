@@ -5603,8 +5603,9 @@ fn legacy_author_compat_prunes_private_thread_ops_but_keeps_a_thread_needed_by_a
         .push_workspace_with_fresh_origin(&mut engine, "ws", "fresh-thread", &NoFaults)
         .expect("quarantine private thread");
 
-    let (fresh_rows, domain_counts): (Vec<(i64, String, serde_json::Value)>, (i64, i64, i64, i64)) =
-        engine
+    type FreshRow = (i64, String, serde_json::Value);
+    type DomainCounts = (i64, i64, i64, i64);
+    let (fresh_rows, domain_counts): (Vec<FreshRow>, DomainCounts) = engine
             .read_with(|conn| {
                 let fresh_rows = {
                     let mut statement = conn.prepare(
