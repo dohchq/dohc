@@ -1,6 +1,6 @@
 ---
 name: codex-review
-description: "Ask Codex CLI (gpt-5.6-sol) for an independent code review of uncommitted changes, a branch diff, a commit, or a specific implementation. Use when the user asks Claude to have Codex or gpt-5.6-sol review work, when the model-selection rubric calls for a gpt-5.6-sol review perspective, or when Codex should audit a diff, find bugs or regressions, or compare Claude's implementation against requirements. For a review by Claude itself, use the normal review process instead."
+description: "Ask GPT-5.6-sol through Codex CLI for an independent code review of uncommitted changes, a branch diff, a commit, or a specific implementation. Use when the user asks Claude to have Codex or GPT-5.6-sol review work, when the shared model-routing policy calls for a Codex review perspective, or when Codex should audit a diff, find bugs or regressions, or compare Claude's implementation against requirements. For a review by Claude itself, use the normal review process instead."
 ---
 
 # Codex Review
@@ -8,6 +8,10 @@ description: "Ask Codex CLI (gpt-5.6-sol) for an independent code review of unco
 Use Codex as an independent reviewer when the user wants a second-pass review or when a change is broad enough that another agent's perspective is useful.
 
 Prefer Claude's normal review process for small local checks. Do not delegate review just to avoid reading the code yourself. Treat Codex's output as evidence, not authority.
+
+Use GPT-5.6-sol through the model-routing policy imported by `CLAUDE.md`.
+Omit `-m` when the configured default is Sol. Otherwise add
+`-m gpt-5.6-sol`.
 
 ## Workflow
 
