@@ -287,13 +287,6 @@ describe("sync relay main process", () => {
     expect(await logLength()).toBe(2);
   });
 
-  // MU-C4 shared channels end-to-end over a LIVE relay child: an owner and
-  // two read-write members converge on one channel through the bidirectional
-  // share path; a read-only member reads but cannot append; a non-member is
-  // denied byte-identically to a share that never existed; the owner's OTHER
-  // channel never leaks into any member's store; revocation closes a member's
-  // view cleanly while their local copy stays readable.
-
   // Gate finding: the transport must cap request bodies AT THE STREAM. A
   // client streaming an oversized body is cut off mid-upload (413 and/or a
   // destroyed socket) instead of being fully buffered, and the server stays

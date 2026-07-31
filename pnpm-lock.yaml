@@ -632,9 +632,6 @@ importers:
         specifier: ^8.21.0
         version: 8.21.0
     devDependencies:
-      '@dohc/workspace-engine':
-        specifier: workspace:*
-        version: link:../../packages/workspace-engine
       '@types/node':
         specifier: ^22.19.19
         version: 22.19.19
