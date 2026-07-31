@@ -4810,6 +4810,54 @@ fn seed_identity(engine: &mut EngineStore) {
 }
 
 #[test]
+fn relay_pull_recovers_only_a_diverged_local_origin() {
+    for (origin_id, expected) in [
+        ("local", RelayError::OriginDiverged),
+        ("peer", RelayError::InvalidResponse),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        seed_identity(&mut engine);
+        if origin_id == "peer" {
+            engine
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO replication_log \
+                         (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                         VALUES ('ws','peer',0,'probe.peer','{}',1000,1)",
+                        [],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .expect("seed imported coordinate");
+        }
+        let client = RelaySyncClient::new(FakeRelay {
+            pushes: Mutex::new(0),
+            pull: Mutex::new(Some(PullResponse {
+                ops: vec![envelope(
+                    origin_id,
+                    0,
+                    if origin_id == "local" {
+                        "probe.local"
+                    } else {
+                        "probe.peer"
+                    },
+                    json!({"changed": true}),
+                )],
+                next_cursor: 1,
+                has_more: false,
+            })),
+        });
+
+        assert_eq!(
+            client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+            Err(expected),
+            "{origin_id}"
+        );
+    }
+}
+
+#[test]
 fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_advance() {
     let (_scratch, path, mut engine) = store();
     seed_identity(&mut engine);

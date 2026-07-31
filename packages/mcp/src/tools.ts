@@ -983,6 +983,7 @@ export async function deleteWorkspacePath(
 interface RemoteIdentity {
   serverUrl: string;
   remoteWorkspaceId: string;
+  ownerUserId?: string;
 }
 
 interface RegistryWorkspace {
@@ -1005,7 +1006,14 @@ interface SyncManifest {
 }
 
 type CloudCredentialLoad =
-  | { ok: true; status: "available"; serverUrl: string; email: string; token: string }
+  | {
+      ok: true;
+      status: "available";
+      serverUrl: string;
+      email: string;
+      userId: string;
+      token: string;
+    }
   | { ok: false; status: "missing" | "encrypted" | "invalid"; reason: string };
 
 function nonEmptyString(value: unknown): value is string {
@@ -1072,17 +1080,20 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
   if (
     process.env.DOHC_MCP_CLOUD_TOKEN ||
     process.env.DOHC_MCP_CLOUD_SERVER_URL ||
-    process.env.DOHC_MCP_CLOUD_EMAIL
+    process.env.DOHC_MCP_CLOUD_EMAIL ||
+    process.env.DOHC_MCP_CLOUD_USER_ID
   ) {
     if (
       nonEmptyString(process.env.DOHC_MCP_CLOUD_TOKEN) &&
-      nonEmptyString(process.env.DOHC_MCP_CLOUD_SERVER_URL)
+      nonEmptyString(process.env.DOHC_MCP_CLOUD_SERVER_URL) &&
+      nonEmptyString(process.env.DOHC_MCP_CLOUD_USER_ID)
     ) {
       return {
         ok: true,
         status: "available",
         serverUrl: process.env.DOHC_MCP_CLOUD_SERVER_URL,
         email: process.env.DOHC_MCP_CLOUD_EMAIL ?? "desktop",
+        userId: process.env.DOHC_MCP_CLOUD_USER_ID,
         token: process.env.DOHC_MCP_CLOUD_TOKEN,
       };
     }
@@ -1097,6 +1108,7 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
     version?: unknown;
     serverUrl?: unknown;
     email?: unknown;
+    userId?: unknown;
     token?: unknown;
   }>(join(ctx.home, "dohc-cloud.json"));
   if (
@@ -1104,6 +1116,7 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
     credentials.version !== 1 ||
     !nonEmptyString(credentials.serverUrl) ||
     !nonEmptyString(credentials.email) ||
+    !nonEmptyString(credentials.userId) ||
     !nonEmptyString(credentials.token)
   ) {
     return { ok: false, status: "missing", reason: "Sign in to dohc Cloud first." };
@@ -1119,6 +1132,7 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
       status: "available",
       serverUrl: credentials.serverUrl,
       email: credentials.email,
+      userId: credentials.userId,
       token,
     };
   }
@@ -1139,14 +1153,30 @@ function credentialStatusFor(
   remote: RemoteIdentity | null,
   credentials: CloudCredentialLoad,
 ):
-  | { cloudConnected: false; credentialStatus: "not-needed" | "missing" | "encrypted" | "invalid" | "server-mismatch" }
+  | {
+      cloudConnected: false;
+      credentialStatus:
+        | "not-needed"
+        | "missing"
+        | "encrypted"
+        | "invalid"
+        | "workspace-owner-missing"
+        | "server-mismatch"
+        | "account-mismatch";
+    }
   | { cloudConnected: true; credentialStatus: "available" } {
   if (!remote) return { cloudConnected: false, credentialStatus: "not-needed" };
   if (!credentials.ok) {
     return { cloudConnected: false, credentialStatus: credentials.status };
   }
+  if (!nonEmptyString(remote.ownerUserId)) {
+    return { cloudConnected: false, credentialStatus: "workspace-owner-missing" };
+  }
   if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {
     return { cloudConnected: false, credentialStatus: "server-mismatch" };
+  }
+  if (credentials.userId !== remote.ownerUserId) {
+    return { cloudConnected: false, credentialStatus: "account-mismatch" };
   }
   return { cloudConnected: true, credentialStatus: "available" };
 }
@@ -1173,10 +1203,7 @@ export async function workspaceStatus(ctx: ToolContext) {
   const remoteWorkspaceId = remote?.remoteWorkspaceId ?? manifest?.remoteWorkspaceId;
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !!remoteWorkspaceId;
-  const credential = credentialStatusFor(
-    remoteWorkspaceId && serverUrl ? { serverUrl, remoteWorkspaceId } : null,
-    credentials,
-  );
+  const credential = credentialStatusFor(remote, credentials);
   return {
     synced,
     scope: synced ? ("cloud" as const) : ("local" as const),

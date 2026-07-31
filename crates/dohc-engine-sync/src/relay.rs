@@ -500,7 +500,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         };
 
-        preflight_collisions(store, workspace_id, &ops)?;
+        preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
         let mut applied = 0_usize;
@@ -1519,9 +1519,10 @@ fn local_blob_present(
 fn preflight_collisions(
     store: &EngineStore,
     workspace_id: &str,
+    local_origin_id: &str,
     ops: &[ReplicationEnvelope],
 ) -> Result<(), RelayError> {
-    store
+    let diverged_is_local = store
         .read_with(|conn| {
             for op in ops {
                 let existing = conn
@@ -1542,26 +1543,27 @@ fn preflight_collisions(
                 let Some((op_kind, payload_json, recorded_at_ms)) = existing else {
                     continue;
                 };
-                let local_payload: serde_json::Value = serde_json::from_str(&payload_json)
-                    .map_err(|_| SyncError::CoordinateDiverged)?;
-                let local_bytes = canonical_json_bytes(&local_payload)?;
-                let remote_bytes = canonical_json_bytes(&op.payload)?;
+                let local_payload: serde_json::Value = match serde_json::from_str(&payload_json) {
+                    Ok(payload) => payload,
+                    Err(_) => return Ok(Some(op.origin_id == local_origin_id)),
+                };
                 if op_kind != op.op_kind
                     || recorded_at_ms != op.recorded_at_ms
-                    || local_bytes != remote_bytes
+                    || canonical_json_bytes(&local_payload)? != canonical_json_bytes(&op.payload)?
                 {
-                    return Err(SyncError::CoordinateDiverged);
+                    return Ok(Some(op.origin_id == local_origin_id));
                 }
             }
-            Ok(())
+            Ok(None)
         })
-        .map_err(|error| {
-            if matches!(error, SyncError::CoordinateDiverged) {
-                RelayError::OriginDiverged
-            } else {
-                local(error)
-            }
-        })
+        .map_err(local)?;
+    match diverged_is_local {
+        Some(true) => Err(RelayError::OriginDiverged),
+        // Recovering the local origin cannot repair a conflicting imported
+        // coordinate. Fail closed without rotating the unrelated local log.
+        Some(false) => Err(RelayError::InvalidResponse),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {

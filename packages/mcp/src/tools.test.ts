@@ -122,12 +122,17 @@ async function bindCloudWorkspace(
   options: {
     serverUrl?: string;
     remoteWorkspaceId?: string;
+    ownerUserId?: string | null;
+    credentialUserId?: string | null;
     token?: string;
     credentials?: boolean;
   } = {},
 ) {
   const serverUrl = options.serverUrl ?? "http://cloud.test";
   const remoteWorkspaceId = options.remoteWorkspaceId ?? "ws-1";
+  const ownerUserId = options.ownerUserId === undefined ? "user-1" : options.ownerUserId;
+  const credentialUserId =
+    options.credentialUserId === undefined ? "user-1" : options.credentialUserId;
   await writeFile(
     join(ctx.home, "dohc-workspaces.json"),
     JSON.stringify({
@@ -138,7 +143,11 @@ async function bindCloudWorkspace(
           rootPath: ctx.root,
           kind: "personal",
           mode: "local-first",
-          remote: { serverUrl, remoteWorkspaceId },
+          remote: {
+            serverUrl,
+            remoteWorkspaceId,
+            ...(ownerUserId === null ? {} : { ownerUserId }),
+          },
         },
       ],
     }),
@@ -150,6 +159,7 @@ async function bindCloudWorkspace(
       version: 1,
       serverUrl,
       email: "ice@example.test",
+      ...(credentialUserId === null ? {} : { userId: credentialUserId }),
       token: options.token ?? "plain:device-token",
     }),
   );
@@ -426,6 +436,64 @@ describe("mcp tools operate on allowed paths", () => {
         serverUrl: "http://cloud.test",
         cloudConnected: true,
         credentialStatus: "available",
+      });
+    });
+  });
+
+  it("workspace_status requires the user ID in environment credentials", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx, { credentials: false });
+      vi.stubEnv("DOHC_MCP_CLOUD_SERVER_URL", "http://cloud.test");
+      vi.stubEnv("DOHC_MCP_CLOUD_EMAIL", "ice@example.test");
+      vi.stubEnv("DOHC_MCP_CLOUD_TOKEN", "device-token");
+      vi.stubEnv("DOHC_MCP_CLOUD_USER_ID", "");
+      try {
+        expect(await workspaceStatus(ctx)).toMatchObject({
+          cloudConnected: false,
+          credentialStatus: "invalid",
+        });
+
+        vi.stubEnv("DOHC_MCP_CLOUD_USER_ID", "user-1");
+        expect(await workspaceStatus(ctx)).toMatchObject({
+          cloudConnected: true,
+          credentialStatus: "available",
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
+
+  it("workspace_status treats a legacy credential without userId as signed out", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx, { credentialUserId: null });
+      expect(await workspaceStatus(ctx)).toMatchObject({
+        cloudConnected: false,
+        credentialStatus: "missing",
+      });
+    });
+  });
+
+  it("workspace_status disconnects a legacy remote without an owner pin", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx, { ownerUserId: null });
+      expect(await workspaceStatus(ctx)).toMatchObject({
+        synced: true,
+        scope: "cloud",
+        cloudConnected: false,
+        credentialStatus: "workspace-owner-missing",
+      });
+    });
+  });
+
+  it("workspace_status disconnects credentials for another account on the same server", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx, { credentialUserId: "user-2" });
+      expect(await workspaceStatus(ctx)).toMatchObject({
+        synced: true,
+        scope: "cloud",
+        cloudConnected: false,
+        credentialStatus: "account-mismatch",
       });
     });
   });
