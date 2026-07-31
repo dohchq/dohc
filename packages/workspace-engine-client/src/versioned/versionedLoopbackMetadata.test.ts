@@ -422,6 +422,75 @@ describe("loopback moment metadata", () => {
     expect(moments[0].metadataCorrelationId).toBe(atCap);
   });
 
+  it("refuses an over-cap field on a DEDUPED binary write, which returned success", async () => {
+    // The refusal is the easy half. The half that needed a test: the daemon
+    // validates metadata before it reads state, but the fake's content-equality
+    // dedup returned `deduped: true` FIRST, so an over-cap field on a repeat
+    // write got a success response. Same shape as the no-op holes already fixed
+    // on the secret paths, on a path nothing was checking.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const bytesBase64 = Buffer.from([7, 8, 9]).toString("base64");
+    const first = await send(engine, VERSIONED_METHOD.binaryWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "logo.png",
+      bytesBase64,
+      origin: "local-file",
+    });
+    expect(first.deduped).toBeFalsy();
+
+    // The SAME bytes again, which is the dedup path, with an over-cap field.
+    await expect(
+      send(engine, VERSIONED_METHOD.binaryWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "logo.png",
+        bytesBase64,
+        origin: "local-file",
+        summary: "s".repeat(16 * 1024 + 1),
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+
+    // And the dedup itself still works when the metadata is fine.
+    const deduped = await send(engine, VERSIONED_METHOD.binaryWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "logo.png",
+      bytesBase64,
+      origin: "local-file",
+      summary: "fine",
+    });
+    expect(deduped.deduped).toBe(true);
+  });
+
+  it("refuses an over-cap field on a secret MERGE", async () => {
+    // secrets.apply read summary/correlationId with raw `optionalString`, so the
+    // cap landed on write, delete and restore but not on the merge path. The
+    // Rust secrets_apply handler calls validate_metadata_fields before applying.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=source\n",
+      origin: "local-file",
+      momentId: "moment-merge-source",
+    });
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsApply, {
+        workspaceId: WORKSPACE,
+        sourceVersionId: versionId,
+        targetVersionId: versionId,
+        path: ".env",
+        momentId: "moment-merge-capped",
+        origin: "local-file",
+        correlationId: "c".repeat(16 * 1024 + 1),
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+  });
+
   it("refuses malformed secret metadata WITHOUT changing the secret", async () => {
     // The daemon refuses a malformed request atomically, before touching state.
     // An earlier draft of this fix evaluated `optionalString` inside the

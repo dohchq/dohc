@@ -571,6 +571,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const text = requiredString(params, "text", "write");
     if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
     const origin = requiredOrigin(params);
+    // Validated HERE, before any replay, dedup or unchanged-merge return. The
+    // daemon parses and validates metadata immediately after the origin and
+    // before it looks at state (`validate_metadata_fields` then
+    // `validated_author`, e.g. lib.rs versionedText.write), so an over-cap
+    // summary on a request that happens to be a no-op is still refused. Computed
+    // once and threaded down, rather than re-derived at the moment site, so the
+    // early returns cannot outrun it.
+    const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const objectId = optionalString(params, "objectId") ??
       (requestId
@@ -632,7 +640,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       file,
       before,
       now,
-      this.momentMetadataFields(params),
+      metadata,
     );
     const internal = {
       wire: moment,
@@ -723,6 +731,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
       requiredString(params, "versionId", "binary write"),
     );
     const origin = requiredOrigin(params);
+    // Validated HERE, before any replay, dedup or unchanged-merge return. The
+    // daemon parses and validates metadata immediately after the origin and
+    // before it looks at state (`validate_metadata_fields` then
+    // `validated_author`, e.g. lib.rs versionedText.write), so an over-cap
+    // summary on a request that happens to be a no-op is still refused. Computed
+    // once and threaded down, rather than re-derived at the moment site, so the
+    // early returns cannot outrun it.
+    const metadata = this.momentMetadataFields(params);
     const rawBytes = params.bytes;
     const rawBase64 = params.bytesBase64;
     let bytes: number[];
@@ -820,7 +836,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       file,
       before,
       now,
-      this.momentMetadataFields(params),
+      metadata,
     );
     const internal = { wire: moment, before: before && copyFile(before), after: copyFile(file) };
     file.momentLog.push(internal);
@@ -884,6 +900,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const fromPath = requiredString(params, "fromPath", "rename");
     const toPath = requiredString(params, "toPath", "rename");
     const origin = requiredOrigin(params);
+    // Parsed with the origin, before state is read — the same ordering as the
+    // write paths and as the daemon.
+    const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
       ? this.generatedRequestId("moment", requestId, toPath)
@@ -917,7 +936,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       after,
       before,
       now,
-      this.momentMetadataFields(params),
+      metadata,
     );
     moment.beforePath = fromPath;
     const internal = {
@@ -950,6 +969,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const version = this.version(state, requiredString(params, "versionId", "delete"));
     const path = requiredString(params, "path", "delete");
     const origin = requiredOrigin(params);
+    // Parsed with the origin, before state is read — the same ordering as the
+    // write paths and as the daemon.
+    const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
       ? this.generatedRequestId("moment", requestId, path)
@@ -981,7 +1003,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       tombstone,
       before,
       now,
-      this.momentMetadataFields(params),
+      metadata,
     );
     const internal = { wire: moment, before: copyFile(before) };
     state.moments.set(momentId, internal);
@@ -1269,6 +1291,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     request: Request,
   ): JsonValue {
     const origin = requiredOrigin(params);
+    // Validated HERE, before any replay, dedup or unchanged-merge return. The
+    // daemon parses and validates metadata immediately after the origin and
+    // before it looks at state (`validate_metadata_fields` then
+    // `validated_author`, e.g. lib.rs versionedText.write), so an over-cap
+    // summary on a request that happens to be a no-op is still refused. Computed
+    // once and threaded down, rather than re-derived at the moment site, so the
+    // early returns cannot outrun it.
+    const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
     const targetVersionId = requiredString(params, "targetVersionId", "merge");
@@ -1385,7 +1415,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         tombstone,
         before,
         now,
-        this.momentMetadataFields(params),
+        metadata,
       );
       const internal: InternalMoment = { wire: moment, before: copyFile(before) };
       target.files.delete(path);
@@ -1425,7 +1455,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       copied,
       before,
       now,
-      this.momentMetadataFields(params),
+      metadata,
     );
     const internal: InternalMoment = {
       wire: moment,
@@ -1634,8 +1664,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = requiredString(params, "path", "secret apply");
     const momentId = requiredString(params, "momentId", "secret apply");
     const origin = requiredOrigin(params);
-    const summary = optionalString(params, "summary") ?? null;
-    const correlationId = optionalString(params, "correlationId") ?? null;
+    // Through the capped helper, not raw `optionalString`: the Rust
+    // `secrets_apply` handler calls `validate_metadata_fields` before applying
+    // the change, so reading these fields uncapped let a secret MERGE certify an
+    // over-cap request production refuses. This path was missed when the cap
+    // landed on write/delete/restore.
+    const { summary, correlationId } = this.secretMomentMetadata(params);
     const before = target.secrets.get(path);
     const after = source.secrets.get(path);
     const base = source.secretForkBase.get(path);
