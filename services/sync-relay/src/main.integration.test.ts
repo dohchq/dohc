@@ -1,18 +1,10 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  unwrapWorkspaceDataKey,
-  wrapWorkspaceDataKey,
-} from "@dohc/security-contract/secret-key-envelope";
-import {
-  ShareUnavailableError,
-  SharedChannelReadOnlyError,
-} from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // This file's spawn helper allows 45s for the relay to report a port (tsx compiles
@@ -122,15 +114,6 @@ function authHeaders(extra?: HeadersInit): Headers {
   return headers;
 }
 
-
-
-// Pull and commit the fetch cursor, standing in for the desktop capture's
-// materialize-then-commit sequence (no disk materialization in these tests).
-
-
-
-
-
 async function postJson(baseUrl: string, path: string, value: unknown): Promise<Response> {
   return fetch(`${baseUrl}${path}`, {
     method: "POST",
@@ -166,25 +149,11 @@ async function putBytes(baseUrl: string, path: string, bytes: Uint8Array): Promi
   });
 }
 
-
-
-
-
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-
-
-
 describe("sync relay main process", () => {
-
-
-
-
-
-
-
 
   // WS-MU-C0 over real HTTP: a second authenticated user cannot forge the first
   // user's chat authorship. The relay derives the pusher's identity from the
@@ -347,9 +316,31 @@ describe("sync relay main process", () => {
     // The server survived: still answering, and a normal-sized blob works.
     const health = await fetch(`${baseUrl}/health`);
     expect(health.status).toBe(200);
-    const smallBytes = Buffer.from("small blob after oversized rejection");
-    const put = await putBytes(baseUrl, `/sync/${WORKSPACE_ID}/blobs/${sha256(smallBytes)}`, smallBytes);
+    // High bytes on purpose. main.ts hand-rolls the node:http<->fetch adapter
+    // BECAUSE the standard one mishandles raw-byte blob traffic, and the only
+    // thing that can catch a regression there is reading a blob back over real
+    // HTTP and comparing bytes. `Buffer.from("...")` cannot: every byte of an
+    // ASCII string survives a text round trip, so a utf8-decoding adapter would
+    // look correct.
+    const smallBytes = Uint8Array.from([0, 1, 2, 253, 254, 255, 128, 200]);
+    const digest = sha256(smallBytes);
+    const put = await putBytes(baseUrl, `/sync/${WORKSPACE_ID}/blobs/${digest}`, smallBytes);
     expect(put.status).toBe(200);
+
+    // Byte-for-byte on the way OUT, which nothing else in this package checks:
+    // every other blob GET goes through createSyncRelayHandler in-process and so
+    // never touches main.ts's adapter at all.
+    const fetched = await fetch(`${baseUrl}/sync/${WORKSPACE_ID}/blobs/${digest}`, {
+      headers: authHeaders(),
+    });
+    expect(fetched.status).toBe(200);
+    expect(new Uint8Array(await fetched.arrayBuffer())).toEqual(smallBytes);
+
+    // And the same layer must still refuse an unauthenticated read: main.ts
+    // decides which paths bypass the relay handler, so an in-process suite
+    // cannot see a wiring regression here.
+    const anonymous = await fetch(`${baseUrl}/sync/${WORKSPACE_ID}/log?since=0`);
+    expect(anonymous.status).toBe(401);
   });
 });
 

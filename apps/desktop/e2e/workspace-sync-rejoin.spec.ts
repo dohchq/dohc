@@ -357,7 +357,6 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "enable-e2e";
-  const machine2 = join(temp.baseDir, "machine2");
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -432,16 +431,34 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     // WITH the adopted identity: `cloudEnableSync` claims through
     // execute_relay_operation, which supplies both identity fields, so the relay
     // adopts them and an identity-free log read answers 409 rather than 200.
+    //
+    // A 409 is RELEARNED, not thrown, exactly as the poll above does. Playwright
+    // evaluates the polled callback outside its own try/catch, so a throw fails
+    // the test on the first interval instead of retrying — and 409 is precisely
+    // what a read racing the adoption (or a rotated epoch, which `??=` would
+    // never re-read) gets back.
     let identity: RelayWorkspaceIdentity | null = null;
     await expect
       .poll(
-        () => {
+        async () => {
           identity ??= relayAdoptedIdentity(relayDb, workspaceId);
-          return relayServesWorkspace(relay!.baseUrl, TOKEN, workspaceId, identity);
+          try {
+            return await relayServesWorkspace(relay!.baseUrl, TOKEN, workspaceId, identity);
+          } catch (error) {
+            if (!/failed: 409/.test(String(error))) throw error;
+            identity = null;
+            return null;
+          }
         },
         { timeout: 90_000, intervals: [1000] },
       )
       .toBe(true);
+
+    // And the identity was actually adopted. Without this the argument above is
+    // decorative: a null identity sends an identity-free read, which a claimed
+    // but un-adopted bucket answers with 200, so the poll would pass whether or
+    // not cloudEnableSync supplied an identity at all.
+    expect(identity, "cloudEnableSync must adopt a replication identity").not.toBeNull();
 
     // The app reflects a synced workspace (the sync-status surface is present,
     // not the local-only absence).

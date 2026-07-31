@@ -22,10 +22,14 @@ import ts from "typescript";
 // be used only in type positions is ALSO erased under this tsconfig
 // (isolatedModules, no verbatimModuleSyntax), but this guard counts it as
 // runtime on purpose. Deciding otherwise needs whole-file binding-usage
-// analysis, and the syntactic form is the one convention worth having: all
-// eleven type-only importers in the repo already write it that way. If this ever
-// rejects legitimate work, the fix is to add the `type` keyword, not to loosen
-// the guard.
+// analysis, and the syntactic form is the one convention worth having. If this
+// ever rejects legitimate work, the fix is to add the `type` keyword, not to
+// loosen the guard.
+//
+// This used to say "all eleven type-only importers already write it that way".
+// #432 repointed those eleven at @dohc/workspace-contracts, so there are now
+// ZERO type-only importers of this package and that evidence is gone. The choice
+// stands on its own terms; the parser tests below pin it either way.
 
 const REPO_ROOT = resolve(__dirname, "..", "..", "..", "..");
 const LEGACY_PACKAGE = "@dohc/workspace-engine";
@@ -38,8 +42,10 @@ const LEGACY_PACKAGE = "@dohc/workspace-engine";
 // `ydocEngineProviderSession` is the legacy provider session that fallback
 // selects. Its Rust replacement already exists.
 //
-// Eleven other production files name this package but import only TYPES, so
-// they are absent by design, not by omission — see the parser tests below.
+// No other production file names this package at all: #432 repointed the eleven
+// type-only importers at @dohc/workspace-contracts, where those types are
+// actually declared. The parser tests below still pin the type-only handling,
+// because the two entries above import types alongside their values.
 const ALLOWED = [
   "apps/desktop/src/collab/ydocEngineProviderSession.ts",
   "apps/desktop/src/workspaces/workspaceEngineCapture.ts",
@@ -805,8 +811,9 @@ const m = require(name);`;
   it("counts a syntactically-untyped import as runtime, by documented choice", () => {
     // `import { X }` used only in type positions is erased under this tsconfig,
     // but deciding that needs binding-usage analysis. The syntactic form is the
-    // convention — all eleven type-only importers already use it — so this is a
-    // deliberate false positive, pinned here so nobody "fixes" it by accident.
+    // convention, so this is a deliberate false positive, pinned here so nobody
+    // "fixes" it by accident. (The "eleven type-only importers" this comment used
+    // to cite as precedent are gone as of #432.)
     expect(hasRuntimeLegacyImport(`import { VersionedTextStore } from "${LEGACY_PACKAGE}";`)).toBe(
       true,
     );
