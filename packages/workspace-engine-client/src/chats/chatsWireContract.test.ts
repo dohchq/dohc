@@ -223,6 +223,7 @@ describe("B2 chats wire contract and loopback", () => {
         messageId: "file-message",
         emoji: "👍",
         author: { authorId: "ada", kind: "human", displayName: "Ada" },
+        replicationAuthorId: "ada",
         state: "added",
         nowMs: 32,
       },
@@ -233,6 +234,20 @@ describe("B2 chats wire contract and loopback", () => {
         threadId: "file-thread",
       })).reactions[0]?.reactionId,
     ).toBe(reaction.reactionId);
+    await expect(
+      roundTrip(
+        CHATS_METHOD.reactionSet,
+        {
+          threadId: "file-thread",
+          messageId: "file-message",
+          emoji: "👍",
+          author: { authorId: "ada", kind: "human", displayName: "Ada" },
+          replicationAuthorId: "other-user",
+          state: "removed",
+        },
+        "mismatched-reaction-author",
+      ),
+    ).rejects.toThrow("invalid-sender");
 
     expect(
       (await roundTrip(CHATS_METHOD.agentReadListUnreadThreads, {})).threads.length,
@@ -789,6 +804,77 @@ describe("B2 chats wire contract and loopback", () => {
     // turns this semantic retry into idempotency-key-reuse-mismatch.
     expect(replay).toEqual(first);
     expect(replay.createdAtMs).toBe(10);
+  });
+
+  it("keeps canonically distinct reaction author IDs distinct across retries", async () => {
+    const engine = new ChatsLoopbackEngine();
+    engine.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "reaction-channel",
+      name: "Reactions",
+    });
+    await call(
+      engine,
+      1,
+      CHATS_METHOD.threadStart,
+      {
+        channelId: "reaction-channel",
+        threadId: "reaction-thread",
+        messageId: "reaction-message",
+        authorKind: "human",
+        authorDisplayName: "Ada",
+        body: "React here.",
+        nowMs: 10,
+      },
+      "reaction-thread-start",
+    );
+    const nfcAuthorId = "Jos\u00e9";
+    const nfdAuthorId = "Jose\u0301";
+    const first = await call(
+      engine,
+      2,
+      CHATS_METHOD.reactionSet,
+      {
+        threadId: "reaction-thread",
+        messageId: "reaction-message",
+        emoji: "👍",
+        author: {
+          authorId: nfdAuthorId,
+          kind: "human",
+          displayName: "Ada",
+        },
+        replicationAuthorId: nfdAuthorId,
+        state: "added",
+        nowMs: 20,
+      },
+      "canonical-reaction",
+    );
+    await expect(
+      call(
+        engine,
+        3,
+        CHATS_METHOD.reactionSet,
+        {
+          threadId: "reaction-thread",
+          messageId: "reaction-message",
+          emoji: "👍",
+          author: {
+            authorId: nfcAuthorId,
+            kind: "human",
+            displayName: "Ada",
+          },
+          replicationAuthorId: nfcAuthorId,
+          state: "added",
+          nowMs: 999,
+        },
+        "canonical-reaction",
+      ),
+    ).rejects.toThrow("idempotency-key-reuse-mismatch");
+
+    // Rust trims reaction identities but does not apply Unicode normalization.
+    expect(first.author.authorId).toBe(nfdAuthorId);
+    expect(first.author.displayName).toBe("Ada");
+    expect(first.atMs).toBe(20);
   });
 
   it("normalizes stored message body like the daemon (trimEnd + CRLF->LF, leading kept)", async () => {

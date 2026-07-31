@@ -504,6 +504,7 @@ export class ChatsLiveAdapter {
     messageId: string;
     emoji: string;
     author: ChatReactionAuthor;
+    replicationAuthorId?: string;
     state: "added" | "removed";
   }): Promise<ChatReaction> {
     this.assertWorkspace(input.workspaceId);
@@ -514,6 +515,9 @@ export class ChatsLiveAdapter {
         messageId: input.messageId,
         emoji: input.emoji,
         author: input.author,
+        ...(input.replicationAuthorId !== undefined
+          ? { replicationAuthorId: input.replicationAuthorId }
+          : {}),
         state: input.state,
       },
       {

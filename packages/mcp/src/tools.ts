@@ -983,6 +983,7 @@ export async function deleteWorkspacePath(
 interface RemoteIdentity {
   serverUrl: string;
   remoteWorkspaceId: string;
+  ownerUserId: string;
 }
 
 interface RegistryWorkspace {
@@ -1005,7 +1006,12 @@ interface SyncManifest {
 }
 
 type CloudCredentialLoad =
-  | { ok: true; status: "available"; serverUrl: string; email: string; token: string }
+  | {
+      ok: true;
+      status: "available";
+      serverUrl: string;
+      userId: string;
+    }
   | { ok: false; status: "missing" | "encrypted" | "invalid"; reason: string };
 
 function nonEmptyString(value: unknown): value is string {
@@ -1041,7 +1047,8 @@ function validRemote(remote: unknown): remote is RemoteIdentity {
     remote !== null &&
     typeof remote === "object" &&
     nonEmptyString((remote as RemoteIdentity).serverUrl) &&
-    nonEmptyString((remote as RemoteIdentity).remoteWorkspaceId)
+    nonEmptyString((remote as RemoteIdentity).remoteWorkspaceId) &&
+    nonEmptyString((remote as RemoteIdentity).ownerUserId)
   );
 }
 
@@ -1052,38 +1059,23 @@ async function remoteForCurrentWorkspace(
   if (validRemote(entry?.remote)) {
     return { workspaceId: entry?.workspaceId, ...entry.remote };
   }
-
-  // A workspace can carry a sync manifest even if the desktop registry is not
-  // available to this MCP process (e.g. copied config or test fixture). Treat
-  // the manifest as a fallback binding, never as an auth credential.
-  const manifest = await readSyncManifest(ctx);
-  if (nonEmptyString(manifest?.serverUrl) && nonEmptyString(manifest?.remoteWorkspaceId)) {
-    return {
-      workspaceId: manifest.workspaceId,
-      serverUrl: manifest.serverUrl,
-      remoteWorkspaceId: manifest.remoteWorkspaceId,
-    };
-  }
-
   return null;
 }
 
 async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLoad> {
   if (
-    process.env.DOHC_MCP_CLOUD_TOKEN ||
     process.env.DOHC_MCP_CLOUD_SERVER_URL ||
-    process.env.DOHC_MCP_CLOUD_EMAIL
+    process.env.DOHC_MCP_CLOUD_USER_ID
   ) {
     if (
-      nonEmptyString(process.env.DOHC_MCP_CLOUD_TOKEN) &&
-      nonEmptyString(process.env.DOHC_MCP_CLOUD_SERVER_URL)
+      nonEmptyString(process.env.DOHC_MCP_CLOUD_SERVER_URL) &&
+      nonEmptyString(process.env.DOHC_MCP_CLOUD_USER_ID)
     ) {
       return {
         ok: true,
         status: "available",
         serverUrl: process.env.DOHC_MCP_CLOUD_SERVER_URL,
-        email: process.env.DOHC_MCP_CLOUD_EMAIL ?? "desktop",
-        token: process.env.DOHC_MCP_CLOUD_TOKEN,
+        userId: process.env.DOHC_MCP_CLOUD_USER_ID,
       };
     }
     return {
@@ -1097,6 +1089,7 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
     version?: unknown;
     serverUrl?: unknown;
     email?: unknown;
+    userId?: unknown;
     token?: unknown;
   }>(join(ctx.home, "dohc-cloud.json"));
   if (
@@ -1104,6 +1097,7 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
     credentials.version !== 1 ||
     !nonEmptyString(credentials.serverUrl) ||
     !nonEmptyString(credentials.email) ||
+    !nonEmptyString(credentials.userId) ||
     !nonEmptyString(credentials.token)
   ) {
     return { ok: false, status: "missing", reason: "Sign in to dohc Cloud first." };
@@ -1118,8 +1112,7 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
       ok: true,
       status: "available",
       serverUrl: credentials.serverUrl,
-      email: credentials.email,
-      token,
+      userId: credentials.userId,
     };
   }
 
@@ -1139,7 +1132,16 @@ function credentialStatusFor(
   remote: RemoteIdentity | null,
   credentials: CloudCredentialLoad,
 ):
-  | { cloudConnected: false; credentialStatus: "not-needed" | "missing" | "encrypted" | "invalid" | "server-mismatch" }
+  | {
+      cloudConnected: false;
+      credentialStatus:
+        | "not-needed"
+        | "missing"
+        | "encrypted"
+        | "invalid"
+        | "server-mismatch"
+        | "account-mismatch";
+    }
   | { cloudConnected: true; credentialStatus: "available" } {
   if (!remote) return { cloudConnected: false, credentialStatus: "not-needed" };
   if (!credentials.ok) {
@@ -1147,6 +1149,9 @@ function credentialStatusFor(
   }
   if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {
     return { cloudConnected: false, credentialStatus: "server-mismatch" };
+  }
+  if (credentials.userId !== remote.ownerUserId) {
+    return { cloudConnected: false, credentialStatus: "account-mismatch" };
   }
   return { cloudConnected: true, credentialStatus: "available" };
 }
@@ -1173,10 +1178,7 @@ export async function workspaceStatus(ctx: ToolContext) {
   const remoteWorkspaceId = remote?.remoteWorkspaceId ?? manifest?.remoteWorkspaceId;
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !!remoteWorkspaceId;
-  const credential = credentialStatusFor(
-    remoteWorkspaceId && serverUrl ? { serverUrl, remoteWorkspaceId } : null,
-    credentials,
-  );
+  const credential = credentialStatusFor(remote, credentials);
   return {
     synced,
     scope: synced ? ("cloud" as const) : ("local" as const),

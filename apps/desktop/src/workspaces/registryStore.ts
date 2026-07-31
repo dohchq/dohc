@@ -9,6 +9,7 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 export interface RemoteIdentity {
   serverUrl: string;
   remoteWorkspaceId: string;
+  ownerUserId: string;
 }
 
 // A shared VIEW received through a relay share grant (PR 18): read-only,
@@ -37,6 +38,7 @@ export interface JoinedSharedChannel {
   // Same origin-relay pin as ShareViewIdentity.relayUrl: refreshes only ever
   // run against the relay the share was joined from.
   relayUrl: string;
+  recipientUserId: string;
   ended?: boolean;
 }
 

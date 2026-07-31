@@ -1504,19 +1504,23 @@ describe("chat reactions (WS-MU-C2)", () => {
     } as SyncReplicationEnvelope;
   }
 
-  async function seedMessage(engine: Engine): Promise<{ threadId: string; messageId: string }> {
+  async function seedMessage(
+    engine: Engine,
+    authorUserId?: string,
+  ): Promise<{ threadId: string; messageId: string }> {
     const channel = await engine.store.createChannel({ workspaceId: WS, name: "general" });
     const started = await engine.store.startChannelThread({
       workspaceId: WS,
       channelId: channel.id,
       author: { kind: "human", displayName: "You" },
+      ...(authorUserId !== undefined ? { authorUserId } : {}),
       body: "ship it?",
     });
     return { threadId: started.thread.id, messageId: started.message.id };
   }
 
   // WS-MU-C0 verified authorship (message.append side).
-  it("omits authorUserId on a solo message.append (byte-identical to pre-MU-C0)", async () => {
+  it("keeps a solo message out of the replication journal", async () => {
     const a = await makeEngine("a");
     const channel = await a.store.createChannel({ workspaceId: WS, name: "general" });
     await a.store.startChannelThread({
@@ -1526,10 +1530,7 @@ describe("chat reactions (WS-MU-C2)", () => {
       body: "solo, no relay identity",
     });
     const messageOps = chatOpsFor(a.root).filter((op) => op.opKind === "chat.message.append");
-    expect(messageOps).toHaveLength(1);
-    // The field is absent (not present-and-undefined): the wire bytes match the
-    // shape shipped before MU-C0, so a solo workspace produces identical ops.
-    expect(Object.prototype.hasOwnProperty.call(messageOps[0]!.payload, "authorUserId")).toBe(false);
+    expect(messageOps).toEqual([]);
   });
 
   it("stamps and replicates an OPAQUE authorUserId on a signed-in message, persisting it on apply", async () => {
@@ -1710,16 +1711,17 @@ describe("chat reactions (WS-MU-C2)", () => {
     expect(list.map((reaction) => reaction.author.authorId)).toEqual(["bob@x"]);
   });
 
-  it("replicates a solo reaction to a second engine over the chat pipeline", async () => {
+  it("replicates a verified reaction to a second engine over the chat pipeline", async () => {
     const a = await makeEngine("a");
     const b = await makeEngine("b");
-    const { threadId, messageId } = await seedMessage(a);
+    const { threadId, messageId } = await seedMessage(a, "alice@x");
     await a.store.setReaction({
       workspaceId: WS,
       threadId,
       messageId,
       emoji: "👍",
       author: { authorId: "alice@x", kind: "human", displayName: "Alice" },
+      replicationAuthorId: "alice@x",
       state: "added",
     });
     // Ship every chat op A journaled (channel, thread, message, reaction) into

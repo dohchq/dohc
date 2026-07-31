@@ -739,6 +739,7 @@ pub struct SetReaction {
     pub message_id: String,
     pub emoji: String,
     pub author_id: String,
+    pub replication_author_id: Option<String>,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
     pub state: ChatReactionState,
@@ -2608,8 +2609,9 @@ impl<'a> LinkedChatStore<'a> {
     /// Atomically create a channel thread AND its first message in ONE
     /// transaction (`startChannelThread`). A failed send never strands an empty
     /// thread: the thread row, the message row (order 0), the read-cursor
-    /// advance (for a human author), and both journal entries commit together or
-    /// not at all.
+    /// advance (for a human author), and both local journal entries commit
+    /// together or not at all. A message without a verified relay author stays
+    /// local and does not create relay-visible operations.
     pub fn start_channel_thread(
         &mut self,
         input: &StartChannelThread,
@@ -2755,25 +2757,6 @@ impl<'a> LinkedChatStore<'a> {
                 &message_search_text,
             )
             .map_err(DomainError::sql_persist)?;
-            let mut thread_payload = serde_json::json!({
-                "threadId": input.thread_id,
-                "title": title_c,
-                "createdAtMs": now,
-                "channelSlug": channel.slug,
-            });
-            if let Some(channel_wire_id) = channel_wire_id {
-                thread_payload
-                    .as_object_mut()
-                    .expect("thread payload is an object")
-                    .insert("channelWireId".to_owned(), serde_json::json!(channel_wire_id));
-            }
-            journal_local_op_in_tx(
-                tx,
-                &input.workspace_id,
-                "chat.thread.create",
-                &thread_payload,
-                now,
-            )?;
             let mut message_payload = serde_json::json!({
                 "messageId": input.message_id,
                 "threadId": input.thread_id,
@@ -2791,13 +2774,22 @@ impl<'a> LinkedChatStore<'a> {
             if let Some(origin) = &origin_c {
                 message_payload.insert("origin".to_owned(), serde_json::json!(origin));
             }
-            journal_local_op_in_tx(
-                tx,
-                &input.workspace_id,
-                "chat.message.append",
-                &serde_json::Value::Object(message_payload.clone()),
-                now,
-            )?;
+            let replicate = author_user_c.is_some();
+            if replicate {
+                ensure_thread_structure_exported(
+                    tx,
+                    &input.workspace_id,
+                    &input.thread_id,
+                    now,
+                )?;
+                journal_local_op_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    "chat.message.append",
+                    &serde_json::Value::Object(message_payload.clone()),
+                    now,
+                )?;
+            }
             if input.needs_decision {
                 journal_decision_set(
                     tx,
@@ -2816,6 +2808,7 @@ impl<'a> LinkedChatStore<'a> {
                 &input.message_id,
                 &attachments_c,
                 now,
+                replicate,
             )?;
             journal(tx, &input.thread_id, "chat.thread.create", now)?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
@@ -2850,8 +2843,10 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// Append a message to an existing thread (`sendMessage`). A reply parent, if
-    /// given, must already exist in the SAME thread (else `message-not-found`).
+    /// Append a message to an existing thread (`sendMessage`). A reply parent,
+    /// if given, must already exist in the same thread. A message without a
+    /// verified relay author stays local. A later verified message exports the
+    /// thread structure before it exports that message.
     pub fn send_message(
         &mut self,
         input: &SendMessage,
@@ -3011,7 +3006,19 @@ impl<'a> LinkedChatStore<'a> {
             if let Some(author_user_id) = &author_user_c {
                 payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
             }
-            if let Some(parent_message_id) = &parent_c {
+            let replicate = author_user_c.is_some();
+            let parent_is_exported = match &parent_c {
+                Some(parent_message_id) if replicate => relay_log_has_authored_message(
+                    tx,
+                    &input.workspace_id,
+                    &input.thread_id,
+                    parent_message_id,
+                )?,
+                _ => false,
+            };
+            if let Some(parent_message_id) = &parent_c
+                && parent_is_exported
+            {
                 payload.insert(
                     "parentMessageId".to_owned(),
                     serde_json::json!(parent_message_id),
@@ -3020,13 +3027,21 @@ impl<'a> LinkedChatStore<'a> {
             if let Some(origin) = &origin_c {
                 payload.insert("origin".to_owned(), serde_json::json!(origin));
             }
-            journal_local_op_in_tx(
-                tx,
-                &input.workspace_id,
-                "chat.message.append",
-                &serde_json::Value::Object(payload.clone()),
-                now,
-            )?;
+            if replicate {
+                ensure_thread_structure_exported(
+                    tx,
+                    &input.workspace_id,
+                    &input.thread_id,
+                    now,
+                )?;
+                journal_local_op_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    "chat.message.append",
+                    &serde_json::Value::Object(payload.clone()),
+                    now,
+                )?;
+            }
             if input.needs_decision {
                 journal_decision_set(
                     tx,
@@ -3045,6 +3060,7 @@ impl<'a> LinkedChatStore<'a> {
                 &input.message_id,
                 &attachments_c,
                 now,
+                replicate,
             )?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
@@ -3066,7 +3082,7 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// Set one reaction LWW cell and journal the exact winning origin coordinate.
+    /// Set one reaction LWW cell. Journal it only for a verified relay author.
     pub fn set_reaction(
         &mut self,
         input: &SetReaction,
@@ -3081,6 +3097,19 @@ impl<'a> LinkedChatStore<'a> {
         validate_message_id(&input.message_id)?;
         let emoji = normalize_reaction_emoji(&input.emoji)?;
         let author_id = normalize_reaction_author_id(&input.author_id)?;
+        let replication_author_id = input
+            .replication_author_id
+            .as_deref()
+            .map(normalize_reaction_author_id)
+            .transpose()?;
+        if let Some(replication_author_id) = &replication_author_id {
+            if replication_author_id != &author_id {
+                return Err(DomainError::chat(
+                    "invalid-sender",
+                    "Replication reaction author must match the local reaction author.",
+                ));
+            }
+        }
         let author_display_name = normalize_display_name(&input.author_display_name)?;
         if input.now_ms < 0 {
             return Err(DomainError::chat(
@@ -3098,6 +3127,7 @@ impl<'a> LinkedChatStore<'a> {
             input.message_id.as_bytes(),
             emoji.as_bytes(),
             author_id.as_bytes(),
+            replication_author_id.as_deref().unwrap_or("").as_bytes(),
             input.author_kind.as_str().as_bytes(),
             author_display_name.as_bytes(),
             input.state.as_str().as_bytes(),
@@ -3120,7 +3150,8 @@ impl<'a> LinkedChatStore<'a> {
             });
         }
 
-        let input = input.clone();
+        let mut input = input.clone();
+        input.replication_author_id = replication_author_id;
         let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             require_thread(tx, &input.workspace_id, &thread_id)?;
             if !thread_has_message(tx, &input.workspace_id, &thread_id, &input.message_id)? {
@@ -3129,6 +3160,13 @@ impl<'a> LinkedChatStore<'a> {
                     "Reaction target was not found in this chat thread.",
                 ));
             }
+            let replicate = input.replication_author_id.is_some()
+                && relay_log_has_authored_message(
+                    tx,
+                    &input.workspace_id,
+                    &thread_id,
+                    &input.message_id,
+                )?;
             let prior_at_ms: Option<i64> = tx
                 .query_row(
                     "SELECT at_ms FROM chat_reactions \
@@ -3181,15 +3219,17 @@ impl<'a> LinkedChatStore<'a> {
                 "state": input.state.as_str(),
                 "atMs": at_ms,
             });
-            insert_local_replication_op(
-                tx,
-                &input.workspace_id,
-                &origin_id,
-                origin_seq,
-                "chat.reaction.set",
-                &payload,
-                at_ms,
-            )?;
+            if replicate {
+                insert_local_replication_op(
+                    tx,
+                    &input.workspace_id,
+                    &origin_id,
+                    origin_seq,
+                    "chat.reaction.set",
+                    &payload,
+                    at_ms,
+                )?;
+            }
             record_request(tx, Some(&input.request_id), &payload_hash, at_ms)?;
             require_reaction_cell(
                 tx,
@@ -6611,6 +6651,7 @@ fn add_local_attachments(
     message_id: &str,
     attachments: &[LocalAttachmentInput],
     created_at_ms: i64,
+    replicate: bool,
 ) -> Result<Vec<ChatAttachment>, DomainError> {
     let mut stored = Vec::with_capacity(attachments.len());
     for input in attachments {
@@ -6660,13 +6701,15 @@ fn add_local_attachments(
                 serde_json::json!(heading_occurrence),
             );
         }
-        journal_local_op_in_tx(
-            tx,
-            workspace_id,
-            "chat.attachment.add",
-            &serde_json::Value::Object(payload.clone()),
-            created_at_ms,
-        )?;
+        if replicate {
+            journal_local_op_in_tx(
+                tx,
+                workspace_id,
+                "chat.attachment.add",
+                &serde_json::Value::Object(payload.clone()),
+                created_at_ms,
+            )?;
+        }
         stored.push(attachment);
     }
     Ok(stored)
@@ -8236,29 +8279,176 @@ fn journal_decision_set(
         &origin_id,
         origin_seq,
     )?;
+    if relay_log_has_authored_message(tx, workspace_id, thread_id, message_id)? {
+        let mut payload = serde_json::json!({
+            "threadId": thread_id,
+            "messageId": message_id,
+            "state": state.as_str(),
+            "atMs": at_ms,
+        });
+        if let Some(resolver) = resolved_by_message_id
+            && relay_log_has_authored_message(tx, workspace_id, thread_id, resolver)?
+        {
+            payload
+                .as_object_mut()
+                .expect("decision payload is an object")
+                .insert(
+                    "resolvedByMessageId".to_owned(),
+                    serde_json::json!(resolver),
+                );
+        }
+        insert_local_replication_op(
+            tx,
+            workspace_id,
+            &origin_id,
+            origin_seq,
+            "chat.decision.set",
+            &payload,
+            at_ms,
+        )?;
+    }
+    Ok(())
+}
+
+fn relay_log_has_local_thread_structure(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<bool, DomainError> {
+    tx.query_row(
+        "SELECT EXISTS( \
+           SELECT 1 FROM sync_identity AS identity \
+           JOIN replication_log AS operation \
+             ON operation.workspace_id = identity.workspace_id \
+            AND operation.origin_id = identity.origin_id \
+            AND operation.imported = 0 \
+            AND operation.op_kind = 'chat.thread.create' \
+            AND json_extract(operation.payload_json, '$.threadId') = ?2 \
+           WHERE identity.workspace_id = ?1)",
+        params![workspace_id, thread_id],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+fn relay_log_has_authored_message(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> Result<bool, DomainError> {
+    // Terminally refused imports remain in replication_log without a projection.
+    // Bind the log row to the current authored message before exporting derived state.
+    tx.query_row(
+        "SELECT EXISTS( \
+           SELECT 1 FROM chat_messages AS message \
+           JOIN replication_log AS operation \
+             ON operation.workspace_id = message.workspace_id \
+            AND operation.op_kind = 'chat.message.append' \
+            AND json_extract(operation.payload_json, '$.threadId') = message.thread_id \
+            AND json_extract(operation.payload_json, '$.messageId') = message.message_id \
+            AND json_extract(operation.payload_json, '$.authorUserId') = message.author_user_id \
+           WHERE message.workspace_id = ?1 \
+             AND message.thread_id = ?2 \
+             AND message.message_id = ?3 \
+             AND message.author_user_id IS NOT NULL)",
+        params![workspace_id, thread_id, message_id],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+fn ensure_thread_structure_exported(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    recorded_at_ms: i64,
+) -> Result<(), DomainError> {
+    // Imported refusals remain in replication_log, and imported valid rows
+    // carry another origin. Mint this structure once on the current local
+    // origin so every local message stream orders thread.create before use.
+    if relay_log_has_local_thread_structure(tx, workspace_id, thread_id)? {
+        return Ok(());
+    }
+
+    let (title, created_at_ms, channel_id, linked_object_id, linked_path_hint, linked_at_ms): (
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ) = tx
+        .query_row(
+            "SELECT title, created_at_ms, channel_id, linked_object_id, \
+                    linked_path_hint, linked_at_ms \
+             FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
+            params![workspace_id, thread_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(DomainError::sql_corrupt)?;
+
     let mut payload = serde_json::json!({
         "threadId": thread_id,
-        "messageId": message_id,
-        "state": state.as_str(),
-        "atMs": at_ms,
+        "title": title,
+        "createdAtMs": created_at_ms,
     });
-    if let Some(resolver) = resolved_by_message_id {
-        payload
-            .as_object_mut()
-            .expect("decision payload is an object")
-            .insert(
-                "resolvedByMessageId".to_owned(),
-                serde_json::json!(resolver),
+    let payload_object = payload
+        .as_object_mut()
+        .expect("thread payload is an object");
+    if let Some(channel_id) = channel_id {
+        let channel = require_channel(tx, workspace_id, &channel_id)?;
+        let channel_wire_id = wire_id_for_channel_id(tx, workspace_id, &channel_id)?;
+        if !is_replicated_channel_slug(&channel.slug)
+            || channel_wire_id
+                .as_deref()
+                .is_some_and(|wire_id| !is_bounded_replicated_chat_id(wire_id, 256))
+        {
+            return Err(DomainError::StateCorrupt {
+                reason: "chat channel identity cannot be replicated",
+            });
+        }
+        payload_object.insert("channelSlug".to_owned(), serde_json::json!(channel.slug));
+        if let Some(channel_wire_id) = channel_wire_id {
+            payload_object.insert(
+                "channelWireId".to_owned(),
+                serde_json::json!(channel_wire_id),
             );
+        }
+    } else {
+        let linked_object_id = linked_object_id.ok_or(DomainError::StateCorrupt {
+            reason: "chat thread has no replication owner",
+        })?;
+        let linked_at_ms = linked_at_ms.ok_or(DomainError::StateCorrupt {
+            reason: "chat thread has no replication timestamp",
+        })?;
+        payload_object.insert(
+            "linkedObjectId".to_owned(),
+            serde_json::json!(linked_object_id),
+        );
+        payload_object.insert("linkedAtMs".to_owned(), serde_json::json!(linked_at_ms));
+        if let Some(linked_path_hint) = linked_path_hint {
+            payload_object.insert(
+                "linkedPathHint".to_owned(),
+                serde_json::json!(linked_path_hint),
+            );
+        }
     }
-    insert_local_replication_op(
+    journal_local_op_in_tx(
         tx,
         workspace_id,
-        &origin_id,
-        origin_seq,
-        "chat.decision.set",
+        "chat.thread.create",
         &payload,
-        at_ms,
+        recorded_at_ms,
     )
 }
 

@@ -23,6 +23,7 @@ const fakeCipher: TokenCipher = {
 const credentials: CloudCredentials = {
   serverUrl: "https://cloud.dohc.example",
   email: "ice@example.com",
+  userId: "usr_opaque-uuid",
   token: "session-token-123",
 };
 
@@ -65,13 +66,22 @@ describe("cloud credential store", () => {
 
   it("round-trips the opaque Better Auth user id (the reactor identity)", async () => {
     const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
-    const withUserId: CloudCredentials = { ...credentials, userId: "usr_opaque-uuid" };
-    await store.save(withUserId);
-    expect(await store.load()).toEqual(withUserId);
-    // An older file with no userId still loads (the field is optional).
-    const legacy = createCloudCredentialStore({ dir: await mkdtemp(join(nativeTmpdir(), "dohc-cloud-legacy-")), cipher: fakeCipher });
-    await legacy.save(credentials);
-    expect((await legacy.load())?.userId).toBeUndefined();
+    await store.save(credentials);
+    expect((await store.load())?.userId).toBe("usr_opaque-uuid");
+  });
+
+  it("reads a pre-userId credential as logged-out", async () => {
+    await writeFile(
+      credentialFile(),
+      JSON.stringify({
+        version: 1,
+        serverUrl: credentials.serverUrl,
+        email: credentials.email,
+        token: `plain:${credentials.token}`,
+      }),
+    );
+    const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
+    expect(await store.load()).toBeNull();
   });
 
   it("loads null when the file is missing", async () => {
@@ -110,12 +120,29 @@ describe("cloud credential store", () => {
     for (const broken of [
       { ...valid, serverUrl: "" },
       { ...valid, email: "" },
+      { ...valid, userId: "" },
       { ...valid, token: "" },
       { ...valid, token: "plain:" },
     ]) {
       await writeFile(credentialFile(), JSON.stringify(broken));
       expect(await store.load()).toBeNull();
     }
+  });
+
+  it("refuses to save credentials with a missing required field", async () => {
+    const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
+    for (const broken of [
+      { ...credentials, serverUrl: "" },
+      { ...credentials, email: "" },
+      { ...credentials, userId: "" },
+      { ...credentials, token: "" },
+      { ...credentials, relayUrl: "" },
+    ]) {
+      await expect(store.save(broken)).rejects.toThrow(
+        /serverUrl, email, userId, and token must be non-empty strings/u,
+      );
+    }
+    await expect(store.load()).resolves.toBeNull();
   });
 
   it("clears credentials and is idempotent", async () => {

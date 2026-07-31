@@ -41,8 +41,9 @@ pub use cursor::{
 pub use error::{RelayError, SyncError};
 pub use hydration::{BlobContent, BlobHydration, hydrate_blob_content};
 pub use journal::{
-    SyncIdentity, ack_replication_peer, journal_local_op_in_tx, journal_local_replication_op,
-    list_replication_ops, read_replication_acked_seq, read_sync_identity,
+    AdoptJoinIdentityOutcome, SyncIdentity, ack_replication_peer, adopt_join_identity,
+    journal_local_op_in_tx, journal_local_replication_op, list_replication_ops,
+    read_replication_acked_seq, read_sync_identity,
 };
 pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,

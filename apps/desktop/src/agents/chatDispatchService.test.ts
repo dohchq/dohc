@@ -111,6 +111,11 @@ interface FixtureOptions {
   runner?: Partial<RunnerSettings>;
   identity?: ChatDispatchIdentity;
   serviceNotesWritable?: boolean;
+  authorizeServiceNote?: (
+    workspace: ChatDispatchWorkspace,
+    threadId: string,
+    verifiedUserId: string | undefined,
+  ) => Promise<boolean>;
   pumpWorkspace?: boolean;
   pumpWorkspaces?: ChatDispatchWorkspace[];
   onQueueSync?: (
@@ -650,7 +655,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
           },
         }
       : {}),
-    authorizeServiceNote: async () => options.serviceNotesWritable !== false,
+    authorizeServiceNote: async (workspace, threadId, verifiedUserId) =>
+      options.authorizeServiceNote
+        ? options.authorizeServiceNote(workspace, threadId, verifiedUserId)
+        : options.serviceNotesWritable !== false,
     onMessagePosted: (workspaceId) => postedWorkspaces.push(workspaceId),
     onRunUpdated: (workspaceId) => runUpdatedWorkspaces.push(workspaceId),
     setRunAttribution: async (workspaceId, run) => {
@@ -2037,6 +2045,36 @@ describe("chatDispatchService", () => {
     ]);
   });
 
+  it("skips an owner service note when the account changes during authorization", async () => {
+    let currentUserId = "user_local";
+    const fixture = await createFixture({
+      authorizeServiceNote: async (_workspace, _threadId, verifiedUserId) => {
+        await Promise.resolve();
+        currentUserId = "user_other";
+        return currentUserId === verifiedUserId;
+      },
+    });
+    const trigger = await createAgentThread(fixture, {
+      body: "This account changes before the runner exits.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    const messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: trigger.threadId,
+    });
+    expect(messages.filter((message) => message.author.kind === "agent")).toEqual([]);
+    expect(fixture.errors).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining("Skipped an agent service note"),
+      }),
+    ]);
+  });
+
   it("posts a failure note when an exit-zero run produces no linked reply", async () => {
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
@@ -2570,7 +2608,10 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
     });
-    expect(messages.some((message) => message.body.includes("timed out after 1m"))).toBe(true);
+    const timeoutMessage = messages.find((message) =>
+      message.body.includes("timed out after 1m"),
+    );
+    expect(timeoutMessage?.authorUserId).toBe("user_local");
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
     expect(fixture.killCalls.at(-1)).toEqual({
@@ -2763,6 +2804,7 @@ describe("chatDispatchService", () => {
     });
     expect(openingMessages[0]).toMatchObject({
       author: { kind: "agent" },
+      authorUserId: "user_local",
       origin: "cli",
     });
 

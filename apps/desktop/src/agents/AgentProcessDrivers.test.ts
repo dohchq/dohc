@@ -116,7 +116,7 @@ describe("process-backed agent drivers", () => {
       mcp: {
         command: "dohc-mcp",
         args: ["--workspace", root],
-        env: { DOHC_MCP_CLOUD_TOKEN: "env-token" },
+        env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
       },
       onEvent: () => {},
     });
@@ -195,7 +195,7 @@ describe("process-backed agent drivers", () => {
       mcp: {
         command: "dohc-mcp",
         args: ["--workspace", root],
-        env: { DOHC_MCP_CLOUD_TOKEN: "env-token" },
+        env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
       },
       onEvent: () => {},
     });

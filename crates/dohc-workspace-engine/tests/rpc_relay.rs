@@ -747,6 +747,130 @@ async fn every_relay_rpc_round_trips_through_dispatch_against_fake_transport() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn join_identity_adoption_is_local_idempotent_and_refuses_non_pristine_rebinding() {
+    let relay = FakeRelay::start(RelayState::default());
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "rpc-relay-join-adoption";
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+
+    id += 1;
+    let invalid = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "sync.adoptJoinIdentity",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": workspace_id,
+                    "replicationEpoch": " epoch-relay",
+                    "streamIdentity": "stream-relay",
+                }),
+            ),
+        )
+        .await
+        .expect_err("relay identity text must use the canonical form");
+    assert_eq!(invalid.code, ErrorCode::InvalidParams);
+    let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
+        .expect("open inspection connection");
+    let identity_count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sync_identity WHERE workspace_id=?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .expect("identity count after invalid adoption");
+    assert_eq!(identity_count, 0, "invalid adoption must not write a row");
+
+    let adopted = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.adoptJoinIdentity",
+        json!({
+            "workspaceId": workspace_id,
+            "replicationEpoch": "epoch-relay",
+            "streamIdentity": "stream-relay",
+        }),
+    )
+    .await;
+    assert_eq!(adopted["adopted"], true);
+
+    let identity: (String, String, String) = db
+        .query_row(
+            "SELECT origin_id,replication_epoch,stream_identity FROM sync_identity \
+             WHERE workspace_id=?1",
+            [workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("joined identity");
+    assert!(identity.0.starts_with("origin_"));
+    assert_eq!(identity.1, "epoch-relay");
+    assert_eq!(identity.2, "stream-relay");
+
+    let retry = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.adoptJoinIdentity",
+        json!({
+            "workspaceId": workspace_id,
+            "replicationEpoch": "epoch-relay",
+            "streamIdentity": "stream-relay",
+        }),
+    )
+    .await;
+    assert_eq!(retry["adopted"], true);
+    let retried_origin: String = db
+        .query_row(
+            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .expect("retried origin");
+    assert_eq!(retried_origin, identity.0);
+
+    seed_sync_identity(&transport, &handle, &mut id).await;
+    id += 1;
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "sync.adoptJoinIdentity",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": workspace_id,
+                    "replicationEpoch": "epoch-other",
+                    "streamIdentity": "stream-other",
+                }),
+            ),
+        )
+        .await
+        .expect_err("non-pristine coordinate replacement must fail closed");
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+    let unchanged: (String, String) = db
+        .query_row(
+            "SELECT replication_epoch,stream_identity FROM sync_identity WHERE workspace_id=?1",
+            [workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("unchanged identity");
+    assert_eq!(
+        unchanged,
+        ("epoch-relay".to_owned(), "stream-relay".to_owned())
+    );
+    assert!(
+        relay.state.lock().expect("relay state").requests.is_empty(),
+        "identity adoption is a local prerequisite and must not contact the relay"
+    );
+    drop(db);
+    close(&transport, &handle, &mut id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multi_page_pull_rpc_surfaces_conflicts_opened_and_reconstructed_pending_resolves() {
     let workspace_id = "rpc-relay-pull-details";
     let side = |path: &str| {
@@ -1269,6 +1393,14 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
         ),
         ("sync.probe", json!({ "workspaceId": "other" })),
         ("sync.claim", json!({ "workspaceId": "other" })),
+        (
+            "sync.adoptJoinIdentity",
+            json!({
+                "workspaceId": "other",
+                "replicationEpoch": "epoch",
+                "streamIdentity": "stream",
+            }),
+        ),
         ("sync.recoverOrigin", json!({ "workspaceId": "other" })),
         (
             "keys.upload",

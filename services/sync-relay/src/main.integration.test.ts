@@ -211,14 +211,17 @@ describe("sync relay main process", () => {
       recordedAtMs: 5_000 + originSeq,
     });
 
-    const logLength = async (): Promise<number> => {
+    const logOps = async (): Promise<Array<{ payload: Record<string, unknown> }>> => {
       const response = await fetch(`${baseUrl}/sync/${ws}/log?since=0`, {
         headers: { authorization: `Bearer test:${alice}` },
       });
       expect(response.status).toBe(200);
-      const body = (await response.json()) as { ops: unknown[] };
-      return body.ops.length;
+      const body = (await response.json()) as {
+        ops: Array<{ payload: Record<string, unknown> }>;
+      };
+      return body.ops;
     };
+    const logLength = async (): Promise<number> => (await logOps()).length;
 
     // Alice forging Mallory's authorship on a message → 403, log unchanged.
     const forgedMessage = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
@@ -245,6 +248,18 @@ describe("sync relay main process", () => {
       ops: [messageOp(0, alice), reactionOp(1, mallory)],
     });
     expect(mixed.status).toBe(403);
+    expect(await logLength()).toBe(0);
+
+    // A message created before sign-in has no verified relay author. The
+    // workspace route rejects it and leaves the log unchanged.
+    const localMessage = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
+      originId: "origin-before-sign-in",
+      ops: [messageOp(0, undefined)],
+    });
+    expect(localMessage.status).toBe(403);
+    expect((await localMessage.json()) as Record<string, unknown>).toMatchObject({
+      code: "authorship_mismatch",
+    });
     expect(await logLength()).toBe(0);
 
     // Alice authoring as HERSELF is admitted.

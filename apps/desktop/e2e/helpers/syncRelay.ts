@@ -112,11 +112,10 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
   };
 };
 
-// R10b: the relay adopts the FIRST replication identity a pusher presents
-// (the desktop daemon's, minted in its store) and never returns it over the
-// wire — identity-less /log calls 409 once adoption happens. A headless
-// "other machine" harness therefore learns the adopted coordinate the only
-// way a harness can: from the relay's own SQLite row.
+// R10b: the relay adopts the FIRST replication identity a pusher presents.
+// Identity-less /log calls then fail; the owner-only /bootstrap route is the
+// production handoff for a joining daemon. Harnesses still inspect SQLite here
+// to assert adoption itself and to drive tests that do not run the join flow.
 // Only "the db file does not exist yet" reads as "not adopted yet" to a
 // poll; anything else — including schema drift ("no such table") and the
 // malformed-row throw below (whose message embeds raw values that could

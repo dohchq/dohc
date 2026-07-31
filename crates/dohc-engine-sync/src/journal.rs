@@ -4,12 +4,26 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::SyncError;
 use crate::model::{MAX_PULL_OPS, ReplicationEnvelope, bounded};
 
+fn relay_identity_component(value: &str, reason: &'static str) -> Result<(), SyncError> {
+    bounded(value, reason)?;
+    if value.trim() != value || value.starts_with('\u{feff}') || value.ends_with('\u{feff}') {
+        return Err(SyncError::InvalidInput { reason });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncIdentity {
     pub workspace_id: String,
     pub origin_id: String,
     pub replication_epoch: String,
     pub stream_identity: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptJoinIdentityOutcome {
+    Adopted,
+    AlreadyMatched,
 }
 
 #[cfg(any(test, feature = "fault-injection"))]
@@ -186,6 +200,93 @@ pub fn read_sync_identity(
         )
         .optional()
         .map_err(SyncError::corrupt)
+    })
+}
+
+/// Adopt the relay's existing workspace coordinate before a fresh join pulls.
+/// An existing different local coordinate is never replaced. An absent
+/// coordinate can be created only while every durable replication position is
+/// pristine. The new origin is local to this machine; the epoch and stream
+/// remain the relay's shared coordinate.
+pub fn adopt_join_identity(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    new_origin_id: &str,
+    replication_epoch: &str,
+    stream_identity: &str,
+    created_at_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<AdoptJoinIdentityOutcome>, SyncError> {
+    bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
+    relay_identity_component(
+        new_origin_id,
+        "origin_id must be 1-512 UTF-8 bytes, ECMAScript-trimmed, and contain no ASCII controls",
+    )?;
+    relay_identity_component(
+        replication_epoch,
+        "replication_epoch must be 1-512 UTF-8 bytes, ECMAScript-trimmed, and contain no ASCII controls",
+    )?;
+    relay_identity_component(
+        stream_identity,
+        "stream_identity must be 1-512 UTF-8 bytes, ECMAScript-trimmed, and contain no ASCII controls",
+    )?;
+
+    store.write_with(faults, |tx| {
+        let current: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT origin_id, replication_epoch, stream_identity \
+                 FROM sync_identity WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        if let Some((_, epoch, stream)) = current {
+            if epoch == replication_epoch && stream == stream_identity {
+                return Ok(AdoptJoinIdentityOutcome::AlreadyMatched);
+            }
+            return Err(SyncError::InvalidInput {
+                reason: "join identity adoption found a different local sync identity",
+            });
+        }
+
+        let has_replication_state: i64 = tx
+            .query_row(
+                "SELECT \
+                   EXISTS(SELECT 1 FROM replication_log WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM replication_peers WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM shared_channel_cursors WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM shared_channel_peers WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM shared_channel_push_state WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM share_view_cursors WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM chat_pending_replication WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id = ?1)",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if has_replication_state != 0 {
+            return Err(SyncError::InvalidInput {
+                reason: "join identity adoption requires pristine local replication state",
+            });
+        }
+
+        tx.execute(
+            "INSERT INTO sync_identity \
+             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                workspace_id,
+                new_origin_id,
+                replication_epoch,
+                stream_identity,
+                created_at_ms
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        Ok(AdoptJoinIdentityOutcome::Adopted)
     })
 }
 

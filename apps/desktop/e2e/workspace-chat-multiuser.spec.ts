@@ -139,13 +139,18 @@ test("owner + participant chat and co-presence converge in the real app", async 
       {
         workspaceId,
         rootPath: temp.rootPath,
-        remote: { serverUrl: relay.baseUrl, remoteWorkspaceId: workspaceId },
+        remote: {
+          serverUrl: relay.baseUrl,
+          remoteWorkspaceId: workspaceId,
+          ownerUserId: GRANTER_USER,
+        },
       },
     ]);
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
       email: GRANTER_EMAIL,
+      userId: GRANTER_USER,
       token: GRANTER_TOKEN,
     });
 
@@ -284,18 +289,20 @@ test("owner + participant chat and co-presence converge in the real app", async 
         messageId: ownerMessageId,
         emoji: "🚀",
         author: { authorId: RECIPIENT_USER, kind: "human", displayName: "Morgan" },
+        replicationAuthorId: RECIPIENT_USER,
         state: "added",
       });
     } finally {
       await memberStore.close();
     }
-    await pushSharedChannel({
+    const pushed = await pushSharedChannel({
       rootDir: memberDir,
       workspaceId: memberWs,
       relay: relayConn,
       shareId,
       channelWireId,
     });
+    expect(pushed.pushed).toBeGreaterThan(0);
 
     // The member's ops are in the OWNER's workspace bucket (share-namespaced
     // origin); the owner ingests them through its NORMAL workspace pull, which

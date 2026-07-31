@@ -289,6 +289,7 @@ describe("CLI socket server", () => {
       async assertWritable() {
         calls.writable += 1;
       },
+      async assertMessageWritable() {},
     };
     serverOptions = {
       stateDir,
@@ -804,6 +805,183 @@ describe("CLI socket server", () => {
     })).toHaveLength(1);
   });
 
+  it("rejects every message command before the store write when message identity is unavailable", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    const existing = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Existing message",
+    });
+    const reason = "Sign in to dohc Cloud to send a message in this shared channel.";
+    let messageGuardCalls = 0;
+    const writesBefore = calls.writes;
+    context.assertMessageWritable = async () => {
+      messageGuardCalls += 1;
+      throw new Error(reason);
+    };
+
+    await expect(invoke("startChannelChat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      channel: general.id,
+      body: "Blocked legacy opening",
+    })).resolves.toEqual({ ok: false, reason });
+    await expect(invoke("replyToChat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: existing.thread.id,
+      body: "Blocked legacy reply",
+    })).resolves.toEqual({ ok: false, reason });
+    await expect(post({
+      actor: "human",
+      title: "Blocked modern opening",
+      body: "Must not land",
+    })).rejects.toThrow(reason);
+    await expect(invoke("reply", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      thread: cliThreadId(existing.thread.id),
+      attachments: [],
+      needsDecision: false,
+      body: "Blocked modern reply",
+    })).rejects.toThrow(reason);
+
+    expect(messageGuardCalls).toBe(4);
+    expect(calls.identity).toBe(4);
+    expect(calls.writes).toBe(writesBefore);
+    expect(await store.listChannelThreads({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+    })).toHaveLength(1);
+    expect(await store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: existing.thread.id,
+    })).toHaveLength(1);
+  });
+
+  it("rejects legacy MCP messages when the account changes before mutation", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const existing = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Existing message",
+    });
+    let identityCalls = 0;
+    serverOptions.identity = async () => {
+      calls.identity += 1;
+      identityCalls += 1;
+      const userId = identityCalls % 2 === 1 ? "user-1" : "user-2";
+      return {
+        displayName: "Ice",
+        authorUserId: userId,
+        reactionAuthorId: "install-local-user-id",
+      };
+    };
+    const reason = "dohc: Your dohc Cloud session changed. Try again.";
+
+    await expect(
+      invoke("startChannelChat", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        channel: general.id,
+        body: "Blocked legacy opening",
+      }),
+    ).resolves.toEqual({ ok: false, reason });
+    await expect(
+      invoke("replyToChat", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        threadId: existing.thread.id,
+        body: "Blocked legacy reply",
+      }),
+    ).resolves.toEqual({ ok: false, reason });
+
+    expect(identityCalls).toBe(4);
+    expect(
+      await store.listChannelThreads({
+        workspaceId: WORKSPACE_ID,
+        channelId: general.id,
+      }),
+    ).toHaveLength(1);
+    expect(
+      await store.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: existing.thread.id,
+      }),
+    ).toHaveLength(1);
+  });
+
+  it("rechecks access after modern post attachments resolve", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    let writable = true;
+    let attachmentResolutions = 0;
+    const writesBefore = calls.writes;
+    context.assertWritable = async () => {
+      calls.writable += 1;
+      if (!writable) throw new Error("This shared channel is read-only.");
+    };
+    context.fileObjectIdForPath = async () => {
+      attachmentResolutions += 1;
+      writable = false;
+      return "object_tracked";
+    };
+
+    await expect(post({
+      actor: "human",
+      title: "Blocked after attachment",
+      body: "Must not land",
+      attachments: ["tracked.md"],
+    })).rejects.toThrow("This shared channel is read-only.");
+
+    expect(attachmentResolutions).toBe(1);
+    expect(calls.identity).toBe(1);
+    expect(calls.writable).toBe(2);
+    expect(calls.writes).toBe(writesBefore);
+    expect(await store.listChannelThreads({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+    })).toEqual([]);
+  });
+
+  it("rejects modern post when the resolved author changes", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    let identityCalls = 0;
+    const writesBefore = calls.writes;
+    serverOptions.identity = async () => {
+      calls.identity += 1;
+      identityCalls += 1;
+      const userId = identityCalls === 1 ? "user-1" : "user-2";
+      return {
+        displayName: "Ice",
+        authorUserId: userId,
+        reactionAuthorId: userId,
+      };
+    };
+
+    await expect(post({
+      actor: "human",
+      title: "Blocked account change",
+      body: "Must not land",
+      attachments: ["tracked.md"],
+    })).rejects.toThrow("Your dohc Cloud session changed. Try again.");
+
+    expect(identityCalls).toBe(2);
+    expect(calls.writes).toBe(writesBefore);
+    expect(await store.listChannelThreads({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+    })).toEqual([]);
+  });
+
   it("keeps MCP chat reads available in read-only workspaces while refusing writes", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
@@ -1056,8 +1234,8 @@ describe("CLI socket server", () => {
         origin: "cli",
       },
     ]);
-    expect(calls.identity).toBe(2);
-    expect(calls.writable).toBe(2);
+    expect(calls.identity).toBe(5);
+    expect(calls.writable).toBe(5);
     expect(errors).toEqual([]);
   });
 
@@ -1737,6 +1915,55 @@ describe("CLI socket server", () => {
     expect(shown.messages[1]?.body).toBe("My resolving reply");
   });
 
+  it("posts the reply but keeps the decision open when access changes during send", async () => {
+    const opened = await post({
+      actor: "human",
+      title: "Access race",
+      body: "Choose a path",
+      needsDecision: true,
+    });
+    if (!store) throw new Error("Store is not available");
+    let writable = true;
+    context.assertWritable = async () => {
+      calls.writable += 1;
+      if (!writable) throw new Error("This shared channel is read-only.");
+    };
+    const originalSend = store.sendMessage.bind(store);
+    store.sendMessage = async (input) => {
+      const message = await originalSend(input);
+      writable = false;
+      return message;
+    };
+
+    try {
+      await expect(
+        invoke("reply", {
+          cwd: workspaceRoot,
+          actor: "human",
+          thread: opened.threadId,
+          attachments: [],
+          needsDecision: false,
+          resolve: opened.messageId,
+          body: "Reply before access changed",
+        }),
+      ).rejects.toThrow(
+        "could not be resolved: This shared channel is read-only.",
+      );
+    } finally {
+      store.sendMessage = originalSend;
+    }
+
+    const shown = await invoke("show", {
+      cwd: workspaceRoot,
+      actor: "human",
+      target: opened.threadId,
+      peek: true,
+    });
+    expect(shown.messages).toHaveLength(2);
+    expect(shown.messages[0]?.decisionState).toBe("open");
+    expect(shown.messages[1]?.body).toBe("Reply before access changed");
+  });
+
   it("returns unread agent DMs, agent mentions, and human unread threads", async () => {
     const agentDm = await post({
       actor: "human",
@@ -1838,6 +2065,97 @@ describe("CLI socket server", () => {
       message: opened.messageId,
       emoji: "👍",
     })).resolves.toEqual({ ...added, state: "removed" });
+  });
+
+  it("removes a signed-out reaction through its local alias after sign-in", async () => {
+    const opened = await post({
+      actor: "human",
+      title: "Local reaction target",
+      body: "React before signing in",
+    });
+    serverOptions.identity = async () => {
+      calls.identity += 1;
+      return {
+        displayName: "Ice",
+        reactionAuthorId: "install-local-user-id",
+      };
+    };
+    const added = await invoke("react", {
+      cwd: workspaceRoot,
+      actor: "human",
+      message: opened.messageId,
+      emoji: "👍",
+    });
+    expect(added).toEqual({
+      threadId: opened.threadId,
+      messageId: opened.messageId,
+      emoji: "👍",
+      state: "added",
+    });
+
+    serverOptions.identity = async () => {
+      calls.identity += 1;
+      return {
+        displayName: "Ice",
+        authorUserId: "verified-user-id",
+        reactionAuthorId: "install-local-user-id",
+      };
+    };
+    await expect(
+      invoke("react", {
+        cwd: workspaceRoot,
+        actor: "human",
+        message: opened.messageId,
+        emoji: "👍",
+      }),
+    ).resolves.toEqual({ ...added, state: "removed" });
+
+    if (!store) throw new Error("Store is not available");
+    const thread = (await store.listThreads({ workspaceId: WORKSPACE_ID })).find(
+      (candidate) => cliThreadId(candidate.id) === opened.threadId,
+    );
+    if (!thread) throw new Error("Reaction thread is not available");
+    expect(
+      await store.listReactions({
+        workspaceId: WORKSPACE_ID,
+        threadId: thread.id,
+      }),
+    ).toEqual([]);
+  });
+
+  it("rejects a reaction when the resolved author changes before mutation", async () => {
+    const opened = await post({
+      actor: "human",
+      title: "Reaction race target",
+      body: "React to this",
+    });
+    let identityCalls = 0;
+    serverOptions.identity = async () => {
+      calls.identity += 1;
+      identityCalls += 1;
+      const userId = identityCalls === 1 ? "user-1" : "user-2";
+      return {
+        displayName: "Ice",
+        authorUserId: userId,
+        reactionAuthorId: userId,
+      };
+    };
+
+    await expect(invoke("react", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      message: opened.messageId,
+      emoji: "👍",
+    })).rejects.toThrow("Your dohc Cloud session changed. Try again.");
+
+    if (!store) throw new Error("Store is not available");
+    const thread = (await store.listThreads({ workspaceId: WORKSPACE_ID }))
+      .find((candidate) => cliThreadId(candidate.id) === opened.threadId);
+    if (!thread) throw new Error("Reaction thread is not available");
+    expect(await store.listReactions({
+      workspaceId: WORKSPACE_ID,
+      threadId: thread.id,
+    })).toEqual([]);
   });
 
   // The TypeScript-backend twin of this scenario was removed with the legacy

@@ -239,12 +239,35 @@ async fn rpc_b2_reactions_decisions_and_personal_feed_hydration() {
                 "kind": "human",
                 "displayName": "Ada",
             },
+            "replicationAuthorId": "ada",
             "state": "added",
             "nowMs": 40,
         }),
     )
     .await;
     assert_eq!(reaction["emoji"], json!("👍"));
+    let mismatched_author = call_error_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.set",
+        "mismatched-author",
+        json!({
+            "threadId": "thread",
+            "messageId": "decision",
+            "emoji": "👍",
+            "author": {
+                "authorId": "ada",
+                "kind": "human",
+                "displayName": "Ada",
+            },
+            "replicationAuthorId": "other-user",
+            "state": "removed",
+        }),
+    )
+    .await;
+    assert_eq!(mismatched_author.code, ErrorCode::InvalidParams);
+    assert_eq!(mismatched_author.message, "invalid-sender");
     let invalid_state = call_error_with_idempotency(
         &transport,
         &handle,
@@ -412,6 +435,7 @@ async fn rpc_b2_reactions_and_decisions_accept_max_page_limit() {
                 "kind": "human",
                 "displayName": "Ada",
             },
+            "replicationAuthorId": "ada",
             "state": "added",
             "nowMs": 30,
         }),
@@ -1102,6 +1126,7 @@ async fn review_round_7_normalizes_persisted_chat_identities() {
             "messageId": "message-round-7",
             "authorKind": "human",
             "authorDisplayName": "Alice",
+            "authorUserId": "  user-round-7  ",
             "body": "round seven",
             "nowMs": 20,
         }),
@@ -1109,6 +1134,7 @@ async fn review_round_7_normalizes_persisted_chat_identities() {
     .await;
     assert_eq!(started["thread"]["id"], json!("thread-round-7"));
     assert_eq!(started["message"]["threadId"], json!("thread-round-7"));
+    assert_eq!(started["message"]["authorUserId"], json!("user-round-7"));
     for (thread_id, message_id) in [
         (format!("bad{}thread", '\u{0001}'), "bad-control"),
         ("x".repeat(257), "bad-overlong"),

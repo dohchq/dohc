@@ -304,6 +304,28 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
   });
 
+  it("recovers, re-pushes, and retries when pull finds a diverged local origin", async () => {
+    pullMock
+      .mockRejectedValueOnce(new RelayOriginDivergedError())
+      .mockResolvedValue(pullResult());
+    const sync = engine({ capture: capture() });
+    await sync.start();
+
+    expect(recoverMock).toHaveBeenCalledTimes(1);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(recoverMock.mock.invocationCallOrder[0]!).toBeGreaterThan(
+      pullMock.mock.invocationCallOrder[0]!,
+    );
+    expect(pushMock.mock.invocationCallOrder[1]!).toBeGreaterThan(
+      recoverMock.mock.invocationCallOrder[0]!,
+    );
+    expect(pullMock.mock.invocationCallOrder[1]!).toBeGreaterThan(
+      pushMock.mock.invocationCallOrder[1]!,
+    );
+    expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
+  });
+
   it("debounces queued sync and serializes passes through capture", async () => {
     const calls: string[] = [];
     let releaseFirst!: () => void;
@@ -600,6 +622,28 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1000);
     await vi.runAllTimersAsync();
     expect(pushMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a bootstrap pull divergence without pushing before the first pull succeeds", async () => {
+    pullMock
+      .mockRejectedValueOnce(new RelayOriginDivergedError())
+      .mockResolvedValue(pullResult());
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      remoteWorkspaceId: "workspace-a",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(),
+      capture: capture(),
+      onChange: vi.fn(),
+      joinBootstrap: true,
+      debounceMs: 100,
+      nowMs: () => 12345,
+    });
+
+    await sync.start();
+    expect(recoverMock).toHaveBeenCalledTimes(1);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(pushMock).not.toHaveBeenCalled();
   });
 
   it("treats typed 401 as terminal authExpired and stops accumulating queued work", async () => {

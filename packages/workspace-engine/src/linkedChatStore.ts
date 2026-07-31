@@ -1337,13 +1337,122 @@ function journalDecisionSet(
   const originId = ensureOriginId(db, workspaceId);
   const originSeq = nextOriginSeq(db, workspaceId, originId);
   upsertDecisionLww(db, workspaceId, payload, { originId, originSeq });
+  if (!replicationLogHasAuthoredMessage(db, workspaceId, payload.threadId, payload.messageId)) {
+    return;
+  }
+  const replicatedPayload: ChatDecisionSetPayload = {
+    threadId: payload.threadId,
+    messageId: payload.messageId,
+    state: payload.state,
+    ...(payload.resolvedByMessageId !== undefined &&
+    replicationLogHasAuthoredMessage(
+      db,
+      workspaceId,
+      payload.threadId,
+      payload.resolvedByMessageId,
+    )
+      ? { resolvedByMessageId: payload.resolvedByMessageId }
+      : {}),
+    atMs: payload.atMs,
+  };
   journalReplicationOp(db, {
     workspaceId,
     originId,
     originSeq,
     opKind: "chat.decision.set",
-    payload,
+    payload: replicatedPayload,
     recordedAtMs: payload.atMs,
+  });
+}
+
+function replicationLogHasAuthoredMessage(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  threadId: ChatThreadId,
+  messageId: ChatMessageId,
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT EXISTS(
+         SELECT 1 FROM chat_messages message
+         JOIN replication_log operation
+           ON operation.workspace_id = message.workspace_id
+          AND operation.op_kind = 'chat.message.append'
+          AND json_extract(operation.payload_json, '$.threadId') = message.thread_id
+          AND json_extract(operation.payload_json, '$.messageId') = message.message_id
+          AND json_extract(operation.payload_json, '$.authorUserId') = message.author_user_id
+         WHERE message.workspace_id = ?
+           AND message.thread_id = ?
+           AND message.message_id = ?
+           AND message.author_user_id IS NOT NULL
+       ) AS present`,
+    )
+    .get(workspaceId, threadId, messageId);
+  if (!row) throw corruptStore();
+  return numberValue(row.present) === 1;
+}
+
+function localReplicationLogHasThreadStructure(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  threadId: ChatThreadId,
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT EXISTS(
+         SELECT 1 FROM sync_identity identity
+         JOIN replication_log operation
+           ON operation.workspace_id = identity.workspace_id
+          AND operation.origin_id = identity.origin_id
+          AND operation.op_kind = 'chat.thread.create'
+          AND json_extract(operation.payload_json, '$.threadId') = ?
+         WHERE identity.workspace_id = ?
+       ) AS present`,
+    )
+    .get(threadId, workspaceId);
+  if (!row) throw corruptStore();
+  return numberValue(row.present) === 1;
+}
+
+function ensureThreadStructureExported(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  thread: ChatThread,
+  recordedAtMs: number,
+): void {
+  if (localReplicationLogHasThreadStructure(db, workspaceId, thread.id)) return;
+  const row = db
+    .prepare(
+      `SELECT title FROM chat_threads
+       WHERE workspace_id = ? AND thread_id = ?`,
+    )
+    .get(workspaceId, thread.id);
+  if (!row) throw corruptStore();
+  const payload: ChatThreadCreatePayload = {
+    threadId: thread.id,
+    title: stringValue(row.title),
+    createdAtMs: thread.createdAtMs,
+    ...(thread.linkedFile
+      ? {
+          linkedObjectId: thread.linkedFile.objectId,
+          ...(thread.linkedFile.pathHint !== undefined
+            ? { linkedPathHint: thread.linkedFile.pathHint }
+            : {}),
+          linkedAtMs: thread.linkedFile.linkedAtMs,
+        }
+      : {}),
+  };
+  if (thread.channelId !== undefined) {
+    const channel = requireWorkspaceChannel(db, workspaceId, thread.channelId);
+    const channelWireId = wireIdForChannelId(db, workspaceId, channel.id);
+    payload.channelSlug = channel.slug;
+    if (channelWireId !== undefined) payload.channelWireId = channelWireId;
+  }
+  journalLocalReplicationOp(db, {
+    workspaceId,
+    opKind: "chat.thread.create",
+    payload,
+    recordedAtMs,
   });
 }
 
@@ -1355,6 +1464,12 @@ function addLocalAttachments(input: {
   attachments: LocalAttachmentInput[];
   createdAtMs: number;
 }): ChatAttachment[] {
+  const replicate = replicationLogHasAuthoredMessage(
+    input.db,
+    input.workspaceId,
+    input.threadId,
+    input.messageId,
+  );
   return input.attachments.map((attachment) => {
     const payload: ChatAttachmentAddPayload = {
       attachmentId: attachmentIdFor(
@@ -1376,12 +1491,14 @@ function addLocalAttachments(input: {
       createdAtMs: input.createdAtMs,
     };
     insertAttachment(input.db, input.workspaceId, payload);
-    journalLocalReplicationOp(input.db, {
-      workspaceId: input.workspaceId,
-      opKind: "chat.attachment.add",
-      payload,
-      recordedAtMs: input.createdAtMs,
-    });
+    if (replicate) {
+      journalLocalReplicationOp(input.db, {
+        workspaceId: input.workspaceId,
+        opKind: "chat.attachment.add",
+        payload,
+        recordedAtMs: input.createdAtMs,
+      });
+    }
     return {
       attachmentId: payload.attachmentId,
       threadId: payload.threadId,
@@ -2530,36 +2647,36 @@ export function createLinkedChatStore(
           author,
           body,
         });
-        const channelWireId = wireIdForChannelId(db, workspaceId, channel.id);
-        journalLocalReplicationOp(db, {
-          workspaceId,
-          opKind: "chat.thread.create",
-          payload: {
-            threadId,
-            title,
-            createdAtMs: recordedAtMs,
-            channelSlug: channel.slug,
-            ...(channelWireId !== undefined ? { channelWireId } : {}),
-          } satisfies ChatThreadCreatePayload,
-          recordedAtMs,
-        });
-        journalLocalReplicationOp(db, {
-          workspaceId,
-          opKind: "chat.message.append",
-          payload: {
-            messageId: message.id,
-            threadId,
-            authorKind: author.kind,
-            authorDisplayName: author.displayName,
-            // WS-MU-C0: carry the verified identity ONLY when signed in (see
-            // sendMessage). Solo omits it — byte-identical to the pre-MU-C0 shape.
-            ...(authorUserId !== undefined ? { authorUserId } : {}),
-            ...(origin !== undefined ? { origin } : {}),
-            body,
-            createdAtMs: recordedAtMs,
-          } satisfies ChatMessageAppendPayload,
-          recordedAtMs,
-        });
+        if (authorUserId !== undefined) {
+          const channelWireId = wireIdForChannelId(db, workspaceId, channel.id);
+          journalLocalReplicationOp(db, {
+            workspaceId,
+            opKind: "chat.thread.create",
+            payload: {
+              threadId,
+              title,
+              createdAtMs: recordedAtMs,
+              channelSlug: channel.slug,
+              ...(channelWireId !== undefined ? { channelWireId } : {}),
+            } satisfies ChatThreadCreatePayload,
+            recordedAtMs,
+          });
+          journalLocalReplicationOp(db, {
+            workspaceId,
+            opKind: "chat.message.append",
+            payload: {
+              messageId: message.id,
+              threadId,
+              authorKind: author.kind,
+              authorDisplayName: author.displayName,
+              authorUserId,
+              ...(origin !== undefined ? { origin } : {}),
+              body,
+              createdAtMs: recordedAtMs,
+            } satisfies ChatMessageAppendPayload,
+            recordedAtMs,
+          });
+        }
         if (input.needsDecision === true) {
           journalDecisionSet(db, workspaceId, {
             threadId,
@@ -2828,25 +2945,28 @@ export function createLinkedChatStore(
           author: message.author,
           body: message.body,
         });
-        journalLocalReplicationOp(db, {
-          workspaceId,
-          opKind: "chat.message.append",
-          payload: {
-            messageId: message.id,
-            threadId: thread.id,
-            authorKind: message.author.kind,
-            authorDisplayName: message.author.displayName,
-            // WS-MU-C0: carry the verified identity ONLY when the caller supplied
-            // one (signed-in send). Omitting it keeps solo ops byte-identical to
-            // the pre-MU-C0 shape and leaves the relay's optional check inert.
-            ...(authorUserId !== undefined ? { authorUserId } : {}),
-            ...(parentMessageId !== undefined ? { parentMessageId } : {}),
-            ...(origin !== undefined ? { origin } : {}),
-            body: message.body,
-            createdAtMs: message.createdAtMs,
-          } satisfies ChatMessageAppendPayload,
-          recordedAtMs: message.createdAtMs,
-        });
+        if (authorUserId !== undefined) {
+          ensureThreadStructureExported(db, workspaceId, thread, message.createdAtMs);
+          const parentIsExported =
+            parentMessageId !== undefined &&
+            replicationLogHasAuthoredMessage(db, workspaceId, thread.id, parentMessageId);
+          journalLocalReplicationOp(db, {
+            workspaceId,
+            opKind: "chat.message.append",
+            payload: {
+              messageId: message.id,
+              threadId: thread.id,
+              authorKind: message.author.kind,
+              authorDisplayName: message.author.displayName,
+              authorUserId,
+              ...(parentIsExported ? { parentMessageId } : {}),
+              ...(origin !== undefined ? { origin } : {}),
+              body: message.body,
+              createdAtMs: message.createdAtMs,
+            } satisfies ChatMessageAppendPayload,
+            recordedAtMs: message.createdAtMs,
+          });
+        }
         if (input.needsDecision === true) {
           journalDecisionSet(db, workspaceId, {
             threadId: thread.id,
@@ -3239,6 +3359,13 @@ export function createLinkedChatStore(
         if (!authorId || authorId.length > 200) {
           throw new LinkedChatStoreError("invalid-sender", "Reaction author id is invalid.");
         }
+        const replicationAuthorId = normalizeAuthorUserId(input.replicationAuthorId);
+        if (replicationAuthorId !== undefined && replicationAuthorId !== authorId) {
+          throw new LinkedChatStoreError(
+            "invalid-sender",
+            "Replication reaction author must match the local reaction author.",
+          );
+        }
         const authorKind = actorKindValue(input.author.kind);
         const authorDisplayName = normalizeDisplayName(input.author.displayName);
         const state = reactionStateValue(input.state);
@@ -3282,19 +3409,23 @@ export function createLinkedChatStore(
         // per-cell monotonic bump above (deterministic per origin, not
         // receiver-dependent — see the clock-skew note near upsertReactionLww).
         upsertReactionLww(db, workspaceId, payload, { originId, originSeq });
-        // Blob-free, rides the SAME push/pull/apply pipeline as the other chat
-        // ops (no new transport). Journaled even for a SOLO workspace so the
-        // reaction replicates the moment the workspace starts syncing. Uses the
-        // origin/seq captured above (not journalLocalReplicationOp) so the
-        // journaled envelope's coordinates equal the register's.
-        journalReplicationOp(db, {
-          workspaceId,
-          originId,
-          originSeq,
-          opKind: "chat.reaction.set",
-          payload,
-          recordedAtMs: payload.atMs,
-        });
+        // Keep unsigned reactions local. A verified reaction also requires an
+        // authored target message, so derived state cannot reach the relay
+        // before the message it belongs to. Reuse the captured coordinate when
+        // journaling so the envelope and register order are identical.
+        if (
+          replicationAuthorId !== undefined &&
+          replicationLogHasAuthoredMessage(db, workspaceId, thread.id, input.messageId)
+        ) {
+          journalReplicationOp(db, {
+            workspaceId,
+            originId,
+            originSeq,
+            opKind: "chat.reaction.set",
+            payload,
+            recordedAtMs: payload.atMs,
+          });
+        }
         // Return the RESOLVED cell (the winning register): for a local set that
         // is always this call's op, but reading it back keeps the contract
         // honest under a future clock skew.
@@ -4590,7 +4721,7 @@ export function createLinkedChatStore(
             (payload.resolvedByMessageId !== undefined &&
               (typeof payload.resolvedByMessageId !== "string" ||
                 payload.resolvedByMessageId.length === 0)) ||
-            (payload.state === "resolved") !== (payload.resolvedByMessageId !== undefined)
+            (payload.state === "open" && payload.resolvedByMessageId !== undefined)
           ) {
             throw corruptStore();
           }

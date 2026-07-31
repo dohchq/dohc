@@ -118,6 +118,8 @@ class MockDaemon implements EngineDaemonClient {
           };
         case "sync.claim":
           return { claimed: true };
+        case "sync.adoptJoinIdentity":
+          return { adopted: true };
         case "sync.probe":
           return { hasContent: true };
         case "share.channel.pull":
@@ -342,6 +344,68 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("claims only an unset relay identity and adopts an established identity", async () => {
+    const { daemon, sessions, client } = await harness();
+
+    await expect(client.bootstrapJoinIdentity(null)).resolves.toBeUndefined();
+    await expect(
+      client.bootstrapJoinIdentity({
+        replicationEpoch: "epoch-relay",
+        streamIdentity: "stream-relay",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(
+      daemon.requests
+        .filter((request) =>
+          ["sync.claim", "sync.adoptJoinIdentity"].includes(request.method),
+        )
+        .map((request) => ({ method: request.method, params: request.params })),
+    ).toEqual([
+      { method: "sync.claim", params: { workspaceId: "workspace-a" } },
+      {
+        method: "sync.adoptJoinIdentity",
+        params: {
+          workspaceId: "workspace-a",
+          replicationEpoch: "epoch-relay",
+          streamIdentity: "stream-relay",
+        },
+      },
+    ]);
+    expect(daemon.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.claim",
+      "workspace.close",
+      "workspace.open",
+      "sync.adoptJoinIdentity",
+      "workspace.close",
+    ]);
+    for (const request of daemon.requests.filter(
+      (request) => request.method === "workspace.open",
+    )) {
+      expect(request.params).toMatchObject({ captureMode: "none" });
+    }
+    await sessions.closeAll();
+  });
+
+  it("orders join identity bootstrap before registration and activity capture", async () => {
+    const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
+    const bootstrap = source.indexOf(
+      "await daemonRelay.bootstrapJoinIdentity(probe.identity);",
+    );
+    const registration = source.indexOf(
+      "registerWorkspace({ ...created, joinBootstrapPending: true });",
+      bootstrap,
+    );
+    const activityOpen = source.indexOf(
+      "await openWorkspaceActivity(created",
+      bootstrap,
+    );
+    expect(bootstrap).toBeGreaterThanOrEqual(0);
+    expect(registration).toBeGreaterThan(bootstrap);
+    expect(activityOpen).toBeGreaterThan(registration);
+  });
+
   it("refreshes a share view and commits its opaque daemon cursor", async () => {
     const { rootPath, daemon, sessions, client, relay } = await harness();
     const store = createCaptureLiveStores(
@@ -552,6 +616,7 @@ describe("EngineRelayClient", () => {
             access: "read-only",
             granterEmail: "owner@example.com",
             relayUrl: relay.baseUrl,
+            recipientUserId: "member-1",
           },
         ],
         pull: async (input) =>
@@ -621,12 +686,19 @@ describe("EngineRelayClient", () => {
     expect(routes.modeFor("workspace-probed")).toBe("daemon");
     finishProbe(
       globalThis.Response.json({
-        ops: [{}],
-        nextCursor: 1,
-        hasMore: false,
+        ok: true,
+        hasContent: true,
+        replicationEpoch: "epoch-probed",
+        streamIdentity: "stream-probed",
       }),
     );
-    await expect(probe).resolves.toEqual({ hasContent: true });
+    await expect(probe).resolves.toEqual({
+      hasContent: true,
+      identity: {
+        replicationEpoch: "epoch-probed",
+        streamIdentity: "stream-probed",
+      },
+    });
     expect(
       routes.modeFor("workspace-probed"),
       "a late probe cleanup must not release a newer daemon route",
@@ -757,7 +829,7 @@ describe("EngineRelayClient", () => {
     let originMarker = false;
     let readOnlyMarker = false;
     const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.push") {
+      if (request.method === "sync.push" || request.method === "sync.pull") {
         throw new DaemonRefusalError(
           {
             code: "INVALID_PARAMS",
@@ -784,8 +856,12 @@ describe("EngineRelayClient", () => {
     const { client, sessions } = await harness(daemon);
 
     await expect(client.push()).rejects.toBeInstanceOf(DaemonRefusalError);
+    await expect(client.pull()).rejects.toBeInstanceOf(DaemonRefusalError);
     originMarker = true;
     await expect(client.push()).rejects.toBeInstanceOf(
+      RelayOriginDivergedError,
+    );
+    await expect(client.pull()).rejects.toBeInstanceOf(
       RelayOriginDivergedError,
     );
     await expect(

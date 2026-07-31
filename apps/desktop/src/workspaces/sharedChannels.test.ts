@@ -12,6 +12,7 @@ import {
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
+  joinedSharedChannelForTarget,
   mergeJoinedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
@@ -33,6 +34,7 @@ function joined(overrides: Partial<JoinedSharedChannel> = {}): JoinedSharedChann
     granterEmail: "owner@example.com",
     relayUrl: "http://relay.test",
     ...overrides,
+    recipientUserId: overrides.recipientUserId ?? "member-1",
   };
 }
 
@@ -286,6 +288,26 @@ describe("assertSharedChannelWritable", () => {
           target: { threadId: started.thread.id },
         }),
       ).resolves.toBeUndefined();
+      await expect(
+        assertSharedChannelWritable({
+          workspaceId: "ws-1",
+          sharedChannels: [
+            joined({
+              shareId: "share-active",
+              channelWireId: teamWire!,
+              access: "read-write",
+            }),
+            joined({
+              shareId: "share-ended",
+              channelWireId: teamWire!,
+              access: "read-write",
+              ended: true,
+            }),
+          ],
+          store: chats,
+          target: { threadId: started.thread.id },
+        }),
+      ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
       // …a plain local channel is unaffected even while a read-only grant
       // exists elsewhere…
       await expect(
@@ -341,6 +363,57 @@ describe("assertSharedChannelWritable", () => {
         threadId: started.thread.id,
       });
       expect(afterEnded).toHaveLength(1);
+    } finally {
+      await chats.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("joinedSharedChannelForTarget", () => {
+  it("resolves a joined channel by channel or thread and ignores local channels", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-shared-channel-target-"));
+    const chats = createLinkedChatStore(root);
+    try {
+      const shared = await chats.createChannel({ workspaceId: "ws-1", name: "shared" });
+      const sharedWire = await chats.getChannelWireId({
+        workspaceId: "ws-1",
+        channelId: shared.id,
+      });
+      expect(sharedWire).not.toBeNull();
+      const thread = await chats.startChannelThread({
+        workspaceId: "ws-1",
+        channelId: shared.id,
+        author: { kind: "human", displayName: "Member" },
+        body: "seeded",
+      });
+      const local = await chats.createChannel({ workspaceId: "ws-1", name: "local" });
+      const rows = [joined({ channelWireId: sharedWire!, relayUrl: "https://relay.one" })];
+
+      await expect(
+        joinedSharedChannelForTarget({
+          workspaceId: "ws-1",
+          sharedChannels: rows,
+          store: chats,
+          target: { channelId: shared.id },
+        }),
+      ).resolves.toEqual(rows[0]);
+      await expect(
+        joinedSharedChannelForTarget({
+          workspaceId: "ws-1",
+          sharedChannels: rows,
+          store: chats,
+          target: { threadId: thread.thread.id },
+        }),
+      ).resolves.toEqual(rows[0]);
+      await expect(
+        joinedSharedChannelForTarget({
+          workspaceId: "ws-1",
+          sharedChannels: rows,
+          store: chats,
+          target: { channelId: local.id },
+        }),
+      ).resolves.toBeNull();
     } finally {
       await chats.close();
       await rm(root, { recursive: true, force: true });

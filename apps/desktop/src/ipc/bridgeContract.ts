@@ -2152,6 +2152,8 @@ export const CloudStatusResult = z.object({
   relayUrl: z.string().optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),
+  // Whether that remote is pinned to the current signed-in account.
+  workspaceSyncConnected: z.boolean().optional(),
   workspaceSecretState: z
     .enum(["none", "protected-key-present", "protected-key-missing"])
     .optional(),

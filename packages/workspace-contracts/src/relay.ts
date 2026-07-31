@@ -113,6 +113,56 @@ export interface ProbeRelayWorkspaceResult {
   hasContent: boolean;
 }
 
+export interface RelayWorkspaceIdentity {
+  replicationEpoch: string;
+  streamIdentity: string;
+}
+
+export interface RelayWorkspaceBootstrapResult {
+  hasContent: boolean;
+  identity: RelayWorkspaceIdentity | null;
+}
+
+const MAX_RELAY_IDENTITY_BYTES = 512;
+const RELAY_IDENTITY_CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
+
+function relayIdentityValue(value: unknown): string | null {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value !== value.trim() ||
+    RELAY_IDENTITY_CONTROL_CHARS.test(value) ||
+    new TextEncoder().encode(value).byteLength > MAX_RELAY_IDENTITY_BYTES
+  ) {
+    return null;
+  }
+  return value;
+}
+
+export function decodeRelayWorkspaceBootstrap(
+  value: unknown,
+): RelayWorkspaceBootstrapResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Relay bootstrap response is invalid.");
+  }
+  const result = value as Record<string, unknown>;
+  if (result.ok !== true || typeof result.hasContent !== "boolean") {
+    throw new Error("Relay bootstrap response is invalid.");
+  }
+  if (result.replicationEpoch === null && result.streamIdentity === null) {
+    return { hasContent: result.hasContent, identity: null };
+  }
+  const replicationEpoch = relayIdentityValue(result.replicationEpoch);
+  const streamIdentity = relayIdentityValue(result.streamIdentity);
+  if (replicationEpoch === null || streamIdentity === null) {
+    throw new Error("Relay bootstrap response is invalid.");
+  }
+  return {
+    hasContent: result.hasContent,
+    identity: { replicationEpoch, streamIdentity },
+  };
+}
+
 export class SharedChannelReadOnlyError extends Error {
   constructor(message = "This shared channel is read-only for you.") {
     super(message);

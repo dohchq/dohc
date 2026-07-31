@@ -8,8 +8,8 @@ use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
     ChatChannelKind, ChatReactionState, CreateFileThread, FollowState, FollowTargetKind,
     GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES, ResolveDecision,
-    SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SetFollow, SetReaction, StartChannelThread,
-    VersionedTextStore, attachment_id_for, channel_slug_for_name,
+    SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SendMessage, SetFollow, SetReaction,
+    StartChannelThread, VersionedTextStore, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -193,6 +193,27 @@ fn imported_decision_refuses_unsafe_at_ms_without_row_and_acks() {
 }
 
 #[test]
+fn imported_decision_refuses_an_explicit_null_resolver() {
+    let (_scratch, _path, mut engine) = store();
+    let mut payload = decision_payload("resolved", 100, None);
+    payload["resolvedByMessageId"] = serde_json::Value::Null;
+    let operation = envelope("null-decision-resolver", 0, "chat.decision.set", payload);
+
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_decisions", [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("decision row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "null-decision-resolver").expect("ack"),
+        0
+    );
+}
+
+#[test]
 fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
     let ops = [
         envelope(
@@ -234,6 +255,171 @@ fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
     assert!(winners.iter().all(|winner| winner == &winners[0]));
     assert_eq!(winners[0].0, "resolved");
     assert_eq!(winners[0].2, "beta");
+}
+
+#[test]
+fn local_only_decision_resolver_producer_converges_through_apply() {
+    let (_source_scratch, _source_path, mut source) = store();
+    LinkedChatStore::new(&mut source)
+        .create_channel(
+            "ws",
+            "decision-channel",
+            "Decisions",
+            ChatChannelKind::Channel,
+            10,
+            &NoFaults,
+        )
+        .expect("source channel");
+    LinkedChatStore::new(&mut source)
+        .start_channel_thread(
+            &StartChannelThread {
+                workspace_id: "ws".to_owned(),
+                channel_id: "decision-channel".to_owned(),
+                thread_id: "decision-thread".to_owned(),
+                message_id: "decision-message".to_owned(),
+                title: None,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Verified".to_owned(),
+                author_user_id: Some("verified-user".to_owned()),
+                origin: None,
+                body: "Choose a launch date".to_owned(),
+                needs_decision: true,
+                attachments: Vec::new(),
+                now_ms: 20,
+                request_id: Some("decision-thread".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("source decision");
+    LinkedChatStore::new(&mut source)
+        .send_message(
+            &SendMessage {
+                workspace_id: "ws".to_owned(),
+                thread_id: "decision-thread".to_owned(),
+                message_id: "local-resolver".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Local".to_owned(),
+                author_user_id: None,
+                parent_message_id: None,
+                origin: None,
+                body: "Resolve while signed out".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 30,
+                request_id: Some("local-resolver".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("local-only resolver");
+    let source_decision = LinkedChatStore::new(&mut source)
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: "ws".to_owned(),
+                thread_id: "decision-thread".to_owned(),
+                message_id: "decision-message".to_owned(),
+                resolved_by_message_id: "local-resolver".to_owned(),
+                now_ms: 40,
+                request_id: "resolve-with-local-message".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("resolve source decision");
+    assert_eq!(
+        source_decision.resolved_by_message_id.as_deref(),
+        Some("local-resolver")
+    );
+
+    let outbound: Vec<ReplicationEnvelope> = source
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT origin_id,origin_seq,op_kind,payload_json,recorded_at_ms \
+                 FROM replication_log \
+                 WHERE workspace_id='ws' AND imported=0 \
+                 ORDER BY origin_seq",
+            )?;
+            statement
+                .query_map([], |row| {
+                    let payload_json: String = row.get(3)?;
+                    Ok(ReplicationEnvelope {
+                        workspace_id: "ws".to_owned(),
+                        origin_id: row.get(0)?,
+                        origin_seq: row.get(1)?,
+                        op_kind: row.get(2)?,
+                        payload: serde_json::from_str(&payload_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                payload_json.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        recorded_at_ms: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("produced chat envelopes");
+    let produced = outbound
+        .iter()
+        .find(|operation| {
+            operation.op_kind == "chat.decision.set" && operation.payload["state"] == "resolved"
+        })
+        .expect("produced resolved decision envelope");
+    assert_eq!(produced.payload["state"], "resolved");
+    assert!(produced.payload.get("resolvedByMessageId").is_none());
+    assert!(outbound.iter().all(|operation| {
+        operation
+            .payload
+            .get("messageId")
+            .and_then(|value| value.as_str())
+            != Some("local-resolver")
+    }));
+
+    let (_target_scratch, _target_path, mut target) = store();
+    for operation in &outbound {
+        assert_eq!(
+            apply_chat_envelope(&mut target, operation, &NoFaults)
+                .expect("apply produced chat envelope"),
+            ApplyOutcome::Applied(())
+        );
+    }
+    let applied: (String, Option<String>) = target
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state,resolved_by_message_id FROM chat_decisions \
+                 WHERE workspace_id='ws' AND message_id='decision-message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("applied decision state");
+    assert_eq!(applied, ("resolved".to_owned(), None));
+
+    let invalid_open = envelope(
+        "invalid-open-resolver",
+        0,
+        "chat.decision.set",
+        json!({
+            "threadId": "decision-thread",
+            "messageId": "decision-message",
+            "state": "open",
+            "resolvedByMessageId": "local-resolver",
+            "atMs": 50
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut target, &invalid_open, &NoFaults));
+    let state_after_refusal: String = target
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state FROM chat_decisions \
+                 WHERE workspace_id='ws' AND message_id='decision-message'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("decision state after invalid open payload");
+    assert_eq!(state_after_refusal, "resolved");
 }
 
 #[test]
@@ -568,6 +754,254 @@ fn fault_sync_during_journal_txn_rolls_back_domain_and_position() {
     )
     .expect("retry");
     assert_eq!(retried, TxnOutcome::Committed(0));
+}
+
+#[test]
+fn join_identity_adoption_creates_only_an_absent_coordinate_and_is_idempotent() {
+    let (_scratch, _path, mut engine) = store();
+    assert_eq!(
+        adopt_join_identity(
+            &mut engine,
+            "ws",
+            "origin-joined",
+            "epoch-relay",
+            "stream-relay",
+            2,
+            &NoFaults,
+        )
+        .expect("adopt relay identity"),
+        TxnOutcome::Committed(AdoptJoinIdentityOutcome::Adopted)
+    );
+    assert_eq!(
+        read_sync_identity(&engine, "ws").expect("identity"),
+        Some(SyncIdentity {
+            workspace_id: "ws".to_owned(),
+            origin_id: "origin-joined".to_owned(),
+            replication_epoch: "epoch-relay".to_owned(),
+            stream_identity: "stream-relay".to_owned(),
+        })
+    );
+
+    assert_eq!(
+        adopt_join_identity(
+            &mut engine,
+            "ws",
+            "origin-must-not-replace",
+            "epoch-relay",
+            "stream-relay",
+            3,
+            &NoFaults,
+        )
+        .expect("retry same coordinate"),
+        TxnOutcome::Committed(AdoptJoinIdentityOutcome::AlreadyMatched)
+    );
+    assert_eq!(
+        read_sync_identity(&engine, "ws")
+            .expect("identity")
+            .expect("present")
+            .origin_id,
+        "origin-joined"
+    );
+}
+
+#[test]
+fn join_identity_adoption_rejects_non_relay_identity_text_without_writing() {
+    let (_scratch, _path, mut engine) = store();
+    let cases = [
+        ("ws-origin", " origin-joined", "epoch-relay", "stream-relay"),
+        ("ws-epoch", "origin-joined", "epoch-relay ", "stream-relay"),
+        (
+            "ws-stream",
+            "origin-joined",
+            "epoch-relay",
+            "stream\u{0000}relay",
+        ),
+        (
+            "ws-bom",
+            "origin-joined",
+            "\u{feff}epoch-relay",
+            "stream-relay",
+        ),
+    ];
+
+    for (workspace_id, origin_id, replication_epoch, stream_identity) in cases {
+        assert!(matches!(
+            adopt_join_identity(
+                &mut engine,
+                workspace_id,
+                origin_id,
+                replication_epoch,
+                stream_identity,
+                2,
+                &NoFaults,
+            ),
+            Err(SyncError::InvalidInput { .. })
+        ));
+        assert!(
+            read_sync_identity(&engine, workspace_id)
+                .expect("identity")
+                .is_none(),
+            "invalid identity text must not create a row for {workspace_id}"
+        );
+    }
+}
+
+#[test]
+fn join_identity_adoption_refuses_a_different_existing_identity() {
+    let (_scratch, _path, mut engine) = store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('ws','origin-old','epoch-old','stream-old',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed different identity");
+
+    assert!(matches!(
+        adopt_join_identity(
+            &mut engine,
+            "ws",
+            "origin-joined",
+            "epoch-relay",
+            "stream-relay",
+            2,
+            &NoFaults,
+        ),
+        Err(SyncError::InvalidInput {
+            reason: "join identity adoption found a different local sync identity"
+        })
+    ));
+    let identity = read_sync_identity(&engine, "ws")
+        .expect("identity")
+        .expect("present");
+    assert_eq!(identity.origin_id, "origin-old");
+    assert_eq!(identity.replication_epoch, "epoch-old");
+    assert_eq!(identity.stream_identity, "stream-old");
+}
+
+#[test]
+fn join_identity_adoption_refuses_any_existing_replication_state() {
+    let (_scratch, _path, mut engine) = store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log \
+                 (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                 VALUES ('ws-log','origin-old',0,'workspace.init','{}',1,0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO sync_relay_cursors \
+                 (workspace_id,cursor,replication_epoch,stream_identity) \
+                 VALUES ('ws-cursor','0','epoch-old','stream-old')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO replication_peers (workspace_id,origin_id,acked_seq) \
+                 VALUES ('ws-peer','origin-old',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES ('ws-push','origin-old',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO shared_channel_cursors (workspace_id,share_id,cursor) \
+                 VALUES ('ws-channel-cursor','share-old','0')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO shared_channel_peers \
+                 (workspace_id,share_id,origin_id,applied_origin_seq,dense_seq) \
+                 VALUES ('ws-channel-peer','share-old','origin-old',0,0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO shared_channel_push_state (workspace_id,share_id,pushed_seq) \
+                 VALUES ('ws-channel-push','share-old',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO share_view_cursors (workspace_id,share_id,cursor) \
+                 VALUES ('ws-view-cursor','share-old','0')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_pending_replication \
+                 (workspace_id,origin_id,origin_seq,dependency_kind,dependency_id) \
+                 VALUES ('ws-chat-pending','origin-old',0,'message-thread','thread-old')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO versioned_workspaces (workspace_id,main_version_id) \
+                 VALUES ('ws-ydoc-pending','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws-ydoc-pending','object-ydoc-pending',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates \
+                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+                 VALUES ('ws-ydoc-pending','main','object-ydoc-pending','origin-old',0,1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed non-pristine state");
+
+    for workspace_id in [
+        "ws-log",
+        "ws-cursor",
+        "ws-peer",
+        "ws-push",
+        "ws-channel-cursor",
+        "ws-channel-peer",
+        "ws-channel-push",
+        "ws-view-cursor",
+        "ws-chat-pending",
+        "ws-ydoc-pending",
+    ] {
+        assert!(matches!(
+            adopt_join_identity(
+                &mut engine,
+                workspace_id,
+                "origin-joined",
+                "epoch-relay",
+                "stream-relay",
+                2,
+                &NoFaults,
+            ),
+            Err(SyncError::InvalidInput {
+                reason: "join identity adoption requires pristine local replication state"
+            })
+        ));
+        assert!(
+            read_sync_identity(&engine, workspace_id)
+                .expect("identity")
+                .is_none()
+        );
+    }
 }
 
 #[test]
@@ -2642,6 +3076,7 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
                 message_id: "message-imported".to_owned(),
                 emoji: "👍".to_owned(),
                 author_id: "Ada".to_owned(),
+                replication_author_id: Some("Ada".to_owned()),
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 state: ChatReactionState::Removed,
@@ -2778,6 +3213,337 @@ fn imported_message_append_refuses_each_oracle_invalid_field() {
             3
         );
     }
+}
+
+#[test]
+fn refused_message_log_cannot_export_local_derived_state_or_parent() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "refused-message-collision");
+    let refused = envelope(
+        "refused-message-collision",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "refused-message-id",
+            "threadId": "thread-imported",
+            "authorKind": "other",
+            "authorDisplayName": "Remote",
+            "authorUserId": "remote-user",
+            "body": "This envelope is terminally refused.",
+            "createdAtMs": 30
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &refused, &NoFaults));
+
+    LinkedChatStore::new(&mut engine)
+        .send_message(
+            &SendMessage {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "refused-message-id".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Local".to_owned(),
+                author_user_id: None,
+                parent_message_id: None,
+                origin: None,
+                body: "This message stays local.".to_owned(),
+                needs_decision: true,
+                attachments: Vec::new(),
+                now_ms: 31,
+                request_id: Some("local-message-after-refusal".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("local message with a refused remote id");
+    LinkedChatStore::new(&mut engine)
+        .set_reaction(
+            &SetReaction {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "refused-message-id".to_owned(),
+                emoji: "👍".to_owned(),
+                author_id: "verified-user".to_owned(),
+                replication_author_id: Some("verified-user".to_owned()),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Verified".to_owned(),
+                state: ChatReactionState::Added,
+                now_ms: 32,
+                request_id: "reaction-after-refusal".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("local reaction to a non-exported message");
+    LinkedChatStore::new(&mut engine)
+        .send_message(
+            &SendMessage {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "authored-child".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Verified".to_owned(),
+                author_user_id: Some("verified-user".to_owned()),
+                parent_message_id: Some("refused-message-id".to_owned()),
+                origin: None,
+                body: "This authored child must not export the local parent.".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 33,
+                request_id: Some("authored-child-after-refusal".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("authored child of a non-exported message");
+    LinkedChatStore::new(&mut engine)
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "refused-message-id".to_owned(),
+                resolved_by_message_id: "authored-child".to_owned(),
+                now_ms: 34,
+                request_id: "resolve-after-refusal".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("resolve the local-only decision");
+
+    let (
+        refused_log_rows,
+        decision_op_rows,
+        reaction_op_rows,
+        decision_state,
+        reaction_rows,
+        child_parent_type,
+    ): (i64, i64, i64, String, i64, Option<String>) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='chat.message.append' \
+                       AND json_extract(payload_json,'$.messageId')='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='chat.decision.set' \
+                       AND json_extract(payload_json,'$.messageId')='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='chat.reaction.set' \
+                       AND json_extract(payload_json,'$.messageId')='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT state FROM chat_decisions \
+                     WHERE workspace_id='ws' AND message_id='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_reactions \
+                     WHERE workspace_id='ws' AND message_id='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT json_type(payload_json,'$.parentMessageId') \
+                     FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='chat.message.append' \
+                       AND json_extract(payload_json,'$.messageId')='authored-child'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read refused-message collision evidence");
+    assert_eq!(refused_log_rows, 1, "the refused envelope remains durable");
+    assert_eq!(decision_op_rows, 0, "local decisions must not export");
+    assert_eq!(reaction_op_rows, 0, "local reactions must not export");
+    assert_eq!(
+        decision_state, "resolved",
+        "local decision state remains usable"
+    );
+    assert_eq!(reaction_rows, 1, "local reaction state remains usable");
+    assert_eq!(
+        child_parent_type, None,
+        "an authored child must not reference a non-exported parent"
+    );
+}
+
+#[test]
+fn refused_thread_log_cannot_suppress_the_current_thread_export() {
+    let (_scratch, _path, mut first_peer) = store();
+    imported_chat_fixture(&mut first_peer, "refused-thread-collision");
+    let refused = envelope(
+        "refused-thread-collision",
+        3,
+        "chat.thread.create",
+        json!({
+            "threadId": "refused-thread-id",
+            "title": "Invalid owner shape",
+            "createdAtMs": 30,
+            "channelSlug": "imported",
+            "linkedObjectId": "object-collision",
+            "linkedAtMs": 30
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut first_peer, &refused, &NoFaults));
+    let (refused_rows, refused_projection_rows): (i64, i64) = first_peer
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND imported=1 \
+                       AND op_kind='chat.thread.create' \
+                       AND json_extract(payload_json,'$.threadId')='refused-thread-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_threads \
+                     WHERE workspace_id='ws' AND thread_id='refused-thread-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("durable refused-thread state");
+    assert_eq!(refused_rows, 1, "the refused envelope remains durable");
+    assert_eq!(
+        refused_projection_rows, 0,
+        "the refused envelope must not create a thread projection"
+    );
+
+    LinkedChatStore::new(&mut first_peer)
+        .start_channel_thread(
+            &StartChannelThread {
+                workspace_id: "ws".to_owned(),
+                channel_id: "channel-imported".to_owned(),
+                thread_id: "refused-thread-id".to_owned(),
+                message_id: "message-after-refused-thread".to_owned(),
+                title: Some("Valid local thread".to_owned()),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Verified".to_owned(),
+                author_user_id: Some("verified-user".to_owned()),
+                origin: None,
+                body: "The valid thread must reach peers first.".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 31,
+                request_id: Some("local-thread-after-refusal".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("local thread with a refused remote id");
+    LinkedChatStore::new(&mut first_peer)
+        .send_message(
+            &SendMessage {
+                workspace_id: "ws".to_owned(),
+                thread_id: "refused-thread-id".to_owned(),
+                message_id: "second-message-after-refused-thread".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Verified".to_owned(),
+                author_user_id: Some("verified-user".to_owned()),
+                parent_message_id: None,
+                origin: None,
+                body: "The thread structure must export only once.".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 32,
+                request_id: Some("second-local-message-after-refusal".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("second local message in the collision thread");
+
+    let outbound: Vec<ReplicationEnvelope> = first_peer
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT operation.origin_id,operation.origin_seq,operation.op_kind, \
+                        operation.payload_json,operation.recorded_at_ms \
+                 FROM replication_log AS operation \
+                 JOIN sync_identity AS identity \
+                   ON identity.workspace_id=operation.workspace_id \
+                  AND identity.origin_id=operation.origin_id \
+                 WHERE operation.workspace_id='ws' AND operation.imported=0 \
+                   AND json_extract(operation.payload_json,'$.threadId')='refused-thread-id' \
+                 ORDER BY operation.origin_seq",
+            )?;
+            statement
+                .query_map([], |row| {
+                    let payload_json: String = row.get(3)?;
+                    Ok(ReplicationEnvelope {
+                        workspace_id: "ws".to_owned(),
+                        origin_id: row.get(0)?,
+                        origin_seq: row.get(1)?,
+                        op_kind: row.get(2)?,
+                        payload: serde_json::from_str(&payload_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                payload_json.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        recorded_at_ms: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("outbound thread and message envelopes");
+    assert_eq!(
+        outbound
+            .iter()
+            .map(|operation| operation.op_kind.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "chat.thread.create",
+            "chat.message.append",
+            "chat.message.append"
+        ],
+        "the current origin must export one valid structure before its messages"
+    );
+
+    let (_second_scratch, _second_path, mut second_peer) = store();
+    for operation in &outbound {
+        assert_eq!(
+            apply_chat_envelope(&mut second_peer, operation, &NoFaults)
+                .expect("apply collision recovery envelope"),
+            ApplyOutcome::Applied(())
+        );
+    }
+    let (message_body, message_rows, pending_rows): (String, i64, i64) = second_peer
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT body FROM chat_messages \
+                     WHERE workspace_id='ws' AND thread_id='refused-thread-id' \
+                       AND message_id='message-after-refused-thread'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages \
+                     WHERE workspace_id='ws' AND thread_id='refused-thread-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM chat_pending_replication", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .expect("second-peer collision recovery state");
+    assert_eq!(
+        message_body, "The valid thread must reach peers first.",
+        "the peer must apply the message after resolving its current thread"
+    );
+    assert_eq!(message_rows, 2, "both current-origin messages must apply");
+    assert_eq!(pending_rows, 0, "the message must not remain parked");
 }
 
 #[test]
@@ -4806,6 +5572,339 @@ fn seed_identity(engine: &mut EngineStore) {
     )
     .expect("identity");
     assert_eq!(outcome, TxnOutcome::Committed(0));
+}
+
+fn journal_test_op(engine: &mut EngineStore, op_kind: &str, payload: &serde_json::Value) -> i64 {
+    match journal_local_replication_op(
+        engine, "ws", "local", "epoch-1", "stream-1", op_kind, payload, 2_000, &NoFaults,
+    )
+    .expect("journal test op")
+    {
+        TxnOutcome::Committed(origin_seq) => origin_seq,
+        TxnOutcome::Crashed { .. } => panic!("no faults were injected"),
+    }
+}
+
+fn journal_lww_ops(engine: &mut EngineStore) -> (i64, i64, i64, i64) {
+    let reaction_seq = journal_test_op(
+        engine,
+        "chat.reaction.set",
+        &json!({
+            "reactionId": "recovery-reaction",
+            "messageId": "safe-message",
+            "threadId": "recovery-thread",
+            "emoji": "👍",
+            "authorId": "user-1",
+            "authorKind": "human",
+            "authorDisplayName": "User 1",
+            "atMs": 2_001,
+            "state": "added"
+        }),
+    );
+    journal_test_op(
+        engine,
+        "chat.decision.set",
+        &json!({
+            "messageId": "safe-message",
+            "threadId": "recovery-thread",
+            "state": "open",
+            "atMs": 2_002
+        }),
+    );
+    let follow_seq = journal_test_op(
+        engine,
+        "chat.follow.set",
+        &json!({
+            "ownerUserId": "user-1",
+            "targetKind": "thread",
+            "targetId": "recovery-thread",
+            "state": "following",
+            "atMs": 2_003
+        }),
+    );
+    let feed_seq = journal_test_op(
+        engine,
+        "chat.feed.read.set",
+        &json!({
+            "ownerUserId": "user-1",
+            "lastSeenCreatedAtMs": 2_000,
+            "lastSeenMessageId": "safe-message",
+            "atMs": 2_004
+        }),
+    );
+    let decision_seq = journal_test_op(
+        engine,
+        "chat.decision.set",
+        &json!({
+            "messageId": "safe-message",
+            "threadId": "recovery-thread",
+            "state": "resolved",
+            "resolvedByMessageId": "safe-message",
+            "atMs": 2_005
+        }),
+    );
+    (reaction_seq, decision_seq, follow_seq, feed_seq)
+}
+
+fn seed_lww_projections(
+    engine: &mut EngineStore,
+    origin_id: &str,
+    reaction_seq: i64,
+    decision_seq: i64,
+    follow_seq: i64,
+    feed_seq: i64,
+) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_reactions \
+                 (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind, \
+                  author_display_name,state,at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','recovery-reaction','recovery-thread','safe-message','👍','user-1', \
+                         'human','User 1','added',2001,?1,?2)",
+                params![origin_id, reaction_seq],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_decisions \
+                 (workspace_id,thread_id,message_id,state,resolved_by_message_id,at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','recovery-thread','safe-message','resolved','safe-message',2005,?1,?2)",
+                params![origin_id, decision_seq],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_follows \
+                 (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','user-1','thread','recovery-thread','following',2003,?1,?2)",
+                params![origin_id, follow_seq],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_feed_read_state \
+                 (workspace_id,owner_user_id,last_seen_created_at_ms,last_seen_message_id,updated_at_ms, \
+                  origin_id,origin_seq) \
+                 VALUES ('ws','user-1',2000,'safe-message',2004,?1,?2)",
+                params![origin_id, feed_seq],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed LWW projections");
+}
+
+fn lww_projection_coordinates(engine: &EngineStore) -> BTreeMap<String, (String, i64)> {
+    engine
+        .read_with(|conn| {
+            let mut coordinates = BTreeMap::new();
+            for (op_kind, query) in [
+                (
+                    "chat.reaction.set",
+                    "SELECT origin_id,origin_seq FROM chat_reactions \
+                     WHERE workspace_id='ws' AND reaction_id='recovery-reaction'",
+                ),
+                (
+                    "chat.decision.set",
+                    "SELECT origin_id,origin_seq FROM chat_decisions \
+                     WHERE workspace_id='ws' AND message_id='safe-message'",
+                ),
+                (
+                    "chat.follow.set",
+                    "SELECT origin_id,origin_seq FROM chat_follows \
+                     WHERE workspace_id='ws' AND owner_user_id='user-1' \
+                       AND target_kind='thread' AND target_id='recovery-thread'",
+                ),
+                (
+                    "chat.feed.read.set",
+                    "SELECT origin_id,origin_seq FROM chat_feed_read_state \
+                     WHERE workspace_id='ws' AND owner_user_id='user-1'",
+                ),
+            ] {
+                coordinates.insert(
+                    op_kind.to_owned(),
+                    conn.query_row(query, [], |row| Ok((row.get(0)?, row.get(1)?)))?,
+                );
+            }
+            Ok::<_, rusqlite::Error>(coordinates)
+        })
+        .expect("read LWW projection coordinates")
+}
+
+fn lww_log_coordinates(engine: &EngineStore, origin_id: &str) -> BTreeMap<String, (String, i64)> {
+    engine
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT op_kind,payload_json,origin_seq FROM replication_log \
+                 WHERE workspace_id='ws' AND origin_id=?1 ORDER BY origin_seq",
+            )?;
+            let rows = statement.query_map([origin_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            let mut coordinates = BTreeMap::new();
+            for row in rows {
+                let (op_kind, payload_json, origin_seq) = row?;
+                if !matches!(
+                    op_kind.as_str(),
+                    "chat.reaction.set"
+                        | "chat.decision.set"
+                        | "chat.follow.set"
+                        | "chat.feed.read.set"
+                ) {
+                    continue;
+                }
+                let payload: serde_json::Value = serde_json::from_str(&payload_json)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+                if op_kind == "chat.decision.set" && payload["state"] != "resolved" {
+                    continue;
+                }
+                coordinates.insert(op_kind, (origin_id.to_owned(), origin_seq));
+            }
+            Ok::<_, rusqlite::Error>(coordinates)
+        })
+        .expect("read LWW log coordinates")
+}
+
+fn seed_recovery_decision_conflict(
+    engine: &mut EngineStore,
+    peer_origin_id: &str,
+    local_is_current_winner: bool,
+) -> ReplicationEnvelope {
+    seed_identity(engine);
+    let peer_operation = envelope(
+        peer_origin_id,
+        0,
+        "chat.decision.set",
+        json!({
+            "messageId": "conflicted-decision",
+            "threadId": "recovery-thread",
+            "state": "resolved",
+            "resolvedByMessageId": "peer-resolver",
+            "atMs": 2_100
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(engine, &peer_operation, &NoFaults).expect("apply peer decision"),
+        ApplyOutcome::Applied(())
+    );
+    let local_seq = journal_test_op(
+        engine,
+        "chat.decision.set",
+        &json!({
+            "messageId": "conflicted-decision",
+            "threadId": "recovery-thread",
+            "state": "resolved",
+            "resolvedByMessageId": "local-resolver",
+            "atMs": 2_100
+        }),
+    );
+    assert_eq!(local_seq, 1);
+    if local_is_current_winner {
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE chat_decisions SET resolved_by_message_id='local-resolver', \
+                     origin_id='local',origin_seq=?1 \
+                     WHERE workspace_id='ws' AND message_id='conflicted-decision'",
+                    [local_seq],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed local decision winner");
+    }
+    peer_operation
+}
+
+fn recover_local_origin(engine: &mut EngineStore, new_origin_id: &str) {
+    RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![ReplicationEnvelope {
+                workspace_id: "ws".to_owned(),
+                origin_id: "local".to_owned(),
+                origin_seq: 0,
+                op_kind: "probe.local".to_owned(),
+                payload: json!({}),
+                recorded_at_ms: 1_000,
+            }],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]))
+    .recover_origin(engine, "ws", new_origin_id, &NoFaults)
+    .expect("recover conflicted decision origin");
+}
+
+fn conflicted_decision_projection(engine: &EngineStore) -> (Option<String>, String, i64) {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT resolved_by_message_id,origin_id,origin_seq FROM chat_decisions \
+                 WHERE workspace_id='ws' AND message_id='conflicted-decision'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("read conflicted decision projection")
+}
+
+fn rebased_decision_operation(engine: &EngineStore, origin_id: &str) -> ReplicationEnvelope {
+    list_replication_ops(engine, "ws", origin_id, -1, 10)
+        .expect("list rebased decision operation")
+        .into_iter()
+        .find(|operation| operation.op_kind == "chat.decision.set")
+        .expect("rebased decision operation")
+}
+
+#[test]
+fn relay_pull_recovers_only_a_diverged_local_origin() {
+    for (origin_id, expected) in [
+        ("local", RelayError::OriginDiverged),
+        ("peer", RelayError::InvalidResponse),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        seed_identity(&mut engine);
+        if origin_id == "peer" {
+            engine
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO replication_log \
+                         (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                         VALUES ('ws','peer',0,'probe.peer','{}',1000,1)",
+                        [],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .expect("seed imported coordinate");
+        }
+        let client = RelaySyncClient::new(FakeRelay {
+            pushes: Mutex::new(0),
+            pull: Mutex::new(Some(PullResponse {
+                ops: vec![envelope(
+                    origin_id,
+                    0,
+                    if origin_id == "local" {
+                        "probe.local"
+                    } else {
+                        "probe.peer"
+                    },
+                    json!({"changed": true}),
+                )],
+                next_cursor: 1,
+                has_more: false,
+            })),
+        });
+
+        assert_eq!(
+            client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+            Err(expected),
+            "{origin_id}"
+        );
+    }
 }
 
 #[test]
@@ -9779,6 +10878,125 @@ fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
         crate::model::MAX_PULL_PAGES_PER_PASS + 1,
         "MUTATION: restoring the recover page ceiling rejects before the terminal page"
     );
+}
+
+#[test]
+fn recover_origin_rebases_each_current_lww_projection_coordinate() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let (reaction_seq, decision_seq, follow_seq, feed_seq) = journal_lww_ops(&mut engine);
+    seed_lww_projections(
+        &mut engine,
+        "local",
+        reaction_seq,
+        decision_seq,
+        follow_seq,
+        feed_seq,
+    );
+    let recovery = RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![ReplicationEnvelope {
+                workspace_id: "ws".to_owned(),
+                origin_id: "local".to_owned(),
+                origin_seq: 0,
+                op_kind: "probe.local".to_owned(),
+                payload: json!({}),
+                recorded_at_ms: 1_000,
+            }],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]));
+
+    let recovered = recovery
+        .recover_origin(&mut engine, "ws", "recovered-lww", &NoFaults)
+        .expect("recover LWW suffix");
+    assert_eq!(recovered.shared_prefix_length, 1);
+
+    let projection_coordinates = lww_projection_coordinates(&engine);
+    let log_coordinates = lww_log_coordinates(&engine, "recovered-lww");
+    assert_eq!(projection_coordinates, log_coordinates);
+    for (op_kind, expected_seq) in [
+        ("chat.reaction.set", 0),
+        ("chat.decision.set", 4),
+        ("chat.follow.set", 2),
+        ("chat.feed.read.set", 3),
+    ] {
+        assert_eq!(
+            projection_coordinates.get(op_kind),
+            Some(&("recovered-lww".to_owned(), expected_seq)),
+            "{op_kind} must point at its exact recovered replication_log row"
+        );
+    }
+}
+
+#[test]
+fn recover_origin_recomputes_when_rebased_decision_winner_becomes_a_loser() {
+    let (_scratch, _path, mut engine) = store();
+    let peer_operation = seed_recovery_decision_conflict(&mut engine, "k-peer", true);
+    assert_eq!(
+        conflicted_decision_projection(&engine),
+        (Some("local-resolver".to_owned()), "local".to_owned(), 1)
+    );
+
+    recover_local_origin(&mut engine, "a-recovered");
+    let recovered_projection = conflicted_decision_projection(&engine);
+    assert_eq!(
+        recovered_projection,
+        (Some("peer-resolver".to_owned()), "k-peer".to_owned(), 0)
+    );
+
+    let rebased_operation = rebased_decision_operation(&engine, "a-recovered");
+    let (_peer_scratch, _peer_path, mut peer) = store();
+    assert_eq!(
+        apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut peer, &rebased_operation, &NoFaults)
+            .expect("apply rebased losing decision"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(conflicted_decision_projection(&peer), recovered_projection);
+}
+
+#[test]
+fn recover_origin_recomputes_when_rebased_decision_loser_becomes_the_winner() {
+    let (_scratch, _path, mut engine) = store();
+    let peer_operation = seed_recovery_decision_conflict(&mut engine, "middle-peer", false);
+    assert_eq!(
+        conflicted_decision_projection(&engine),
+        (
+            Some("peer-resolver".to_owned()),
+            "middle-peer".to_owned(),
+            0
+        )
+    );
+
+    recover_local_origin(&mut engine, "z-recovered");
+    let recovered_projection = conflicted_decision_projection(&engine);
+    assert_eq!(
+        recovered_projection,
+        (
+            Some("local-resolver".to_owned()),
+            "z-recovered".to_owned(),
+            0
+        )
+    );
+
+    let rebased_operation = rebased_decision_operation(&engine, "z-recovered");
+    let (_peer_scratch, _peer_path, mut peer) = store();
+    assert_eq!(
+        apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut peer, &rebased_operation, &NoFaults)
+            .expect("apply rebased winning decision"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(conflicted_decision_projection(&peer), recovered_projection);
 }
 
 #[test]

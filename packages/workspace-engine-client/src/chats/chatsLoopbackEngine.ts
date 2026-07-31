@@ -725,7 +725,10 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.decisionResolve:
       return ["threadId", "messageId", "resolvedByMessageId", "nowMs"];
     case CHATS_METHOD.reactionSet:
-      return ["threadId", "messageId", "emoji", "author", "state", "nowMs"];
+      return [
+        "threadId", "messageId", "emoji", "author", "replicationAuthorId",
+        "state", "nowMs",
+      ];
     case CHATS_METHOD.decisionsListForThread:
     case CHATS_METHOD.reactionsList:
     case CHATS_METHOD.attachmentsListForThread:
@@ -1147,14 +1150,26 @@ export class ChatsLoopbackEngine implements EngineTransport {
         const author = strictObject(params.author ?? null, "author", [
           "authorId", "kind", "displayName",
         ]);
+        const authorId = normalizeTrimmed(
+          requiredString(author, "authorId", "invalid-sender"),
+          "invalid-sender",
+        );
+        const replicationAuthorId = optionalString(params, "replicationAuthorId");
+        const normalizedReplicationAuthorId = replicationAuthorId === undefined
+          ? undefined
+          : normalizeTrimmed(replicationAuthorId, "invalid-sender");
+        if (
+          normalizedReplicationAuthorId !== undefined &&
+          normalizedReplicationAuthorId !== authorId
+        ) {
+          throw new Error("invalid-sender");
+        }
         return JSON.stringify([
           normalizeTrimmed(requiredString(params, "threadId"), "invalid-input"),
           requiredString(params, "messageId"),
           validateEmoji(requiredString(params, "emoji", "invalid-message-body")),
-          normalizeTrimmed(
-            requiredString(author, "authorId", "invalid-sender"),
-            "invalid-sender",
-          ),
+          authorId,
+          normalizedReplicationAuthorId ?? "",
           requiredString(author, "kind", "invalid-sender"),
           normalizeTrimmed(
             requiredString(author, "displayName", "invalid-sender"),
@@ -1816,7 +1831,20 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const authorInput = strictObject(params.author ?? null, "author", [
       "authorId", "kind", "displayName",
     ]);
-    const authorId = normalizeNonempty(requiredString(authorInput, "authorId", "invalid-sender"), "invalid-sender");
+    const authorId = normalizeTrimmed(
+      requiredString(authorInput, "authorId", "invalid-sender"),
+      "invalid-sender",
+    );
+    const replicationAuthorId = optionalString(params, "replicationAuthorId");
+    const normalizedReplicationAuthorId = replicationAuthorId === undefined
+      ? undefined
+      : normalizeTrimmed(replicationAuthorId, "invalid-sender");
+    if (
+      normalizedReplicationAuthorId !== undefined &&
+      normalizedReplicationAuthorId !== authorId
+    ) {
+      throw new Error("invalid-sender");
+    }
     const kind = requiredString(authorInput, "kind", "invalid-sender");
     if (kind !== "human" && kind !== "agent") throw new Error("invalid-sender");
     const stateValue = requiredString(params, "state", "invalid-parameters");
@@ -1831,7 +1859,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       author: {
         authorId,
         kind,
-        displayName: normalizeNonempty(
+        displayName: normalizeTrimmed(
           requiredString(authorInput, "displayName", "invalid-sender"),
           "invalid-sender",
         ),

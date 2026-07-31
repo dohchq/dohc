@@ -6,13 +6,14 @@ import type {
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
 import {
+  decodeRelayWorkspaceBootstrap,
   RelayBlobMissingError,
   RelayConflictError,
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
-  type ProbeRelayWorkspaceResult,
+  type RelayWorkspaceBootstrapResult,
   type PullWorkspaceFromRelayResult,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
@@ -908,21 +909,19 @@ export async function pullWorkspaceFromRelay(
   return { fetched, ...applyCounts, fastForwardedPaths, nextCursor: cursor, commitFetchCursor };
 }
 
-// Cheap pre-flight for the desktop join flow: fetch the FIRST log page only
-// (no engine store, no disk writes). Distinguishes "no such workspace for
-// this account" (the relay's fixed 404 -> RelayWorkspaceUnavailableError)
-// from "claimed but nothing synced yet" (an owned workspace with an empty
-// log). The join flow refuses both before it creates any local state, so a
-// mistyped code can never mint an empty local workspace.
+// Authenticated pre-flight for the desktop join flow (no engine store and no
+// disk writes). The relay returns content presence and its authoritative sync
+// coordinate together so the join cannot probe one generation and adopt
+// another. An unset coordinate stays null until the fresh daemon claims it.
 export async function probeRelayWorkspace(input: {
   workspaceId: WorkspaceId;
   relay: SyncRelayConnection;
-}): Promise<ProbeRelayWorkspaceResult> {
-  const page = await jsonRelay<RelayLogPage>(
+}): Promise<RelayWorkspaceBootstrapResult> {
+  const bootstrap = await jsonRelay<unknown>(
     input.relay,
-    `/sync/${encodeURIComponent(input.workspaceId)}/log?since=0&limit=1`,
+    `/sync/${encodeURIComponent(input.workspaceId)}/bootstrap`,
   );
-  return { hasContent: page.ops.length > 0 };
+  return decodeRelayWorkspaceBootstrap(bootstrap);
 }
 
 export async function claimRelayWorkspace(input: {

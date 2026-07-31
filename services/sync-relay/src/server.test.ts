@@ -165,6 +165,7 @@ describe("sync relay handler", () => {
       request(null, "/sync/workspace-a/blobs/have", jsonBody({ sha256s: [blobSha] })),
       request(null, "/sync/workspace-a/keys", { method: "GET" }),
       request(null, "/sync/workspace-a/keys", { method: "PUT", body: "{}" }),
+      request(null, "/sync/workspace-a/bootstrap", { method: "GET" }),
       request(null, "/sync/workspace-a/epoch", jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 })),
       request(null, "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op(0)] })),
       request(null, "/sync/workspace-a/log?since=0", { method: "GET" }),
@@ -196,6 +197,7 @@ describe("sync relay handler", () => {
       (ws: string) => request("intruder", `/sync/${ws}/blobs/have`, jsonBody({ sha256s: [blobSha] })),
       (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "GET" }),
       (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "PUT", body: "{}" }),
+      (ws: string) => request("intruder", `/sync/${ws}/bootstrap`, { method: "GET" }),
       (ws: string) => request("intruder", `/sync/${ws}/epoch`, jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 })),
       (ws: string) => request("intruder", `/sync/${ws}/log`, jsonBody({ originId: "origin-b", ops: [op(0)] })),
       (ws: string) => request("intruder", `/sync/${ws}/log?since=0`, { method: "GET" }),
@@ -1014,6 +1016,95 @@ describe("sync relay handler", () => {
 });
 
 describe("sync relay epoch and stream identity enforcement", () => {
+  it("returns content presence and the current identity in one owner-only bootstrap read", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+
+    const empty = await h(
+      request("a", "/sync/workspace-a/bootstrap", { method: "GET" }),
+    );
+    expect(empty.status).toBe(200);
+    expect(await json(empty)).toEqual({
+      ok: true,
+      hasContent: false,
+      replicationEpoch: null,
+      streamIdentity: null,
+    });
+
+    const pushed = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(withIdentity({ originId: "origin-a", ops: [op(0)] })),
+      ),
+    );
+    expect(pushed.status).toBe(200);
+
+    const established = await h(
+      request("a", "/sync/workspace-a/bootstrap", { method: "GET" }),
+    );
+    expect(established.status).toBe(200);
+    expect(await json(established)).toEqual({
+      ok: true,
+      hasContent: true,
+      replicationEpoch: EPOCH_1,
+      streamIdentity: STREAM_1,
+    });
+
+    const rotated = await h(
+      request(
+        "a",
+        "/sync/workspace-a/epoch",
+        jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+      ),
+    );
+    expect(rotated.status).toBe(200);
+    expect(
+      await json(
+        await h(
+          request("a", "/sync/workspace-a/bootstrap", { method: "GET" }),
+        ),
+      ),
+    ).toEqual({
+      ok: true,
+      hasContent: false,
+      replicationEpoch: EPOCH_2,
+      streamIdentity: STREAM_2,
+    });
+
+    const pushedAfterRotation = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(
+          withIdentity(
+            { originId: "origin-b", ops: [op(0)] },
+            EPOCH_2,
+            STREAM_2,
+          ),
+        ),
+      ),
+    );
+    expect(pushedAfterRotation.status).toBe(200);
+    expect(
+      await json(
+        await h(
+          request("a", "/sync/workspace-a/bootstrap", { method: "GET" }),
+        ),
+      ),
+    ).toEqual({
+      ok: true,
+      hasContent: true,
+      replicationEpoch: EPOCH_2,
+      streamIdentity: STREAM_2,
+    });
+    expect(
+      (await h(request("a", "/sync/workspace-a/bootstrap", { method: "POST" })))
+        .status,
+    ).toBe(405);
+  });
+
   it("first identity-bearing push claims the workspace identity and matching pushes keep it", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -1880,10 +1971,11 @@ describe("sync relay epoch and stream identity enforcement", () => {
   });
 });
 
-// WS-MU-C0 — the relay stamps/verifies that a chat op's claimed author equals
+// WS-MU-C0 — the relay verifies that a chat op's claimed author equals
 // the authenticated pusher (actor.userId) before admitting it to the log. These
 // mirror PR-18's isolation rigor: a forged author is rejected atomically and
-// leaves the log unchanged; the honest path is admitted; solo ops are untouched.
+// leaves the log unchanged. The honest path is admitted. An unattributed local
+// message cannot enter either relay log.
 describe("MU-C0 verified chat authorship", () => {
   function messageOp(
     originSeq: number,
@@ -1967,26 +2059,20 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toHaveLength(2);
   });
 
-  it("stamps the authenticated pusher onto a message.append that omits authorUserId", async () => {
-    // The relay only ever sees AUTHENTICATED pushes, so an append that omits
-    // authorUserId is not "solo" here — it is attributable to its pusher. The
-    // relay stamps actor.userId so the replicated op is VERIFIED, never NULL.
-    // (The genuine solo/no-relay omission survives only in the engine-local
-    // path, which never traverses the relay.)
+  it("rejects a workspace message with no authorUserId and leaves the log unchanged", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
-    const stamped = await h(
+    const missing = await h(
       request(
         "a",
         "/sync/workspace-a/log",
         jsonBody({ originId: "origin-a", ops: [messageOp(0, undefined)] }),
       ),
     );
-    expect(stamped.status).toBe(200);
-    const ops = await logOps(h);
-    expect(ops).toHaveLength(1);
-    expect((ops[0] as { payload: { authorUserId?: string } }).payload.authorUserId).toBe("a");
+    expect(missing.status).toBe(403);
+    expect(await json(missing)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+    expect(await logOps(h)).toEqual([]);
   });
 
   it("rejects a message.append forging another user's authorUserId, leaving the log unchanged", async () => {

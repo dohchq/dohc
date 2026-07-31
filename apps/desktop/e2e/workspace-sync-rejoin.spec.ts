@@ -56,14 +56,11 @@ function relayConnection(baseUrl: string): SyncRelayConnection {
   return { baseUrl, token: TOKEN };
 }
 
-// R10b: once the app's daemon first pushes (or claims), the relay adopts the
-// daemon's replication identity and identity-less /log calls 409 with
-// identity_required. The TS harness client deliberately presents no identity
-// of its own, so the headless machine learns the adopted coordinate from the
-// relay's SQLite (relayAdoptedIdentity) and injects it at the connection's
-// fetch seam: query params on pulls, body fields on pushes. Pre-adopting a
-// spec-minted identity would instead 409 the APP's push — the relay refuses
-// every identity but the first.
+// R10b log requests must present the relay's current replication identity once
+// it is established. The headless harness injects that coordinate at its fetch
+// seam: query params on pulls and body fields on pushes. The join bootstrap is
+// the separate authenticated handoff that lets a fresh daemon adopt an already
+// established coordinate before its first pull.
 function identityConnection(
   baseUrl: string,
   identity: RelayWorkspaceIdentity | null,
@@ -186,6 +183,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
         workspaceId,
         threadId: thread.id,
         author: { kind: "human", displayName: "Ice" },
+        authorUserId: "e2e-user",
         body: "Let's settle the quasar sync cadence this week.",
       });
     } finally {
@@ -195,16 +193,24 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     const relayDb = join(temp.baseDir, "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: TOKEN, workspaceId });
+    const establishedIdentity: RelayWorkspaceIdentity = {
+      replicationEpoch: "epoch-join-e2e",
+      streamIdentity: "stream-join-e2e",
+    };
     await pushWorkspaceToRelay({
       rootDir: machine1,
       workspaceId,
-      relay: relayConnection(relay.baseUrl),
+      relay: identityConnection(relay.baseUrl, establishedIdentity),
     });
+    expect(relayAdoptedIdentity(relayDb, workspaceId)).toEqual(
+      establishedIdentity,
+    );
 
     // Machine 2 is the app: fresh home (no workspaces), already signed in.
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
+      userId: "e2e-user",
     });
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
@@ -244,11 +250,9 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     // carries no `.context/me.md` op, and the ORIGINAL machine's next pull
     // converges without conflicts or a boilerplate me.md.
     //
-    // The joining app adopts the relay's replication identity at a timing the
-    // spec does not control (its first claim/push), so both reads below learn
-    // the current identity and retry across an adoption racing them — the
-    // same pattern as spec 1's polls.
-    let identity: RelayWorkspaceIdentity | null = null;
+    // The joining app must adopt the coordinate that machine 1 established
+    // above before its first pull. Both later reads use that same coordinate.
+    let identity: RelayWorkspaceIdentity | null = establishedIdentity;
     const loggedPaths: string[] = [];
     await expect
       .poll(
@@ -377,6 +381,7 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
+      userId: "e2e-user",
     });
 
     desktop = await launchDesktopApp({

@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
 use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
+use crate::apply::apply_chat_lww_projection_tx;
 use crate::cursor::{
     RelayCursor, commit_relay_cursor, read_pushed_seq, rewind_pushed_seq, write_pushed_seq,
 };
@@ -500,7 +501,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         };
 
-        preflight_collisions(store, workspace_id, &ops)?;
+        preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
         let mut applied = 0_usize;
@@ -801,12 +802,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     ],
                 )
                 .map_err(SyncError::persist)?;
+                let affected_chat_lww_cells = rebase_chat_projection_suffix(
+                    tx,
+                    workspace_id,
+                    &old_origin_id,
+                    shared_prefix_length,
+                    new_origin_id,
+                )?;
                 tx.execute(
                     "DELETE FROM replication_log \
                      WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>=?3",
                     params![workspace_id, old_origin_id, shared_prefix_length],
                 )
                 .map_err(SyncError::persist)?;
+                recompute_chat_projection_winners(
+                    tx,
+                    workspace_id,
+                    new_origin_id,
+                    &affected_chat_lww_cells,
+                )?;
                 tx.execute(
                     "UPDATE sync_identity SET origin_id=?1 WHERE workspace_id=?2",
                     params![new_origin_id, workspace_id],
@@ -1516,12 +1530,264 @@ fn local_blob_present(
         .map_err(local)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ChatLwwCell {
+    Reaction {
+        message_id: String,
+        emoji: String,
+        author_id: String,
+    },
+    Decision {
+        message_id: String,
+    },
+    Follow {
+        owner_user_id: String,
+        target_kind: String,
+        target_id: String,
+    },
+    FeedRead {
+        owner_user_id: String,
+    },
+}
+
+fn chat_lww_cell(op_kind: &str, payload: &serde_json::Value) -> Option<ChatLwwCell> {
+    let field = |name| payload.get(name)?.as_str().map(str::to_owned);
+    match op_kind {
+        "chat.reaction.set" => Some(ChatLwwCell::Reaction {
+            message_id: field("messageId")?,
+            emoji: field("emoji")?,
+            author_id: field("authorId")?,
+        }),
+        "chat.decision.set" => Some(ChatLwwCell::Decision {
+            message_id: field("messageId")?,
+        }),
+        "chat.follow.set" => Some(ChatLwwCell::Follow {
+            owner_user_id: field("ownerUserId")?,
+            target_kind: field("targetKind")?,
+            target_id: field("targetId")?,
+        }),
+        "chat.feed.read.set" => Some(ChatLwwCell::FeedRead {
+            owner_user_id: field("ownerUserId")?,
+        }),
+        _ => None,
+    }
+}
+
+fn rebase_chat_projection_suffix(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    old_origin_id: &str,
+    first_old_origin_seq: i64,
+    new_origin_id: &str,
+) -> Result<BTreeSet<ChatLwwCell>, SyncError> {
+    let suffix_ops = {
+        let mut statement = tx
+            .prepare(
+                "SELECT origin_seq,op_kind,payload_json FROM replication_log \
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>=?3 \
+                   AND op_kind IN ('chat.reaction.set','chat.decision.set', \
+                                   'chat.follow.set','chat.feed.read.set') \
+                 ORDER BY origin_seq",
+            )
+            .map_err(SyncError::corrupt)?;
+        statement
+            .query_map(
+                params![workspace_id, old_origin_id, first_old_origin_seq],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)?
+    };
+    let mut affected = BTreeSet::new();
+    for (old_origin_seq, op_kind, payload_json) in suffix_ops {
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_json).map_err(SyncError::corrupt)?;
+        let cell = chat_lww_cell(&op_kind, &payload).ok_or(SyncError::CoordinateDiverged)?;
+        let new_origin_seq = old_origin_seq
+            .checked_sub(first_old_origin_seq)
+            .ok_or(SyncError::CoordinateDiverged)?;
+        rebase_current_chat_projection(
+            tx,
+            workspace_id,
+            old_origin_id,
+            old_origin_seq,
+            new_origin_id,
+            new_origin_seq,
+            &cell,
+        )?;
+        affected.insert(cell);
+    }
+    Ok(affected)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rebase_current_chat_projection(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    old_origin_id: &str,
+    old_origin_seq: i64,
+    new_origin_id: &str,
+    new_origin_seq: i64,
+    cell: &ChatLwwCell,
+) -> Result<(), SyncError> {
+    match cell {
+        ChatLwwCell::Reaction {
+            message_id,
+            emoji,
+            author_id,
+        } => tx.execute(
+            "UPDATE chat_reactions SET origin_id=?1,origin_seq=?2 \
+             WHERE workspace_id=?3 AND origin_id=?4 AND origin_seq=?5 \
+               AND message_id=?6 AND emoji=?7 AND author_id=?8",
+            params![
+                new_origin_id,
+                new_origin_seq,
+                workspace_id,
+                old_origin_id,
+                old_origin_seq,
+                message_id,
+                emoji,
+                author_id
+            ],
+        ),
+        ChatLwwCell::Decision { message_id } => tx.execute(
+            "UPDATE chat_decisions SET origin_id=?1,origin_seq=?2 \
+             WHERE workspace_id=?3 AND origin_id=?4 AND origin_seq=?5 AND message_id=?6",
+            params![
+                new_origin_id,
+                new_origin_seq,
+                workspace_id,
+                old_origin_id,
+                old_origin_seq,
+                message_id
+            ],
+        ),
+        ChatLwwCell::Follow {
+            owner_user_id,
+            target_kind,
+            target_id,
+        } => tx.execute(
+            "UPDATE chat_follows SET origin_id=?1,origin_seq=?2 \
+             WHERE workspace_id=?3 AND origin_id=?4 AND origin_seq=?5 \
+               AND owner_user_id=?6 AND target_kind=?7 AND target_id=?8",
+            params![
+                new_origin_id,
+                new_origin_seq,
+                workspace_id,
+                old_origin_id,
+                old_origin_seq,
+                owner_user_id,
+                target_kind,
+                target_id
+            ],
+        ),
+        ChatLwwCell::FeedRead { owner_user_id } => tx.execute(
+            "UPDATE chat_feed_read_state SET origin_id=?1,origin_seq=?2 \
+             WHERE workspace_id=?3 AND origin_id=?4 AND origin_seq=?5 AND owner_user_id=?6",
+            params![
+                new_origin_id,
+                new_origin_seq,
+                workspace_id,
+                old_origin_id,
+                old_origin_seq,
+                owner_user_id
+            ],
+        ),
+    }
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn recompute_chat_projection_winners(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    new_origin_id: &str,
+    affected: &BTreeSet<ChatLwwCell>,
+) -> Result<(), SyncError> {
+    if affected.is_empty() {
+        return Ok(());
+    }
+    let raw_candidates = {
+        let mut statement = tx
+            .prepare(
+                "SELECT origin_id,origin_seq,op_kind,payload_json,recorded_at_ms \
+                 FROM replication_log WHERE workspace_id=?1 \
+                   AND op_kind IN ('chat.reaction.set','chat.decision.set', \
+                                   'chat.follow.set','chat.feed.read.set') \
+                 ORDER BY origin_id,origin_seq",
+            )
+            .map_err(SyncError::corrupt)?;
+        statement
+            .query_map([workspace_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)?
+    };
+    for (origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) in raw_candidates {
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_json).map_err(SyncError::corrupt)?;
+        let Some(cell) = chat_lww_cell(&op_kind, &payload) else {
+            continue;
+        };
+        if !affected.contains(&cell) {
+            continue;
+        }
+        let operation = ReplicationEnvelope {
+            workspace_id: workspace_id.to_owned(),
+            origin_id,
+            origin_seq,
+            op_kind,
+            payload,
+            recorded_at_ms,
+        };
+        tx.execute_batch("SAVEPOINT dohc_recover_chat_lww")
+            .map_err(SyncError::persist)?;
+        match apply_chat_lww_projection_tx(tx, &operation) {
+            Ok(()) => tx
+                .execute_batch("RELEASE dohc_recover_chat_lww")
+                .map_err(SyncError::persist)?,
+            Err(error) => {
+                tx.execute_batch(
+                    "ROLLBACK TO dohc_recover_chat_lww; RELEASE dohc_recover_chat_lww",
+                )
+                .map_err(SyncError::persist)?;
+                match error {
+                    SyncError::InvalidInput { .. } if operation.origin_id != new_origin_id => {
+                        continue;
+                    }
+                    SyncError::InvalidInput { .. } => {
+                        return Err(SyncError::CoordinateDiverged);
+                    }
+                    error => return Err(error),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn preflight_collisions(
     store: &EngineStore,
     workspace_id: &str,
+    local_origin_id: &str,
     ops: &[ReplicationEnvelope],
 ) -> Result<(), RelayError> {
-    store
+    let diverged_is_local = store
         .read_with(|conn| {
             for op in ops {
                 let existing = conn
@@ -1542,26 +1808,27 @@ fn preflight_collisions(
                 let Some((op_kind, payload_json, recorded_at_ms)) = existing else {
                     continue;
                 };
-                let local_payload: serde_json::Value = serde_json::from_str(&payload_json)
-                    .map_err(|_| SyncError::CoordinateDiverged)?;
-                let local_bytes = canonical_json_bytes(&local_payload)?;
-                let remote_bytes = canonical_json_bytes(&op.payload)?;
+                let local_payload: serde_json::Value = match serde_json::from_str(&payload_json) {
+                    Ok(payload) => payload,
+                    Err(_) => return Ok(Some(op.origin_id == local_origin_id)),
+                };
                 if op_kind != op.op_kind
                     || recorded_at_ms != op.recorded_at_ms
-                    || local_bytes != remote_bytes
+                    || canonical_json_bytes(&local_payload)? != canonical_json_bytes(&op.payload)?
                 {
-                    return Err(SyncError::CoordinateDiverged);
+                    return Ok(Some(op.origin_id == local_origin_id));
                 }
             }
-            Ok(())
+            Ok(None)
         })
-        .map_err(|error| {
-            if matches!(error, SyncError::CoordinateDiverged) {
-                RelayError::OriginDiverged
-            } else {
-                local(error)
-            }
-        })
+        .map_err(local)?;
+    match diverged_is_local {
+        Some(true) => Err(RelayError::OriginDiverged),
+        // Recovering the local origin cannot repair a conflicting imported
+        // coordinate. Fail closed without rotating the unrelated local log.
+        Some(false) => Err(RelayError::InvalidResponse),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {

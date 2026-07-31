@@ -66,10 +66,12 @@ describe("registry store", () => {
     store.setRemote("ws-1", {
       serverUrl: "https://cloud.dohc.example",
       remoteWorkspaceId: "rw-99",
+      ownerUserId: "user-99",
     });
     expect(store.find("ws-1")?.remote).toEqual({
       serverUrl: "https://cloud.dohc.example",
       remoteWorkspaceId: "rw-99",
+      ownerUserId: "user-99",
     });
   });
 
@@ -100,6 +102,7 @@ describe("registry store", () => {
       access: "read-write" as const,
       granterEmail: "owner@example.com",
       relayUrl: "http://relay.test",
+      recipientUserId: "member-1",
     };
     store.setSharedChannels("ws-1", [joined]);
     expect(store.find("ws-1")?.sharedChannels).toEqual([joined]);

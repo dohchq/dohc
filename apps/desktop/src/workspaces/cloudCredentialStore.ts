@@ -10,10 +10,9 @@ export interface CloudCredentials {
   serverUrl: string;
   relayUrl?: string;
   email: string;
-  // The Better Auth user id (an opaque uuid). Used as the STABLE, OPAQUE reactor
-  // author key so raw email (PII) never replicates into the CRDT. Optional so an
-  // older credential file (saved before this field existed) still loads.
-  userId?: string;
+  // The Better Auth user id (an opaque uuid). This is the stable author key,
+  // so a signed-in session cannot exist without it.
+  userId: string;
   token: string;
 }
 
@@ -59,6 +58,7 @@ export function createCloudCredentialStore(options: {
       if (
         !nonEmptyString(obj.serverUrl) ||
         !nonEmptyString(obj.email) ||
+        !nonEmptyString(obj.userId) ||
         !nonEmptyString(obj.token)
       ) {
         return null;
@@ -83,12 +83,25 @@ export function createCloudCredentialStore(options: {
         serverUrl: obj.serverUrl,
         ...(nonEmptyString(obj.relayUrl) ? { relayUrl: obj.relayUrl } : {}),
         email: obj.email,
-        ...(nonEmptyString(obj.userId) ? { userId: obj.userId } : {}),
+        userId: obj.userId,
         token,
       };
     },
 
     async save(credentials: CloudCredentials): Promise<void> {
+      if (
+        !credentials ||
+        !nonEmptyString(credentials.serverUrl) ||
+        !nonEmptyString(credentials.email) ||
+        !nonEmptyString(credentials.userId) ||
+        !nonEmptyString(credentials.token) ||
+        (credentials.relayUrl !== undefined &&
+          !nonEmptyString(credentials.relayUrl))
+      ) {
+        throw new Error(
+          "Cannot save cloud credentials: serverUrl, email, userId, and token must be non-empty strings; relayUrl must be non-empty when set.",
+        );
+      }
       // The OS keychain may be absent (Linux without a secret service, CI).
       // The "plain:" prefix documents that fallback on disk so it is never
       // silently lossy, and load() can tell the two formats apart.
@@ -100,7 +113,7 @@ export function createCloudCredentialStore(options: {
         serverUrl: credentials.serverUrl,
         ...(credentials.relayUrl ? { relayUrl: credentials.relayUrl } : {}),
         email: credentials.email,
-        ...(credentials.userId ? { userId: credentials.userId } : {}),
+        userId: credentials.userId,
         token,
       };
       // 0700 dir + 0600 file: the session token is a full account credential,

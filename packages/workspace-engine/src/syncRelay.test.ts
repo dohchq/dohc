@@ -118,6 +118,15 @@ class FakeRelay {
       return new Response("not found", { status: 404 });
     }
 
+    if (parts[2] === "bootstrap" && request.method === "GET") {
+      return Response.json({
+        ok: true,
+        hasContent: this.log.some((op) => op.workspaceId === workspaceId),
+        replicationEpoch: null,
+        streamIdentity: null,
+      });
+    }
+
     if (parts[2] === "blobs" && parts[3] === "have" && request.method === "POST") {
       const body = (await request.json()) as { sha256s: string[] };
       return Response.json({
@@ -508,7 +517,7 @@ describe("sync relay client", () => {
 
     await expect(
       probeRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() }),
-    ).resolves.toEqual({ hasContent: true });
+    ).resolves.toEqual({ hasContent: true, identity: null });
   });
 
   it("probe reports an owned-but-empty workspace as having no content", async () => {
@@ -516,7 +525,7 @@ describe("sync relay client", () => {
     await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
     await expect(
       probeRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() }),
-    ).resolves.toEqual({ hasContent: false });
+    ).resolves.toEqual({ hasContent: false, identity: null });
   });
 
   it("probe maps an absent/foreign workspace to the typed unavailable error", async () => {
@@ -568,6 +577,7 @@ describe("sync relay client", () => {
         channelId: channel.id,
         title: "Relay",
         author: { kind: "agent", displayName: "Agent" },
+        authorUserId: "user-a",
         body: "hello relay",
       });
     } finally {

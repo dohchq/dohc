@@ -1568,16 +1568,17 @@ export interface LinkedChatStore {
   // Set (add or remove) one author's emoji reaction on a message. A
   // set-membership CRDT cell keyed by (messageId, emoji, author.authorId):
   // LWW-per-cell by (atMs, remove-wins tie), so the op is commutative and
-  // re-applying is a no-op. Solo it persists with no relay; it journals a
-  // `chat.reaction.set` op that replicates when the workspace syncs. Returns
-  // the resolved cell after the LWW upsert (state reflects the winning op —
-  // which, for a local set, is always this call's).
+  // re-applying is a no-op. It always persists locally. It journals a
+  // `chat.reaction.set` op only when replicationAuthorId is present and
+  // matches author.authorId. Returns the resolved cell after the LWW upsert
+  // (state reflects the winning op, which is always this call for a local set).
   setReaction(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
     messageId: ChatMessageId;
     emoji: string;
     author: ChatReactionAuthor;
+    replicationAuthorId?: string;
     state: ChatReactionState;
   }): Promise<ChatReaction>;
   // Every ACTIVE ("added") reaction in a thread, oldest-first per cell. The UI

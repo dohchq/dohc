@@ -7,10 +7,11 @@
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
-    FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore,
-    NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, SaveBookmark, SendMessage, SetFollow,
-    StartChannelThread, base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name,
-    decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
+    ChatReactionState, FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
+    LinkedChatStore, LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
+    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
+    encode_feed_cursor, linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -1106,7 +1107,6 @@ fn core_chat_creates_journal_exact_relay_payloads() {
         20,
     );
     opening.title = Some("Launch".to_owned());
-    opening.author_user_id = None;
     chats
         .start_channel_thread(&opening, &NO_FAULTS)
         .expect("thread");
@@ -1197,11 +1197,11 @@ fn core_chat_creates_journal_exact_relay_payloads() {
             "threadId": "thread-1",
             "authorKind": "human",
             "authorDisplayName": "Ada",
+            "authorUserId": "user-ada",
             "body": "opening",
             "createdAtMs": 20,
         })
     );
-    assert!(ops[2].1.get("authorUserId").is_none());
     assert_eq!(ops[3].0, "chat.message.append");
     assert_eq!(
         ops[3].1,
@@ -1216,6 +1216,218 @@ fn core_chat_creates_journal_exact_relay_payloads() {
             "body": "reply",
             "createdAtMs": 30,
         })
+    );
+}
+
+#[test]
+fn authorless_message_and_derived_state_stay_local() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+            .expect("general");
+        let mut opening = start_thread(
+            "gen-1",
+            "local-thread",
+            "local-message",
+            "private before sign-in",
+            ChatActorKind::Human,
+            20,
+        );
+        opening.author_user_id = None;
+        opening.needs_decision = true;
+        opening.attachments = vec![LocalAttachmentInput {
+            object_id: "private-file".to_owned(),
+            path_hint: Some("private/file.md".to_owned()),
+            heading_text: None,
+            heading_anchor: None,
+            heading_occurrence: None,
+        }];
+
+        let (thread, message) = chats
+            .start_channel_thread(&opening, &NO_FAULTS)
+            .expect("local thread");
+        assert_eq!(thread.thread_id, "local-thread");
+        assert_eq!(message.author_user_id, None);
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(
+            chats
+                .list_thread_decisions(WS, "local-thread", None, 10)
+                .expect("local decision")
+                .len(),
+            1
+        );
+        assert_eq!(
+            chats
+                .list_thread_attachments(WS, "local-thread", None, 10)
+                .expect("local attachment")
+                .len(),
+            1
+        );
+        chats
+            .set_reaction(
+                &SetReaction {
+                    workspace_id: WS.to_owned(),
+                    thread_id: "local-thread".to_owned(),
+                    message_id: "local-message".to_owned(),
+                    emoji: "👍".to_owned(),
+                    author_id: "user-ada".to_owned(),
+                    replication_author_id: Some("user-ada".to_owned()),
+                    author_kind: ChatActorKind::Human,
+                    author_display_name: "Ada".to_owned(),
+                    state: ChatReactionState::Added,
+                    now_ms: 21,
+                    request_id: "local-reaction".to_owned(),
+                },
+                &NO_FAULTS,
+            )
+            .expect("local reaction");
+    }
+
+    let unsafe_relay_ops: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE workspace_id = ?1 \
+                 AND op_kind IN ('chat.thread.create', 'chat.message.append', \
+                                 'chat.decision.set', 'chat.attachment.add', \
+                                 'chat.reaction.set')",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("relay-visible ops");
+    assert_eq!(unsafe_relay_ops, 0);
+
+    let local_journal: Vec<(String, String)> = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT doc_id, op_kind FROM replication_journal \
+                 WHERE doc_id IN ('local-thread', 'local-message') ORDER BY seq",
+            )?;
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+        })
+        .expect("local journal");
+    assert_eq!(
+        local_journal,
+        vec![
+            ("local-thread".to_owned(), "chat.thread.create".to_owned()),
+            ("local-message".to_owned(), "chat.message.append".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn authored_reply_exports_structure_without_exporting_local_parent() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+            .expect("general");
+        let mut opening = start_thread(
+            "gen-1",
+            "local-thread",
+            "local-message",
+            "private before sign-in",
+            ChatActorKind::Human,
+            20,
+        );
+        opening.title = Some("Local thread".to_owned());
+        opening.author_user_id = None;
+        chats
+            .start_channel_thread(&opening, &NO_FAULTS)
+            .expect("local thread");
+
+        let mut reply = send_msg(
+            "local-thread",
+            "authored-message",
+            Some("local-message"),
+            "safe to share",
+            30,
+        );
+        reply.needs_decision = true;
+        reply.attachments = vec![LocalAttachmentInput {
+            object_id: "shared-file".to_owned(),
+            path_hint: Some("shared/file.md".to_owned()),
+            heading_text: None,
+            heading_anchor: None,
+            heading_occurrence: None,
+        }];
+        let sent = chats
+            .send_message(&reply, &NO_FAULTS)
+            .expect("authored reply");
+        assert_eq!(sent.parent_message_id.as_deref(), Some("local-message"));
+    }
+
+    let ops: Vec<(i64, String, serde_json::Value)> = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT origin_seq, op_kind, payload_json FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind IN \
+                   ('chat.thread.create', 'chat.message.append', \
+                    'chat.decision.set', 'chat.attachment.add') \
+                 ORDER BY origin_seq",
+            )?;
+            statement
+                .query_map([WS], |row| {
+                    let payload: String = row.get(2)?;
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        serde_json::from_str(&payload).expect("payload json"),
+                    ))
+                })?
+                .collect()
+        })
+        .expect("exported ops");
+    assert_eq!(
+        ops.iter().map(|(seq, _, _)| *seq).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(
+        ops.iter()
+            .map(|(_, kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "chat.thread.create",
+            "chat.message.append",
+            "chat.decision.set",
+            "chat.attachment.add",
+        ]
+    );
+    assert_eq!(
+        ops[0].2,
+        json!({
+            "threadId": "local-thread",
+            "title": "Local thread",
+            "createdAtMs": 20,
+            "channelSlug": "general",
+            "channelWireId": GENERAL_CHANNEL_WIRE_ID,
+        })
+    );
+    assert_eq!(
+        ops[1].2,
+        json!({
+            "messageId": "authored-message",
+            "threadId": "local-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "user-ada",
+            "body": "safe to share",
+            "createdAtMs": 30,
+        })
+    );
+    assert!(ops[1].2.get("parentMessageId").is_none());
+    assert!(
+        ops.iter()
+            .all(|(_, _, payload)| !payload.to_string().contains("local-message"))
     );
 }
 

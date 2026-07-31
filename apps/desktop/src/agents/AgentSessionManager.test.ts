@@ -23,11 +23,23 @@ class FakeSession implements AgentSession {
   async dispose(): Promise<void> {}
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function harness(
   options: {
     startSession?: (input: AgentSessionStartInput) => Promise<AgentSession>;
     probe?: AgentDriver["probe"];
-    mcpFor?: (rootPath: string) => AgentSessionStartInput["mcp"];
+    mcpFor?: (
+      rootPath: string,
+    ) => AgentSessionStartInput["mcp"] | Promise<AgentSessionStartInput["mcp"]>;
   } = {},
 ) {
   const eventHandlers: Array<(event: AgentEvent) => void> = [];
@@ -88,7 +100,7 @@ describe("AgentSessionManager", () => {
       mcpFor: () => ({
         command: "dohc-mcp",
         args: ["--workspace", "/tmp/workspace"],
-        env: { DOHC_MCP_CLOUD_TOKEN: "tok" },
+        env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
       }),
       async startSession(input) {
         captured.push(input);
@@ -105,8 +117,130 @@ describe("AgentSessionManager", () => {
     expect(captured[0]?.mcp).toEqual({
       command: "dohc-mcp",
       args: ["--workspace", "/tmp/workspace"],
-      env: { DOHC_MCP_CLOUD_TOKEN: "tok" },
+      env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
     });
+  });
+
+  it("awaits the main-owned MCP environment before starting the provider", async () => {
+    const mcp = deferred<NonNullable<AgentSessionStartInput["mcp"]>>();
+    const mcpRequested = deferred<void>();
+    const mcpFor = vi.fn(() => {
+      mcpRequested.resolve(undefined);
+      return mcp.promise;
+    });
+    const startSession = vi.fn(async () => new FakeSession());
+    const { manager } = harness({
+      mcpFor,
+      startSession,
+    });
+
+    const starting = manager.startSession({
+      workspaceId: "ws-1",
+      driverId: "fake-driver",
+      prompt: "go",
+    });
+    await mcpRequested.promise;
+    expect(mcpFor).toHaveBeenCalledWith("/tmp/workspace");
+    expect(startSession).not.toHaveBeenCalled();
+
+    mcp.resolve({
+      command: "dohc-mcp",
+      args: [],
+      env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
+    });
+    await starting;
+    expect(startSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mcp: expect.objectContaining({
+          env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
+        }),
+      }),
+    );
+  });
+
+  it("does not start the provider after stopSession ends a pending MCP lookup", async () => {
+    const mcp = deferred<NonNullable<AgentSessionStartInput["mcp"]>>();
+    const mcpRequested = deferred<void>();
+    const startSession = vi.fn(async () => new FakeSession());
+    const { manager, integration } = harness({
+      mcpFor() {
+        mcpRequested.resolve(undefined);
+        return mcp.promise;
+      },
+      startSession,
+    });
+
+    const starting = manager.startSession({
+      workspaceId: "ws-1",
+      driverId: "fake-driver",
+      prompt: "go",
+    });
+    await mcpRequested.promise;
+    await expect(manager.stopSession("ws-1")).resolves.toMatchObject({
+      session: { status: "stopped" },
+    });
+
+    mcp.resolve({ command: "dohc-mcp", args: [] });
+    await expect(starting).resolves.toMatchObject({
+      session: { status: "stopped" },
+    });
+    expect(startSession).not.toHaveBeenCalled();
+    expect(integration.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("does not start the provider after stopAll ends a pending MCP lookup", async () => {
+    const mcp = deferred<NonNullable<AgentSessionStartInput["mcp"]>>();
+    const mcpRequested = deferred<void>();
+    const startSession = vi.fn(async () => new FakeSession());
+    const { manager, integration } = harness({
+      mcpFor() {
+        mcpRequested.resolve(undefined);
+        return mcp.promise;
+      },
+      startSession,
+    });
+
+    const starting = manager.startSession({
+      workspaceId: "ws-1",
+      driverId: "fake-driver",
+      prompt: "go",
+    });
+    await mcpRequested.promise;
+    await manager.stopAll();
+    expect(manager.panelSnapshot("ws-1").session).toBeNull();
+
+    mcp.resolve({ command: "dohc-mcp", args: [] });
+    await expect(starting).resolves.toMatchObject({ session: null });
+    expect(startSession).not.toHaveBeenCalled();
+    expect(integration.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("keeps a stopped session stopped when its pending MCP lookup rejects", async () => {
+    const mcp = deferred<NonNullable<AgentSessionStartInput["mcp"]>>();
+    const mcpRequested = deferred<void>();
+    const startSession = vi.fn(async () => new FakeSession());
+    const { manager, integration } = harness({
+      mcpFor() {
+        mcpRequested.resolve(undefined);
+        return mcp.promise;
+      },
+      startSession,
+    });
+
+    const starting = manager.startSession({
+      workspaceId: "ws-1",
+      driverId: "fake-driver",
+      prompt: "go",
+    });
+    await mcpRequested.promise;
+    await manager.stopSession("ws-1");
+    mcp.reject(new Error("MCP setup failed after cancellation"));
+
+    await expect(starting).resolves.toMatchObject({
+      session: { status: "stopped", lastError: undefined },
+    });
+    expect(startSession).not.toHaveBeenCalled();
+    expect(integration.startAgentRun).not.toHaveBeenCalled();
   });
 
   it("passes only agent probe allowlist env through to drivers", async () => {

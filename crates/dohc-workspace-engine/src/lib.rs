@@ -754,6 +754,10 @@ impl EngineService {
             "sync.claim" => {
                 Box::pin(self.sync_claim(&ctx, request.workspace, request.params)).await?
             }
+            "sync.adoptJoinIdentity" => {
+                Box::pin(self.sync_adopt_join_identity(&ctx, request.workspace, request.params))
+                    .await?
+            }
             "sync.recoverOrigin" => {
                 Box::pin(self.sync_recover_origin(&ctx, request.workspace, request.params)).await?
             }
@@ -2018,8 +2022,38 @@ impl EngineService {
                 configuration,
                 RelayOperation::Claim {
                     workspace_id: open.workspace_id.clone(),
+                    new_origin_id: sync_identifier("origin")?,
+                    new_replication_epoch: sync_identifier("epoch")?,
+                    new_stream_identity: sync_identifier("stream")?,
+                    created_at_ms: now_ms()?,
                 },
                 "sync.claim",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_adopt_join_identity(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AdoptJoinIdentityParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::AdoptJoinIdentity {
+                    workspace_id: open.workspace_id.clone(),
+                    new_origin_id: recovered_origin_id()?,
+                    replication_epoch: params.replication_epoch,
+                    stream_identity: params.stream_identity,
+                    created_at_ms: now_ms()?,
+                },
+                "sync.adoptJoinIdentity",
             )
             .await?;
         relay_outcome_json(outcome)
@@ -5446,6 +5480,7 @@ impl EngineService {
                     message_id: params.message_id,
                     emoji: params.emoji,
                     author_id: params.author.author_id,
+                    replication_author_id: params.replication_author_id,
                     author_kind,
                     author_display_name: params.author.display_name,
                     state,
@@ -8207,6 +8242,14 @@ struct RelayWorkspaceParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdoptJoinIdentityParams {
+    workspace_id: String,
+    replication_epoch: String,
+    stream_identity: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CommitCursorParams {
     workspace_id: String,
     pending_cursor: PendingCursorParams,
@@ -9012,6 +9055,8 @@ struct ChatReactionSetParams {
     message_id: String,
     emoji: String,
     author: ChatReactionAuthorParams,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    replication_author_id: Option<String>,
     state: String,
     now_ms: Option<i64>,
 }
@@ -10463,6 +10508,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         RelayOperationOutcome::CursorCommitted => json!({ "committed": true }),
         RelayOperationOutcome::Probe(has_content) => json!({ "hasContent": has_content }),
         RelayOperationOutcome::Claimed => json!({ "claimed": true }),
+        RelayOperationOutcome::JoinIdentityAdopted => json!({ "adopted": true }),
         RelayOperationOutcome::Recovered(outcome) => json!({
             "oldOriginId": outcome.old_origin_id,
             "newOriginId": outcome.new_origin_id,
@@ -10870,13 +10916,17 @@ fn workspace_unavailable() -> WireError {
 }
 
 fn recovered_origin_id() -> Result<String, WireError> {
-    let mut entropy = [0_u8; 16];
-    getrandom::fill(&mut entropy)
-        .map_err(|_| wire(ErrorCode::Internal, "origin-id-generation-failed"))?;
-    Ok(origin_id_from_entropy(entropy))
+    sync_identifier("origin")
 }
 
-fn origin_id_from_entropy(mut entropy: [u8; 16]) -> String {
+fn sync_identifier(prefix: &'static str) -> Result<String, WireError> {
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy)
+        .map_err(|_| wire(ErrorCode::Internal, "sync-identity-generation-failed"))?;
+    Ok(sync_identifier_from_entropy(prefix, entropy))
+}
+
+fn sync_identifier_from_entropy(prefix: &str, mut entropy: [u8; 16]) -> String {
     entropy[6] = (entropy[6] & 0x0f) | 0x40;
     entropy[8] = (entropy[8] & 0x3f) | 0x80;
     let hex = entropy
@@ -10884,7 +10934,7 @@ fn origin_id_from_entropy(mut entropy: [u8; 16]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!(
-        "origin_{}-{}-{}-{}-{}",
+        "{prefix}_{}-{}-{}-{}-{}",
         &hex[0..8],
         &hex[8..12],
         &hex[12..16],
@@ -10935,8 +10985,8 @@ mod tests {
 
     #[test]
     fn recovered_origins_use_random_uuid_identity_coordinates() {
-        let first = origin_id_from_entropy([0; 16]);
-        let second = origin_id_from_entropy([1; 16]);
+        let first = sync_identifier_from_entropy("origin", [0; 16]);
+        let second = sync_identifier_from_entropy("origin", [1; 16]);
         assert_eq!(first, "origin_00000000-0000-4000-8000-000000000000");
         assert_eq!(second, "origin_01010101-0101-4101-8101-010101010101");
         assert_ne!(

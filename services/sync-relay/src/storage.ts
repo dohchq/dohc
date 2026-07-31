@@ -74,6 +74,11 @@ export interface WorkspaceSyncIdentity {
   streamIdentity: string;
 }
 
+export interface WorkspaceBootstrap {
+  hasContent: boolean;
+  identity: WorkspaceSyncIdentity | null;
+}
+
 export type ClaimWorkspaceIdentityResult =
   | "claimed"
   | "matched"
@@ -109,6 +114,7 @@ export interface SyncRelayStorage {
     ownerUserId: string;
     createdAtMs: number;
   }): "created" | "owned" | "not-owner";
+  getWorkspaceBootstrap(workspaceId: string): WorkspaceBootstrap;
   getWorkspaceIdentity(workspaceId: string): WorkspaceSyncIdentity | null;
   getEpochLogFloor(workspaceId: string): number;
   verifyWorkspaceIdentity(input: {
@@ -549,6 +555,32 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       throw new Error("sync relay workspace identity is partially populated");
     }
     return { replicationEpoch, streamIdentity };
+  }
+
+  getWorkspaceBootstrap(workspaceId: string): WorkspaceBootstrap {
+    const row = this.db
+      .prepare(
+        `SELECT replication_epoch, stream_identity,
+                EXISTS(
+                  SELECT 1 FROM sync_relay_log
+                  WHERE sync_relay_log.workspace_id = sync_relay_workspaces.workspace_id
+                    AND sync_relay_log.relay_seq >
+                      COALESCE(sync_relay_workspaces.epoch_log_floor, 0)
+                  LIMIT 1
+                ) AS has_content
+         FROM sync_relay_workspaces
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    if (row === undefined) throw new Error("workspace does not exist");
+    const hasContent = row.has_content;
+    if (hasContent !== 0 && hasContent !== 1) {
+      throw new Error("sync relay workspace content state is invalid");
+    }
+    return {
+      hasContent: hasContent === 1,
+      identity: workspaceIdentityFromRow(row),
+    };
   }
 
   getEpochLogFloor(workspaceId: string): number {
