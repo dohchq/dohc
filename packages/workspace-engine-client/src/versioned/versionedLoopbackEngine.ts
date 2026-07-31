@@ -168,6 +168,10 @@ function optionalNumber(object: JsonObject, key: string): number | undefined {
 // honour — accepting one lets the fake through a request the daemon refuses while
 // deserializing.
 function restoreOrigin(object: JsonObject): VersionedOrigin {
+  // `deny_unknown_fields` makes the mere PRESENCE of metadataOrigin fatal, even
+  // alongside a valid `origin` — serde refuses before any field is read. So this
+  // rejects the field rather than merely declining to fall back to it.
+  if (object.metadataOrigin !== undefined) throw new Error("invalid-metadata");
   const origin = optionalString(object, "origin");
   if (origin === undefined || !ACCEPTED_ORIGINS.has(origin)) {
     throw new Error("invalid-metadata");

@@ -704,9 +704,15 @@ describe("loopback moment metadata", () => {
 
   it("refuses over-cap RENAME and DELETE metadata before resolving the version", async () => {
     // The daemon validates metadata before the actor resolves the version, so an
-    // over-cap field plus an unknown versionId answers `invalid-metadata`. Safe to
-    // match now that a Rust test pins the reason it was in doubt: a refused write
-    // creates no version (rpc_write_surface a_refused_write_creates_no_version).
+    // over-cap field plus an unknown versionId answers `invalid-metadata`.
+    //
+    // The reason this was in doubt: resolving later must not change what a refused
+    // request leaves behind. Measured directly against the daemon — a
+    // versionedBinary.write with malformed base64 against a workspace with no
+    // `main` returns invalid-input and `versions.list` is empty both before and
+    // after, so a refusal creates nothing. Recorded on dohc-ai/dohc#439; the Rust
+    // test pinning it is not in this branch, so this cites the measurement rather
+    // than a test name that does not exist here yet.
     const engine = new VersionedLoopbackEngine();
     await openWorkspace(engine);
     const overCap = "s".repeat(16 * 1024 + 1);
@@ -772,6 +778,32 @@ describe("loopback moment metadata", () => {
       momentId: "moment-origin-preserved",
     });
     expect((moment.metadata as Record<string, unknown>).origin).toBe("api");
+  });
+
+  it("refuses a RESTORE carrying metadataOrigin even alongside a valid origin", async () => {
+    // `deny_unknown_fields` on SecretsRestoreParams makes the PRESENCE of
+    // metadataOrigin fatal — serde refuses before reading any field — so a request
+    // with both is rejected, not silently accepted on the valid one.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=both\n",
+      origin: "local-file",
+      momentId: "moment-both-origins",
+    });
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsRestore, {
+        workspaceId: WORKSPACE,
+        path: ".env",
+        beforeMomentId: "moment-both-origins",
+        momentId: "moment-both-refused",
+        origin: "restore",
+        metadataOrigin: "restore",
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
   });
 
   it("refuses over-cap RESTORE metadata before it looks for the moment", async () => {
