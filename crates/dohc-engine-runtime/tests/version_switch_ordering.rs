@@ -730,8 +730,8 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     let scan = EngineDbScan::read(&database);
     scan.assert_secret_plaintext_absent(&main_text);
     scan.assert_secret_plaintext_absent(&feature_text);
-    scan.assert_absent("main marker", main_marker.as_bytes());
-    scan.assert_absent("feature marker", feature_marker.as_bytes());
+    scan.assert_absent_in_every_form("main marker", main_marker);
+    scan.assert_absent_in_every_form("feature marker", feature_marker);
     // Positive control: the ciphertext both tips hold IS in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&database);
     scan.assert_scanned_wal();

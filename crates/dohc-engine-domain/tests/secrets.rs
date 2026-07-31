@@ -369,7 +369,7 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
     };
 
     let scan = EngineDbScan::read(&db);
-    scan.assert_absent("plaintext marker", marker.as_bytes());
+    scan.assert_absent_in_every_form("plaintext marker", marker);
     // The whole plaintext, in BOTH forms: raw bytes, and the base64 that
     // ciphertext is stored as. A write site that base64-encoded the plaintext
     // on the way in would slip past the raw-marker scan alone.
@@ -1184,9 +1184,9 @@ fn plaintext_never_leaks_when_a_secret_merges_across_versions() {
     for text in [&base_text, &source_text, &target_text] {
         scan.assert_secret_plaintext_absent(text);
     }
-    scan.assert_absent("fork-base marker", base_marker.as_bytes());
-    scan.assert_absent("merge-source marker", source_marker.as_bytes());
-    scan.assert_absent("merge-target marker", target_marker.as_bytes());
+    scan.assert_absent_in_every_form("fork-base marker", base_marker);
+    scan.assert_absent_in_every_form("merge-source marker", source_marker);
+    scan.assert_absent_in_every_form("merge-target marker", target_marker);
     // Positive control: the ciphertext the store holds IS in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&db);
     // ...and the WAL really survived the writer's close, so the absence above
