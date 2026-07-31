@@ -10,6 +10,17 @@ dohc is basically rethinking Notion, Obsidian, Google Docs, spreadsheets, Jira, 
 
 We are currently building the MVP for dohc and haven't launched with users yet.
 
+## Do not preserve backward compatibility
+
+We have no users yet. Optimize for the best current design, not compatibility
+with earlier versions.
+
+- Replace old contracts instead of layering new behavior over them.
+- Remove compatibility shims, deprecated aliases, dual formats, fallbacks, and
+  dead paths.
+- Update all internal callers, tests, fixtures, and docs in the same change.
+- Add a migration path only when the user explicitly asks for one.
+
 ## Some thoughts from the author (Ice)
 
 The following is a letter from me to you, the agent. We are building this together, but to be frank, I'm building this for you. I want you to have the proper context about me and/or my team and the text primitives you need to build the proper solutions for me. dohc is the tooling that will power it. We are building a communication layer for humans and AI.
