@@ -30,3 +30,6 @@ target-*/
 # keeping goes to docs/ under a real name instead of sitting at the repo root.
 /.agent-artifacts/
 /codex-*.log
+
+# Read-only external source clones for agent exploration.
+/.agent-sources/

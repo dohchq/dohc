@@ -149,6 +149,22 @@ Do not weaken authorization, ownership, or review gates for convenience.
   before setting UI state. A slow response for workspace A must never repaint
   workspace B after the user switches workspaces.
 
+## Explore external source before guessing
+
+When external behavior is unclear, inspect source instead of guessing.
+
+- Clone relevant public repositories into `.agent-sources/<owner>/<repo>/`.
+- Save other reference files under `.agent-artifacts/references/`.
+- Use shallow clones without submodules unless the task needs more.
+
+### Keep sources current
+
+- Match source to the locked dependency version. Otherwise fetch the latest
+  relevant upstream ref.
+- Refresh existing clones before reuse. If refresh fails, report the exact
+  commit.
+- Cite the remote URL and full commit SHA when source affects the result.
+
 ## Repeated work should become skills
 
 When a user likes how an agent handled something, dohc should make it easy to turn that process into a reusable skill, workflow, or playbook.
