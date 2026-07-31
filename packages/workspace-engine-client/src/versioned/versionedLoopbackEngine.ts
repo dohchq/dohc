@@ -189,6 +189,17 @@ function utf8Length(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 
+// The daemon validates `summary`/`correlationId` against MAX_METADATA_FIELD_BYTES
+// on EVERY write handler (`validate_metadata_fields`), not just the secret ones,
+// and refuses with the bare code below. Enforcing it only on the secret paths
+// left text and binary writes certifying an over-cap request production refuses.
+function cappedMetadataField<T extends string | null | undefined>(value: T): T {
+  if (typeof value === "string" && utf8Length(value) > MAX_METADATA_FIELD_BYTES) {
+    throw new Error("invalid-metadata");
+  }
+  return value;
+}
+
 /**
  * Loopback subset of dohc-engine-files' path floor. It mirrors the common
  * case-insensitive `.env` segment, `name.env`, and `.env.*` basename rules;
@@ -1487,14 +1498,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       const raw = params[key];
       if (raw === undefined || raw === null) return null;
       if (typeof raw !== "string") throw new Error(`${key} is invalid.`);
-      // The daemon caps each metadata field at 16 KiB in validate_metadata_fields
-      // and refuses the request. Accepting a longer one made the fake certify a
-      // write production rejects — the third time this helper has been too
-      // permissive, so the cap is enforced here rather than assumed.
-      if (utf8Length(raw) > MAX_METADATA_FIELD_BYTES) {
-        throw new Error(`${key} is invalid.`);
-      }
-      return raw;
+      return cappedMetadataField(raw);
     };
     return { summary: field("summary"), correlationId: field("correlationId") };
   }
@@ -2118,8 +2122,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private momentMetadataFields(params: JsonObject): JsonObject {
-    const summary = optionalString(params, "summary");
-    const correlationId = optionalString(params, "correlationId");
+    const summary = cappedMetadataField(optionalString(params, "summary"));
+    const correlationId = cappedMetadataField(
+      optionalString(params, "correlationId"),
+    );
     return {
       ...(summary !== undefined ? { metadataSummary: summary } : {}),
       ...(correlationId !== undefined

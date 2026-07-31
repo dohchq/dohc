@@ -366,7 +366,7 @@ describe("loopback moment metadata", () => {
         momentId: "moment-capped",
         summary: justOver,
       }),
-    ).rejects.toThrow(/summary is invalid/);
+    ).rejects.toThrow(/invalid-metadata/); // the daemon's own refusal, verbatim
 
     // Exactly at the cap is accepted — an off-by-one here would reject valid work.
     const atCap = "s".repeat(16 * 1024);
@@ -382,6 +382,44 @@ describe("loopback moment metadata", () => {
     expect((ok.moment as Record<string, unknown>).metadata).toMatchObject({
       summary: atCap,
     });
+  });
+
+  it("refuses an over-cap metadata field on a TEXT write too", async () => {
+    // The daemon calls validate_metadata_fields from EVERY write handler, not
+    // only the secret ones. The cap first landed on the secret path alone, so
+    // the text and binary paths still accepted an over-cap summary — the same
+    // over-permissive fake, one layer up, and nothing caught it because the
+    // only cap test drove a secret write.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await expect(
+      send(engine, VERSIONED_METHOD.textWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "notes.md",
+        text: "hello",
+        origin: "local-file",
+        correlationId: "c".repeat(16 * 1024 + 1),
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+
+    // At the cap the same write is accepted.
+    const atCap = "c".repeat(16 * 1024);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "notes.md",
+      text: "hello",
+      origin: "local-file",
+      correlationId: atCap,
+    });
+    const page = await send(engine, VERSIONED_METHOD.momentsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const moments = page.moments as Array<Record<string, unknown>>;
+    expect(moments).toHaveLength(1);
+    expect(moments[0].metadataCorrelationId).toBe(atCap);
   });
 
   it("refuses malformed secret metadata WITHOUT changing the secret", async () => {
