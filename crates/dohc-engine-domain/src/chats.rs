@@ -739,6 +739,7 @@ pub struct SetReaction {
     pub message_id: String,
     pub emoji: String,
     pub author_id: String,
+    pub replication_author_id: Option<String>,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
     pub state: ChatReactionState,
@@ -3066,7 +3067,7 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// Set one reaction LWW cell and journal the exact winning origin coordinate.
+    /// Set one reaction LWW cell. Journal it only for a verified relay author.
     pub fn set_reaction(
         &mut self,
         input: &SetReaction,
@@ -3081,6 +3082,19 @@ impl<'a> LinkedChatStore<'a> {
         validate_message_id(&input.message_id)?;
         let emoji = normalize_reaction_emoji(&input.emoji)?;
         let author_id = normalize_reaction_author_id(&input.author_id)?;
+        let replication_author_id = input
+            .replication_author_id
+            .as_deref()
+            .map(normalize_reaction_author_id)
+            .transpose()?;
+        if let Some(replication_author_id) = &replication_author_id {
+            if replication_author_id != &author_id {
+                return Err(DomainError::chat(
+                    "invalid-sender",
+                    "Replication reaction author must match the local reaction author.",
+                ));
+            }
+        }
         let author_display_name = normalize_display_name(&input.author_display_name)?;
         if input.now_ms < 0 {
             return Err(DomainError::chat(
@@ -3098,6 +3112,7 @@ impl<'a> LinkedChatStore<'a> {
             input.message_id.as_bytes(),
             emoji.as_bytes(),
             author_id.as_bytes(),
+            replication_author_id.as_deref().unwrap_or("").as_bytes(),
             input.author_kind.as_str().as_bytes(),
             author_display_name.as_bytes(),
             input.state.as_str().as_bytes(),
@@ -3120,7 +3135,8 @@ impl<'a> LinkedChatStore<'a> {
             });
         }
 
-        let input = input.clone();
+        let mut input = input.clone();
+        input.replication_author_id = replication_author_id;
         let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             require_thread(tx, &input.workspace_id, &thread_id)?;
             if !thread_has_message(tx, &input.workspace_id, &thread_id, &input.message_id)? {
@@ -3181,15 +3197,17 @@ impl<'a> LinkedChatStore<'a> {
                 "state": input.state.as_str(),
                 "atMs": at_ms,
             });
-            insert_local_replication_op(
-                tx,
-                &input.workspace_id,
-                &origin_id,
-                origin_seq,
-                "chat.reaction.set",
-                &payload,
-                at_ms,
-            )?;
+            if input.replication_author_id.is_some() {
+                insert_local_replication_op(
+                    tx,
+                    &input.workspace_id,
+                    &origin_id,
+                    origin_seq,
+                    "chat.reaction.set",
+                    &payload,
+                    at_ms,
+                )?;
+            }
             record_request(tx, Some(&input.request_id), &payload_hash, at_ms)?;
             require_reaction_cell(
                 tx,

@@ -1940,6 +1940,9 @@ async function dispatch(
           authorId: identity.reactionAuthorId,
           ...authorForActor(identity, request.args.actor),
         },
+        ...(identity.authorUserId
+          ? { replicationAuthorId: identity.authorUserId }
+          : {}),
         state,
       });
       await notifyWrite(options, context);

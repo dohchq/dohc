@@ -5446,6 +5446,7 @@ impl EngineService {
                     message_id: params.message_id,
                     emoji: params.emoji,
                     author_id: params.author.author_id,
+                    replication_author_id: params.replication_author_id,
                     author_kind,
                     author_display_name: params.author.display_name,
                     state,
@@ -9012,6 +9013,8 @@ struct ChatReactionSetParams {
     message_id: String,
     emoji: String,
     author: ChatReactionAuthorParams,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    replication_author_id: Option<String>,
     state: String,
     now_ms: Option<i64>,
 }

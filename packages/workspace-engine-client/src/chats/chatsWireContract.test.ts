@@ -223,6 +223,7 @@ describe("B2 chats wire contract and loopback", () => {
         messageId: "file-message",
         emoji: "👍",
         author: { authorId: "ada", kind: "human", displayName: "Ada" },
+        replicationAuthorId: "ada",
         state: "added",
         nowMs: 32,
       },
@@ -233,6 +234,20 @@ describe("B2 chats wire contract and loopback", () => {
         threadId: "file-thread",
       })).reactions[0]?.reactionId,
     ).toBe(reaction.reactionId);
+    await expect(
+      roundTrip(
+        CHATS_METHOD.reactionSet,
+        {
+          threadId: "file-thread",
+          messageId: "file-message",
+          emoji: "👍",
+          author: { authorId: "ada", kind: "human", displayName: "Ada" },
+          replicationAuthorId: "other-user",
+          state: "removed",
+        },
+        "mismatched-reaction-author",
+      ),
+    ).rejects.toThrow("invalid-sender");
 
     expect(
       (await roundTrip(CHATS_METHOD.agentReadListUnreadThreads, {})).threads.length,

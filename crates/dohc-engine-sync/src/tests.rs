@@ -2642,6 +2642,7 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
                 message_id: "message-imported".to_owned(),
                 emoji: "👍".to_owned(),
                 author_id: "Ada".to_owned(),
+                replication_author_id: Some("Ada".to_owned()),
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 state: ChatReactionState::Removed,

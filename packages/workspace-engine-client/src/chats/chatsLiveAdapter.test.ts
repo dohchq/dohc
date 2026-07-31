@@ -963,6 +963,7 @@ describe("ChatsLiveAdapter", () => {
         kind: "human" as const,
         displayName: "Ice",
       },
+      replicationAuthorId: "ice",
     };
 
     await adapter.setReaction({ ...reaction, state: "added" });
@@ -975,6 +976,11 @@ describe("ChatsLiveAdapter", () => {
     expect(transitions.map((request) => request.idempotencyKey)).toHaveLength(3);
     expect(new Set(transitions.map((request) => request.idempotencyKey)).size)
       .toBe(3);
+    expect(transitions.map((request) => request.params)).toEqual([
+      expect.objectContaining({ replicationAuthorId: "ice" }),
+      expect.objectContaining({ replicationAuthorId: "ice" }),
+      expect.objectContaining({ replicationAuthorId: "ice" }),
+    ]);
     await expect(
       adapter.listReactions({
         workspaceId: "workspace",

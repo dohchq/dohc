@@ -107,6 +107,7 @@ fn set_reaction(
             message_id: message_id.to_owned(),
             emoji: emoji.to_owned(),
             author_id: author_id.to_owned(),
+            replication_author_id: Some(author_id.to_owned()),
             author_kind: ChatActorKind::Human,
             author_display_name: author_id.to_owned(),
             state,
@@ -268,6 +269,104 @@ fn reaction_row_and_journal_share_origin_coordinate() {
         .expect("coordinates");
     // MUTATION: allocating a second journal sequence after the row upsert -> the replicated tie-break differs from the stored cell.
     assert_eq!(coordinates.0, coordinates.1);
+}
+
+#[test]
+fn reaction_without_verified_relay_author_stays_out_of_replication_log() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    let input = SetReaction {
+        workspace_id: WS.to_owned(),
+        thread_id: "thread".to_owned(),
+        message_id: "message".to_owned(),
+        emoji: "👍".to_owned(),
+        author_id: "local-user".to_owned(),
+        replication_author_id: None,
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Local user".to_owned(),
+        state: ChatReactionState::Added,
+        now_ms: 30,
+        request_id: "local-only-reaction".to_owned(),
+    };
+
+    let reaction = LinkedChatStore::new(&mut store)
+        .set_reaction(&input, &NO_FAULTS)
+        .expect("local reaction");
+    assert_eq!(reaction.author_id, "local-user");
+    let reaction_ops: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.reaction.set'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("reaction operation count");
+    assert_eq!(reaction_ops, 0);
+    assert_eq!(store.request_ledger_len().expect("request ledger"), 1);
+
+    let mut verified = input;
+    verified.replication_author_id = Some("local-user".to_owned());
+    let mismatch = LinkedChatStore::new(&mut store).set_reaction(&verified, &NO_FAULTS);
+    assert!(matches!(
+        mismatch,
+        Err(dohc_engine_domain::DomainError::IdempotencyKeyReuseMismatch)
+    ));
+}
+
+#[test]
+fn reaction_rejects_mismatched_relay_author_before_writing() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    let result = LinkedChatStore::new(&mut store).set_reaction(
+        &SetReaction {
+            workspace_id: WS.to_owned(),
+            thread_id: "thread".to_owned(),
+            message_id: "message".to_owned(),
+            emoji: "👍".to_owned(),
+            author_id: "local-user".to_owned(),
+            replication_author_id: Some("other-user".to_owned()),
+            author_kind: ChatActorKind::Human,
+            author_display_name: "Local user".to_owned(),
+            state: ChatReactionState::Added,
+            now_ms: 30,
+            request_id: "mismatched-reaction".to_owned(),
+        },
+        &NO_FAULTS,
+    );
+    assert!(matches!(
+        result,
+        Err(dohc_engine_domain::DomainError::Chat {
+            code: "invalid-sender",
+            ..
+        })
+    ));
+    let counts: (i64, i64) = store
+        .read_with(|conn| {
+            let rows = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM chat_reactions WHERE workspace_id = ?1",
+                    [WS],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let ops = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.reaction.set'",
+                    [WS],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)?;
+            Ok::<_, StorageError>((rows, ops))
+        })
+        .expect("reaction counts");
+    assert_eq!(counts, (0, 0));
+    assert_eq!(store.request_ledger_len().expect("request ledger"), 0);
 }
 
 #[test]

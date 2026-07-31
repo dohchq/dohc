@@ -81,6 +81,8 @@ describe("main-process chat authorization", () => {
     expect(handler).toContain("syncWorkspaceSharedChannels(workspaceId)");
     expect(handler).toContain("queueCloudSync:");
     expect(handler).toContain("activity.queueCloudSync(workspaceId)");
+    expect(handler).toContain("const replicationAuthorId = relayAuthorUserId()");
+    expect(handler).toContain("{ replicationAuthorId }");
   });
 
   it("derives generic channel-share eligibility in the main process", () => {

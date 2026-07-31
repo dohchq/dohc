@@ -285,6 +285,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
         messageId: ownerMessageId,
         emoji: "🚀",
         author: { authorId: RECIPIENT_USER, kind: "human", displayName: "Morgan" },
+        replicationAuthorId: RECIPIENT_USER,
         state: "added",
       });
     } finally {

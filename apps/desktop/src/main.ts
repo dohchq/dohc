@@ -6175,29 +6175,32 @@ function registerIpcHandlers(
           store: linkedChatStoreFor(workspace),
           target: { threadId: input.threadId },
         });
+        const authorId = localUserId();
+        const replicationAuthorId = relayAuthorUserId();
         const reaction = await linkedChatStoreFor(workspace).setReaction({
           workspaceId: workspace.workspaceId,
           threadId: input.threadId,
           messageId: input.messageId,
           emoji: input.emoji,
           author: {
-            authorId: localUserId(),
+            authorId,
             kind: "human",
             displayName: localUserDisplayName(),
           },
+          ...(replicationAuthorId ? { replicationAuthorId } : {}),
           state: input.state,
         });
         return SetChatReactionResult.parse({
           reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
-          viewerAuthorId: localUserId(),
+          viewerAuthorId: authorId,
         });
       },
       // MU-C4: reactions in a joined shared channel push out promptly too.
       syncJoinedChannels: (workspaceId) => {
         void syncWorkspaceSharedChannels(workspaceId);
       },
-      // Reactions are journaled workspace mutations just like messages and
-      // decision changes, so the owner's cloud workspace is nudged too.
+      // Signed-in reactions are journaled workspace mutations, so the owner's
+      // cloud workspace is nudged too. Signed-out sync attempts are no-ops.
       queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
     }),
   );

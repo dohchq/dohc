@@ -383,6 +383,7 @@ export type ChatReactionSetParams = ChatsJsonObject & {
   messageId: string;
   emoji: string;
   author: ChatReactionAuthor;
+  replicationAuthorId?: string;
   state: "added" | "removed";
   nowMs?: number;
 };
