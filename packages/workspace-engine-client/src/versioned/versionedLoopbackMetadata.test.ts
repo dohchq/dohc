@@ -12,6 +12,12 @@ import { VersionedLoopbackEngine } from "./versionedLoopbackEngine";
 // because the first fix threaded them through the TEXT paths while leaving
 // `binaryWrite` behind — the fingerprints already counted them, so a binary
 // write's request identity included metadata that its moment then lost.
+//
+// The same fix skipped the SECRET paths in the same way: `secrets.apply` read
+// them, `secrets.write` / `secrets.delete` / `secrets.restore` did not. That
+// dropped the summary the desktop pipeline puts on every protected moment
+// ("Updated .env" / "Deleted .env" — `metadata_summary` in the daemon), so a
+// loopback-backed suite read `undefined` where the product shows a label.
 const WORKSPACE = "loopback-metadata-ws";
 
 async function send(
@@ -83,6 +89,91 @@ describe("loopback moment metadata", () => {
     expect(moments).toHaveLength(1);
     expect(moments[0].metadataSummary).toBe("Became a binary file");
     expect(moments[0].metadataCorrelationId).toBe("corr-binary");
+  });
+
+  it("carries them through a SECRET write and the matching delete", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const written = await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=x\n",
+      origin: "local-file",
+      momentId: "secret-write-1",
+      summary: "Updated .env",
+      correlationId: "corr-secret-write",
+    });
+    // The write's echoed moment and the moment history must agree: dropping
+    // the metadata in only one of them is how the earlier binary regression
+    // stayed invisible.
+    expect((written.moment as Record<string, unknown>).metadata).toEqual({
+      origin: "local-file",
+      summary: "Updated .env",
+      correlationId: "corr-secret-write",
+    });
+
+    const deleted = await send(engine, VERSIONED_METHOD.secretsDelete, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      origin: "local-file",
+      momentId: "secret-delete-1",
+      summary: "Deleted .env",
+      correlationId: "corr-secret-delete",
+    });
+    expect((deleted.moment as Record<string, unknown>).metadata).toEqual({
+      origin: "local-file",
+      summary: "Deleted .env",
+      correlationId: "corr-secret-delete",
+    });
+
+    const page = await send(engine, VERSIONED_METHOD.secretsMomentsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const moments = page.moments as Array<Record<string, unknown>>;
+    expect(moments.map((moment) => (moment.metadata as { summary?: unknown }).summary)).toEqual([
+      "Deleted .env",
+      "Updated .env",
+    ]);
+  });
+
+  it("carries them through a SECRET restore", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    for (const [index, text] of ["API_KEY=a\n", "API_KEY=b\n"].entries()) {
+      await send(engine, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: ".env",
+        text,
+        origin: "local-file",
+        momentId: `secret-write-${index}`,
+        summary: "Updated .env",
+      });
+    }
+    const restored = await send(engine, VERSIONED_METHOD.secretsRestore, {
+      workspaceId: WORKSPACE,
+      path: ".env",
+      beforeMomentId: "secret-write-1",
+      momentId: "secret-restore-1",
+      origin: "restore",
+      summary: "Restored .env",
+      correlationId: "corr-secret-restore",
+    });
+    // `secrets.restore` answers with the outcome, not the moment, so read the
+    // recorded moment back rather than trusting the reply.
+    expect(restored.restoredMomentId).toBe("secret-restore-1");
+    const moment = await send(engine, VERSIONED_METHOD.secretsMomentsGet, {
+      workspaceId: WORKSPACE,
+      momentId: "secret-restore-1",
+    });
+    expect(moment.metadata).toEqual({
+      origin: "restore",
+      summary: "Restored .env",
+      correlationId: "corr-secret-restore",
+    });
   });
 
   it("normalizes an author to the daemon's output shape", async () => {

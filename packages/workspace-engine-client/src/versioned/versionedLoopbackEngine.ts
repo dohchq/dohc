@@ -1484,7 +1484,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (before === text) return { changed: false, moment: null };
     this.assertFreshSecretMoment(state, momentId);
     version.secrets.set(path, text);
-    const wire = this.makeSecretMoment(workspace, version.id, path, momentId, "write", origin);
+    const wire = this.makeSecretMoment(
+      workspace,
+      version.id,
+      path,
+      momentId,
+      "write",
+      origin,
+      optionalString(params, "summary") ?? null,
+      optionalString(params, "correlationId") ?? null,
+    );
     state.secretMoments.set(momentId, { wire, before, after: text });
     return { changed: true, moment: wire };
   }
@@ -1540,7 +1549,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (before === undefined) return { moment: null };
     this.assertFreshSecretMoment(state, momentId);
     version.secrets.delete(path);
-    const wire = this.makeSecretMoment(workspace, version.id, path, momentId, "delete", origin);
+    const wire = this.makeSecretMoment(
+      workspace,
+      version.id,
+      path,
+      momentId,
+      "delete",
+      origin,
+      optionalString(params, "summary") ?? null,
+      optionalString(params, "correlationId") ?? null,
+    );
     state.secretMoments.set(momentId, { wire, before });
     return { moment: wire };
   }
@@ -1625,7 +1643,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (sourceMoment.before === undefined) version.secrets.delete(path);
     else version.secrets.set(path, sourceMoment.before);
     const operation = sourceMoment.before === undefined ? "delete" : "write";
-    const wire = this.makeSecretMoment(workspace, version.id, path, momentId, operation, "restore");
+    const wire = this.makeSecretMoment(
+      workspace,
+      version.id,
+      path,
+      momentId,
+      operation,
+      "restore",
+      optionalString(params, "summary") ?? null,
+      optionalString(params, "correlationId") ?? null,
+    );
     state.secretMoments.set(momentId, { wire, before: prior, after: sourceMoment.before });
     return { restored: sourceMoment.before === undefined ? "deleted" : "text", restoredMomentId: momentId, path };
   }

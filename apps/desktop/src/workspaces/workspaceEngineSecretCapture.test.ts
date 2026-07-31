@@ -1,12 +1,21 @@
 import type { SecretFileStore, VersionedTextStore } from "@dohc/workspace-engine";
 import { createSecretFileStore, createVersionedTextStore } from "@dohc/workspace-engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
+import {
+  VERSIONED_METHOD,
+  VersionedLoopbackEngine,
+  type Request,
+} from "@dohc/workspace-engine-client";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
-import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import {
+  createWorkspaceEngineCapture,
+  type WorkspaceEngineCapture,
+} from "./workspaceEngineCapture";
 
 // Secret-backed files through the DESKTOP capture pipeline (PR 08): secret
 // paths are captured encrypted with metadata-only moments, follow version
@@ -87,11 +96,32 @@ function stores(root: string): {
   };
 }
 
+// The LEGACY in-process engine (no `rustEngineSessions` ⇒ `useRustEngine` is
+// false), on the real AES-256-GCM secret store. Only the suites below that
+// prove something about bytes at rest still use it — see the comment on
+// "secret encryption at rest".
 function capture(root: string, injected?: ReturnType<typeof stores>) {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-secret-test",
     rootPath: root,
     ...(injected ? { store: injected.store, secretStore: injected.secretStore } : {}),
+  });
+}
+
+// The DAEMON path: `rustEngineSessions` is what selects the Rust engine, and
+// the loopback behind it holds real secret/version/moment state, so what these
+// tests read back is recorded state and not a hand-written responder. Passing
+// `requests` is what lets a test PROVE the path it took instead of inferring
+// it from a result the legacy engine would also produce.
+function daemonCapture(
+  root: string,
+  loopback: VersionedLoopbackEngine,
+  requests?: Request[],
+): WorkspaceEngineCapture {
+  return createWorkspaceEngineCapture({
+    workspaceId: "engine-secret-test",
+    rootPath: root,
+    rustEngineSessions: mockLiveSessions(loopback, requests),
   });
 }
 
@@ -124,7 +154,125 @@ function readTextStorePaths(root: string): string[] {
   }
 }
 
-describe("secret capture through the desktop pipeline", () => {
+describe("secret capture through the desktop pipeline (daemon path)", () => {
+  it("captures live .env batches, coalesces no-op rewrites, and retires deletions", async () => {
+    const root = await tempRoot();
+    await write(root, ".env", ENV_A);
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = daemonCapture(root, loopback, requests);
+    engine.start();
+    await engine.flush();
+
+    // Positive proof of the path: a relapse to the legacy in-process engine
+    // never opens a daemon workspace and never writes the secret over the
+    // wire, so the suite cannot go quietly green on the engine it left.
+    const methods = requests.map((request) => request.method);
+    expect(methods).toContain("workspace.open");
+    expect(methods).toContain(VERSIONED_METHOD.secretsWrite);
+
+    // Same content again: no second moment (content-equality no-op).
+    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    await engine.flush();
+    let page = await engine.listMoments();
+    expect(page.moments.filter((moment) => moment.protected)).toHaveLength(1);
+
+    // Real change: one more metadata-only moment.
+    await write(root, ".env", ENV_B);
+    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    await engine.flush();
+    page = await engine.listMoments();
+    expect(page.moments.filter((moment) => moment.protected)).toHaveLength(2);
+
+    // Deletion retires the protected state with a moment.
+    await rm(join(root, ".env"));
+    engine.captureBatch([{ path: ".env", operation: "delete" }]);
+    await engine.flush();
+    page = await engine.listMoments();
+    const protectedMoments = page.moments.filter((moment) => moment.protected);
+    expect(protectedMoments).toHaveLength(3);
+    expect(protectedMoments[0].operation).toBe("delete");
+    expect(protectedMoments[0].metadata.summary).toBe("Deleted .env");
+    expect(requests.map((request) => request.method)).toContain(
+      VERSIONED_METHOD.secretsDelete,
+    );
+    await engine.stop();
+  });
+
+  it("a version that never had .env removes it from disk on switch and restores it on the way back", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = daemonCapture(root, loopback, requests);
+    engine.start();
+    await engine.flush();
+    // Fork Experiment while no secret exists.
+    const created = await engine.createVersion("Experiment");
+    const experimentId = created.activeVersionId;
+    // Back on Main, gain a secret.
+    await engine.switchVersion("main");
+    await write(root, ".env", ENV_A);
+    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    await engine.flush();
+
+    await engine.switchVersion(experimentId);
+    expect(await readText(root, ".env")).toBeNull();
+    await engine.switchVersion("main");
+    expect(await readText(root, ".env")).toBe(ENV_A);
+
+    // Both halves of the claim went over the wire: the fork carried the
+    // secret tips, and the plaintext that landed back on disk came from the
+    // engine's single authorized materialization rather than a leftover file.
+    const methods = requests.map((request) => request.method);
+    expect(methods).toContain(VERSIONED_METHOD.secretsFork);
+    expect(methods).toContain(VERSIONED_METHOD.secretsMaterialize);
+    await engine.stop();
+  });
+
+  it("compareVersions reports protected changes without contents", async () => {
+    const root = await tempRoot();
+    await write(root, ".env", ENV_A);
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = daemonCapture(root, loopback, requests);
+    engine.start();
+    await engine.flush();
+    const created = await engine.createVersion("Experiment");
+    await write(root, ".env", ENV_B);
+    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    await engine.flush();
+
+    const changes = await engine.compareVersions(created.activeVersionId);
+    const secretChange = changes.find((change) => change.path === ".env");
+    expect(secretChange).toMatchObject({ status: "modified", protected: true });
+    expect(secretChange?.currentText).toBeUndefined();
+    expect(secretChange?.incomingText).toBeUndefined();
+    // The comparison the assertions above read was answered by the engine's
+    // protected comparison, not by a text diff of a plaintext row.
+    expect(requests.map((request) => request.method)).toContain(
+      VERSIONED_METHOD.secretsCompare,
+    );
+    // Absence claim: `currentText`/`incomingText` are the fields a text change
+    // carries, so this catches a protected change routed as text.
+    expect(JSON.stringify(changes).includes(MARKER)).toBe(false);
+    await engine.stop();
+  });
+});
+
+// These stay on the LEGACY in-process engine on purpose, and must not be
+// ported to `mockLiveSessions`.
+//
+// The first three are about what reaches DISK: they read the raw
+// `.dohc/engine/engine.db` (+wal/shm) bytes, or open the DB directly through
+// `readTextStorePaths`, and assert a plaintext marker is ABSENT.
+// `VersionedLoopbackEngine` has no encryption at all — it holds secrets as
+// plaintext strings in a Map and never writes engine.db — so on the daemon
+// fixture those assertions would stay green while proving nothing, and each
+// title's claim about the encrypted path would be false. Porting them deletes
+// the leak proof and keeps the check mark.
+//
+// The last two are legacy for their own reasons, stated on each test.
+describe("secret capture through the desktop pipeline (encryption at rest)", () => {
   it("captures .env encrypted with a metadata-only moment and no text-store entry", async () => {
     const root = await tempRoot();
     await write(root, "notes.md", "plain notes\n");
@@ -157,38 +305,6 @@ describe("secret capture through the desktop pipeline", () => {
     expect(
       bytes.includes(Buffer.from(Buffer.from(ENV_A, "utf8").toString("base64"), "utf8")),
     ).toBe(false);
-  });
-
-  it("captures live .env batches, coalesces no-op rewrites, and retires deletions", async () => {
-    const root = await tempRoot();
-    await write(root, ".env", ENV_A);
-    const engine = capture(root);
-    engine.start();
-    await engine.flush();
-
-    // Same content again: no second moment (content-equality no-op).
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
-    await engine.flush();
-    let page = await engine.listMoments();
-    expect(page.moments.filter((moment) => moment.protected)).toHaveLength(1);
-
-    // Real change: one more metadata-only moment.
-    await write(root, ".env", ENV_B);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
-    await engine.flush();
-    page = await engine.listMoments();
-    expect(page.moments.filter((moment) => moment.protected)).toHaveLength(2);
-
-    // Deletion retires the protected state with a moment.
-    await rm(join(root, ".env"));
-    engine.captureBatch([{ path: ".env", operation: "delete" }]);
-    await engine.flush();
-    page = await engine.listMoments();
-    const protectedMoments = page.moments.filter((moment) => moment.protected);
-    expect(protectedMoments).toHaveLength(3);
-    expect(protectedMoments[0].operation).toBe("delete");
-    expect(protectedMoments[0].metadata.summary).toBe("Deleted .env");
-    await engine.stop();
   });
 
   it("secrets follow a version switch (the product win) without leaking plaintext", async () => {
@@ -227,47 +343,6 @@ describe("secret capture through the desktop pipeline", () => {
     expect(bytes.includes(Buffer.from(MARKER, "utf8"))).toBe(false);
   });
 
-  it("a version that never had .env removes it from disk on switch and restores it on the way back", async () => {
-    const root = await tempRoot();
-    const engine = capture(root);
-    engine.start();
-    await engine.flush();
-    // Fork Experiment while no secret exists.
-    const created = await engine.createVersion("Experiment");
-    const experimentId = created.activeVersionId;
-    // Back on Main, gain a secret.
-    await engine.switchVersion("main");
-    await write(root, ".env", ENV_A);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
-    await engine.flush();
-
-    await engine.switchVersion(experimentId);
-    expect(await readText(root, ".env")).toBeNull();
-    await engine.switchVersion("main");
-    expect(await readText(root, ".env")).toBe(ENV_A);
-    await engine.stop();
-  });
-
-  it("compareVersions reports protected changes without contents", async () => {
-    const root = await tempRoot();
-    await write(root, ".env", ENV_A);
-    const engine = capture(root);
-    engine.start();
-    await engine.flush();
-    const created = await engine.createVersion("Experiment");
-    await write(root, ".env", ENV_B);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
-    await engine.flush();
-
-    const changes = await engine.compareVersions(created.activeVersionId);
-    const secretChange = changes.find((change) => change.path === ".env");
-    expect(secretChange).toMatchObject({ status: "modified", protected: true });
-    expect(secretChange?.currentText).toBeUndefined();
-    expect(secretChange?.incomingText).toBeUndefined();
-    expect(JSON.stringify(changes).includes(MARKER)).toBe(false);
-    await engine.stop();
-  });
-
   it("merges a version's secret into Main through the encrypted path and materializes it", async () => {
     const root = await tempRoot();
     await write(root, ".env", ENV_A);
@@ -296,6 +371,12 @@ describe("secret capture through the desktop pipeline", () => {
     expect(bytes.includes(Buffer.from(MARKER, "utf8"))).toBe(false);
   });
 
+  // Legacy on purpose. Restore reads the encrypted BEFORE-state back out and
+  // materializes it as plaintext on disk, so the decrypt is the thing under
+  // test — on the loopback the before-state is already a plaintext Map entry
+  // and the round-trip cannot fail. The marker check on the recorded moment is
+  // an absence claim, and an absence claim is worthless against a fixture that
+  // never had ciphertext to get wrong.
   it("restores a protected file to before a moment through the encrypted path", async () => {
     const root = await tempRoot();
     await write(root, ".env", ENV_A);
@@ -326,6 +407,14 @@ describe("secret capture through the desktop pipeline", () => {
     await engine.stop();
   });
 
+  // Legacy on purpose, and NOT because of encryption: this test needs the
+  // colliding clock injected above (#406), and the daemon fixture cannot be
+  // given one. `VersionedLoopbackEngine` stamps every secret moment with its
+  // own `this.clock++` and accepts no `nowMs` for the secret methods, so
+  // timestamps there are always distinct — exactly the regime the comment on
+  // READS_PER_CLOCK_TICK says leaves the half-open interleave window untested
+  // (see #403). Ported, the seam-tie assertion below would go green on a
+  // timeline that no longer has a tie in it.
   it("interleaves protected moments into paged timelines without duplication or loss", async () => {
     const root = await tempRoot();
     const injected = stores(root);
