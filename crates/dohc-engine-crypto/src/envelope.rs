@@ -225,6 +225,50 @@ mod tests {
         );
     }
 
+    /// The TS suite flipped a byte in each of `ciphertextBase64`,
+    /// `authTagBase64` and `saltBase64` and required the SAME generic
+    /// `unwrap-failed` for all three, so nothing distinguishable about why an
+    /// unwrap failed can leak. Rust had wrong-passphrase and wrong-AAD but no
+    /// per-field tamper test at all, and this envelope carries a fourth field
+    /// the TS test never touched.
+    ///
+    /// All four tampers keep the field valid base64 of the same length, so they
+    /// all land on the AEAD check rather than on a decode or shape guard.
+    ///
+    /// Honest about what this adds: it does NOT have a mutation of its own.
+    /// Giving `decrypt_in_place_detached`'s `map_err` a different error kills
+    /// this test AND `wrong_passphrase_fails_closed` AND
+    /// `wrong_workspace_aad_fails_closed`, because all three reach that one
+    /// call. What it closes is an INPUT-CLASS gap -- nothing else here feeds
+    /// unwrap a corrupted field -- plus the cross-field invariant that all four
+    /// produce the same generic error rather than distinguishable ones.
+    #[test]
+    fn every_tampered_envelope_field_fails_closed_the_same_way() {
+        let envelope =
+            wrap_with(&data_key(), "pw", "wsA", [1u8; SALT_BYTES], [2u8; IV_BYTES]).unwrap();
+        for field in [
+            "ciphertextBase64",
+            "authTagBase64",
+            "saltBase64",
+            "ivBase64",
+        ] {
+            let mut parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+            let encoded = parsed[field].as_str().unwrap().to_owned();
+            let mut bytes =
+                base64::strict_decode(&encoded).unwrap_or_else(|_| panic!("{field} is not base64"));
+            assert!(!bytes.is_empty(), "{field} carries no bytes to tamper with");
+            bytes[0] ^= 0xff;
+            parsed[field] = serde_json::Value::String(base64::encode_standard(&bytes));
+            let tampered = serde_json::to_string(&parsed).unwrap();
+            assert_ne!(tampered, envelope, "the {field} tamper changed nothing");
+            assert_eq!(
+                unwrap(&tampered, "pw", "wsA").unwrap_err(),
+                CryptoError::EnvelopeUnwrapFailed,
+                "a tampered {field} must fail closed with the generic error"
+            );
+        }
+    }
+
     #[test]
     fn envelope_json_shape_matches_ts_fields() {
         let envelope =
