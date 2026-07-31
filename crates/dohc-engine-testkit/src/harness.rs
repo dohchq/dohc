@@ -75,8 +75,17 @@ pub fn open_readonly_keeper(db_path: &Path) -> rusqlite::Result<Connection> {
 
 /// The `-wal` sidecar path for a database file.
 pub fn wal_sidecar(db_path: &Path) -> std::path::PathBuf {
+    sidecar(db_path, "-wal")
+}
+
+/// The `-shm` sidecar path for a database file.
+pub fn shm_sidecar(db_path: &Path) -> std::path::PathBuf {
+    sidecar(db_path, "-shm")
+}
+
+fn sidecar(db_path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut os = db_path.as_os_str().to_owned();
-    os.push("-wal");
+    os.push(suffix);
     std::path::PathBuf::from(os)
 }
 

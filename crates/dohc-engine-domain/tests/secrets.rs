@@ -11,8 +11,7 @@ use dohc_engine_domain::{
     fork_version_keyless, restore_secret_file_verbatim,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint};
-use dohc_engine_testkit::harness::wal_sidecar;
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults, bytes_contain};
 use rusqlite::params;
 use std::path::Path;
 
@@ -361,16 +360,15 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
         // Store dropped → WAL flushed on close.
     }
 
-    let marker_bytes = marker.as_bytes();
-    for candidate in [db.clone(), wal_sidecar(&db), shm_sidecar(&db)] {
-        if let Ok(bytes) = std::fs::read(&candidate) {
-            assert!(
-                !contains(&bytes, marker_bytes),
-                "plaintext marker leaked into {}",
-                candidate.display()
-            );
-        }
-    }
+    let scan = EngineDbScan::read(&db);
+    scan.assert_absent("plaintext marker", marker.as_bytes());
+    // The whole plaintext, in BOTH forms: raw bytes, and the base64 that
+    // ciphertext is stored as. A write site that base64-encoded the plaintext
+    // on the way in would slip past the raw-marker scan alone.
+    scan.assert_secret_plaintext_absent(&text);
+    // Positive control: the ciphertext the store actually holds IS in the bytes
+    // we scanned, so the absence above is a result and not an empty read.
+    scan.assert_stored_ciphertext_scanned(&db);
 
     // Sanity: the ciphertext IS present somewhere (proves we scanned real data
     // and the secret was actually stored — just never as plaintext).
@@ -405,7 +403,7 @@ fn materialization_job_is_enqueued_atomically_and_references_ciphertext() {
         .unwrap()
         .expect("blob present");
     assert!(
-        !contains(&blob, text.as_bytes()),
+        !bytes_contain(&blob, text.as_bytes()),
         "materialization blob must be ciphertext, not plaintext"
     );
     assert_eq!(
@@ -895,6 +893,138 @@ fn secret_apply_reencrypted_plaintext_equal_is_no_op() {
     assert_eq!(store.table_row_count("secret_moments").unwrap(), before);
 }
 
+/// Set up a divergent three-way secret merge: `main` holds `base`, `feat` forks
+/// from it and moves to `source`, then `main` moves to `target`. Returns the
+/// apply that carries `feat`'s tip into `main`.
+fn diverge_for_merge(
+    store: &mut EngineStore,
+    key: &SecretDataKey,
+    base: &str,
+    source: &str,
+    target: &str,
+) -> ApplySecretFileFromVersion {
+    write_version(store, key, "main", ".env", base, "sm-base", 10);
+    create_feature(store);
+    write_version(store, key, "feat", ".env", source, "sm-source", 11);
+    write_version(store, key, "main", ".env", target, "sm-target", 12);
+    ApplySecretFileFromVersion {
+        workspace_id: WS.to_owned(),
+        path: ".env".to_owned(),
+        from_version_id: "feat".to_owned(),
+        to_version_id: "main".to_owned(),
+        moment_id: "sm-merged".to_owned(),
+        metadata_origin: "api".to_owned(),
+        metadata_summary: Some("Merged .env from feature".to_owned()),
+        metadata_correlation_id: None,
+        now_ms: 20,
+    }
+}
+
+#[test]
+fn plaintext_never_leaks_when_a_secret_merges_across_versions() {
+    // MUTATION: at the apply site, store the source PLAINTEXT rather than its
+    // ciphertext — `put_binary_blob(tx, source_text…as_bytes())` instead of
+    // `put_binary_blob(tx, source.ciphertext())` — and the scan finds the
+    // marker. Same for replacing `seal` with the plaintext in the write path.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+
+    // One distinctive marker per side, so a leak names the version it came from.
+    let base_marker = "MARKER_0a5d31f7_MERGE_BASE";
+    let source_marker = "MARKER_c48be216_MERGE_SOURCE";
+    let target_marker = "MARKER_9f2e7b04_MERGE_TARGET";
+    let base_text = format!("PASSWORD={base_marker}\n");
+    let source_text = format!("PASSWORD={source_marker}\nTOKEN={source_marker}-2\n");
+    let target_text = format!("PASSWORD={target_marker}\n");
+
+    {
+        let mut store = EngineStore::open(&db, 2).unwrap();
+        let input = diverge_for_merge(&mut store, &key, &base_text, &source_text, &target_text);
+        let merged = apply_secret_file_from_version(&mut store, &key, &input, &NO_FAULTS).unwrap();
+        assert!(merged.changed, "a divergent merge must move the target tip");
+
+        // Materialization is the one place the plaintext is allowed to exist,
+        // and only in memory on its way to the projected file.
+        let materialized = SecretFileStore::new(&mut store, &key)
+            .materialize_secret_file(WS, "main", ".env")
+            .unwrap()
+            .unwrap()
+            .into_utf8()
+            .unwrap();
+        assert_eq!(
+            materialized, source_text,
+            "the merge must materialize the source plaintext at the target"
+        );
+        // Store dropped → WAL flushed on close.
+    }
+
+    let scan = EngineDbScan::read(&db);
+    for text in [&base_text, &source_text, &target_text] {
+        scan.assert_secret_plaintext_absent(text);
+    }
+    scan.assert_absent("fork-base marker", base_marker.as_bytes());
+    scan.assert_absent("merge-source marker", source_marker.as_bytes());
+    scan.assert_absent("merge-target marker", target_marker.as_bytes());
+    // Positive control: the ciphertext the store holds IS in the scanned bytes.
+    scan.assert_stored_ciphertext_scanned(&db);
+}
+
+#[test]
+fn a_divergent_secret_merge_records_no_conflict() {
+    // Secrets never ride a conflict record: a conflict row persists each side's
+    // TEXT in `blobs`, so an opened conflict would put the plaintext in the
+    // database. The merge is last-write-wins instead.
+    //
+    // MUTATION: call `insert_text_conflict_if_absent` on the divergent branch of
+    // `apply_secret_file_from_version` and both the conflict count and the
+    // plaintext scan below fail.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+
+    let source_text = "PASSWORD=MARKER_5c07ad93_CONFLICT_SOURCE\n";
+    let target_text = "PASSWORD=MARKER_31f6b8ec_CONFLICT_TARGET\n";
+
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    let input = diverge_for_merge(
+        &mut store,
+        &key,
+        "PASSWORD=MARKER_d2810fb4_CONFLICT_BASE\n",
+        source_text,
+        target_text,
+    );
+    let merged = apply_secret_file_from_version(&mut store, &key, &input, &NO_FAULTS).unwrap();
+    assert!(
+        merged.changed,
+        "both sides moved, so the merge must take the source"
+    );
+
+    let open = VersionedTextStore::new(&mut store)
+        .list_text_conflicts(WS, Some("open"))
+        .unwrap();
+    assert!(
+        open.is_empty(),
+        "a secret merge must open no conflict, found {}",
+        open.len()
+    );
+    assert_eq!(
+        store.table_row_count("conflicts").unwrap(),
+        0,
+        "no conflict record of any status may exist for a secret merge"
+    );
+    // No conflict row means no conflict side blob, so `blobs` holds nothing.
+    assert_eq!(store.table_row_count("blobs").unwrap(), 0);
+    drop(store);
+
+    let scan = EngineDbScan::read(&db);
+    scan.assert_secret_plaintext_absent(source_text);
+    scan.assert_secret_plaintext_absent(target_text);
+    scan.assert_stored_ciphertext_scanned(&db);
+}
+
 #[test]
 fn secret_restore_verbatim_copy_is_content_equality_no_op() {
     // MUTATION: re-seal the historical state or append on equality -> IV/moment assertions fail.
@@ -1097,19 +1227,6 @@ fn secret_compare_reencrypted_same_content_is_unmodified() {
 }
 
 // --- helpers ----------------------------------------------------------------
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
-fn shm_sidecar(db: &Path) -> std::path::PathBuf {
-    let mut s = db.as_os_str().to_owned();
-    s.push("-shm");
-    std::path::PathBuf::from(s)
-}
 
 fn hex(s: &str) -> Vec<u8> {
     (0..s.len())

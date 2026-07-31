@@ -7,7 +7,7 @@ use dohc_engine_runtime::{
     WorkspaceSupervisor,
 };
 use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -585,4 +585,150 @@ async fn switch_projection_generation_does_not_advance_moment_order() {
         mutation_order, 3,
         "projection timestamps must not enter the moment-order sequence"
     );
+}
+
+/// Seal one secret into `version_id` at `.env`.
+async fn write_secret(
+    actor: &dohc_engine_runtime::ActorHandle,
+    version_id: &str,
+    text: &str,
+    moment_id: &str,
+    now_ms: i64,
+    key: dohc_engine_crypto::SecretDataKey,
+    disk_intent: SecretDiskIntent,
+) {
+    actor
+        .write_secret_file(
+            SecretWrite {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: version_id.to_owned(),
+                path: ".env".to_owned(),
+                text: text.to_owned(),
+                moment_id: moment_id.to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms,
+                disk_intent,
+            },
+            key,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write secret");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plaintext_never_leaks_across_a_version_switch_and_back() {
+    // A switch is the one place the engine holds a secret plaintext outside a
+    // write: `plan_secret_switch` decrypts the target tip to compare it with the
+    // file on disk. The projection it plans must still reference the stored
+    // CIPHERTEXT, so the plaintext lives only in memory and on the projected
+    // file — never in the database.
+    //
+    // MUTATION: in `plan_secret_switch`, leave the decrypted plaintext behind as
+    // a stray blob — `store.write_with(…, |tx| put_binary_blob(tx, &leaked))`
+    // beside the existing `drop(plaintext)`. Nothing reads that blob, so every
+    // other assertion here still passes and only the scan fails.
+    //
+    // Planning the projection with the plaintext INLINE also fails this test,
+    // but for the wrong reason: the secret executor then cannot decrypt what it
+    // was handed, so the switch itself errors before the scan runs.
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = scratch.engine_db_path().expect("database");
+    let env_path = scratch.path().join(".env");
+
+    // One distinctive marker per version, so a leak names the side it came from.
+    let main_marker = "MARKER_4be1c07d_SWITCH_MAIN";
+    let feature_marker = "MARKER_a93f5d28_SWITCH_FEATURE";
+    let main_text = format!("PASSWORD={main_marker}\n");
+    let feature_text = format!("PASSWORD={feature_marker}\nTOKEN={feature_marker}-2\n");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+
+    let key = create_key_file(scratch.path()).expect("secret key");
+    write_secret(
+        &actor,
+        "main",
+        &main_text,
+        "switch-scan-main",
+        2,
+        key,
+        SecretDiskIntent::AlreadyOnDisk,
+    )
+    .await;
+    std::fs::write(&env_path, main_text.as_bytes()).expect("seed disk");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 3,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature");
+    let key = dohc_engine_crypto::load_key_file(scratch.path())
+        .expect("load key")
+        .expect("key exists");
+    write_secret(
+        &actor,
+        "feature",
+        &feature_text,
+        "switch-scan-feature",
+        4,
+        key,
+        SecretDiskIntent::Materialize,
+    )
+    .await;
+
+    // Switch to the fork, then back. Each switch re-projects the secret, and
+    // the on-disk file proves the switch really ran rather than no-opping.
+    for (version_id, expected, now_ms) in [("feature", &feature_text, 5), ("main", &main_text, 6)] {
+        actor
+            .set_active_version(
+                ActiveVersionSwitch {
+                    workspace_id: WORKSPACE.to_owned(),
+                    version_id: version_id.to_owned(),
+                    root_dir: scratch.path().to_path_buf(),
+                    self_writes: Arc::new(NoRecorder),
+                    now_ms,
+                },
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("switch to {version_id}: {error}"));
+        assert_eq!(
+            std::fs::read_to_string(&env_path).expect("projected secret"),
+            **expected,
+            "the switch to {version_id} must project that version's secret"
+        );
+    }
+
+    supervisor.close(&database).expect("close");
+
+    let scan = EngineDbScan::read(&database);
+    scan.assert_secret_plaintext_absent(&main_text);
+    scan.assert_secret_plaintext_absent(&feature_text);
+    scan.assert_absent("main marker", main_marker.as_bytes());
+    scan.assert_absent("feature marker", feature_marker.as_bytes());
+    // Positive control: the ciphertext both tips hold IS in the scanned bytes.
+    scan.assert_stored_ciphertext_scanned(&database);
 }

@@ -2,7 +2,7 @@ use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{EngineDbScan, ScratchDir};
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -451,4 +451,89 @@ async fn switching_skips_content_already_equal_to_target() {
         )
         .expect("projection job count");
     assert_eq!(jobs, 0, "an equal path must not enqueue a write");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plaintext_never_leaks_across_an_rpc_version_switch() {
+    // The same property as the domain and runtime scans, proven at the daemon's
+    // own surface: after a switch driven entirely through RPC, the closed
+    // database holds no secret plaintext in either form.
+    //
+    // MUTATION: leave the decrypted plaintext behind as a stray blob in
+    // `plan_secret_switch` (`put_binary_blob(tx, plaintext.as_bytes())`) and the
+    // scan finds it while every other assertion here still passes.
+    let main_marker = "MARKER_1c6a94fe_RPC_MAIN";
+    let feature_marker = "MARKER_78b2de50_RPC_FEATURE";
+    let main_text = format!("PASSWORD={main_marker}\n");
+    let feature_text = format!("PASSWORD={feature_marker}\n");
+
+    let (scratch, transport, handle, workspace_id) = fixture("secret-scan").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "path": ".env",
+            "text": main_text,
+            "origin": "api",
+            "momentId": "scan-secret-main",
+        }),
+    )
+    .await;
+    let feature = create_feature(&transport, &handle, 4, &workspace_id).await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": feature,
+            "path": ".env",
+            "text": feature_text,
+            "origin": "api",
+            "momentId": "scan-secret-feature",
+        }),
+    )
+    .await;
+
+    // Switch to the fork and back. The projected file proves each switch ran.
+    switch_to(&transport, &handle, 6, &workspace_id, &feature).await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("switched secret"),
+        feature_text
+    );
+    switch_to(&transport, &handle, 7, &workspace_id, "main").await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("switched back"),
+        main_text
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(8, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("workspace close");
+
+    let database = scratch.path().join(".dohc/engine/engine.db");
+    let scan = EngineDbScan::read(&database);
+    scan.assert_secret_plaintext_absent(&main_text);
+    scan.assert_secret_plaintext_absent(&feature_text);
+    scan.assert_absent("main marker", main_marker.as_bytes());
+    scan.assert_absent("feature marker", feature_marker.as_bytes());
+    // Positive control: both stored ciphertexts ARE in the scanned bytes.
+    scan.assert_stored_ciphertext_scanned(&database);
 }
