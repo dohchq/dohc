@@ -28,56 +28,27 @@
 ## General preferences
 
 - If asked to do too much work at once, stop and state that clearly.
-- If computer use is helpful for completing or verifying work, shell out to
-  gpt-5.6-sol with Codex for it.
+- If computer use is helpful, use the `codex-computer-use` skill with
+  GPT-5.6-sol.
 
-## Picking the right models for workflows and subagents
+@.agents/model-routing.md
 
-Rankings: higher = better. Cost reflects what I actually pay (OpenAI has
-really generous limits), not list price. Intelligence is how hard a problem you
-can hand the model unsupervised. Taste covers UI/UX, code quality, API design,
-and copy.
+## Using Codex inside workflows and subagents
 
-| model       | cost | intelligence | taste |
-| ----------- | ---- | ------------ | ----- |
-| gpt-5.6-sol | 9    | 8            | 6     |
-| opus-5      | 8    | 6            | 8     |
-| fable-5     | 2    | 9            | 9     |
-
-How to apply:
-
-- These are defaults, not limits. You have standing permission to override them:
-  if a cheaper model's output doesn't meet the bar, rerun or redo the work with
-  a smarter model without asking. Judge the output, not the price tag.
-  Escalating costs less than shipping mediocre work.
-- Don't let cost prevent you from using the right model for the job. Instead, take advantage of cheaper options to get more information and try things before moving the work to a more expensive option.
-- Bulk/mechanical work (clear-spec implementation, data analysis, migrations):
-  gpt-5.6-sol—it's effectively free.
-- Anything user-facing (UI, copy, API design) needs taste >= 7.
-- Reviews of plans/implementations: fable-5 or opus-5, optionally gpt-5.6-sol as
-  an extra independent perspective.
-- Never use Haiku.
-- Mechanics: gpt-5.6-sol is only reachable through the Codex CLI—`codex exec` /
-  `codex review` (my ~/.codex/config.toml defaults to gpt-5.6-sol). Use the
-  codex-implementation, codex-review, and codex-computer-use skills; for work
-  they don't cover (investigation, data analysis), run
-  `codex exec -s read-only` directly with a self-contained prompt.
-- Claude models (opus-5, fable-5) run via the Agent/Workflow model
-  parameter.
-
-Using gpt-5.6-sol inside workflows and subagents (the model parameter only takes
-Claude models, so use a wrapper):
+The workflow model parameter accepts only Claude models. Use a thin Claude
+wrapper to run GPT-5.6-sol:
 
 - Spawn a thin Claude wrapper agent with `model: 'opus', effort: 'low'` whose
   prompt instructs it to write a self-contained Codex prompt, run `codex exec`
   via Bash, and return the report (use `schema` on the wrapper to get
   structured output back).
-- Always label these agents with a `gpt-5.6-sol:` prefix, e.g.,
-  `{label: 'gpt-5.6-sol:review-auth'}`—the workflow UI shows the wrapper's Claude
-  model, so the label is the only indication the real worker is gpt-5.6-sol.
+- Use GPT-5.6-sol through the imported routing policy. Pass
+  `-m gpt-5.6-sol` when the configured default differs.
+- Label the wrapper with GPT-5.6-sol, such as
+  `{label: 'gpt-5.6-sol:review-auth'}`. The workflow UI otherwise shows only
+  the wrapper's Claude model.
 - Codex runs can exceed Bash's 10-minute timeout: pass an explicit timeout, or
   run in background and poll for the report file.
-- Parallel gpt-5.6-sol implementation agents must use `isolation: 'worktree'` so
-  Codex edits don't collide in the shared checkout.
+- Parallel Codex implementation agents must use `isolation: 'worktree'`.
 - Workflow token budgets only count Claude tokens; Codex work is free and
   invisible to `budget.spent()`.
