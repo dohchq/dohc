@@ -28,6 +28,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { arch, platform, release } from "node:os";
+import { buildRustCheckReport } from "./rust-check-report.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -80,7 +81,6 @@ const optional = [
 ];
 
 const results = [];
-let failed = false;
 
 console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
@@ -95,18 +95,18 @@ for (const step of required) {
     console.error(
       `  ${step.name} — SKIPPED (${step.skipReason}) — required steps may not skip; install the missing dependency (\`pnpm install --frozen-lockfile\`) and rerun.`,
     );
-    failed = true;
     results.push({
       name: step.name,
       status: "SKIP",
+      required: true,
       reason: `${step.skipReason}; required step skipped → verdict FAIL`,
     });
     continue;
   }
-  if (!r.ok) failed = true;
   results.push({
     name: step.name,
     status: r.ok ? "PASS" : "FAIL",
+    required: true,
   });
   if (r.error) console.error(`  (spawn error: ${r.error.message})`);
 }
@@ -117,31 +117,28 @@ for (const step of optional) {
     console.warn(
       `  ${step.name} not installed — SKIPPED (install with \`cargo install ${step.name} --locked\`).`,
     );
-    results.push({ name: step.name, status: "SKIP" });
+    results.push({ name: step.name, status: "SKIP", required: false });
     continue;
   }
   const r = run(step.cmd);
-  if (!r.ok) failed = true;
-  results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
+  results.push({
+    name: step.name,
+    status: r.ok ? "PASS" : "FAIL",
+    required: false,
+  });
 }
 
 // Summary + pasteable evidence line.
-const stamp = new Date().toISOString();
-const summary = results
-  .map((r) => `${r.name}=${r.status}${r.reason ? `[${r.reason}]` : ""}`)
-  .join(" ");
+const report = buildRustCheckReport(results, {
+  stamp: new Date().toISOString(),
+  platform: platform(),
+  arch: arch(),
+});
 
 console.log(`\n== summary ==`);
-for (const r of results) {
-  console.log(
-    `  ${r.status.padEnd(4)} ${r.name}${r.reason ? ` — ${r.reason}` : ""}`,
-  );
-}
+console.log(report.summary);
 
-const verdict = failed ? "FAIL" : "PASS";
 console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
-console.log(
-  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} | ${verdict} | ${summary}`,
-);
+console.log(report.evidence);
 
-process.exit(failed ? 1 : 0);
+process.exit(report.exitCode);
