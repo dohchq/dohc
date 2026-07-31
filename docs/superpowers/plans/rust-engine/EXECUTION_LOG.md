@@ -3477,7 +3477,10 @@ negative.** WSL had Node 18 and no version manager and no passwordless sudo; Nod
 these tests at all, because the legacy engine reaches `node:sqlite` through `createRequire`. A
 no-sudo tarball install of Node **22.14** then produced `25 files failed / 408 failed | 29
 passed` — which looks exactly like catastrophic product breakage and is nothing of the kind. The
-cause was `no such module: fts5`: that tarball's bundled SQLite lacks FTS5.
+cause was `no such module: fts5`: that tarball's bundled SQLite lacks FTS5. So the run was a false
+negative about the product and, at the same time, a true positive about the repository — 22.14 was
+a version the root `package.json` claimed to support, which makes this a compatibility failure the
+repo owned, not an error by whoever installed it. That half is fixed below.
 
 **Match the version the repo pins, which is 24.14.0** — `.node-version`, `.nvmrc`,
 `docs/development/local-dev.md` and the desktop-release workflow all say so. The evidence above
