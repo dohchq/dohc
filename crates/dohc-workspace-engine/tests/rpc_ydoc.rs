@@ -100,6 +100,37 @@ async fn moment_count_for_object(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ydoc_open_rejects_secret_paths() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), ".env.local", b"TOKEN=secret\n");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-secret", 1).await;
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "ydoc.open",
+                Some(handle),
+                json!({
+                    "versionId": "main",
+                    "path": ".env.local",
+                    "contentKind": "plaintext"
+                }),
+            ),
+        )
+        .await
+        .expect_err("a secret path must never enter a plaintext Y.Doc session");
+
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    assert_eq!(error.message, "invalid Y.Doc path");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
