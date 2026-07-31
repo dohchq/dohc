@@ -1468,6 +1468,20 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return { entries, nextCursor };
   }
 
+  // Parsed BEFORE any no-op check or mutation. `optionalString` throws on a
+  // non-string, and evaluating it inside the makeSecretMoment call meant the
+  // secret had already changed while the caller got a refusal and no moment —
+  // the daemon refuses a malformed request atomically, before touching state.
+  private secretMomentMetadata(params: JsonObject): {
+    summary: string | null;
+    correlationId: string | null;
+  } {
+    return {
+      summary: optionalString(params, "summary") ?? null,
+      correlationId: optionalString(params, "correlationId") ?? null,
+    };
+  }
+
   private secretWrite(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
     const path = requiredString(params, "path", "secret write");
     if (!isSecretClassifiedPath(path)) throw new Error("not-secret-path");
@@ -1480,6 +1494,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
     const origin = requiredOrigin(params);
     const momentId = requiredString(params, "momentId", "secret write");
+    const metadata = this.secretMomentMetadata(params);
     const before = version.secrets.get(path);
     if (before === text) return { changed: false, moment: null };
     this.assertFreshSecretMoment(state, momentId);
@@ -1491,8 +1506,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       momentId,
       "write",
       origin,
-      optionalString(params, "summary") ?? null,
-      optionalString(params, "correlationId") ?? null,
+      metadata.summary,
+      metadata.correlationId,
     );
     state.secretMoments.set(momentId, { wire, before, after: text });
     return { changed: true, moment: wire };
@@ -1546,6 +1561,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const origin = requiredOrigin(params);
     const momentId = requiredString(params, "momentId", "secret delete");
     const before = version.secrets.get(path);
+    const metadata = this.secretMomentMetadata(params);
     if (before === undefined) return { moment: null };
     this.assertFreshSecretMoment(state, momentId);
     version.secrets.delete(path);
@@ -1556,8 +1572,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       momentId,
       "delete",
       origin,
-      optionalString(params, "summary") ?? null,
-      optionalString(params, "correlationId") ?? null,
+      metadata.summary,
+      metadata.correlationId,
     );
     state.secretMoments.set(momentId, { wire, before });
     return { moment: wire };
@@ -1639,6 +1655,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         path,
       };
     }
+    const metadata = this.secretMomentMetadata(params);
     this.assertFreshSecretMoment(state, momentId);
     if (sourceMoment.before === undefined) version.secrets.delete(path);
     else version.secrets.set(path, sourceMoment.before);
@@ -1650,8 +1667,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       momentId,
       operation,
       "restore",
-      optionalString(params, "summary") ?? null,
-      optionalString(params, "correlationId") ?? null,
+      metadata.summary,
+      metadata.correlationId,
     );
     state.secretMoments.set(momentId, { wire, before: prior, after: sourceMoment.before });
     return { restored: sourceMoment.before === undefined ? "deleted" : "text", restoredMomentId: momentId, path };

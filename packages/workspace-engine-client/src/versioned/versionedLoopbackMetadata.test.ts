@@ -282,6 +282,50 @@ describe("loopback moment metadata", () => {
     expect(Object.keys(moments[0].author as object)).not.toContain("agentRunId");
   });
 
+  it("refuses malformed secret metadata WITHOUT changing the secret", async () => {
+    // The daemon refuses a malformed request atomically, before touching state.
+    // An earlier draft of this fix evaluated `optionalString` inside the
+    // makeSecretMoment call — AFTER `version.secrets.set` — so a non-string
+    // summary left the secret changed, recorded no moment, and still returned a
+    // refusal. The refusal is the easy half to get right; not mutating is the
+    // half that needs a test.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=first\n",
+      origin: "local-file",
+      momentId: "moment-secret-1",
+    });
+
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: ".env",
+        text: "API_KEY=second\n",
+        origin: "local-file",
+        momentId: "moment-secret-2",
+        summary: { not: "a string" },
+      }),
+    ).rejects.toThrow();
+
+    // The secret must still hold the FIRST value: a refused write that mutated
+    // would be worse than one that succeeded.
+    const listed = await send(engine, VERSIONED_METHOD.secretsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const secrets = listed.secrets as Array<Record<string, unknown>>;
+    expect(secrets).toHaveLength(1);
+    // The listing deliberately carries no plaintext, so the stored value is
+    // identified by its byte length: 14 for the first value, 15 for the second.
+    // If the refused write had mutated, this would read 15.
+    expect(secrets[0].byteLength).toBe(Buffer.byteLength("API_KEY=first\n", "utf8"));
+  });
+
   it("leaves both null when the caller supplies neither", async () => {
     // A write without metadata must produce exactly the shape it did before this
     // was threaded through, so no existing consumer changes.
