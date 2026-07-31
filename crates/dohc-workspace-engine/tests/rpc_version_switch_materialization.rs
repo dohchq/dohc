@@ -520,15 +520,12 @@ async fn plaintext_never_leaks_across_an_rpc_version_switch() {
         main_text
     );
 
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(8, "workspace.close", Some(handle), json!({})),
-        )
-        .await
-        .expect("workspace close");
-
     let database = scratch.path().join(".dohc/engine/engine.db");
+    // The WAL is part of the evidence, so the scan runs BEFORE the close: closing
+    // the last connection checkpoints the WAL into the main file and normally
+    // deletes it, and plaintext that reached a WAL page and was later overwritten
+    // would be gone before this could look. `assert_scanned_wal` fails if that
+    // ordering is ever undone.
     let scan = EngineDbScan::read(&database);
     scan.assert_secret_plaintext_absent(&main_text);
     scan.assert_secret_plaintext_absent(&feature_text);
@@ -536,4 +533,13 @@ async fn plaintext_never_leaks_across_an_rpc_version_switch() {
     scan.assert_absent("feature marker", feature_marker.as_bytes());
     // Positive control: both stored ciphertexts ARE in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&database);
+    scan.assert_scanned_wal();
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(8, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("workspace close");
 }

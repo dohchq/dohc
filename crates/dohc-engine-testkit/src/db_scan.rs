@@ -14,7 +14,14 @@
 //!    assertion must be paired with a positive control —
 //!    [`EngineDbScan::assert_stored_ciphertext_scanned`] proves the scanned bytes
 //!    hold the store's real data.
-//! 2. **Ciphertext is stored as base64 `TEXT`.** A scan for the raw plaintext
+//! 2. **Closing the last connection destroys the evidence.** SQLite checkpoints
+//!    the WAL into the main file on that close and normally deletes the WAL, so
+//!    plaintext that reached a WAL page and was later overwritten leaves no trace
+//!    and "never reaches disk" passes over erased bytes. Hold a
+//!    [`crate::harness::open_readonly_keeper`] across the writer's close and
+//!    assert with [`EngineDbScan::assert_scanned_wal`] that the WAL really was
+//!    among the bytes read.
+//! 3. **Ciphertext is stored as base64 `TEXT`.** A scan for the raw plaintext
 //!    bytes alone would miss a plaintext that was base64-encoded on the way in,
 //!    so [`EngineDbScan::assert_secret_plaintext_absent`] looks for both forms.
 
@@ -46,8 +53,13 @@ pub struct EngineDbScan {
 }
 
 impl EngineDbScan {
-    /// Read `db_path` and its sidecars. Drop every store handle first: closing
-    /// the last connection is what flushes the WAL into the main file.
+    /// Read `db_path` and its sidecars.
+    ///
+    /// Do NOT drop every connection first for a "never reaches disk" property:
+    /// that close checkpoints the WAL into the main file and normally deletes the
+    /// WAL, so an overwritten plaintext page is gone before this reads it. Hold a
+    /// [`crate::harness::open_readonly_keeper`] across the writer's close and
+    /// pair the scan with [`Self::assert_scanned_wal`].
     ///
     /// # Panics
     ///
@@ -68,11 +80,21 @@ impl EngineDbScan {
             db_path.display()
         );
         let mut files = vec![(db_path.to_path_buf(), main)];
-        // The sidecars are present only while the WAL is live. Their absence is
-        // normal after a clean close; their bytes still count when they exist.
+        // The sidecars are present only while the WAL is live. Their ABSENCE is
+        // normal after a clean close; any OTHER read error is not, and must not
+        // be swallowed. `if let Ok(..)` treated a permissions failure, an I/O
+        // error or a Windows sharing violation as "no such file", so a leak
+        // living only in an unreadable WAL would produce a passing security test
+        // while the positive control still succeeded from the main database.
         for sidecar in [wal_sidecar(db_path), shm_sidecar(db_path)] {
-            if let Ok(bytes) = std::fs::read(&sidecar) {
-                files.push((sidecar, bytes));
+            match std::fs::read(&sidecar) {
+                Ok(bytes) => files.push((sidecar, bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!(
+                    "sidecar {} exists but could not be read ({error}); a scan that \
+                     skips it cannot claim to have inspected persisted bytes",
+                    sidecar.display()
+                ),
             }
         }
         Self { files }
@@ -154,6 +176,34 @@ impl EngineDbScan {
     /// bytes the secret was written into, so an absence assertion over the same
     /// bytes is a real result.
     ///
+    /// Assert a `-wal` sidecar was among the files read, and that it holds
+    /// bytes. Without this, a scan whose WAL was checkpointed away still passes
+    /// every absence assertion -- over the main file alone, which holds only the
+    /// FINAL page image. The bytes a leak would have touched and then overwritten
+    /// live in the WAL, so a scan that missed it proves nothing about them.
+    ///
+    /// # Panics
+    ///
+    /// When no `-wal` file was read, or the one read is empty.
+    pub fn assert_scanned_wal(&self) {
+        let wal = self
+            .files
+            .iter()
+            .find(|(path, _)| path.to_string_lossy().ends_with("-wal"));
+        let Some((path, bytes)) = wal else {
+            panic!(
+                "no -wal sidecar was scanned, so this proves nothing about bytes that \
+                 reached the write-ahead log. It was checkpointed away before the scan: \
+                 scan before the last connection closes, or hold an `open_readonly_keeper`"
+            );
+        };
+        assert!(
+            !bytes.is_empty(),
+            "scanned {} holds no bytes; the WAL carried no evidence",
+            path.display()
+        );
+    }
+
     /// # Panics
     ///
     /// When `secret_files` is empty (there would be nothing to prove), when the

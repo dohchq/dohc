@@ -11,6 +11,7 @@ use dohc_engine_domain::{
     fork_version_keyless, restore_secret_file_verbatim,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint};
+use dohc_engine_testkit::harness::open_readonly_keeper;
 use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults, bytes_contain};
 use rusqlite::params;
 use std::path::Path;
@@ -347,7 +348,7 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
     let marker = "MARKER_2f9c1e7b_TOP_SECRET_VALUE";
     let text = format!("PASSWORD={marker}\nTOKEN={marker}-2\n");
 
-    {
+    let keeper = {
         let mut store = EngineStore::open(&db, 2).unwrap();
         write(&mut store, &key, ".env", &text, "sm1", 10);
         // Also list files + moments to exercise the metadata-only surfaces.
@@ -357,8 +358,15 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
         assert_eq!(stats[0].byte_length, text.len() as i64);
         let moments = secrets.list_secret_moments(WS, Some("main"), None).unwrap();
         assert_eq!(moments.len(), 1);
-        // Store dropped → WAL flushed on close.
-    }
+        // Snapshotted while the store is still open and held past the scan below:
+        // closing the last connection checkpoints the WAL into the main file and
+        // normally deletes it, so plaintext that reached a WAL page and was later
+        // overwritten would be erased before this test could look for it, and the
+        // absence assertion would pass over destroyed evidence.
+        let keeper = open_readonly_keeper(&db).expect("wal keeper");
+        drop(store);
+        keeper
+    };
 
     let scan = EngineDbScan::read(&db);
     scan.assert_absent("plaintext marker", marker.as_bytes());
@@ -369,6 +377,9 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
     // Positive control: the ciphertext the store actually holds IS in the bytes
     // we scanned, so the absence above is a result and not an empty read.
     scan.assert_stored_ciphertext_scanned(&db);
+    // ...and the WAL really survived the writer's close, so the absence above
+    // covers the bytes a leak would have written there.
+    scan.assert_scanned_wal();
 
     // Sanity: the ciphertext IS present somewhere (proves we scanned real data
     // and the secret was actually stored — just never as plaintext).
@@ -377,6 +388,7 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
         .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM secret_files", [], |r| r.get(0)))
         .unwrap();
     assert_eq!(ct_present, 1, "the encrypted tip must be stored");
+    drop(keeper);
 }
 
 #[test]
@@ -939,7 +951,7 @@ fn plaintext_never_leaks_when_a_secret_merges_across_versions() {
     let source_text = format!("PASSWORD={source_marker}\nTOKEN={source_marker}-2\n");
     let target_text = format!("PASSWORD={target_marker}\n");
 
-    {
+    let keeper = {
         let mut store = EngineStore::open(&db, 2).unwrap();
         let input = diverge_for_merge(&mut store, &key, &base_text, &source_text, &target_text);
         let merged = apply_secret_file_from_version(&mut store, &key, &input, &NO_FAULTS).unwrap();
@@ -957,8 +969,15 @@ fn plaintext_never_leaks_when_a_secret_merges_across_versions() {
             materialized, source_text,
             "the merge must materialize the source plaintext at the target"
         );
-        // Store dropped → WAL flushed on close.
-    }
+        // Snapshotted while the store is still open and held past the scan below:
+        // closing the last connection checkpoints the WAL into the main file and
+        // normally deletes it, so plaintext that reached a WAL page and was later
+        // overwritten would be erased before this test could look for it, and the
+        // absence assertion would pass over destroyed evidence.
+        let keeper = open_readonly_keeper(&db).expect("wal keeper");
+        drop(store);
+        keeper
+    };
 
     let scan = EngineDbScan::read(&db);
     for text in [&base_text, &source_text, &target_text] {
@@ -969,6 +988,10 @@ fn plaintext_never_leaks_when_a_secret_merges_across_versions() {
     scan.assert_absent("merge-target marker", target_marker.as_bytes());
     // Positive control: the ciphertext the store holds IS in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&db);
+    // ...and the WAL really survived the writer's close, so the absence above
+    // covers the bytes a leak would have written there.
+    scan.assert_scanned_wal();
+    drop(keeper);
 }
 
 #[test]
@@ -1017,12 +1040,21 @@ fn a_divergent_secret_merge_records_no_conflict() {
     );
     // No conflict row means no conflict side blob, so `blobs` holds nothing.
     assert_eq!(store.table_row_count("blobs").unwrap(), 0);
+
+    // Snapshotted before the close so the WAL survives for the scan (see
+    // `open_readonly_keeper`); the close would otherwise checkpoint it away and
+    // the absence assertion would run over erased evidence.
+    let keeper = open_readonly_keeper(&db).expect("wal keeper");
     drop(store);
 
     let scan = EngineDbScan::read(&db);
     scan.assert_secret_plaintext_absent(source_text);
     scan.assert_secret_plaintext_absent(target_text);
     scan.assert_stored_ciphertext_scanned(&db);
+    // ...and the WAL really survived the writer's close, so the absence above
+    // covers the bytes a leak would have written there.
+    scan.assert_scanned_wal();
+    drop(keeper);
 }
 
 #[test]

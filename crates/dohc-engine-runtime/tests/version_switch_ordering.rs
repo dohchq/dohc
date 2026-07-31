@@ -722,8 +722,11 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
         );
     }
 
-    supervisor.close(&database).expect("close");
-
+    // The WAL is part of the evidence, so the scan runs BEFORE the close: closing
+    // the last connection checkpoints the WAL into the main file and normally
+    // deletes it, and plaintext that reached a WAL page and was later overwritten
+    // would be gone before this could look. `assert_scanned_wal` fails if that
+    // ordering is ever undone.
     let scan = EngineDbScan::read(&database);
     scan.assert_secret_plaintext_absent(&main_text);
     scan.assert_secret_plaintext_absent(&feature_text);
@@ -731,4 +734,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     scan.assert_absent("feature marker", feature_marker.as_bytes());
     // Positive control: the ciphertext both tips hold IS in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&database);
+    scan.assert_scanned_wal();
+
+    supervisor.close(&database).expect("close");
 }
