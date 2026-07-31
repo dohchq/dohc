@@ -538,6 +538,9 @@ describe("versioned typed loopback", () => {
 
   it("round-trips opaque secret write/fork/compare/apply/restore/delete and protected moments", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     const writeMain: SecretsWriteParams = {
       workspaceId: WORKSPACE,
       versionId: "main",
@@ -984,14 +987,14 @@ describe("loopback contract enforcement", () => {
         momentId: "malformed-base64-moment",
       }),
     ).rejects.toThrow("invalid-input");
-    expect(
-      decodeVersionedBinaryReadResult(
-        await call(engine, 2, VERSIONED_METHOD.binaryRead, {
-          versionId: "main",
-          path: "malformed.bin",
-        }),
-      ),
-    ).toBeNull();
+    // The refused write must not create `main`; the daemon test
+    // `a_refused_write_creates_no_version` pins this behavior.
+    await expect(
+      call(engine, 2, VERSIONED_METHOD.binaryRead, {
+        versionId: "main",
+        path: "malformed.bin",
+      }),
+    ).rejects.toThrow("version-not-found");
   });
 
   it("returns the existing head moment for binary content-equality dedup", async () => {
@@ -1190,6 +1193,9 @@ describe("loopback contract enforcement", () => {
 
   it("treats a same-moment same-value secret write retry as an equality no-op", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     const params: SecretsWriteParams = {
       workspaceId: WORKSPACE,
       versionId: "main",
@@ -1272,6 +1278,9 @@ describe("loopback contract enforcement", () => {
 
   it("keeps target changes when the secret source is unchanged from its fork base", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
       workspaceId: WORKSPACE,
       versionId: "main",
@@ -1313,6 +1322,9 @@ describe("loopback contract enforcement", () => {
 
   it("propagates a source secret deletion with sync provenance", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
       workspaceId: WORKSPACE,
       versionId: "main",
@@ -1352,6 +1364,9 @@ describe("loopback contract enforcement", () => {
 
   it("secret restore equality is a no-op with the original moment id", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     for (const [id, text] of [["restore-a", "A"], ["restore-b", "B"]] as const) {
       await call(engine, engine.requests.length + 1, VERSIONED_METHOD.secretsWrite, {
         workspaceId: WORKSPACE,
@@ -1392,6 +1407,9 @@ describe("loopback contract enforcement", () => {
 
   it("retries a committed secret delete as a no-op before duplicate-id validation", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
       workspaceId: WORKSPACE,
       versionId: "main",
@@ -1419,6 +1437,9 @@ describe("loopback contract enforcement", () => {
 
   it("retries a committed secret apply as a no-op before duplicate-id validation", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
       workspaceId: WORKSPACE,
       versionId: "main",
@@ -1462,6 +1483,9 @@ describe("loopback contract enforcement", () => {
 
   it("retries a committed secret restore as a no-op before duplicate-id validation", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     for (const [id, text] of [["restore-retry-a", "A"], ["restore-retry-b", "B"]] as const) {
       await call(engine, engine.requests.length + 1, VERSIONED_METHOD.secretsWrite, {
         workspaceId: WORKSPACE,
@@ -1491,6 +1515,9 @@ describe("loopback contract enforcement", () => {
 
   it("rejects a secret restore whose requested path differs from the protected moment", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     for (const [id, text] of [["restore-path-a", "A"], ["restore-path-b", "B"]] as const) {
       await call(engine, engine.requests.length + 1, VERSIONED_METHOD.secretsWrite, {
         workspaceId: WORKSPACE,
@@ -1517,6 +1544,9 @@ describe("loopback contract enforcement", () => {
 
   it("restores a secret into the source moment version while another version is active", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     for (const [id, text] of [["main-a", "A"], ["main-b", "B"]] as const) {
       await call(engine, engine.requests.length + 1, VERSIONED_METHOD.secretsWrite, {
         workspaceId: WORKSPACE,
@@ -1642,6 +1672,9 @@ describe("loopback contract enforcement", () => {
   it("rejects a text moment id already owned by secret history", async () => {
     // MUTATION: make the text freshness guard consult only moments -> succeeds.
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
       workspaceId: WORKSPACE,
       versionId: "main",
@@ -1835,6 +1868,9 @@ describe("loopback contract enforcement", () => {
 
   it("paginates protected secret moments without overlap", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     for (const [index, text] of ["one", "two", "three"].entries()) {
       await call(engine, index + 1, VERSIONED_METHOD.secretsWrite, {
         workspaceId: WORKSPACE,
@@ -1911,6 +1947,9 @@ describe("loopback contract enforcement", () => {
 
   it("lists protected history across versions when versionId is omitted", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
       workspaceId: WORKSPACE,
       versionId: "main",

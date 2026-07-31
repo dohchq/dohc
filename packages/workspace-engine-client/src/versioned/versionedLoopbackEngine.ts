@@ -42,6 +42,9 @@ function refusalFrom(error: unknown): unknown {
 }
 
 const INBAND_LIMIT_BYTES = 48 * 1024;
+const MAX_DESKTOP_CAPTURE_TEXT_BYTES = 128 * 1024;
+const MAX_SECRET_FILE_BYTES = 1024 * 1024;
+const MAX_CAPTURE_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 const COMPARE_PAGE_SIZE = 200;
 const MAX_MERGE_LINES = 2_000;
 // Mirrors MAX_METADATA_FIELD_BYTES in crates/dohc-workspace-engine/src/lib.rs.
@@ -54,6 +57,34 @@ const ACCEPTED_ORIGINS = new Set<string>([
   "sync",
   "unknown",
 ]);
+
+const WRITE_PARAM_FIELDS = [
+  "workspaceId",
+  "versionId",
+  "objectId",
+  "path",
+  "origin",
+  "metadataOrigin",
+  "summary",
+  "correlationId",
+  "author",
+  "authorJson",
+  "momentId",
+  "requestId",
+  "nowMs",
+] as const;
+const TEXT_WRITE_PARAM_FIELDS = new Set<string>([...WRITE_PARAM_FIELDS, "text"]);
+const BINARY_WRITE_PARAM_FIELDS = new Set<string>([
+  ...WRITE_PARAM_FIELDS,
+  "bytes",
+  "bytesBase64",
+]);
+const BINARY_BLOB_WRITE_PARAM_FIELDS = new Set<string>([
+  ...WRITE_PARAM_FIELDS,
+  "sha256",
+  "bytesBase64",
+]);
+const WORKSPACE_ONLY_PARAM_FIELDS = new Set<string>(["workspaceId"]);
 
 interface LoopbackFile {
   objectId: string;
@@ -105,6 +136,13 @@ interface WorkspaceState {
   replays: Map<string, { fingerprint: string; result: JsonObject }>;
 }
 
+interface ParsedWriteFields {
+  objectId?: string;
+  momentId?: string;
+  requestId?: string;
+  nowMs?: number;
+}
+
 export interface SeedVersionedTextInput {
   workspace: string;
   versionId?: string;
@@ -147,11 +185,21 @@ function requiredString(object: JsonObject, key: string, label: string): string 
   return value;
 }
 
+function rejectUnknownFields(object: JsonObject, allowed: ReadonlySet<string>): void {
+  if (Object.keys(object).some((key) => !allowed.has(key))) {
+    throw new Error("invalid parameters");
+  }
+}
+
 function optionalString(object: JsonObject, key: string): string | undefined {
   const value = object[key];
   if (value === undefined) return undefined;
   if (typeof value !== "string") throw new Error(`${key} is invalid.`);
   return value;
+}
+
+function serdeOptionalString(object: JsonObject, key: string): string | undefined {
+  return object[key] === null ? undefined : optionalString(object, key);
 }
 
 function optionalNumber(object: JsonObject, key: string): number | undefined {
@@ -161,6 +209,31 @@ function optionalNumber(object: JsonObject, key: string): number | undefined {
     throw new Error(`${key} is invalid.`);
   }
   return value;
+}
+
+function serdeOptionalNumber(object: JsonObject, key: string): number | undefined {
+  return object[key] === null ? undefined : optionalNumber(object, key);
+}
+
+function requestIdempotencyKey(request: Request): string | undefined {
+  const value = request.idempotencyKey as unknown;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error("idempotencyKey is invalid.");
+  return value;
+}
+
+// Rust deserializes these fields before handler code can read state. Blob
+// writes pass the parsed values through binaryWrite to keep that single phase.
+function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFields {
+  const idempotencyKey = requestIdempotencyKey(request);
+  serdeOptionalString(params, "metadataOrigin");
+  serdeOptionalString(params, "authorJson");
+  return {
+    objectId: serdeOptionalString(params, "objectId"),
+    momentId: serdeOptionalString(params, "momentId"),
+    requestId: serdeOptionalString(params, "requestId") ?? idempotencyKey,
+    nowMs: serdeOptionalNumber(params, "nowMs"),
+  };
 }
 
 // `secrets.restore` only. SecretsRestoreParams takes `origin` as a required field
@@ -180,12 +253,12 @@ function restoreOrigin(object: JsonObject): VersionedOrigin {
 }
 
 function requiredOrigin(object: JsonObject): VersionedOrigin {
-  const origin = optionalString(object, "origin");
+  const origin = serdeOptionalString(object, "origin");
+  const legacyOrigin = serdeOptionalString(object, "metadataOrigin");
   if (origin !== undefined) {
     if (!ACCEPTED_ORIGINS.has(origin)) throw new Error("invalid-metadata");
     return origin as VersionedOrigin;
   }
-  const legacyOrigin = optionalString(object, "metadataOrigin");
   if (legacyOrigin === "agent") return "api";
   if (!legacyOrigin || !ACCEPTED_ORIGINS.has(legacyOrigin)) {
     throw new Error("invalid-metadata");
@@ -216,11 +289,10 @@ function utf8Length(value: string): number {
 // two ways must fail on whichever the daemon reaches first, and the call sites
 // below keep that order rather than restating why.
 //
-// Two exceptions the call sites DO have to name, because they are not derivable:
+// Two ordering details must stay explicit at the call sites:
 // `versionedBinary.writeBlob` validates before decoding while
-// `versionedBinary.write` decodes first, and the handlers that call
-// `mutationVersion` still touch state before validating because that call creates
-// `main` (#439).
+// `versionedBinary.write` decodes first, and handlers must validate before they
+// call `mutationVersion` because it can create `main` (#439).
 function metadataField(params: JsonObject, key: string): string | undefined {
   const raw = params[key];
   if (raw === undefined || raw === null) return undefined;
@@ -536,6 +608,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       case VERSIONED_METHOD.versionsSetActive:
         return this.setActive(state, params);
       case VERSIONED_METHOD.versionsEnsureMain:
+        rejectUnknownFields(params, WORKSPACE_ONLY_PARAM_FIELDS);
         return this.versionJson(this.ensureMain(state, workspace));
       case VERSIONED_METHOD.versionsActive:
         return state.versioned && state.activeVersionId !== undefined
@@ -590,24 +663,25 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
+    rejectUnknownFields(params, TEXT_WRITE_PARAM_FIELDS);
     const path = requiredString(params, "path", "write");
-    if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
-    const version = this.mutationVersion(
-      state,
-      workspace,
-      requiredString(params, "versionId", "write"),
-    );
+    const versionId = requiredString(params, "versionId", "write");
     const text = requiredString(params, "text", "write");
-    if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
+    const writeFields = parseWriteFields(params, request);
+    if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
+    if (utf8Length(text) > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
+      throw new Error("content-exceeds-inband-cap");
+    }
     const origin = requiredOrigin(params);
     // Before every replay/dedup/unchanged return — see metadataField.
     const metadata = this.momentMetadataFields(params);
-    const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
-    const objectId = optionalString(params, "objectId") ??
+    const version = this.mutationVersion(state, workspace, versionId);
+    const requestId = writeFields.requestId;
+    const objectId = writeFields.objectId ??
       (requestId
         ? this.generatedWriteId("object", requestId, path)
         : version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
-    const momentId = optionalString(params, "momentId") ??
+    const momentId = writeFields.momentId ??
       (requestId
         ? this.generatedWriteId("moment", requestId, path)
         : `moment-${this.nextMomentId++}`);
@@ -649,7 +723,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // The daemon binds the input object id to NEW paths only — an existing
     // head keeps its identity (store.rs existing_object.unwrap_or).
     const effectiveObjectId = before?.objectId ?? objectId;
-    const now = optionalNumber(params, "nowMs") ?? this.clock++;
+    const now = writeFields.nowMs ?? this.clock++;
     const file: LoopbackFile = {
       objectId: effectiveObjectId,
       contentKind: "text",
@@ -749,16 +823,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
     allowFullRange = false,
+    preparsedWriteFields?: ParsedWriteFields,
   ): JsonValue {
+    rejectUnknownFields(params, BINARY_WRITE_PARAM_FIELDS);
     const path = requiredString(params, "path", "binary write");
+    const versionId = requiredString(params, "versionId", "binary write");
+    const writeFields = preparsedWriteFields ?? parseWriteFields(params, request);
     if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
-    const version = this.mutationVersion(
-      state,
-      workspace,
-      requiredString(params, "versionId", "binary write"),
-    );
-    const rawBytes = params.bytes;
-    const rawBase64 = params.bytesBase64;
+    const rawBytes = params.bytes === null ? undefined : params.bytes;
+    const rawBase64 = serdeOptionalString(params, "bytesBase64");
     let bytes: number[];
     if (Array.isArray(rawBytes) && rawBase64 === undefined) {
       bytes = rawBytes.map((byte) => {
@@ -776,16 +849,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
       throw new Error("content-exceeds-inband-cap");
     }
     const origin = requiredOrigin(params);
-    // Exception 1 (see metadataField): AFTER the decode and cap, because this
-    // handler decodes first — unlike writeBlob. Exception 2: `mutationVersion`
-    // above already created `main`, so this is not proof of atomic refusal (#439).
+    // The daemon decodes and caps bytes before it validates metadata.
     const metadata = this.momentMetadataFields(params);
-    const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
-    const objectId = optionalString(params, "objectId") ??
+    const version = this.mutationVersion(state, workspace, versionId);
+    const requestId = writeFields.requestId;
+    const objectId = writeFields.objectId ??
       (requestId
         ? this.generatedWriteId("object", requestId, path)
         : version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
-    const momentId = optionalString(params, "momentId") ??
+    const momentId = writeFields.momentId ??
       (requestId
         ? this.generatedWriteId("moment", requestId, path)
         : `moment-${this.nextMomentId++}`);
@@ -840,7 +912,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     this.assertFreshMoment(state, momentId);
     // Daemon parity: an existing head keeps its object identity.
     const effectiveObjectId = before?.objectId ?? objectId;
-    const now = optionalNumber(params, "nowMs") ?? this.clock++;
+    const now = writeFields.nowMs ?? this.clock++;
     const file: LoopbackFile = {
       objectId: effectiveObjectId,
       contentKind: "binary",
@@ -895,7 +967,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
+    rejectUnknownFields(params, BINARY_BLOB_WRITE_PARAM_FIELDS);
+    requiredString(params, "versionId", "binary blob write");
+    requiredString(params, "path", "binary blob write");
     const expectedSha = requiredString(params, "sha256", "binary blob write").toLowerCase();
+    const writeFields = parseWriteFields(params, request);
+    const encoded = serdeOptionalString(params, "bytesBase64");
     if (!/^[0-9a-f]{64}$/.test(expectedSha)) throw new Error("invalid-input");
     // The blob handler validates origin, metadata AND author before it decodes
     // or looks up the bytes (lib.rs versionedBinary.writeBlob: origin, metadata,
@@ -909,19 +986,24 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // all of them; these calls exist purely for the refusal order.
     requiredOrigin(params);
     this.momentMetadataFields(params);
-    const encoded = optionalString(params, "bytesBase64");
     const bytes =
       encoded === undefined
         ? state.blobs.get(expectedSha)
         : decodeBase64(encoded);
     if (bytes === undefined) throw new Error("file-not-found");
+    if (encoded !== undefined && bytes.length > MAX_CAPTURE_BINARY_FILE_BYTES) {
+      throw new Error("content-exceeds-capture-cap");
+    }
     if (sha256(bytes) !== expectedSha) throw new Error("invalid-input");
+    const writeParams: JsonObject = { ...params, bytesBase64: encodeBase64(bytes) };
+    delete writeParams.sha256;
     return this.binaryWrite(
       state,
       workspace,
-      { ...params, bytesBase64: encodeBase64(bytes) },
+      writeParams,
       request,
       true,
+      writeFields,
     );
   }
 
@@ -931,12 +1013,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
-    // Before state is read — see metadataField.
-    const metadata = this.momentMetadataFields(params);
-    const version = this.version(state, requiredString(params, "versionId", "rename"));
+    const versionId = requiredString(params, "versionId", "rename");
     const fromPath = requiredString(params, "fromPath", "rename");
     const toPath = requiredString(params, "toPath", "rename");
     const origin = requiredOrigin(params);
+    const metadata = this.momentMetadataFields(params);
+    const version = this.version(state, versionId);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
       ? this.generatedRequestId("moment", requestId, toPath)
@@ -1000,11 +1082,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
-    // Before state is read — see metadataField.
-    const metadata = this.momentMetadataFields(params);
-    const version = this.version(state, requiredString(params, "versionId", "delete"));
+    const versionId = requiredString(params, "versionId", "delete");
     const path = requiredString(params, "path", "delete");
     const origin = requiredOrigin(params);
+    const metadata = this.momentMetadataFields(params);
+    const version = this.version(state, versionId);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
       ? this.generatedRequestId("moment", requestId, path)
@@ -1557,17 +1639,17 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private secretWrite(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
     const path = requiredString(params, "path", "secret write");
-    if (!isSecretClassifiedPath(path)) throw new Error("not-secret-path");
-    const version = this.mutationVersion(
-      state,
-      workspace,
-      requiredString(params, "versionId", "secret write"),
-    );
+    const versionId = requiredString(params, "versionId", "secret write");
     const text = requiredString(params, "text", "secret write");
-    if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
+    if (utf8Length(text) > MAX_SECRET_FILE_BYTES) {
+      throw new Error("content-exceeds-inband-cap");
+    }
     const origin = requiredOrigin(params);
     const momentId = requiredString(params, "momentId", "secret write");
     const metadata = this.secretMomentMetadata(params);
+    if (!isSecretClassifiedPath(path)) throw new Error("not-secret-path");
+    const version = state.versions.get(versionId);
+    if (!version) throw new Error("invalid-version");
     const before = version.secrets.get(path);
     if (before === text) return { changed: false, moment: null };
     this.assertFreshSecretMoment(state, momentId);
@@ -1625,16 +1707,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretDelete(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const version = this.mutationVersion(
-      state,
-      workspace,
-      requiredString(params, "versionId", "secret delete"),
-    );
+    const versionId = requiredString(params, "versionId", "secret delete");
     const path = requiredString(params, "path", "secret delete");
     const origin = requiredOrigin(params);
     const momentId = requiredString(params, "momentId", "secret delete");
-    const before = version.secrets.get(path);
     const metadata = this.secretMomentMetadata(params);
+    if (!isSecretClassifiedPath(path)) throw new Error("not-secret-path");
+    const version = state.versions.get(versionId);
+    if (!version) throw new Error("invalid-version");
+    const before = version.secrets.get(path);
     if (before === undefined) return { moment: null };
     this.assertFreshSecretMoment(state, momentId);
     version.secrets.delete(path);
@@ -1863,6 +1944,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return main;
   }
 
+  // Call only after the handler completes daemon-parity validation. This may
+  // create `main`; a refused mutation must leave `versions.list` empty.
   private mutationVersion(
     state: WorkspaceState,
     workspace: string,
@@ -2152,6 +2235,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const refuse = (): never => {
       throw new Error("invalid-metadata");
     };
+    if (legacy !== undefined && legacy !== null && typeof legacy !== "string") refuse();
     if (raw !== undefined && raw !== null && typeof legacy === "string") refuse();
     let value: JsonValue;
     if (raw !== undefined && raw !== null) {

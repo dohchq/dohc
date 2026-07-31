@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { VERSIONED_METHOD } from "./versionedWireContract";
 import { VersionedLoopbackEngine } from "./versionedLoopbackEngine";
@@ -24,12 +25,14 @@ async function send(
   engine: VersionedLoopbackEngine,
   method: string,
   params: Record<string, unknown>,
+  requestFields: Record<string, unknown> = {},
 ): Promise<Record<string, unknown>> {
   const response = await engine.sendRequest({
     id: `${method}-1`,
     method,
     workspace: WORKSPACE,
     params: params as never,
+    ...requestFields,
   } as never);
   const result = (response as { result?: unknown }).result;
   return (result ?? {}) as Record<string, unknown>;
@@ -41,6 +44,152 @@ async function openWorkspace(engine: VersionedLoopbackEngine): Promise<string> {
     workspaceId: WORKSPACE,
   });
   return String((active.version as { id?: unknown } | undefined)?.id ?? "main");
+}
+
+type MutationRefusalCase = {
+  handler: string;
+  method: string;
+  missingState: Record<string, unknown>;
+  missingMain?: Record<string, unknown>;
+  validatesAuthor?: boolean;
+};
+
+function mutationCaseWithVersion(
+  handler: string,
+  method: string,
+  params: Record<string, unknown>,
+  validatesAuthor = false,
+): MutationRefusalCase {
+  return {
+    handler,
+    method,
+    missingState: { ...params, versionId: "no-such-version" },
+    missingMain: { ...params, versionId: "main" },
+    validatesAuthor,
+  };
+}
+
+function mutationCaseWithVersions(
+  handler: string,
+  method: string,
+  params: Record<string, unknown>,
+  validatesAuthor = false,
+): MutationRefusalCase {
+  return {
+    handler,
+    method,
+    missingState: {
+      ...params,
+      sourceVersionId: "no-such-source",
+      targetVersionId: "no-such-target",
+    },
+    missingMain: { ...params, sourceVersionId: "main", targetVersionId: "main" },
+    validatesAuthor,
+  };
+}
+
+function mutationRefusalCases(): MutationRefusalCase[] {
+  const blobBytes = Buffer.from([1, 2, 3]);
+  const blobSha256 = createHash("sha256").update(blobBytes).digest("hex");
+
+  return [
+    mutationCaseWithVersion(
+      "textWrite",
+      VERSIONED_METHOD.textWrite,
+      { path: "notes.md", text: "hello", origin: "local-file" },
+      true,
+    ),
+    mutationCaseWithVersion(
+      "binaryWrite",
+      VERSIONED_METHOD.binaryWrite,
+      { path: "logo.png", bytes: [1, 2, 3], origin: "local-file" },
+      true,
+    ),
+    {
+      handler: "binaryWriteBlob",
+      method: VERSIONED_METHOD.binaryWriteBlob,
+      missingState: {
+        versionId: "no-such-version",
+        path: "logo.png",
+        sha256: "b".repeat(64),
+        origin: "local-file",
+      },
+      missingMain: {
+        versionId: "main",
+        path: "logo.png",
+        sha256: blobSha256,
+        bytesBase64: blobBytes.toString("base64"),
+        origin: "local-file",
+      },
+      validatesAuthor: true,
+    },
+    mutationCaseWithVersion(
+      "textRename",
+      VERSIONED_METHOD.textRename,
+      {
+        fromPath: "before.md",
+        toPath: "after.md",
+        origin: "local-file",
+      },
+      true,
+    ),
+    mutationCaseWithVersion(
+      "textDelete",
+      VERSIONED_METHOD.textDelete,
+      { path: "notes.md", origin: "local-file" },
+      true,
+    ),
+    mutationCaseWithVersions(
+      "merge",
+      VERSIONED_METHOD.versionsMerge,
+      { path: "notes.md", origin: "local-file" },
+      true,
+    ),
+    mutationCaseWithVersion("secretWrite", VERSIONED_METHOD.secretsWrite, {
+      path: ".env",
+      text: "API_KEY=value\n",
+      momentId: "secret-write-refused",
+      origin: "local-file",
+    }),
+    mutationCaseWithVersion("secretDelete", VERSIONED_METHOD.secretsDelete, {
+      path: ".env",
+      momentId: "secret-delete-refused",
+      origin: "local-file",
+    }),
+    mutationCaseWithVersions("secretApply", VERSIONED_METHOD.secretsApply, {
+      path: ".env",
+      momentId: "secret-apply-refused",
+      origin: "local-file",
+    }),
+    {
+      handler: "secretRestore",
+      method: VERSIONED_METHOD.secretsRestore,
+      missingState: {
+        path: ".env",
+        beforeMomentId: "no-such-moment",
+        momentId: "secret-restore-refused",
+        origin: "restore",
+      },
+    },
+  ];
+}
+
+async function expectRefusalWithoutVersion(
+  label: string,
+  method: string,
+  params: Record<string, unknown>,
+  error: RegExp,
+  requestFields: Record<string, unknown> = {},
+): Promise<void> {
+  const engine = new VersionedLoopbackEngine();
+  await expect(
+    send(engine, method, { workspaceId: WORKSPACE, ...params }, requestFields),
+    label,
+  ).rejects.toThrow(error);
+  const listed = await send(engine, VERSIONED_METHOD.versionsList, {
+    workspaceId: WORKSPACE,
+  });
+  expect(listed.versions, `${label}: refusal must not create a version`).toEqual([]);
 }
 
 describe("loopback moment metadata", () => {
@@ -729,6 +878,430 @@ describe("loopback moment metadata", () => {
           ...extra,
         }),
       ).rejects.toThrow(/invalid-metadata/);
+    }
+  });
+
+  it("rejects metadata before state lookup in all ten mutation handlers", async () => {
+    const overCap = "s".repeat(16 * 1024 + 1);
+    const invalidFields: Array<[string, Record<string, unknown>]> = [
+      ["summary", { summary: overCap }],
+      ["correlationId", { correlationId: overCap }],
+    ];
+
+    for (const testCase of mutationRefusalCases()) {
+      const scenarios: Array<[string, Record<string, unknown>]> = [
+        ["missing state", testCase.missingState],
+      ];
+      if (testCase.missingMain) scenarios.push(["missing main", testCase.missingMain]);
+
+      for (const [field, invalidMetadata] of invalidFields) {
+        for (const [scenario, params] of scenarios) {
+          await expectRefusalWithoutVersion(
+            `${testCase.handler}: ${field}, ${scenario}`,
+            testCase.method,
+            { ...params, ...invalidMetadata },
+            /invalid-metadata/,
+          );
+        }
+      }
+    }
+  });
+
+  it("rejects invalid origins before state lookup in all ten mutation handlers", async () => {
+    for (const testCase of mutationRefusalCases()) {
+      const scenarios: Array<[string, Record<string, unknown>]> = [
+        ["missing state", testCase.missingState],
+      ];
+      if (testCase.missingMain) scenarios.push(["missing main", testCase.missingMain]);
+
+      for (const [scenario, params] of scenarios) {
+        await expectRefusalWithoutVersion(
+          `${testCase.handler}: ${scenario}`,
+          testCase.method,
+          { ...params, origin: "not-an-origin" },
+          /invalid-metadata/,
+        );
+      }
+    }
+  });
+
+  it("rejects invalid authors before state lookup in all six author handlers", async () => {
+    for (const testCase of mutationRefusalCases().filter(
+      ({ validatesAuthor }) => validatesAuthor,
+    )) {
+      const scenarios: Array<[string, Record<string, unknown>]> = [
+        ["missing state", testCase.missingState],
+      ];
+      if (testCase.missingMain) scenarios.push(["missing main", testCase.missingMain]);
+
+      for (const [scenario, params] of scenarios) {
+        await expectRefusalWithoutVersion(
+          `${testCase.handler}: ${scenario}`,
+          testCase.method,
+          { ...params, author: { kind: "not-an-author" } },
+          /invalid-metadata/,
+        );
+      }
+    }
+  });
+
+  it("rejects invalid content before version lookup or main creation", async () => {
+    const overCapBytes = Array.from({ length: 48 * 1024 + 1 }, () => 1);
+    const overCaptureBytes = Buffer.alloc(5 * 1024 * 1024 + 1, 1);
+    const cases: Array<{
+      name: string;
+      method: string;
+      params: Record<string, unknown>;
+      error: RegExp;
+    }> = [
+      {
+        name: "binaryWrite content cap",
+        method: VERSIONED_METHOD.binaryWrite,
+        params: {
+          versionId: "main",
+          path: "logo.png",
+          bytes: overCapBytes,
+          origin: "local-file",
+        },
+        error: /content-exceeds-inband-cap/,
+      },
+      {
+        name: "binaryWrite byte validation",
+        method: VERSIONED_METHOD.binaryWrite,
+        params: {
+          versionId: "main",
+          path: "logo.png",
+          bytes: [256],
+          origin: "local-file",
+        },
+        error: /invalid-input/,
+      },
+      {
+        name: "binaryWriteBlob digest validation",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: {
+          versionId: "main",
+          path: "logo.png",
+          sha256: "not-a-digest",
+          bytesBase64: Buffer.from([1, 2, 3]).toString("base64"),
+          origin: "local-file",
+        },
+        error: /invalid-input/,
+      },
+      {
+        name: "binaryWriteBlob byte validation",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: {
+          versionId: "main",
+          path: "logo.png",
+          sha256: "b".repeat(64),
+          bytesBase64: "!!!not base64!!!",
+          origin: "local-file",
+        },
+        error: /invalid-input/,
+      },
+      {
+        name: "binaryWriteBlob digest match",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: {
+          versionId: "main",
+          path: "logo.png",
+          sha256: "b".repeat(64),
+          bytesBase64: Buffer.from([1, 2, 3]).toString("base64"),
+          origin: "local-file",
+        },
+        error: /invalid-input/,
+      },
+      {
+        name: "binaryWriteBlob capture cap",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: {
+          versionId: "main",
+          path: "logo.png",
+          sha256: createHash("sha256").update(overCaptureBytes).digest("hex"),
+          bytesBase64: overCaptureBytes.toString("base64"),
+          origin: "local-file",
+        },
+        error: /content-exceeds-capture-cap/,
+      },
+    ];
+
+    for (const testCase of cases) {
+      await expectRefusalWithoutVersion(
+        testCase.name,
+        testCase.method,
+        testCase.params,
+        testCase.error,
+      );
+    }
+  });
+
+  it("accepts the text write limit and refuses one extra byte without state", async () => {
+    const limit = 128 * 1024;
+    const engine = new VersionedLoopbackEngine();
+    const written = await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "notes.md",
+      text: "x".repeat(limit),
+      origin: "local-file",
+    });
+    expect((written.snapshot as { byteLength?: unknown }).byteLength).toBe(limit);
+
+    await expectRefusalWithoutVersion(
+      "textWrite: limit + 1",
+      VERSIONED_METHOD.textWrite,
+      {
+        versionId: "main",
+        path: "notes.md",
+        text: "x".repeat(limit + 1),
+        origin: "local-file",
+      },
+      /content-exceeds-inband-cap/,
+    );
+  });
+
+  it("accepts the secret write limit and refuses one extra byte without state", async () => {
+    const limit = 1024 * 1024;
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const written = await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "x".repeat(limit),
+      momentId: "secret-content-limit",
+      origin: "local-file",
+    });
+    expect(written.changed).toBe(true);
+    const listed = await send(engine, VERSIONED_METHOD.secretsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    const secrets = listed.secrets as Array<Record<string, unknown>>;
+    expect(secrets).toHaveLength(1);
+    expect(secrets[0].byteLength).toBe(limit);
+
+    await expectRefusalWithoutVersion(
+      "secretWrite: limit + 1",
+      VERSIONED_METHOD.secretsWrite,
+      {
+        versionId: "main",
+        path: ".env",
+        text: "x".repeat(limit + 1),
+        momentId: "secret-content-refused",
+        origin: "local-file",
+      },
+      /content-exceeds-inband-cap/,
+    );
+  });
+
+  it("rejects malformed optional write fields before creating main", async () => {
+    const handlers: Array<{
+      name: string;
+      method: string;
+      params: Record<string, unknown>;
+    }> = [
+      {
+        name: "textWrite",
+        method: VERSIONED_METHOD.textWrite,
+        params: {
+          versionId: "main",
+          path: "notes.md",
+          text: "hello",
+          origin: "local-file",
+        },
+      },
+      {
+        name: "binaryWrite",
+        method: VERSIONED_METHOD.binaryWrite,
+        params: {
+          versionId: "main",
+          path: "logo.png",
+          bytes: [1, 2, 3],
+          origin: "local-file",
+        },
+      },
+      {
+        name: "binaryWriteBlob",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: {
+          versionId: "main",
+          path: "logo.png",
+          sha256: "b".repeat(64),
+          origin: "local-file",
+        },
+      },
+    ];
+    const malformedFields: Array<[string, unknown, RegExp]> = [
+      ["objectId", 1, /objectId is invalid/],
+      ["momentId", 1, /momentId is invalid/],
+      ["requestId", 1, /requestId is invalid/],
+      ["nowMs", "now", /nowMs is invalid/],
+      ["metadataOrigin", 1, /metadataOrigin is invalid/],
+      ["authorJson", 1, /authorJson is invalid/],
+    ];
+
+    for (const handler of handlers) {
+      for (const [field, value, error] of malformedFields) {
+        await expectRefusalWithoutVersion(
+          `${handler.name}: malformed ${field}`,
+          handler.method,
+          { ...handler.params, [field]: value },
+          error,
+        );
+      }
+      await expectRefusalWithoutVersion(
+        `${handler.name}: malformed idempotencyKey`,
+        handler.method,
+        handler.params,
+        /idempotencyKey is invalid/,
+        { idempotencyKey: 1 },
+      );
+    }
+  });
+
+  it("treats null binary sources as absent", async () => {
+    for (const bytes of [
+      { bytes: [1], bytesBase64: null },
+      { bytes: null, bytesBase64: "AQ==" },
+    ]) {
+      const engine = new VersionedLoopbackEngine();
+      const result = await send(engine, VERSIONED_METHOD.binaryWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "logo.png",
+        origin: "local-file",
+        ...bytes,
+      });
+      expect((result.snapshot as { byteLength: number }).byteLength).toBe(1);
+    }
+  });
+
+  it("rejects unknown fields before creating main", async () => {
+    const blobBytes = Buffer.from([1, 2, 3]);
+    const blobParams = {
+      versionId: "main",
+      path: "logo.png",
+      sha256: createHash("sha256").update(blobBytes).digest("hex"),
+      bytesBase64: blobBytes.toString("base64"),
+      origin: "local-file",
+    };
+    const cases: Array<{
+      name: string;
+      method: string;
+      params: Record<string, unknown>;
+    }> = [
+      {
+        name: "textWrite",
+        method: VERSIONED_METHOD.textWrite,
+        params: {
+          versionId: "main",
+          path: "notes.md",
+          text: "hello",
+          origin: "local-file",
+          stray: true,
+        },
+      },
+      {
+        name: "binaryWrite",
+        method: VERSIONED_METHOD.binaryWrite,
+        params: {
+          versionId: "main",
+          path: "logo.png",
+          bytes: [1, 2, 3],
+          origin: "local-file",
+          stray: true,
+        },
+      },
+      {
+        name: "binaryWriteBlob",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: { ...blobParams, stray: true },
+      },
+      {
+        name: "binaryWriteBlob bytes",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: { ...blobParams, bytes: null },
+      },
+      {
+        name: "versionsEnsureMain",
+        method: VERSIONED_METHOD.versionsEnsureMain,
+        params: { stray: true },
+      },
+    ];
+
+    for (const testCase of cases) {
+      await expectRefusalWithoutVersion(
+        testCase.name,
+        testCase.method,
+        testCase.params,
+        /invalid parameters/,
+      );
+    }
+  });
+
+  it("requires an existing version for secret writes and deletes", async () => {
+    for (const [method, extra] of [
+      [
+        VERSIONED_METHOD.secretsWrite,
+        { text: "API_KEY=value\n", momentId: "secret-write-missing-version" },
+      ],
+      [
+        VERSIONED_METHOD.secretsDelete,
+        { momentId: "secret-delete-missing-version" },
+      ],
+    ] as const) {
+      for (const versionId of ["main", "no-such-version"]) {
+        const engine = new VersionedLoopbackEngine();
+        await expect(
+          send(engine, method, {
+            workspaceId: WORKSPACE,
+            versionId,
+            path: ".env",
+            origin: "local-file",
+            ...extra,
+          }),
+        ).rejects.toThrow(/invalid-version/);
+        const listed = await send(engine, VERSIONED_METHOD.versionsList, {
+          workspaceId: WORKSPACE,
+        });
+        expect(listed.versions).toEqual([]);
+        const moments = await send(
+          engine,
+          VERSIONED_METHOD.secretsMomentsList,
+          { workspaceId: WORKSPACE },
+        );
+        expect(moments.moments).toEqual([]);
+      }
+    }
+  });
+
+  it("rejects non-secret paths before version lookup without creating main", async () => {
+    for (const [method, extra] of [
+      [
+        VERSIONED_METHOD.secretsWrite,
+        { text: "not secret", momentId: "secret-write-invalid-path" },
+      ],
+      [
+        VERSIONED_METHOD.secretsDelete,
+        { momentId: "secret-delete-invalid-path" },
+      ],
+    ] as const) {
+      const engine = new VersionedLoopbackEngine();
+      await expect(
+        send(engine, method, {
+          workspaceId: WORKSPACE,
+          versionId: "main",
+          path: "notes.md",
+          origin: "local-file",
+          ...extra,
+        }),
+      ).rejects.toThrow(/not-secret-path/);
+      const listed = await send(engine, VERSIONED_METHOD.versionsList, {
+        workspaceId: WORKSPACE,
+      });
+      expect(listed.versions).toEqual([]);
     }
   });
 
