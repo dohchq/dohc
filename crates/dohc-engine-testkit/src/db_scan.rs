@@ -153,29 +153,43 @@ impl EngineDbScan {
         }
     }
 
-    /// A secret plaintext must appear in **neither** form: not as its raw
-    /// bytes, and not base64-encoded. Ciphertext lands in `TEXT` columns as
-    /// standard base64, so a raw-bytes scan alone would miss a plaintext that
-    /// took the base64 path into the database.
+    /// `text` must appear in **none** of three forms: raw UTF-8 bytes, standard
+    /// base64, and UTF-16LE. `label` names it in the panic.
+    ///
+    /// Each form covers a way a leak hides from the others. Ciphertext lands in
+    /// `TEXT` columns as standard base64, so a write site that base64-encoded
+    /// the plaintext on the way in would slip past a raw scan. UTF-16LE catches
+    /// a value that reached the file through a UTF-16 encoder -- every other
+    /// byte is a NUL, so the UTF-8 needle never matches.
+    ///
+    /// Use this for MARKERS as well as whole bodies. A whole-body needle only
+    /// matches a leak of the entire file: a site that persisted just the secret
+    /// value, or one line of it, defeats it. That was the hole here — the body
+    /// gained all three forms while the distinctive marker assertions beside it
+    /// stayed UTF-8-only, so a UTF-16LE leak of the marker alone still passed.
     ///
     /// # Panics
     ///
-    /// When either form is found, or when `plaintext` is empty.
-    pub fn assert_secret_plaintext_absent(&self, plaintext: &str) {
-        self.assert_absent("secret plaintext", plaintext.as_bytes());
+    /// When any form is found, or when `text` is empty.
+    pub fn assert_absent_in_every_form(&self, label: &str, text: &str) {
+        self.assert_absent(label, text.as_bytes());
         self.assert_absent(
-            "base64 of the secret plaintext",
-            encode_standard(plaintext.as_bytes()).as_bytes(),
+            &format!("base64 of the {label}"),
+            encode_standard(text.as_bytes()).as_bytes(),
         );
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        self.assert_absent(&format!("UTF-16LE of the {label}"), &utf16le);
     }
 
-    /// Positive control against the store's own data: every `ciphertext_base64`
-    /// held in `secret_files` must be findable in the scanned bytes.
+    /// [`Self::assert_absent_in_every_form`] for a whole secret body.
     ///
-    /// This is stronger than counting rows. It proves the scan covered the very
-    /// bytes the secret was written into, so an absence assertion over the same
-    /// bytes is a real result.
+    /// # Panics
     ///
+    /// When any form is found, or when `plaintext` is empty.
+    pub fn assert_secret_plaintext_absent(&self, plaintext: &str) {
+        self.assert_absent_in_every_form("secret plaintext", plaintext);
+    }
+
     /// Assert a `-wal` sidecar was among the files read, and that it holds
     /// bytes. Without this, a scan whose WAL was checkpointed away still passes
     /// every absence assertion -- over the main file alone, which holds only the
@@ -204,6 +218,13 @@ impl EngineDbScan {
         );
     }
 
+    /// Positive control against the store's own data: every `ciphertext_base64`
+    /// held in `secret_files` must be findable in the scanned bytes.
+    ///
+    /// This is stronger than counting rows. It proves the scan covered the very
+    /// bytes the secret was written into, so an absence assertion over the same
+    /// bytes is a real result.
+    ///
     /// # Panics
     ///
     /// When `secret_files` is empty (there would be nothing to prove), when the

@@ -369,7 +369,7 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
     };
 
     let scan = EngineDbScan::read(&db);
-    scan.assert_absent("plaintext marker", marker.as_bytes());
+    scan.assert_absent_in_every_form("plaintext marker", marker);
     // The whole plaintext, in BOTH forms: raw bytes, and the base64 that
     // ciphertext is stored as. A write site that base64-encoded the plaintext
     // on the way in would slip past the raw-marker scan alone.
@@ -389,6 +389,81 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
         .unwrap();
     assert_eq!(ct_present, 1, "the encrypted tip must be stored");
     drop(keeper);
+}
+
+#[test]
+fn every_secret_write_seals_under_a_fresh_iv() {
+    // The store-level half of the nonce-freshness proof (the primitive half is
+    // `aead::tests::seal_draws_a_fresh_iv_for_identical_plaintext`). Three real
+    // content changes, where the FIRST and THIRD carry the same plaintext: a
+    // constant or plaintext-derived IV makes rows 1 and 3 identical.
+    //
+    // MUTATION: replace the `getrandom` draw in `aead::seal` with a constant IV,
+    // or derive the IV from the plaintext -> both assert_ne! below fail.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+
+    let repeated = "TOKEN=repeated-value";
+    write(&mut store, &key, ".env", repeated, "iv-1", 10);
+    // An interposed different value, because a write whose text equals the tip is
+    // a deliberate no-op and would never reach `seal` a second time.
+    write(&mut store, &key, ".env", "TOKEN=interposed", "iv-2", 11);
+    write(&mut store, &key, ".env", repeated, "iv-3", 12);
+
+    let rows: Vec<(String, String, String)> = store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT moment_id, after_iv_base64, after_ciphertext_base64 \
+                 FROM secret_moments WHERE workspace_id = ?1 AND path = '.env' \
+                 ORDER BY moment_order",
+            )?;
+            let rows = stmt
+                .query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 3, "three real content changes -> three moments");
+    assert_eq!(rows[0].0, "iv-1");
+    assert_eq!(rows[2].0, "iv-3");
+    assert_ne!(
+        rows[0].1, rows[2].1,
+        "sealing the same plaintext twice must not reuse the IV"
+    );
+    assert_ne!(
+        rows[0].2, rows[2].2,
+        "a reused IV would also make the stored ciphertext identical"
+    );
+
+    // Positive control: rows 1 and 3 really do hold the same plaintext, so the
+    // inequalities above are about the nonce and not about differing inputs.
+    let plaintexts: Vec<String> = ["iv-1", "iv-3"]
+        .iter()
+        .map(|moment_id| {
+            let (iv, tag, ct, len): (String, String, String, i64) = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT after_iv_base64, after_auth_tag_base64, \
+                         after_ciphertext_base64, after_byte_length \
+                         FROM secret_moments WHERE moment_id = ?1",
+                        [moment_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                })
+                .unwrap();
+            let sealed =
+                aead::SealedSecret::from_base64(&iv, &tag, &ct, usize::try_from(len).unwrap())
+                    .unwrap();
+            aead::open(&key, WS, ".env", &sealed)
+                .unwrap()
+                .into_utf8()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(plaintexts, vec![repeated.to_owned(), repeated.to_owned()]);
 }
 
 #[test]
@@ -566,6 +641,93 @@ fn tampered_ciphertext_fails_closed_on_materialize() {
 }
 
 #[test]
+fn ciphertext_spliced_from_another_secret_path_fails_closed() {
+    // The AAD is `dohc-secret-v1\0<workspace>\0<path>`, so a sealed row belongs to
+    // ONE path and must not open under another. `aead::tests::aad_is_byte_exact`
+    // proves the AAD bytes; nothing proved that the STORE threads the requested
+    // path into it on both the seal and the open side. This does.
+    //
+    // MUTATION: hardcode ".env" in place of `&path` at the seal site
+    // (`src/secrets.rs` `write_secret_file`) and at the `aead::open` sites in
+    // `materialize_secret_file`/`materialize_secret_file_inband` -> the spliced
+    // row opens and the `decrypt-failed` assertion fails.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+
+    // EQUAL-LENGTH plaintexts, and the splice below copies `byte_length` too.
+    // `SealedSecret::from_base64` prechecks the encoded ciphertext length against
+    // the declared `byte_length` before decoding, so a length mismatch would be
+    // rejected as `invalid-base64` and this test would pass for the wrong reason.
+    // Keeping the row internally consistent leaves the AAD path binding as the
+    // only thing that can reject it.
+    let dot_env = "SECRET=aaaaaaaa";
+    let prod_env = "SECRET=bbbbbbbb";
+    assert_eq!(dot_env.len(), prod_env.len());
+    {
+        let mut store = EngineStore::open(&db, 2).unwrap();
+        write(&mut store, &key, ".env", dot_env, "sm-dot-env", 10);
+        write(&mut store, &key, "prod.env", prod_env, "sm-prod-env", 11);
+    }
+
+    // Splice `.env`'s whole sealed record onto the `prod.env` row.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let spliced = conn
+            .execute(
+                "UPDATE secret_files SET \
+                   iv_base64 = (SELECT iv_base64 FROM secret_files WHERE path = '.env'), \
+                   auth_tag_base64 = \
+                     (SELECT auth_tag_base64 FROM secret_files WHERE path = '.env'), \
+                   ciphertext_base64 = \
+                     (SELECT ciphertext_base64 FROM secret_files WHERE path = '.env'), \
+                   byte_length = (SELECT byte_length FROM secret_files WHERE path = '.env') \
+                 WHERE path = 'prod.env'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(spliced, 1, "the splice must hit exactly the prod.env row");
+        let (spliced_iv, source_iv): (String, String) = conn
+            .query_row(
+                "SELECT (SELECT iv_base64 FROM secret_files WHERE path = 'prod.env'), \
+                        (SELECT iv_base64 FROM secret_files WHERE path = '.env')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(spliced_iv, source_iv, "the splice really landed");
+    }
+
+    let mut store = EngineStore::open(&db, 3).unwrap();
+    let secrets = SecretFileStore::new(&mut store, &key);
+    // Positive control: the SOURCE row still opens, so the failure below is the
+    // path binding and not a database we broke on the way in.
+    assert_eq!(
+        secrets
+            .materialize_secret_file(WS, "main", ".env")
+            .unwrap()
+            .unwrap()
+            .into_utf8()
+            .unwrap(),
+        dot_env
+    );
+    let err = secrets
+        .materialize_secret_file(WS, "main", "prod.env")
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        "decrypt-failed",
+        "ciphertext sealed for .env must not open under prod.env"
+    );
+    // The in-band reader authenticates too, over the same spliced row.
+    let inband_err = secrets
+        .materialize_secret_file_inband(WS, "main", "prod.env", 1024)
+        .unwrap_err();
+    assert_eq!(inband_err.code(), "decrypt-failed");
+}
+
+#[test]
 fn fork_copies_secret_tips_verbatim() {
     let scratch = ScratchDir::new().unwrap();
     let db = scratch.engine_db_path().unwrap();
@@ -612,6 +774,45 @@ fn fork_copies_secret_tips_verbatim() {
         1,
         "fork base copy seeded"
     );
+
+    // VERBATIM, not merely equivalent. Decrypting to the same plaintext would
+    // also be satisfied by a fork that re-sealed under a fresh nonce, which is a
+    // different (and more expensive, key-requiring) contract than the one the
+    // fork advertises. Same shape as the apply assertion below.
+    //
+    // MUTATION: re-seal in the fork path instead of copying the sealed fields ->
+    // the plaintext assertion above stays green and only this fails.
+    let (source_iv, forked_iv): (String, String) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT iv_base64 FROM secret_files \
+                     WHERE workspace_id=?1 AND version_id='main' AND path='.env'",
+                    [WS],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT iv_base64 FROM secret_files \
+                     WHERE workspace_id=?1 AND version_id='feat' AND path='.env'",
+                    [WS],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(source_iv, forked_iv, "fork copies the sealed IV verbatim");
+    // The fork base is the same verbatim copy.
+    let base_iv: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT iv_base64 FROM secret_fork_bases \
+                 WHERE workspace_id=?1 AND version_id='feat' AND path='.env'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(base_iv, source_iv, "the fork base is verbatim too");
 }
 
 #[test]
@@ -983,9 +1184,9 @@ fn plaintext_never_leaks_when_a_secret_merges_across_versions() {
     for text in [&base_text, &source_text, &target_text] {
         scan.assert_secret_plaintext_absent(text);
     }
-    scan.assert_absent("fork-base marker", base_marker.as_bytes());
-    scan.assert_absent("merge-source marker", source_marker.as_bytes());
-    scan.assert_absent("merge-target marker", target_marker.as_bytes());
+    scan.assert_absent_in_every_form("fork-base marker", base_marker);
+    scan.assert_absent_in_every_form("merge-source marker", source_marker);
+    scan.assert_absent_in_every_form("merge-target marker", target_marker);
     // Positive control: the ciphertext the store holds IS in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&db);
     // ...and the WAL really survived the writer's close, so the absence above

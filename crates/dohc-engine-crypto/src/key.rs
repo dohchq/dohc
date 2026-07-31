@@ -452,7 +452,56 @@ mod tests {
         // silently orphan every sealed snapshot.
         std::fs::write(&file, "garbage").unwrap();
         assert!(load_or_create_key_file(&dir).is_err());
+        // "Fails closed" also means it LEAVES THE FILE ALONE. An error return that
+        // truncated, deleted, or re-minted over the file would read as fail-closed
+        // to the caller while destroying the only copy of the key — the operator's
+        // one chance to restore the real one.
+        //
+        // MUTATION: have the malformed branch remove or overwrite the file -> this
+        // fails while the `is_err()` assertion above stays green.
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the malformed key file still exists"),
+            "garbage",
+            "a failed load must not rewrite or delete the key file"
+        );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn freshly_minted_key_file_is_0600() {
+        // `load_retightens_lax_permissions_to_0600` chmods the file to 0644 ITSELF
+        // before loading, so it can only prove the re-tighten on load — deleting
+        // the create-time mode leaves it green. This asserts the mode the MINT
+        // chose, with no `set_permissions` step in between.
+        //
+        // MUTATION: delete `options.mode(0o600)` in `create_key_file` -> the mint
+        // lands at the umask default (0644 under the usual 022) and this fails.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "dohc-keymint-mode-test-{}-{:x}",
+            std::process::id(),
+            std::ptr::from_ref(&()) as usize
+        ));
+        let _key = create_key_file(&dir).expect("mint");
+        let path = dir.join(SECRET_KEY_FILE_RELATIVE);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a freshly minted key file must not be readable by other local users"
+        );
+        // MUTATION: delete `builder.mode(0o700)` -> the key directory becomes
+        // world-listable and this fails.
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "the key directory must not advertise the key to other local users"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
