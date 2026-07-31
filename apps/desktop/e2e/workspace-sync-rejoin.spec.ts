@@ -11,7 +11,7 @@ import {
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
 } from "@dohc/workspace-engine";
-import { claimRelayWorkspace, relayBucketExists } from "./helpers/relayPeer";
+import { claimRelayWorkspace, relayServesWorkspace } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   relayAdoptedIdentity,
@@ -117,23 +117,9 @@ async function engineText(
 }
 
 
-// DELETED: "offline edits on two machines surface as a reviewable conflict and
-// the resolution settles both".
-//
-// It was `test.fixme`d by AUDIT-WAVE3 because two-machine FILE sync does not
-// work post-cutover: the daemon journals captured file writes into
-// `replication_journal` (dohc-engine-domain/src/store.rs) and nothing drains
-// that table into the relay-visible `replication_log` -- the only reader of it
-// anywhere is a COUNT(*) helper in dohc-engine-storage. So file content never
-// reaches the relay. That is #356.
-//
-// Removed rather than ported to the hand-rolled peer, for two reasons. It cannot
-// run, so porting it means maintaining code that never executes; and per
-// docs/architecture/ydoc-replicated-lineage.md, un-fixme-ing it once the drain
-// lands would report #356 AND #378 closed while base origination stayed
-// unimplemented -- a green check that checks nothing. The conflict-review
-// property it covered is recorded on #356 as an acceptance gate to be rewritten
-// against the daemon, not resurrected from here.
+// The two-machine conflict-review scenario that lived here was deleted: it was
+// `test.fixme`d because file content never reaches the relay (#356), and its
+// acceptance criteria are recorded there.
 
 
 test("join flow: paste the sync code, pick a folder, and the workspace arrives with history, chats, and search", async () => {
@@ -443,11 +429,18 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     // assertion carried no `fixme`, so it has been failing silently since the
     // cutover, because e2e only runs on demand. Content arriving at a second
     // machine is #356's acceptance gate and is deliberately not asserted here.
+    // WITH the adopted identity: `cloudEnableSync` claims through
+    // execute_relay_operation, which supplies both identity fields, so the relay
+    // adopts them and an identity-free log read answers 409 rather than 200.
+    let identity: RelayWorkspaceIdentity | null = null;
     await expect
-      .poll(() => relayBucketExists(relay!.baseUrl, TOKEN, workspaceId), {
-        timeout: 90_000,
-        intervals: [1000],
-      })
+      .poll(
+        () => {
+          identity ??= relayAdoptedIdentity(relayDb, workspaceId);
+          return relayServesWorkspace(relay!.baseUrl, TOKEN, workspaceId, identity);
+        },
+        { timeout: 90_000, intervals: [1000] },
+      )
       .toBe(true);
 
     // The app reflects a synced workspace (the sync-status surface is present,
