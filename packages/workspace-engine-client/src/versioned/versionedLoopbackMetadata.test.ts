@@ -464,6 +464,52 @@ describe("loopback moment metadata", () => {
     expect(deduped.deduped).toBe(true);
   });
 
+  it("refuses bad BYTES before bad metadata, in the daemon's order", async () => {
+    // Hoisting the metadata parse to fix the dedup hole first put it above the
+    // byte decode, which inverted the refusal precedence: a request with both
+    // bad bytes and an over-cap field answered `invalid-metadata` where the
+    // daemon answers `invalid-input`. The daemon's order is decode, inband cap,
+    // origin, metadata, author (lib.rs versionedBinary.write), so a request that
+    // is wrong in two ways must fail on the FIRST one.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const overCap = "s".repeat(16 * 1024 + 1);
+    await expect(
+      send(engine, VERSIONED_METHOD.binaryWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "logo.png",
+        bytes: [1, 2, 999], // not a byte
+        origin: "local-file",
+        summary: overCap,
+      }),
+    ).rejects.toThrow(/invalid-input/);
+
+    // Neither spelling of the bytes is a second chance to skip the check.
+    await expect(
+      send(engine, VERSIONED_METHOD.binaryWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "logo.png",
+        bytesBase64: "!!!not base64!!!",
+        origin: "local-file",
+        summary: overCap,
+      }),
+    ).rejects.toThrow(/invalid-input/);
+
+    // And a bad origin also outranks the metadata, as in the daemon.
+    await expect(
+      send(engine, VERSIONED_METHOD.binaryWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "logo.png",
+        bytesBase64: Buffer.from([1]).toString("base64"),
+        origin: "not-a-real-origin",
+        summary: overCap,
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+  });
+
   it("refuses an over-cap field on a secret MERGE", async () => {
     // secrets.apply read summary/correlationId with raw `optionalString`, so the
     // cap landed on write, delete and restore but not on the merge path. The

@@ -730,15 +730,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
       workspace,
       requiredString(params, "versionId", "binary write"),
     );
-    const origin = requiredOrigin(params);
-    // Validated HERE, before any replay, dedup or unchanged-merge return. The
-    // daemon parses and validates metadata immediately after the origin and
-    // before it looks at state (`validate_metadata_fields` then
-    // `validated_author`, e.g. lib.rs versionedText.write), so an over-cap
-    // summary on a request that happens to be a no-op is still refused. Computed
-    // once and threaded down, rather than re-derived at the moment site, so the
-    // early returns cannot outrun it.
-    const metadata = this.momentMetadataFields(params);
     const rawBytes = params.bytes;
     const rawBase64 = params.bytesBase64;
     let bytes: number[];
@@ -757,6 +748,17 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (!allowFullRange && bytes.length > INBAND_LIMIT_BYTES) {
       throw new Error("content-exceeds-inband-cap");
     }
+    const origin = requiredOrigin(params);
+    // Validated AFTER the bytes are decoded and size-checked, and before any
+    // replay or dedup return. The
+    // daemon's order is decode, inband cap, origin, `validate_metadata_fields`,
+    // `validated_author`, and only then any state (lib.rs versionedBinary.write).
+    // Hoisting it above the decode inverted the refusal precedence: a request
+    // with BOTH bad bytes and bad metadata got `invalid-metadata` where the
+    // daemon sends `invalid-input`. Hoisting it at all is what keeps an over-cap
+    // field on a DEDUPED write from returning success, so it belongs here --
+    // after the content checks, before the early returns.
+    const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const objectId = optionalString(params, "objectId") ??
       (requestId
