@@ -189,17 +189,22 @@ function utf8Length(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 
-// One reading of a metadata field, matching the daemon on all three points.
+// One reading of a metadata field, matching the daemon on all three points:
+// JSON `null` is ABSENT (these deserialize as `Option<String>`), a non-string is
+// a refusal, and either field over MAX_METADATA_FIELD_BYTES is
+// `invalid-metadata`.
 //
-// JSON `null` is the ABSENT value, not a type error: these deserialize as
-// `Option<String>`, so the daemon accepts null and answers normally. Treating it
-// as invalid made the fake reject requests production accepts — which only
-// surfaced once the parse moved ahead of the dedup return, because before that a
-// same-content write never reached it.
+// THE ORDERING INVARIANT, stated once for every caller. `validate_metadata_fields`
+// runs on EVERY write handler, immediately after the content checks and the
+// origin, and BEFORE the handler reads any state. So a request that is wrong in
+// two ways must fail on whichever the daemon reaches first, and the call sites
+// below keep that order rather than restating why.
 //
-// A non-string IS a refusal. And either field over MAX_METADATA_FIELD_BYTES is
-// `invalid-metadata`, which `validate_metadata_fields` enforces on EVERY write
-// handler, not just the secret ones.
+// Two exceptions the call sites DO have to name, because they are not derivable:
+// `versionedBinary.writeBlob` validates before decoding while
+// `versionedBinary.write` decodes first, and the handlers that call
+// `mutationVersion` still touch state before validating because that call creates
+// `main` (#439).
 function metadataField(params: JsonObject, key: string): string | undefined {
   const raw = params[key];
   if (raw === undefined || raw === null) return undefined;
@@ -579,13 +584,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const text = requiredString(params, "text", "write");
     if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
     const origin = requiredOrigin(params);
-    // Validated HERE, before any replay, dedup or unchanged-merge return. The
-    // daemon parses and validates metadata immediately after the origin and
-    // before it looks at state (`validate_metadata_fields` then
-    // `validated_author`, e.g. lib.rs versionedText.write), so an over-cap
-    // summary on a request that happens to be a no-op is still refused. Computed
-    // once and threaded down, rather than re-derived at the moment site, so the
-    // early returns cannot outrun it.
+    // Before every replay/dedup/unchanged return — see metadataField.
     const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const objectId = optionalString(params, "objectId") ??
@@ -761,15 +760,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
       throw new Error("content-exceeds-inband-cap");
     }
     const origin = requiredOrigin(params);
-    // Validated AFTER the bytes are decoded and size-checked, and before any
-    // replay or dedup return. The
-    // daemon's order is decode, inband cap, origin, `validate_metadata_fields`,
-    // `validated_author`, and only then any state (lib.rs versionedBinary.write).
-    // Hoisting it above the decode inverted the refusal precedence: a request
-    // with BOTH bad bytes and bad metadata got `invalid-metadata` where the
-    // daemon sends `invalid-input`. Hoisting it at all is what keeps an over-cap
-    // field on a DEDUPED write from returning success, so it belongs here --
-    // after the content checks, before the early returns.
+    // Exception 1 (see metadataField): AFTER the decode and cap, because this
+    // handler decodes first — unlike writeBlob. Exception 2: `mutationVersion`
+    // above already created `main`, so this is not proof of atomic refusal (#439).
     const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const objectId = optionalString(params, "objectId") ??
@@ -899,9 +892,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // plus a missing blob still answered `file-not-found`. binaryWrite re-derives
     // all of them; these calls exist purely for the refusal order.
     requiredOrigin(params);
-    metadataField(params, "summary");
-    metadataField(params, "correlationId");
-    this.validatedAuthorValue(params);
+    this.momentMetadataFields(params);
     const encoded = optionalString(params, "bytesBase64");
     const bytes =
       encoded === undefined
@@ -928,8 +919,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const fromPath = requiredString(params, "fromPath", "rename");
     const toPath = requiredString(params, "toPath", "rename");
     const origin = requiredOrigin(params);
-    // Parsed with the origin, before state is read — the same ordering as the
-    // write paths and as the daemon.
+    // Before state is read — see metadataField.
     const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
@@ -997,8 +987,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const version = this.version(state, requiredString(params, "versionId", "delete"));
     const path = requiredString(params, "path", "delete");
     const origin = requiredOrigin(params);
-    // Parsed with the origin, before state is read — the same ordering as the
-    // write paths and as the daemon.
+    // Before state is read — see metadataField.
     const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
@@ -1319,13 +1308,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     request: Request,
   ): JsonValue {
     const origin = requiredOrigin(params);
-    // Validated HERE, before any replay, dedup or unchanged-merge return. The
-    // daemon parses and validates metadata immediately after the origin and
-    // before it looks at state (`validate_metadata_fields` then
-    // `validated_author`, e.g. lib.rs versionedText.write), so an over-cap
-    // summary on a request that happens to be a no-op is still refused. Computed
-    // once and threaded down, rather than re-derived at the moment site, so the
-    // early returns cannot outrun it.
+    // Before every replay/dedup/unchanged return — see metadataField.
     const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
@@ -1684,11 +1667,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = requiredString(params, "path", "secret apply");
     const momentId = requiredString(params, "momentId", "secret apply");
     const origin = requiredOrigin(params);
-    // Above BOTH version lookups: secrets_apply validates metadata before its
-    // source/target checks, so an over-cap field plus a missing version answers
-    // `invalid-metadata`, not `invalid-version`. Safe to hoist here because
-    // `state.versions.get` only reads — the handlers still listed in #439 use
-    // `mutationVersion`, which CREATES `main`, so moving those changes state.
+    // Above both version lookups, which is safe here because `state.versions.get`
+    // only reads — the #439 handlers use `mutationVersion`, which creates.
     const { summary, correlationId } = this.secretMomentMetadata(params);
     const source = state.versions.get(requiredString(params, "sourceVersionId", "secret apply"));
     const target = state.versions.get(requiredString(params, "targetVersionId", "secret apply"));
@@ -1721,13 +1701,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = requiredString(params, "path", "secret restore");
     const beforeMomentId = requiredString(params, "beforeMomentId", "secret restore");
     const momentId = requiredString(params, "momentId", "secret restore");
-    // Parsed BEFORE any state is read, which is where the daemon does it:
-    // secrets_restore validates the origin and then the metadata fields
-    // immediately after deserialization, before it looks up the source moment
-    // (lib.rs). Sitting below these checks meant an over-cap field on a request
-    // that ALSO named a missing beforeMomentId answered `moment-not-found` where
-    // the daemon answers `invalid-metadata`. My own comment here already said
-    // "before it looks at state"; the placement contradicted it.
+    // Origin then metadata, both before any state is read — the daemon's order
+    // (secrets_restore: validated_origin, validate_metadata_fields, then the
+    // source-moment lookup). Origin is REQUIRED on this request: the daemon takes
+    // it as a non-Option field, so a restore without one is refused. The fake used
+    // to ignore params.origin entirely and hardcode "restore" below, which made it
+    // accept requests production rejects while a comment here claimed the ordering
+    // was matched.
+    requiredOrigin(params);
     const metadata = this.secretMomentMetadata(params);
     const sourceMoment = state.secretMoments.get(beforeMomentId);
     if (!sourceMoment) throw new Error("moment-not-found");

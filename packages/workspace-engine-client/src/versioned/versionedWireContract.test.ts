@@ -1367,7 +1367,8 @@ describe("loopback contract enforcement", () => {
       path: ".env",
       beforeMomentId: "restore-b",
       momentId: "restore-first",
-    });
+      origin: "restore",
+     });
     // MUTATION: always append a restore moment even when the protected state is already equal.
     const replay = decodeSecretRestoreResult(
       await call(engine, 4, VERSIONED_METHOD.secretsRestore, {
@@ -1375,7 +1376,8 @@ describe("loopback contract enforcement", () => {
         path: ".env",
         beforeMomentId: "restore-b",
         momentId: "restore-equal",
-      }),
+        origin: "restore",
+       }),
     );
     expect(replay.restoredMomentId).toBe("restore-b");
     expect(
@@ -1507,7 +1509,8 @@ describe("loopback contract enforcement", () => {
         path: ".other",
         beforeMomentId: "restore-path-b",
         momentId: "restore-wrong-path",
-      }),
+        origin: "restore",
+       }),
     ).rejects.toThrow("invalid-input");
     expect(engine.secretValue(WORKSPACE, "main", ".other")).toBeUndefined();
   });
@@ -1541,7 +1544,8 @@ describe("loopback contract enforcement", () => {
       path: ".env",
       beforeMomentId: "main-b",
       momentId: "restore-main",
-    });
+      origin: "restore",
+     });
 
     expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe("A");
     expect(engine.secretValue(WORKSPACE, feature.id, ".env")).toBe("B");

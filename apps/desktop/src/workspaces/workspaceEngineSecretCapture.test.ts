@@ -220,8 +220,11 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     await engine.switchVersion("main");
     expect(await readText(root, ".env")).toBe(ENV_A);
 
-    // Both halves of the claim went over the wire: the fork carried the
-    // secret tips, and the plaintext that landed back on disk came from the
+    // Both calls went over the wire. Note what each one does and does not show:
+    // `createVersion` ran while NO secret existed, so the recorded secretsFork
+    // forked an empty secret map — it proves the fork path is exercised, not that
+    // tips were carried. The disk assertions above are what prove the switch
+    // behaviour, and secretsMaterialize is what shows the plaintext came from the
     // engine's single authorized materialization rather than a leftover file.
     const methods = requests.map((request) => request.method);
     expect(methods).toContain(VERSIONED_METHOD.secretsFork);

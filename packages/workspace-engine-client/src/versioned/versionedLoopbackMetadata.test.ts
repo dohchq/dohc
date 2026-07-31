@@ -299,9 +299,16 @@ describe("loopback moment metadata", () => {
       summary: null,
       correlationId: null,
     });
-    const moment = written.moment as Record<string, unknown>;
-    expect(moment.metadataSummary ?? null).toBeNull();
-    expect(moment.metadataCorrelationId ?? null).toBeNull();
+    // Assert the RECORDED fields. An earlier version of this test read
+    // `moment.metadataSummary` — a key secret moments never carry, since
+    // makeSecretMoment nests them under `metadata` — so with `?? null` both reads
+    // were undefined and the test passed for every possible engine behaviour,
+    // including rejecting null outright.
+    expect((written.moment as Record<string, unknown>).metadata).toEqual({
+      origin: "local-file",
+      summary: null,
+      correlationId: null,
+    });
   });
 
   it("refuses malformed restore metadata even when the restore is a no-op", async () => {
@@ -345,7 +352,8 @@ describe("loopback moment metadata", () => {
         beforeMomentId: "moment-restore-second",
         momentId: "moment-restore-noop",
         summary: 42,
-      }),
+        origin: "restore",
+       }),
     ).rejects.toThrow(/summary is invalid/);
   });
 
@@ -597,17 +605,11 @@ describe("loopback moment metadata", () => {
       }),
     ).rejects.toThrow(/invalid-input/);
 
-    // And a bad origin also outranks the metadata, as in the daemon.
-    await expect(
-      send(engine, VERSIONED_METHOD.binaryWrite, {
-        workspaceId: WORKSPACE,
-        versionId,
-        path: "logo.png",
-        bytesBase64: Buffer.from([1]).toString("base64"),
-        origin: "not-a-real-origin",
-        summary: overCap,
-      }),
-    ).rejects.toThrow(/invalid-metadata/);
+    // Removed a third sub-assertion that sent a bad origin AND an over-cap field
+    // expecting `invalid-metadata`: `requiredOrigin` and the cap check raise the
+    // SAME code, so it passed whichever fired first and proved nothing about
+    // their order. The two cases above work because bad bytes and bad metadata
+    // raise DIFFERENT codes, which is what makes precedence observable at all.
   });
 
   it("refuses an over-cap field on a secret MERGE", async () => {
@@ -670,6 +672,32 @@ describe("loopback moment metadata", () => {
         momentId: "moment-apply-capped",
         origin: "local-file",
         summary: "s".repeat(16 * 1024 + 1),
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+  });
+
+  it("requires an origin on RESTORE, which the fake used to ignore", async () => {
+    // The daemon takes `origin` as a non-Option field on SecretsRestoreParams, so
+    // a restore without one is refused. The fake ignored params.origin entirely
+    // and hardcoded "restore" on the recorded moment, so it accepted requests
+    // production rejects — and several tests in this package were sending exactly
+    // those, which is how the gap survived.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=origin\n",
+      origin: "local-file",
+      momentId: "moment-origin-required",
+    });
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsRestore, {
+        workspaceId: WORKSPACE,
+        path: ".env",
+        beforeMomentId: "moment-origin-required",
+        momentId: "moment-origin-missing",
       }),
     ).rejects.toThrow(/invalid-metadata/);
   });
