@@ -1831,11 +1831,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const authorInput = strictObject(params.author ?? null, "author", [
       "authorId", "kind", "displayName",
     ]);
-    const authorId = normalizeNonempty(requiredString(authorInput, "authorId", "invalid-sender"), "invalid-sender");
+    const authorId = normalizeTrimmed(
+      requiredString(authorInput, "authorId", "invalid-sender"),
+      "invalid-sender",
+    );
     const replicationAuthorId = optionalString(params, "replicationAuthorId");
     const normalizedReplicationAuthorId = replicationAuthorId === undefined
       ? undefined
-      : normalizeNonempty(replicationAuthorId, "invalid-sender");
+      : normalizeTrimmed(replicationAuthorId, "invalid-sender");
     if (
       normalizedReplicationAuthorId !== undefined &&
       normalizedReplicationAuthorId !== authorId
@@ -1856,7 +1859,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       author: {
         authorId,
         kind,
-        displayName: normalizeNonempty(
+        displayName: normalizeTrimmed(
           requiredString(authorInput, "displayName", "invalid-sender"),
           "invalid-sender",
         ),

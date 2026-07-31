@@ -5,6 +5,7 @@ import {
   createRegistryStore,
   type JoinedSharedChannel,
   type RegistryEntry,
+  type RemoteIdentity,
   type ShareMountRecord,
   type ShareViewIdentity,
 } from "./registryStore";
@@ -59,7 +60,7 @@ export function removeWorkspace(workspaceId: string): void {
 
 export function setWorkspaceRemote(
   workspaceId: string,
-  remote: { serverUrl: string; remoteWorkspaceId: string },
+  remote: RemoteIdentity,
 ): void {
   store().setRemote(workspaceId, remote);
 }

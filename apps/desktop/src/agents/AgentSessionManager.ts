@@ -78,7 +78,9 @@ export interface AgentSessionManagerOptions {
   registry: AgentDriverRegistry;
   integration: AgentIntegration;
   rootFor(workspaceId: string): string | null;
-  mcpFor(rootPath: string): { command: string; args: string[]; env?: Record<string, string> };
+  mcpFor(rootPath: string):
+    | { command: string; args: string[]; env?: Record<string, string> }
+    | Promise<{ command: string; args: string[]; env?: Record<string, string> }>;
   now?: () => number;
 }
 
@@ -382,11 +384,12 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
     };
     sessions.set(input.workspaceId, state);
     try {
+      const mcp = await options.mcpFor(root);
       const session = await driver.startSession({
         workspaceRoot: root,
         mode: "approval-required",
         model: input.model,
-        mcp: options.mcpFor(root),
+        mcp,
         onEvent: (event) => applyEvent(input.workspaceId, state, event),
       });
       state.session = session;

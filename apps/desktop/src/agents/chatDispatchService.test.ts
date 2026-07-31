@@ -2570,7 +2570,10 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
     });
-    expect(messages.some((message) => message.body.includes("timed out after 1m"))).toBe(true);
+    const timeoutMessage = messages.find((message) =>
+      message.body.includes("timed out after 1m"),
+    );
+    expect(timeoutMessage?.authorUserId).toBe("user_local");
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
     expect(fixture.killCalls.at(-1)).toEqual({

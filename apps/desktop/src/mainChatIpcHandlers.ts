@@ -126,3 +126,65 @@ export function createSetChatReactionIpcHandler<
     ],
   });
 }
+
+export async function setChatReactionFromMain<Result>(input: {
+  workspaceId: string;
+  threadId: string;
+  messageId: string;
+  emoji: string;
+  state: "added" | "removed";
+  localFallbackAuthorId: string;
+  localAuthorDisplayName: string;
+  resolveReplicationAuthorId: () => Promise<string | undefined>;
+  revalidateReplicationAuthorId: (
+    replicationAuthorId: string | undefined,
+  ) => Promise<void>;
+  setReaction: (mutation: {
+    workspaceId: string;
+    threadId: string;
+    messageId: string;
+    emoji: string;
+    author: {
+      authorId: string;
+      kind: "human";
+      displayName: string;
+    };
+    replicationAuthorId?: string;
+    state: "added" | "removed";
+  }) => Promise<Result>;
+}): Promise<Result> {
+  const replicationAuthorId = await input.resolveReplicationAuthorId();
+  await input.revalidateReplicationAuthorId(replicationAuthorId);
+  const authorId = replicationAuthorId ?? input.localFallbackAuthorId;
+  return input.setReaction({
+    workspaceId: input.workspaceId,
+    threadId: input.threadId,
+    messageId: input.messageId,
+    emoji: input.emoji,
+    author: {
+      authorId,
+      kind: "human",
+      displayName: input.localAuthorDisplayName,
+    },
+    ...(replicationAuthorId ? { replicationAuthorId } : {}),
+    state: input.state,
+  });
+}
+
+export async function writeChatMessageFromMain<Attachment, Result>(input: {
+  resolveAuthorUserId: () => Promise<string | undefined>;
+  resolveAttachments: () => Promise<Attachment[]>;
+  revalidateAuthorUserId: (authorUserId: string | undefined) => Promise<void>;
+  write: (resolved: {
+    authorUserId?: string;
+    attachments: Attachment[];
+  }) => Promise<Result>;
+}): Promise<Result> {
+  const authorUserId = await input.resolveAuthorUserId();
+  const attachments = await input.resolveAttachments();
+  await input.revalidateAuthorUserId(authorUserId);
+  return input.write({
+    ...(authorUserId ? { authorUserId } : {}),
+    attachments,
+  });
+}

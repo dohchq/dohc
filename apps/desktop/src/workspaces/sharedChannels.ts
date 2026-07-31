@@ -82,7 +82,7 @@ export function mergeJoinedChannel(
 // against the joined registry rows. Targets that resolve OUTSIDE any
 // read-only/ended grant — plain local channels, file-linked threads, unknown
 // ids — pass through; the store's own write path owns those errors.
-export async function assertSharedChannelWritable(input: {
+interface SharedChannelTargetInput {
   workspaceId: string;
   sharedChannels: readonly JoinedSharedChannel[] | undefined;
   store: {
@@ -93,30 +93,41 @@ export async function assertSharedChannelWritable(input: {
     getChannelWireId(input: { workspaceId: string; channelId: string }): Promise<string | null>;
   };
   target: { channelId: string } | { threadId: string };
-}): Promise<void> {
-  const blockedWires = new Set(
-    (input.sharedChannels ?? [])
-      .filter((channel) => channel.access === "read-only" || channel.ended === true)
-      .map((channel) => channel.channelWireId),
-  );
-  if (blockedWires.size === 0) return;
+}
+
+export async function joinedSharedChannelForTarget(
+  input: SharedChannelTargetInput,
+): Promise<JoinedSharedChannel | null> {
+  if ((input.sharedChannels?.length ?? 0) === 0) return null;
   let channelId: string | null;
   if ("channelId" in input.target) {
     channelId = input.target.channelId;
   } else {
-    // Point lookup, not a workspace-wide thread scan: every gated write pays
-    // this once a read-only/ended share exists.
     channelId = await input.store.findThreadChannelId({
       workspaceId: input.workspaceId,
       threadId: input.target.threadId,
     });
   }
-  if (!channelId) return;
+  if (!channelId) return null;
   const wireId = await input.store.getChannelWireId({
     workspaceId: input.workspaceId,
     channelId,
   });
-  if (wireId !== null && blockedWires.has(wireId)) {
+  const matching = (input.sharedChannels ?? []).filter(
+    (channel) => channel.channelWireId === wireId,
+  );
+  return (
+    matching.find((channel) => channel.access === "read-only" || channel.ended === true) ??
+    matching[0] ??
+    null
+  );
+}
+
+export async function assertSharedChannelWritable(
+  input: SharedChannelTargetInput,
+): Promise<void> {
+  const channel = await joinedSharedChannelForTarget(input);
+  if (channel?.access === "read-only" || channel?.ended === true) {
     // The engine's read-only refusal, reused verbatim (an ended grant is a
     // read-only local copy) so the IPC error copy matches what the relay-side
     // downgrade path surfaces.

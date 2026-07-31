@@ -9,6 +9,9 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 export interface RemoteIdentity {
   serverUrl: string;
   remoteWorkspaceId: string;
+  // Account that enrolled this workspace. Optional only for registry records
+  // written before the account pin existed.
+  ownerUserId?: string;
 }
 
 // A shared VIEW received through a relay share grant (PR 18): read-only,
@@ -37,6 +40,9 @@ export interface JoinedSharedChannel {
   // Same origin-relay pin as ShareViewIdentity.relayUrl: refreshes only ever
   // run against the relay the share was joined from.
   relayUrl: string;
+  // Account that joined this channel. Optional only for registry records
+  // written before the account pin existed.
+  recipientUserId?: string;
   ended?: boolean;
 }
 

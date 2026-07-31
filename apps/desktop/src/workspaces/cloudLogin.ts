@@ -34,6 +34,13 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
   const fetchImpl = options.fetch ?? fetch;
   let pending: { serverUrl: string; relayUrl?: string; deviceCode: string } | null = null;
 
+  function failCloudLoginIdentity(): never {
+    pending = null;
+    throw new Error(
+      "Cloud login failed because the server could not confirm your identity. Contact the server administrator.",
+    );
+  }
+
   async function postJson(url: string, body: unknown): Promise<Response> {
     return fetchImpl(url, {
       method: "POST",
@@ -83,19 +90,15 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         const session = await fetchImpl(`${serverUrl}/api/auth/get-session`, {
           headers: { authorization: `Bearer ${data.access_token}` },
         });
+        if (!session.ok) failCloudLoginIdentity();
         const body = (await session.json()) as {
-          user?: { email?: string; id?: string };
+          user?: { email?: unknown; id?: unknown };
         } | null;
-        const email = body?.user?.email ?? "";
         // The Better Auth user id (opaque uuid) becomes the reactor author key —
         // never the email — so no PII replicates into the CRDT.
         const userId = body?.user?.id;
-        if (!userId) {
-          pending = null;
-          throw new Error(
-            "Cloud login failed because the server returned no user identity. Contact the server administrator.",
-          );
-        }
+        if (typeof userId !== "string" || userId.length === 0) failCloudLoginIdentity();
+        const email = typeof body?.user?.email === "string" ? body.user.email : "";
         await options.store.save({
           serverUrl,
           ...(relayUrl ? { relayUrl } : {}),

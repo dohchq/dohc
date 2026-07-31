@@ -77,12 +77,61 @@ describe("main-process chat authorization", () => {
 
   it("registers the production reaction handler with both sync effects", () => {
     const handler = handlerSource("setChatReaction");
+    expect(handler).toContain("setChatReactionFromMain({");
+    expect(handler).toContain("revalidateReplicationAuthorId:");
+    expect(handler).toContain("revalidateChatWrite(workspace, target, authorUserId)");
     expect(handler).toContain("syncJoinedChannels:");
     expect(handler).toContain("syncWorkspaceSharedChannels(workspaceId)");
     expect(handler).toContain("queueCloudSync:");
     expect(handler).toContain("activity.queueCloudSync(workspaceId)");
-    expect(handler).toContain("const replicationAuthorId = relayAuthorUserId()");
-    expect(handler).toContain("{ replicationAuthorId }");
+  });
+
+  it("routes both message composers through the behavior-tested identity gate", () => {
+    for (const channel of ["sendChatMessage", "startChannelThread"]) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("writeChatMessageFromMain({");
+      expect(handler, channel).toContain("revalidateAuthorUserId:");
+      expect(handler, channel).toContain(
+        "revalidateChatWrite(workspace, target, authorUserId)",
+      );
+      expect(handler.indexOf("await assertSharedChannelWritable({")).toBeLessThan(
+        handler.indexOf("writeChatMessageFromMain({"),
+      );
+    }
+  });
+
+  it("pins workspace and joined-channel relay work to the enrolled account", () => {
+    expect(mainSource.match(/ownerUserId: credentials\.userId/g)).toHaveLength(2);
+    expect(handlerSource("joinSharedChannel")).toContain(
+      "recipientUserId: joinedRecipientUserId",
+    );
+    expect(mainSource).toContain("const recipientUserId = joinCredentials.userId;");
+    expect(mainSource).toContain(
+      "joinedChannelMatchesCredentials(channel, syncCredentials)",
+    );
+    expect(mainSource).toContain(
+      "workspaceRemoteMatchesCredentials(remote, credentials)",
+    );
+    expect(mainSource.match(/workspaceRemoteMatchesCredentials\(/g)).toHaveLength(5);
+    expect(mainSource).not.toContain("credentialMatchesRemote");
+    expect(mainSource).toContain(
+      "!!remote && workspaceRemoteMatchesCredentials(remote, cachedCredentials)",
+    );
+    expect(mainSource).toContain(
+      "workspaceRemoteMatchesCredentials(workspace.remote, credentials)",
+    );
+    expect(mainSource).toContain(
+      "This workspace needs a new cloud account link before it can use cloud features.",
+    );
+    expect(mainSource).toContain(
+      "Sign in to the account that synced this workspace.",
+    );
+    expect(handlerSource("cloudLoginPoll")).toContain(
+      "previousUserId !== cachedCredentials.userId",
+    );
+    expect(handlerSource("cloudLoginPoll")).toContain(
+      "if (relayChanged || accountChanged)",
+    );
   });
 
   it("derives generic channel-share eligibility in the main process", () => {

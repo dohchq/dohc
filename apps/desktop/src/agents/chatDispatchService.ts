@@ -111,7 +111,10 @@ export interface ChatDispatchServiceOptions {
     workspace: ChatDispatchWorkspace,
   ): AwaitableAgentDispatchStore;
   readRunnerSettings(): Promise<RunnerSettings>;
-  identityFor(workspaceId: string): Promise<ChatDispatchIdentity>;
+  identityFor(
+    workspaceId: string,
+    target?: { channelId: string } | { threadId: string },
+  ): Promise<ChatDispatchIdentity>;
   stateDir(): string;
   appRoot(): string;
   isPackaged(): boolean;
@@ -130,6 +133,7 @@ export interface ChatDispatchServiceOptions {
   authorizeServiceNote(
     workspace: ChatDispatchWorkspace,
     threadId: string,
+    verifiedUserId: string | undefined,
   ): Promise<boolean>;
   onMessagePosted(workspaceId: string): void;
   onRunUpdated?(workspaceId: string): void;
@@ -614,15 +618,21 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     runId?: string,
     dispatchRequest?: AgentDispatchRequestOptions,
   ): Promise<string | null> {
-    if (!(await options.authorizeServiceNote(workspace, threadId))) {
+    const identity = await options.identityFor(workspace.workspaceId, { threadId });
+    if (
+      !(await options.authorizeServiceNote(
+        workspace,
+        threadId,
+        identity.verifiedUserId,
+      ))
+    ) {
       reportError(
         new Error(
-          `Skipped an agent service note in read-only thread ${threadId}.`,
+          `Skipped an agent service note that cannot be shared from thread ${threadId}.`,
         ),
       );
       return null;
     }
-    const identity = await options.identityFor(workspace.workspaceId);
     const message = await options.chatStoreFor(workspace).sendMessage({
       workspaceId: workspace.workspaceId,
       threadId,
@@ -630,6 +640,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         kind: "agent",
         displayName: identity.displayName,
       },
+      ...(identity.verifiedUserId
+        ? { authorUserId: identity.verifiedUserId }
+        : {}),
       body,
     });
     if (runId) {

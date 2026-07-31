@@ -60,7 +60,11 @@ test("grant side: share a file by email from the explorer, copy the code, and en
       {
         workspaceId,
         rootPath: temp.rootPath,
-        remote: { serverUrl: relay.baseUrl, remoteWorkspaceId: workspaceId },
+        remote: {
+          serverUrl: relay.baseUrl,
+          remoteWorkspaceId: workspaceId,
+          ownerUserId: "e2e-granter",
+        },
       },
     ]);
     await seedCloudCredentials(temp, {

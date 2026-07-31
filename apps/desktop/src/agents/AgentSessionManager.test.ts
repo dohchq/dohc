@@ -27,7 +27,9 @@ function harness(
   options: {
     startSession?: (input: AgentSessionStartInput) => Promise<AgentSession>;
     probe?: AgentDriver["probe"];
-    mcpFor?: (rootPath: string) => AgentSessionStartInput["mcp"];
+    mcpFor?: (
+      rootPath: string,
+    ) => AgentSessionStartInput["mcp"] | Promise<AgentSessionStartInput["mcp"]>;
   } = {},
 ) {
   const eventHandlers: Array<(event: AgentEvent) => void> = [];
@@ -107,6 +109,42 @@ describe("AgentSessionManager", () => {
       args: ["--workspace", "/tmp/workspace"],
       env: { DOHC_MCP_CLOUD_TOKEN: "tok" },
     });
+  });
+
+  it("awaits the main-owned MCP environment before starting the provider", async () => {
+    let resolveMcp:
+      | ((mcp: NonNullable<AgentSessionStartInput["mcp"]>) => void)
+      | undefined;
+    const mcp = new Promise<NonNullable<AgentSessionStartInput["mcp"]>>((resolve) => {
+      resolveMcp = resolve;
+    });
+    const startSession = vi.fn(async () => new FakeSession());
+    const { manager } = harness({
+      mcpFor: () => mcp,
+      startSession,
+    });
+
+    const starting = manager.startSession({
+      workspaceId: "ws-1",
+      driverId: "fake-driver",
+      prompt: "go",
+    });
+    await Promise.resolve();
+    expect(startSession).not.toHaveBeenCalled();
+
+    resolveMcp?.({
+      command: "dohc-mcp",
+      args: [],
+      env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
+    });
+    await starting;
+    expect(startSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mcp: expect.objectContaining({
+          env: { DOHC_MCP_CLOUD_USER_ID: "user-1" },
+        }),
+      }),
+    );
   });
 
   it("passes only agent probe allowlist env through to drivers", async () => {

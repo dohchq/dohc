@@ -309,6 +309,14 @@ import {
   syncJoinedSharedChannels,
 } from "./workspaces/sharedChannels";
 import {
+  assertSharedChannelMessageIdentity,
+  joinedChannelMatchesCredentials,
+  resolveChatRelayIdentity,
+  resolveWorkspaceRelayAuthorId,
+  workspaceRemoteMatchesCredentials,
+  type ChatRelayIdentityTarget,
+} from "./workspaces/chatRelayIdentity";
+import {
   dmChannelNameFor,
   grantDmRecipients,
   listDmRecords,
@@ -331,7 +339,10 @@ import {
   createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
+  setChatReactionFromMain,
+  writeChatMessageFromMain,
 } from "./mainChatIpcHandlers";
+import { mcpCloudEnvironment } from "./agents/mcpCloudEnvironment";
 import {
   buildShareCode,
   parseShareCode,
@@ -1165,23 +1176,28 @@ function clearCachedCredentials(): void {
 function normalizeServerUrl(url: string): string {
   return url.replace(/\/+$/, "");
 }
-function credentialMatchesRemote(remoteServerUrl: string): boolean {
-  return (
-    cachedCredentials !== null &&
-    normalizeServerUrl(cachedCredentials.serverUrl) === normalizeServerUrl(remoteServerUrl)
-  );
-}
-
 async function remoteForWorkspace(workspaceId: string) {
   await warmCredentialCache();
   const workspace = requireWorkspace(workspaceId);
   const remote = workspace.remote;
   if (!remote) throw new Error("Sync this workspace before sharing.");
-  if (!cachedCredentials) throw new Error("Sign in to dohc Cloud first.");
-  if (!credentialMatchesRemote(remote.serverUrl)) {
-    throw new Error("Sign in to the cloud server this workspace uses.");
+  const credentials = cachedCredentials;
+  if (!credentials) throw new Error("Sign in to dohc Cloud first.");
+  if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
+    if (!remote.ownerUserId) {
+      throw new Error(
+        "This workspace needs a new cloud account link before it can use cloud features.",
+      );
+    }
+    if (
+      normalizeServerUrl(credentials.serverUrl) !==
+      normalizeServerUrl(remote.serverUrl)
+    ) {
+      throw new Error("Sign in to the cloud server this workspace uses.");
+    }
+    throw new Error("Sign in to the account that synced this workspace.");
   }
-  return { workspace, remote, credentials: cachedCredentials };
+  return { workspace, remote, credentials };
 }
 
 // Relay-share HTTP (PR 18): grant-side calls go to the SYNC RELAY (not the
@@ -1279,15 +1295,18 @@ async function presenceRelayTransportForScope(
   scope: PresenceScopeInput,
 ): Promise<ReturnType<typeof createRelayPresenceTransport> | null> {
   await warmCredentialCache();
-  if (!cachedCredentials?.relayUrl) return null;
-  const baseUrl = normalizeServerUrl(cachedCredentials.relayUrl);
-  const token = cachedCredentials.token;
+  const credentials = cachedCredentials;
+  if (!credentials?.relayUrl) return null;
+  const baseUrl = normalizeServerUrl(credentials.relayUrl);
+  const token = credentials.token;
   const fetchImpl = relayFetchWithTimeout(PRESENCE_PUBLISH_TIMEOUT_MS);
   let relayScope: RelayPresenceScope;
   if (scope.kind === "workspace") {
     const entry = findWorkspace(scope.workspaceId);
     const remote = entry?.remote;
-    if (!remote || !credentialMatchesRemote(remote.serverUrl)) return null;
+    if (!remote || !workspaceRemoteMatchesCredentials(remote, credentials)) {
+      return null;
+    }
     relayScope = {
       kind: "workspace",
       workspaceId: remote.remoteWorkspaceId,
@@ -1339,16 +1358,19 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
     const channels = (entry?.sharedChannels ?? []).filter((channel) => !channel.ended);
     if (!entry || channels.length === 0) return;
     await warmCredentialCache();
-    if (!cachedCredentials?.relayUrl) return;
-    const relayUrl = cachedCredentials.relayUrl;
-    // Origin-relay pin (mirrors the shared-view refresh rule): a share is
-    // only ever refreshed against the relay it was joined from — signed into
-    // a DIFFERENT relay, skip rather than misread a 404 as "ended".
-    const matching = channels.filter((channel) => relayUrlsMatch(channel.relayUrl, relayUrl));
+    const syncCredentials = cachedCredentials;
+    if (!syncCredentials?.relayUrl) return;
+    const relayUrl = syncCredentials.relayUrl;
+    // A joined channel syncs only for the relay account that joined it.
+    // Legacy rows without an account pin stay readable and are skipped rather
+    // than risking a wrong-account 404 being recorded as "ended".
+    const matching = channels.filter((channel) =>
+      joinedChannelMatchesCredentials(channel, syncCredentials),
+    );
     if (matching.length === 0) return;
     const relay = {
       baseUrl: normalizeServerUrl(relayUrl),
-      token: cachedCredentials.token,
+      token: syncCredentials.token,
       fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
     };
     const daemonRelay = relayClientForWorkspace({
@@ -1450,29 +1472,22 @@ function mcpConfigFor(
   };
 }
 
-function mcpRuntimeConfigFor(rootPath: string): {
+async function mcpRuntimeConfigFor(rootPath: string): Promise<{
   command: string;
   args: string[];
   env?: Record<string, string>;
-} {
+}> {
+  await warmCredentialCache();
   const workspace = listWorkspaces().find((entry) => entry.rootPath === rootPath);
   // Defense in depth: managed agent runs are already refused on shared views,
   // but if a runtime MCP is ever spawned for one it must be the read-only
   // profile — never the write-capable server.
   const config = mcpConfigFor(rootPath, { readOnly: !!workspace?.shareView });
-  const remote = workspace?.remote;
-  const env =
-    remote && cachedCredentials && credentialMatchesRemote(remote.serverUrl)
-      ? {
-          DOHC_MCP_CLOUD_SERVER_URL: cachedCredentials.serverUrl,
-          DOHC_MCP_CLOUD_EMAIL: cachedCredentials.email,
-          DOHC_MCP_OWNER_NAME: localUserDisplayName(),
-          DOHC_MCP_CLOUD_TOKEN: cachedCredentials.token,
-          // WS-MU-C0: the opaque Better Auth user id that the relay verifies as
-          // actor.userId before it accepts an authored chat operation.
-          DOHC_MCP_CLOUD_USER_ID: cachedCredentials.userId,
-        }
-      : undefined;
+  const env = mcpCloudEnvironment({
+    workspace,
+    credentials: cachedCredentials,
+    ownerName: localUserDisplayName(),
+  });
   return {
     command: config.command,
     args: config.args,
@@ -1514,14 +1529,15 @@ function engineForWorkspace(
   engineOptions: { joinBootstrap?: boolean } = {},
 ) {
   const remote = findWorkspace(workspace.workspaceId)?.remote;
-  if (!remote || !cachedCredentials) return null;
-  if (!capture || !cachedCredentials.relayUrl) return null;
+  const credentials = cachedCredentials;
+  if (!remote || !credentials) return null;
+  if (!capture || !credentials.relayUrl) return null;
   // Only sync when the session belongs to the server this workspace is bound
   // to; a mismatch keeps it local-only (no token leak, no mass-delete).
-  if (!credentialMatchesRemote(remote.serverUrl)) return null;
+  if (!workspaceRemoteMatchesCredentials(remote, credentials)) return null;
   const relay = {
-    baseUrl: cachedCredentials.relayUrl,
-    token: cachedCredentials.token,
+    baseUrl: credentials.relayUrl,
+    token: credentials.token,
   };
   const daemonRelay = relayClientForWorkspace({
     workspaceId: remote.remoteWorkspaceId,
@@ -1569,8 +1585,9 @@ const activity = createWorkspaceActivity(notifyRenderer, {
     const remote = findWorkspace(workspaceId)?.remote;
     return {
       enabled: !!remote,
-      // connected requires the session to belong to this workspace's server.
-      connected: !!remote && credentialMatchesRemote(remote.serverUrl),
+      // Legacy and different-account bindings stay local-only.
+      connected:
+        !!remote && workspaceRemoteMatchesCredentials(remote, cachedCredentials),
     };
   },
   engineFor: engineForWorkspace,
@@ -1818,8 +1835,51 @@ function localUserId(): string {
 // signed-in session always carries the opaque Better Auth user id that the relay
 // verifies as `actor.userId`. Signed-out sends omit `authorUserId`. Reactions
 // still use the stable local fallback id offline. The email stays display-only.
-function relayAuthorUserId(): string | undefined {
-  return cachedCredentials?.userId;
+async function chatRelayIdentityFor(
+  workspaceId: string,
+  target: ChatRelayIdentityTarget,
+) {
+  await warmCredentialCache();
+  const workspace = requireWorkspace(workspaceId);
+  return resolveChatRelayIdentity({
+    workspace,
+    credentials: cachedCredentials,
+    store: linkedChatStoreFor(workspace),
+    target,
+  });
+}
+
+async function verifiedChatAuthorUserIdFor(
+  workspaceId: string,
+  target: ChatRelayIdentityTarget,
+): Promise<string | undefined> {
+  const identity = await chatRelayIdentityFor(workspaceId, target);
+  assertSharedChannelMessageIdentity({
+    joinedChannel: identity.joinedChannel,
+    credentials: cachedCredentials,
+    authorUserId: identity.authorUserId,
+  });
+  return identity.authorUserId;
+}
+
+async function revalidateChatWrite(
+  workspace: { workspaceId: string; rootPath: string },
+  target: ChatRelayIdentityTarget,
+  authorUserId: string | undefined,
+): Promise<void> {
+  await assertSharedChannelWritable({
+    workspaceId: workspace.workspaceId,
+    sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+    store: linkedChatStoreFor(workspace),
+    target,
+  });
+  const currentAuthorUserId = await verifiedChatAuthorUserIdFor(
+    workspace.workspaceId,
+    target,
+  );
+  if (currentAuthorUserId !== authorUserId) {
+    throw new Error("Your dohc Cloud session changed. Try again.");
+  }
 }
 
 function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null {
@@ -1834,12 +1894,13 @@ function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null
 }
 
 function syncDispatchWorkspaces(): ChatDispatchWorkspace[] {
-  if (!cachedCredentials) return [];
+  const credentials = cachedCredentials;
+  if (!credentials) return [];
   return listWorkspaces()
     .filter(
       (workspace) =>
         workspace.remote !== undefined &&
-        credentialMatchesRemote(workspace.remote.serverUrl),
+        workspaceRemoteMatchesCredentials(workspace.remote, credentials),
     )
     .map((workspace) => workspaceForDispatch(workspace.workspaceId))
     .filter(
@@ -2046,13 +2107,14 @@ const chatDispatchService = createChatDispatchService({
     agentDispatchStoreHandleFor(workspace).store,
   readRunnerSettings: async () =>
     (await readCachedUserSettingsFile(stateDir())).settings.runner,
-  identityFor: async (workspaceId) => {
+  identityFor: async (workspaceId, target) => {
     await warmCredentialCache();
-    const remote = findWorkspace(workspaceId)?.remote;
-    const verifiedUserId =
-      remote && credentialMatchesRemote(remote.serverUrl)
-        ? relayAuthorUserId()
-        : undefined;
+    const workspace = findWorkspace(workspaceId);
+    const verifiedUserId = workspace
+      ? target
+        ? (await chatRelayIdentityFor(workspaceId, target)).authorUserId
+        : resolveWorkspaceRelayAuthorId(workspace, cachedCredentials)
+      : undefined;
     return {
       displayName: localUserDisplayName(),
       ...(verifiedUserId ? { verifiedUserId } : {}),
@@ -2081,7 +2143,7 @@ const chatDispatchService = createChatDispatchService({
     }
     return release;
   },
-  authorizeServiceNote: async (workspace, threadId) => {
+  authorizeServiceNote: async (workspace, threadId, verifiedUserId) => {
     try {
       await assertSharedChannelWritable({
         workspaceId: workspace.workspaceId,
@@ -2089,7 +2151,13 @@ const chatDispatchService = createChatDispatchService({
         store: linkedChatStoreFor(workspace),
         target: { threadId },
       });
-      return true;
+      const identity = await chatRelayIdentityFor(workspace.workspaceId, {
+        threadId,
+      });
+      return (
+        identity.joinedChannel === null ||
+        (verifiedUserId !== undefined && identity.authorUserId === verifiedUserId)
+      );
     } catch (error) {
       if (!(error instanceof SharedChannelReadOnlyError)) throw error;
       return false;
@@ -2268,6 +2336,14 @@ async function openCliWorkspace(
         target,
       });
     },
+    assertMessageWritable: async (target, authorUserId) => {
+      const identity = await chatRelayIdentityFor(workspace.workspaceId, target);
+      assertSharedChannelMessageIdentity({
+        joinedChannel: identity.joinedChannel,
+        credentials: cachedCredentials,
+        authorUserId,
+      });
+    },
   };
 }
 
@@ -2285,9 +2361,14 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
           readOnly: Boolean(sharedViewOf(workspaceId)),
         })),
     openWorkspace: openCliWorkspace,
-    identity: async () => {
+    identity: async (workspaceId, target) => {
       await warmCredentialCache();
-      const authorUserId = relayAuthorUserId();
+      const workspace = findWorkspace(workspaceId);
+      const authorUserId = workspace
+        ? target
+          ? (await chatRelayIdentityFor(workspaceId, target)).authorUserId
+          : resolveWorkspaceRelayAuthorId(workspace, cachedCredentials)
+        : undefined;
       return {
         displayName: localUserDisplayName(),
         ...(authorUserId ? { authorUserId } : {}),
@@ -3644,13 +3725,18 @@ function registerIpcHandlers(
     const result = await cloudLogin().poll();
     if (result.status === "complete") {
       const previousRelayUrl = cachedCredentials?.relayUrl;
+      const previousUserId = cachedCredentials?.userId;
       await refreshCredentialCache();
       const relayChanged =
         previousRelayUrl !== undefined &&
         cachedCredentials?.relayUrl !== undefined &&
         normalizeServerUrl(previousRelayUrl) !==
           normalizeServerUrl(cachedCredentials.relayUrl);
-      if (relayChanged) {
+      const accountChanged =
+        previousUserId !== undefined &&
+        cachedCredentials?.userId !== undefined &&
+        previousUserId !== cachedCredentials.userId;
+      if (relayChanged || accountChanged) {
         await activity.stopEngines();
         await closeAllRelayTransportWorkspaces();
       }
@@ -3760,6 +3846,7 @@ function registerIpcHandlers(
     setWorkspaceRemote(workspace.workspaceId, {
       serverUrl: credentials.serverUrl,
       remoteWorkspaceId: workspace.workspaceId,
+      ownerUserId: credentials.userId,
     });
     await activity.enableCloud(workspace);
     return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
@@ -3853,6 +3940,7 @@ function registerIpcHandlers(
         setWorkspaceRemote(created.workspaceId, {
           serverUrl: credentials.serverUrl,
           remoteWorkspaceId: parsed.workspaceId,
+          ownerUserId: credentials.userId,
         });
         await activity.enableCloud(created, { joinBootstrap: true });
         completeWorkspaceJoinBootstrap(created.workspaceId);
@@ -4087,8 +4175,9 @@ function registerIpcHandlers(
       throw new Error("Shared views are read-only — join channels from a workspace you own.");
     }
     await warmCredentialCache();
-    if (!cachedCredentials) throw new Error("Sign in to dohc Cloud first.");
-    if (!cachedCredentials.relayUrl) {
+    const joinCredentials = cachedCredentials;
+    if (!joinCredentials) throw new Error("Sign in to dohc Cloud first.");
+    if (!joinCredentials.relayUrl) {
       throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
     }
     // Capture the credentials BEFORE the awaits below (CodeRabbit Data
@@ -4096,10 +4185,11 @@ function registerIpcHandlers(
     // relay switch) — re-reading it afterwards can crash on null or pin the
     // joined channel to the WRONG relay. The join is atomic against the
     // credentials it started with.
-    const joinedRelayUrl = cachedCredentials.relayUrl;
+    const joinedRelayUrl = joinCredentials.relayUrl;
+    const joinedRecipientUserId = joinCredentials.userId;
     const relay = {
       baseUrl: normalizeServerUrl(joinedRelayUrl),
-      token: cachedCredentials.token,
+      token: joinCredentials.token,
       // Same timeout wrapper runSharedChannelSyncPass uses (:973): an
       // unresponsive relay must abort the join's fetch/pull instead of leaving
       // the renderer's "Joining…" button stuck forever.
@@ -4132,6 +4222,7 @@ function registerIpcHandlers(
       access: info.access,
       granterEmail: info.granterEmail,
       relayUrl: joinedRelayUrl,
+      recipientUserId: joinedRecipientUserId,
     };
     // Dedup by shareId AND channelWireId (CodeRabbit Data Integrity): a
     // re-join of the same channel under a NEW share id (revoked + re-granted)
@@ -5547,32 +5638,32 @@ function registerIpcHandlers(
       store: linkedChatStoreFor(workspace),
       target: { threadId: input.threadId },
     });
-    // WS-MU-C0: the credential cache must be warm BEFORE relayAuthorUserId()
-    // reads it — a send racing an unfinished async cache load would otherwise
-    // omit authorUserId from a signed-in user's message. The relay refuses that
-    // payload. warmCredentialCache is idempotent.
-    await warmCredentialCache();
-    const attachments = await resolveChatFileReferences(
-      workspace,
-      capture,
-      input.fileReferences,
-    );
-    // Author is derived HERE: renderer-sent messages are always the local
-    // human user. Agent authorship arrives through agent tooling, never
-    // through this channel.
-    const message = await linkedChatStoreFor(workspace).sendMessage({
-      workspaceId: workspace.workspaceId,
-      threadId: input.threadId,
-      author: { kind: "human", displayName: localUserDisplayName() },
-      // WS-MU-C0: include the verified relay identity when signed in (the relay
-      // checks it === actor.userId); omit it solo. Identity is main-derived,
-      // never renderer-supplied.
-      authorUserId: relayAuthorUserId(),
-      ...(input.parentMessageId
-        ? { parentMessageId: input.parentMessageId }
-        : {}),
-      body: input.body,
-      ...(attachments.length > 0 ? { attachments } : {}),
+    // Resolve one relay-scoped identity before attachments or any durable
+    // write. Shared channels require it; local history may omit it.
+    const store = linkedChatStoreFor(workspace);
+    const target = { threadId: input.threadId };
+    const message = await writeChatMessageFromMain({
+      resolveAuthorUserId: () =>
+        verifiedChatAuthorUserIdFor(workspace.workspaceId, target),
+      resolveAttachments: () =>
+        resolveChatFileReferences(workspace, capture, input.fileReferences),
+      revalidateAuthorUserId: (authorUserId) =>
+        revalidateChatWrite(workspace, target, authorUserId),
+      // Author is derived HERE: renderer-sent messages are always the local
+      // human user. Agent authorship arrives through agent tooling, never
+      // through this channel.
+      write: ({ authorUserId, attachments }) =>
+        store.sendMessage({
+          workspaceId: workspace.workspaceId,
+          threadId: input.threadId,
+          author: { kind: "human", displayName: localUserDisplayName() },
+          ...(authorUserId ? { authorUserId } : {}),
+          ...(input.parentMessageId
+            ? { parentMessageId: input.parentMessageId }
+            : {}),
+          body: input.body,
+          ...(attachments.length > 0 ? { attachments } : {}),
+        }),
     });
     void materializePendingChatBookmarks(workspace, capture).catch((error) => {
       console.error("[desktop] chat bookmark projection:", error);
@@ -5876,7 +5967,10 @@ function registerIpcHandlers(
       targetId = message.authorUserId;
     }
     const ownerUserId = localUserId();
-    const replicationOwnerUserId = relayAuthorUserId();
+    const replicationOwnerUserId = resolveWorkspaceRelayAuthorId(
+      workspace,
+      cachedCredentials,
+    );
     const follow = await store.setFollow({
       workspaceId: workspace.workspaceId,
       ownerUserId,
@@ -5979,7 +6073,10 @@ function registerIpcHandlers(
           mark: async () => {
             await warmCredentialCache();
             const ownerUserId = localUserId();
-            const replicationOwnerUserId = relayAuthorUserId();
+            const replicationOwnerUserId = resolveWorkspaceRelayAuthorId(
+              workspace,
+              cachedCredentials,
+            );
             await linkedChatStoreFor(workspace).markPersonalFeedSeen({
               workspaceId: workspace.workspaceId,
               ownerUserId,
@@ -6053,25 +6150,28 @@ function registerIpcHandlers(
       store: linkedChatStoreFor(workspace),
       target: { channelId: input.channelId },
     });
-    // WS-MU-C0: warm the credential cache before relayAuthorUserId() reads it,
-    // so a thread opened before the async cache load finishes still includes the
-    // signed-in author. Idempotent.
-    await warmCredentialCache();
-    const attachments = await resolveChatFileReferences(
-      workspace,
-      capture,
-      input.fileReferences,
-    );
-    // No title, ever, on this path: the thread displays its first-message
-    // snippet. Author is main-derived like every renderer send.
-    const started = await linkedChatStoreFor(workspace).startChannelThread({
-      workspaceId: workspace.workspaceId,
-      channelId: input.channelId,
-      author: { kind: "human", displayName: localUserDisplayName() },
-      // WS-MU-C0: include the verified relay identity when signed in; omit solo.
-      authorUserId: relayAuthorUserId(),
-      body: input.body,
-      ...(attachments.length > 0 ? { attachments } : {}),
+    // Resolve one relay-scoped identity before attachments or any durable
+    // write. Shared channels require it; local history may omit it.
+    const store = linkedChatStoreFor(workspace);
+    const target = { channelId: input.channelId };
+    const started = await writeChatMessageFromMain({
+      resolveAuthorUserId: () =>
+        verifiedChatAuthorUserIdFor(workspace.workspaceId, target),
+      resolveAttachments: () =>
+        resolveChatFileReferences(workspace, capture, input.fileReferences),
+      revalidateAuthorUserId: (authorUserId) =>
+        revalidateChatWrite(workspace, target, authorUserId),
+      // No title, ever, on this path: the thread displays its first-message
+      // snippet. Author is main-derived like every renderer send.
+      write: ({ authorUserId, attachments }) =>
+        store.startChannelThread({
+          workspaceId: workspace.workspaceId,
+          channelId: input.channelId,
+          author: { kind: "human", displayName: localUserDisplayName() },
+          ...(authorUserId ? { authorUserId } : {}),
+          body: input.body,
+          ...(attachments.length > 0 ? { attachments } : {}),
+        }),
     });
     void materializePendingChatBookmarks(workspace, capture).catch((error) => {
       console.error("[desktop] chat bookmark projection:", error);
@@ -6167,32 +6267,33 @@ function registerIpcHandlers(
       assertWritableWorkspace,
       run: async ({ workspace }, input) => {
         await warmCredentialCache();
+        const target = { threadId: input.threadId };
         // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
         // shared channel rejects them before any durable row.
         await assertSharedChannelWritable({
           workspaceId: workspace.workspaceId,
           sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
           store: linkedChatStoreFor(workspace),
-          target: { threadId: input.threadId },
+          target,
         });
-        const authorId = localUserId();
-        const replicationAuthorId = relayAuthorUserId();
-        const reaction = await linkedChatStoreFor(workspace).setReaction({
+        const reaction = await setChatReactionFromMain({
           workspaceId: workspace.workspaceId,
           threadId: input.threadId,
           messageId: input.messageId,
           emoji: input.emoji,
-          author: {
-            authorId,
-            kind: "human",
-            displayName: localUserDisplayName(),
-          },
-          ...(replicationAuthorId ? { replicationAuthorId } : {}),
+          localFallbackAuthorId: localReactorFallbackId(),
+          localAuthorDisplayName: localUserDisplayName(),
+          resolveReplicationAuthorId: () =>
+            verifiedChatAuthorUserIdFor(workspace.workspaceId, target),
+          revalidateReplicationAuthorId: (authorUserId) =>
+            revalidateChatWrite(workspace, target, authorUserId),
+          setReaction: (mutation) =>
+            linkedChatStoreFor(workspace).setReaction(mutation),
           state: input.state,
         });
         return SetChatReactionResult.parse({
           reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
-          viewerAuthorId: authorId,
+          viewerAuthorId: reaction.author.authorId,
         });
       },
       // MU-C4: reactions in a joined shared channel push out promptly too.
@@ -6281,8 +6382,10 @@ function registerIpcHandlers(
     workspace: { workspaceId: string; rootPath: string },
     relay: SyncRelayConnection,
   ): Promise<void> {
-    const relayUrl = cachedCredentials?.relayUrl;
-    if (!relayUrl) return;
+    const joinCredentials = cachedCredentials;
+    const relayUrl = joinCredentials?.relayUrl;
+    if (!joinCredentials || !relayUrl) return;
+    const recipientUserId = joinCredentials.userId;
     const listing = await relayShareJson<{
       received?: Array<{
         shareId?: unknown;
@@ -6343,6 +6446,7 @@ function registerIpcHandlers(
           access: info.access,
           granterEmail: info.granterEmail,
           relayUrl,
+          recipientUserId,
         };
         setWorkspaceSharedChannels(
           workspace.workspaceId,
@@ -6424,7 +6528,10 @@ function registerIpcHandlers(
     );
     await warmCredentialCache();
     const relay = dmRelayConnection();
-    const authorUserId = relayAuthorUserId();
+    const authorUserId = resolveWorkspaceRelayAuthorId(
+      workspace,
+      cachedCredentials,
+    );
     if (!relay || !authorUserId) {
       throw new Error("Sign in to dohc Cloud to start a direct message.");
     }

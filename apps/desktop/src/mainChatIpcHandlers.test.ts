@@ -6,6 +6,8 @@ import {
   createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
+  setChatReactionFromMain,
+  writeChatMessageFromMain,
   type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
 
@@ -55,6 +57,124 @@ function boundaryDeps(contexts: Map<string, TestContext>) {
 }
 
 describe("runtime main chat IPC boundaries", () => {
+  it("passes the authenticated relay identity into the reaction mutation", async () => {
+    const setReaction = vi.fn(async () => ({ reactionId: "reaction-1" }));
+
+    await expect(
+      setChatReactionFromMain({
+        workspaceId: "workspace-1",
+        threadId: "thread-1",
+        messageId: "message-1",
+        emoji: "👍",
+        state: "added",
+        localFallbackAuthorId: "local-user-id",
+        localAuthorDisplayName: "Ice",
+        resolveReplicationAuthorId: async () => "verified-user-id",
+        revalidateReplicationAuthorId: async () => undefined,
+        setReaction,
+      }),
+    ).resolves.toEqual({ reactionId: "reaction-1" });
+    expect(setReaction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        author: expect.objectContaining({ authorId: "verified-user-id" }),
+        replicationAuthorId: "verified-user-id",
+      }),
+    );
+  });
+
+  it("checks message identity before attachments and passes one captured author to the writer", async () => {
+    const resolveAttachments = vi.fn(async () => ["attachment-1"]);
+    const revalidateAuthorUserId = vi.fn(async () => undefined);
+    const write = vi.fn(async () => ({ messageId: "message-1" }));
+
+    await expect(
+      writeChatMessageFromMain({
+        resolveAuthorUserId: async () => {
+          throw new Error(
+            "Sign in to dohc Cloud to send a message in this shared channel.",
+          );
+        },
+        resolveAttachments,
+        revalidateAuthorUserId,
+        write,
+      }),
+    ).rejects.toThrow(/Sign in to dohc Cloud/u);
+    expect(resolveAttachments).not.toHaveBeenCalled();
+    expect(revalidateAuthorUserId).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+
+    await expect(
+      writeChatMessageFromMain({
+        resolveAuthorUserId: async () => "verified-user-id",
+        resolveAttachments,
+        revalidateAuthorUserId,
+        write,
+      }),
+    ).resolves.toEqual({ messageId: "message-1" });
+    expect(revalidateAuthorUserId).toHaveBeenCalledWith("verified-user-id");
+    expect(write).toHaveBeenCalledWith({
+      authorUserId: "verified-user-id",
+      attachments: ["attachment-1"],
+    });
+  });
+
+  it("revalidates access after attachments and before the message write", async () => {
+    const events: string[] = [];
+    const write = vi.fn(async () => ({ messageId: "message-1" }));
+
+    await expect(
+      writeChatMessageFromMain({
+        resolveAuthorUserId: async () => {
+          events.push("identity");
+          return "verified-user-id";
+        },
+        resolveAttachments: async () => {
+          events.push("attachments");
+          return ["attachment-1"];
+        },
+        revalidateAuthorUserId: async (authorUserId) => {
+          events.push(`revalidate:${authorUserId}`);
+          throw new Error("This shared channel is read-only.");
+        },
+        write,
+      }),
+    ).rejects.toThrow("This shared channel is read-only.");
+
+    expect(events).toEqual([
+      "identity",
+      "attachments",
+      "revalidate:verified-user-id",
+    ]);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the reaction author before the mutation", async () => {
+    const setReaction = vi.fn(async () => ({ reactionId: "reaction-1" }));
+    const revalidateReplicationAuthorId = vi.fn(async () => {
+      throw new Error("Your dohc Cloud session changed. Try again.");
+    });
+
+    await expect(
+      setChatReactionFromMain({
+        workspaceId: "workspace-1",
+        threadId: "thread-1",
+        messageId: "message-1",
+        emoji: "👍",
+        state: "added",
+        localFallbackAuthorId: "local-user-id",
+        localAuthorDisplayName: "Ice",
+        resolveReplicationAuthorId: async () => "verified-user-id",
+        revalidateReplicationAuthorId,
+        setReaction,
+      }),
+    ).rejects.toThrow("Your dohc Cloud session changed. Try again.");
+
+    expect(revalidateReplicationAuthorId).toHaveBeenCalledWith(
+      "verified-user-id",
+    );
+    expect(setReaction).not.toHaveBeenCalled();
+  });
+
   it("rejects mutations and keeps read-shaped writes as no-ops in a read-only workspace", async () => {
     const workspaceId = "shared-view";
     const contexts = new Map<string, TestContext>([

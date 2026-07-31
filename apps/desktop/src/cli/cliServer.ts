@@ -153,6 +153,10 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   listMoments(input: { limit: number }): Promise<VersionedTextMomentSummary[]>;
   readMoment(momentId: string): Promise<VersionedTextMoment | null>;
   assertWritable(target: { channelId: string } | { threadId: string }): Promise<void>;
+  assertMessageWritable(
+    target: { channelId: string } | { threadId: string },
+    authorUserId: string | undefined,
+  ): Promise<void>;
   daemonReads?: {
     queryChatMessagesGranular(input: {
       query: string;
@@ -181,7 +185,10 @@ export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
-  identity(): Promise<CliMainIdentity>;
+  identity(
+    workspaceId: string,
+    target?: { channelId: string } | { threadId: string },
+  ): Promise<CliMainIdentity>;
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   onError?(error: unknown): void;
   onDebug?(message: string): void;
@@ -313,6 +320,25 @@ function authorForActor(identity: CliMainIdentity, actor: CliActor): CliAuthor {
   return actor === "agent"
     ? { kind: "agent", displayName: identity.displayName }
     : { kind: "human", displayName: identity.displayName };
+}
+
+async function revalidateCliWrite(
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+  target: { channelId: string } | { threadId: string },
+  identity: CliMainIdentity,
+  compareReactionAuthor = false,
+): Promise<void> {
+  await context.assertWritable(target);
+  const currentIdentity = await options.identity(context.workspaceId, target);
+  await context.assertMessageWritable(target, currentIdentity.authorUserId);
+  if (
+    currentIdentity.authorUserId !== identity.authorUserId ||
+    (compareReactionAuthor &&
+      currentIdentity.reactionAuthorId !== identity.reactionAuthorId)
+  ) {
+    throw new CliCommandError("Your dohc Cloud session changed. Try again.");
+  }
 }
 
 function rawChatThread(thread: ChatThread) {
@@ -1533,7 +1559,9 @@ async function dispatch(
           };
         }
         await context.assertWritable({ channelId: channel.id });
-        const identity = await options.identity();
+        const target = { channelId: channel.id };
+        const identity = await options.identity(context.workspaceId, target);
+        await context.assertMessageWritable(target, identity.authorUserId);
         const started = await context.store.startChannelThread({
           workspaceId: context.workspaceId,
           channelId: channel.id,
@@ -1568,7 +1596,9 @@ async function dispatch(
     case "replyToChat": {
       try {
         await context.assertWritable({ threadId: request.args.threadId });
-        const identity = await options.identity();
+        const target = { threadId: request.args.threadId };
+        const identity = await options.identity(context.workspaceId, target);
+        await context.assertMessageWritable(target, identity.authorUserId);
         const message = await context.store.sendMessage({
           workspaceId: context.workspaceId,
           threadId: request.args.threadId,
@@ -1776,11 +1806,16 @@ async function dispatch(
           "DMs are streams — use 'dohc chat reply <thread>'",
         );
       }
-      await context.assertWritable({ channelId: channel.engine.id });
-      const [identity, attachments] = await Promise.all([
-        options.identity(),
-        resolveAttachments(context, request.args.cwd, request.args.attachments),
-      ]);
+      const target = { channelId: channel.engine.id };
+      await context.assertWritable(target);
+      const identity = await options.identity(context.workspaceId, target);
+      await context.assertMessageWritable(target, identity.authorUserId);
+      const attachments = await resolveAttachments(
+        context,
+        request.args.cwd,
+        request.args.attachments,
+      );
+      await revalidateCliWrite(context, options, target, identity);
       const started = await context.store.startChannelThread({
         workspaceId: context.workspaceId,
         channelId: channel.engine.id,
@@ -1833,11 +1868,16 @@ async function dispatch(
           );
         }
       }
-      await context.assertWritable({ threadId: thread.thread.id });
-      const [identity, attachments] = await Promise.all([
-        options.identity(),
-        resolveAttachments(context, request.args.cwd, request.args.attachments),
-      ]);
+      const target = { threadId: thread.thread.id };
+      await context.assertWritable(target);
+      const identity = await options.identity(context.workspaceId, target);
+      await context.assertMessageWritable(target, identity.authorUserId);
+      const attachments = await resolveAttachments(
+        context,
+        request.args.cwd,
+        request.args.attachments,
+      );
+      await revalidateCliWrite(context, options, target, identity);
       const message = await context.store.sendMessage({
         workspaceId: context.workspaceId,
         threadId: thread.thread.id,
@@ -1918,17 +1958,28 @@ async function dispatch(
       if (!target.rootMessage) {
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
-      await context.assertWritable({ threadId: target.thread.thread.id });
-      const identity = await options.identity();
+      const writeTarget = { threadId: target.thread.thread.id };
+      await context.assertWritable(writeTarget);
+      const identity = await options.identity(context.workspaceId, writeTarget);
+      await context.assertMessageWritable(writeTarget, identity.authorUserId);
       const existing = await context.store.listReactions({
         workspaceId: context.workspaceId,
         threadId: target.thread.thread.id,
       });
+      await revalidateCliWrite(
+        context,
+        options,
+        writeTarget,
+        identity,
+        true,
+      );
+      const reactionAuthorId =
+        identity.authorUserId ?? identity.reactionAuthorId;
       const active = existing.some(
         (reaction) =>
           reaction.messageId === target.rootMessage?.id &&
           reaction.emoji === request.args.emoji &&
-          reaction.author.authorId === identity.reactionAuthorId,
+          reaction.author.authorId === reactionAuthorId,
       );
       const state = active ? "removed" : "added";
       await context.store.setReaction({
@@ -1937,7 +1988,7 @@ async function dispatch(
         messageId: target.rootMessage.id,
         emoji: request.args.emoji,
         author: {
-          authorId: identity.reactionAuthorId,
+          authorId: reactionAuthorId,
           ...authorForActor(identity, request.args.actor),
         },
         ...(identity.authorUserId

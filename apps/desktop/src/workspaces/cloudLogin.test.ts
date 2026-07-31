@@ -136,7 +136,50 @@ describe("cloud device-flow login", () => {
     });
 
     await login.start();
-    await expect(login.poll()).rejects.toThrow(/server returned no user identity/i);
+    await expect(login.poll()).rejects.toThrow(/server could not confirm your identity/i);
+    expect(store.saved).toBeNull();
+    await expect(login.poll()).rejects.toThrow(/no cloud login in progress/i);
+  });
+
+  it("does not create a signed-in session when get-session fails", async () => {
+    const store = memoryStore();
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "session-token-xyz" } }),
+      "/api/auth/get-session": () => ({
+        status: 503,
+        body: { user: { email: "ice@dohc.test", id: "usr_ice" } },
+      }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+
+    await login.start();
+    await expect(login.poll()).rejects.toThrow(/server could not confirm your identity/i);
+    expect(store.saved).toBeNull();
+    await expect(login.poll()).rejects.toThrow(/no cloud login in progress/i);
+  });
+
+  it("does not create a signed-in session with a non-string Better Auth user id", async () => {
+    const store = memoryStore();
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "session-token-xyz" } }),
+      "/api/auth/get-session": () => ({
+        body: { user: { email: "ice@dohc.test", id: 42 } },
+      }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+
+    await login.start();
+    await expect(login.poll()).rejects.toThrow(/server could not confirm your identity/i);
     expect(store.saved).toBeNull();
     await expect(login.poll()).rejects.toThrow(/no cloud login in progress/i);
   });

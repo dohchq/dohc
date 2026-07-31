@@ -185,7 +185,11 @@ export async function seedWorkspaceRegistry(
   entries: Array<{
     workspaceId: string;
     rootPath: string;
-    remote?: { serverUrl: string; remoteWorkspaceId: string };
+    remote?: {
+      serverUrl: string;
+      remoteWorkspaceId: string;
+      ownerUserId: string;
+    };
   }>,
 ): Promise<void> {
   await mkdir(workspace.homeDir, { recursive: true });

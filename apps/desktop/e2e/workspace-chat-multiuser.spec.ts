@@ -139,7 +139,11 @@ test("owner + participant chat and co-presence converge in the real app", async 
       {
         workspaceId,
         rootPath: temp.rootPath,
-        remote: { serverUrl: relay.baseUrl, remoteWorkspaceId: workspaceId },
+        remote: {
+          serverUrl: relay.baseUrl,
+          remoteWorkspaceId: workspaceId,
+          ownerUserId: GRANTER_USER,
+        },
       },
     ]);
     await seedCloudCredentials(temp, {
