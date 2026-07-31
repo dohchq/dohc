@@ -3498,11 +3498,22 @@ working install of anything. Narrowed to `">=24.14.0"`, matching every other pla
 written down. Deleting the legacy package does not make the old range correct again, since the
 production `node:sqlite` callers outlive it.
 
-The importers, corrected — an earlier draft of this entry named `apps/desktop/src/main.ts`, which
-contains only a *comment* mentioning `node:sqlite`, not an import. Review caught it. The real
-production callers all reach it through `createRequire`, which is why a plain import grep finds
-nothing: `apps/desktop/src/workspaces/workspaceDatabase.ts:37`,
-`services/sync-relay/src/storage.ts:246`, `services/sqlite-worker/src/sqliteEngine.ts:68`.
+The callers, corrected twice. An earlier draft named `apps/desktop/src/main.ts`, which contains only
+a *comment* mentioning `node:sqlite`, not a call. Review caught that; the replacement list was then
+still incomplete, and review caught that too. Every production caller reaches it through
+`createRequire`, which is why a plain import grep finds nothing at all. The complete set outside the
+package being deleted, five of them:
+
+- `apps/desktop/src/workspaces/workspaceDatabase.ts:37`
+- `apps/desktop/src/cli/cliServer.ts:232`
+- `packages/mcp/src/tools.ts:410`
+- `services/sync-relay/src/storage.ts:246`
+- `services/sqlite-worker/src/sqliteEngine.ts:68`
+
+(plus `crates/yrs-spike/scripts/harvest.mjs:24`, a dev script, not shipped.) All five outlive the
+legacy package, which is the point: the Node floor is not a consequence of the package being
+deleted. Two rounds of getting this list wrong is the argument for enumerating it here rather than
+naming an example and trusting the reader to re-derive it.
 
 **And the floor is a support policy, not a measured failure boundary — worth stating plainly,
 because the two are easy to confuse.** The only versions actually measured are 22.14, which fails
