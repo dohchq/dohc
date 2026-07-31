@@ -2,7 +2,7 @@
 // per-side content-kind rules are unit-testable (WS-G1 review fix). main
 // injects the display-name rule for agent authors; nothing here touches
 // Electron or process state.
-import type { VersionedTextMomentSummary } from "@dohc/workspace-engine";
+import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type {
   WorkspaceEngineMomentDetail,
   WorkspaceEngineMomentSummary,

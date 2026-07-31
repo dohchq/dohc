@@ -12,7 +12,7 @@ import type {
   AgentDispatchRecord,
   AgentRunRecord,
   ThreadDispatchPauseState,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/engine";
 import type {
   EngineWorkspace,
   EngineWorkspaceSessions,

@@ -9,7 +9,7 @@ import {
 import {
   type SearchVisibility,
   type TextFileSnapshot,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/engine";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MAX_WORKSPACE_SETTINGS_FILE_BYTES } from "./workspaceSettingsFile";

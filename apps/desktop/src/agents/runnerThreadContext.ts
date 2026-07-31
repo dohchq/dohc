@@ -5,7 +5,7 @@ import type {
   ChatThreadId,
   LinkedChatStore,
   WorkspaceId,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/engine";
 
 type RunnerThreadStore = Pick<
   LinkedChatStore,

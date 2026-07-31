@@ -13,7 +13,7 @@ import type {
   VersionedTextMoment,
   VersionedTextMomentSummary,
   VersionedTextStore,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/engine";
 import {
   DaemonRefusalError,
   VersionedLiveAdapter,

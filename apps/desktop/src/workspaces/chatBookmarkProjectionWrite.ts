@@ -1,4 +1,4 @@
-import type { ChatBookmark } from "@dohc/workspace-engine";
+import type { ChatBookmark } from "@dohc/workspace-contracts/engine";
 import type {
   WorkspaceEngineCapture,
   WorkspaceGeneratedTextArchiveResult,

@@ -1,4 +1,4 @@
-import type { LinkedChatStore } from "@dohc/workspace-engine";
+import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
 
 type AwaitableMethod<T> = T extends (...args: infer TArgs) => infer TResult
   ? (...args: TArgs) => TResult extends Promise<unknown>
