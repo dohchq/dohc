@@ -637,6 +637,43 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid-metadata/);
   });
 
+  it("refuses a malformed AUTHOR on writeBlob before resolving the bytes", async () => {
+    // The daemon's blob handler runs origin, metadata, validated_author, and only
+    // then the decode/lookup. My preflight did origin and metadata and CLAIMED in
+    // its own comment to do the author too, so a malformed author plus a missing
+    // blob answered `file-not-found`.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await expect(
+      send(engine, VERSIONED_METHOD.binaryWriteBlob, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "logo.png",
+        sha256: "b".repeat(64), // no such blob
+        origin: "local-file",
+        author: { kind: "not-a-real-author-kind" },
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+  });
+
+  it("refuses over-cap APPLY metadata before looking up either version", async () => {
+    // secrets_apply validates metadata before its source/target checks, so an
+    // over-cap field plus a missing version answers for the metadata.
+    const engine = new VersionedLoopbackEngine();
+    await openWorkspace(engine);
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsApply, {
+        workspaceId: WORKSPACE,
+        sourceVersionId: "no-such-source",
+        targetVersionId: "no-such-target",
+        path: ".env",
+        momentId: "moment-apply-capped",
+        origin: "local-file",
+        summary: "s".repeat(16 * 1024 + 1),
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+  });
+
   it("refuses over-cap RESTORE metadata before it looks for the moment", async () => {
     // Fourth handler in this file where the fake read state before validating
     // metadata. The daemon validates origin then metadata immediately after

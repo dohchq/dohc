@@ -888,14 +888,20 @@ export class VersionedLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const expectedSha = requiredString(params, "sha256", "binary blob write").toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(expectedSha)) throw new Error("invalid-input");
-    // The blob handler validates origin, metadata and author BEFORE it decodes
-    // or looks up the bytes (lib.rs versionedBinary.writeBlob), the OPPOSITE
-    // order from versionedBinary.write, which decodes first. So a request that
-    // is wrong in both ways answers `invalid-metadata` here and `invalid-input`
-    // there. binaryWrite re-derives these; this call is for the refusal order.
+    // The blob handler validates origin, metadata AND author before it decodes
+    // or looks up the bytes (lib.rs versionedBinary.writeBlob: origin, metadata,
+    // validated_author, then the decode), the OPPOSITE order from
+    // versionedBinary.write, which decodes first. So a request wrong in both ways
+    // answers for the metadata or author here and for the bytes there.
+    //
+    // All three, not two: an earlier version of this comment claimed author was
+    // validated here while only origin and metadata were, so a malformed author
+    // plus a missing blob still answered `file-not-found`. binaryWrite re-derives
+    // all of them; these calls exist purely for the refusal order.
     requiredOrigin(params);
     metadataField(params, "summary");
     metadataField(params, "correlationId");
+    this.validatedAuthorValue(params);
     const encoded = optionalString(params, "bytesBase64");
     const bytes =
       encoded === undefined
@@ -1675,18 +1681,18 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretApply(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const source = state.versions.get(requiredString(params, "sourceVersionId", "secret apply"));
-    const target = state.versions.get(requiredString(params, "targetVersionId", "secret apply"));
-    if (!source || !target) throw new Error("invalid-version");
     const path = requiredString(params, "path", "secret apply");
     const momentId = requiredString(params, "momentId", "secret apply");
     const origin = requiredOrigin(params);
-    // Through the capped helper, not raw `optionalString`: the Rust
-    // `secrets_apply` handler calls `validate_metadata_fields` before applying
-    // the change, so reading these fields uncapped let a secret MERGE certify an
-    // over-cap request production refuses. This path was missed when the cap
-    // landed on write/delete/restore.
+    // Above BOTH version lookups: secrets_apply validates metadata before its
+    // source/target checks, so an over-cap field plus a missing version answers
+    // `invalid-metadata`, not `invalid-version`. Safe to hoist here because
+    // `state.versions.get` only reads — the handlers still listed in #439 use
+    // `mutationVersion`, which CREATES `main`, so moving those changes state.
     const { summary, correlationId } = this.secretMomentMetadata(params);
+    const source = state.versions.get(requiredString(params, "sourceVersionId", "secret apply"));
+    const target = state.versions.get(requiredString(params, "targetVersionId", "secret apply"));
+    if (!source || !target) throw new Error("invalid-version");
     const before = target.secrets.get(path);
     const after = source.secrets.get(path);
     const base = source.secretForkBase.get(path);
