@@ -408,7 +408,7 @@ export function createSyncRelayHandler({
         if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
         // Authorship runs before the filter and parseLogOp so neither admits nor
         // freezes a payload whose claimed author is missing or forged (MU-C0).
-        assertChatAuthorship(input.ops, actor.userId, "shared-channel-log");
+        assertChatAuthorship(input.ops, actor.userId);
         // Batch-aware channel scoping: a thread created earlier in THIS batch
         // is a valid target for later ops in the same batch (the composer's
         // thread.create + first message.append), but the LOG's earliest
@@ -808,15 +808,11 @@ export function createSyncRelayHandler({
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
         if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
         // MU-C0 verified authorship — the trust boundary. Every chat op that
-        // carries an author identity must claim the AUTHENTICATED pusher; a
-        // client can no longer forge a message/reaction as another user, and an
-        // unrecognized chat op is refused (fail-closed). A workspace owner can
-        // also upload messages created locally before sign-in. Those messages
-        // stay unattributed: the relay admits the missing field but never
-        // rewrites the replicated bytes. Runs BEFORE parseLogOp and
-        // appendLogBatch so a batch mixing one forged/unknown op with valid ones
-        // is rejected atomically (nothing is admitted to the log).
-        assertChatAuthorship(input.ops, actor.userId, "workspace-log");
+        // names an author must claim the authenticated pusher. The relay refuses
+        // authorless messages and unknown chat ops. This check runs before
+        // parseLogOp and appendLogBatch, so the relay rejects the full batch
+        // before it writes any operation.
+        assertChatAuthorship(input.ops, actor.userId);
         const ops = input.ops.map(parseLogOp);
         const result = storage.appendLogBatch({
           workspaceId: route.workspaceId,
@@ -1125,10 +1121,8 @@ function parseLogOp(value: unknown): SyncRelayLogInput {
 //
 // Author identity is always the OPAQUE relay user id (never a raw email — PII
 // must not enter the replicated CRDT):
-//  - chat.message.append.authorUserId — verified when present. A workspace
-//    owner may upload an older local-only message that predates sign-in and has
-//    no relay identity. The relay preserves that omission. Shared-channel
-//    member appends still require the field.
+//  - chat.message.append.authorUserId — REQUIRED. Messages without a verified
+//    relay identity stay in the local engine and never enter a relay log.
 //  - chat.reaction.set.authorId       — REQUIRED. A reaction is inherently an
 //    authored act, so a missing/non-string author id is a malformed op and is
 //    rejected (fail-closed), same as a mismatch.
@@ -1143,7 +1137,6 @@ type ChatOpPolicy =
   | {
       kind: "authored";
       field: string;
-      onMissing: "reject" | "allow-workspace-history";
     };
 const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
   // No-author structural/derived ops: nothing to verify, pass through.
@@ -1155,25 +1148,21 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
   "chat.message.append": {
     kind: "authored",
     field: "authorUserId",
-    onMissing: "allow-workspace-history",
   },
-  "chat.reaction.set": { kind: "authored", field: "authorId", onMissing: "reject" },
+  "chat.reaction.set": { kind: "authored", field: "authorId" },
   // Receiver-private state still rides the owner's ordinary workspace log.
   // It never appears in a channel share, and the authenticated pusher must be
   // the receiver named by the durable record.
-  "chat.follow.set": { kind: "authored", field: "ownerUserId", onMissing: "reject" },
-  "chat.feed.read.set": { kind: "authored", field: "ownerUserId", onMissing: "reject" },
+  "chat.follow.set": { kind: "authored", field: "ownerUserId" },
+  "chat.feed.read.set": { kind: "authored", field: "ownerUserId" },
 };
 
 // Verifies chat authorship before parseLogOp freezes the exact payload bytes.
 // The relay never mutates replicated payloads because the author reads its own
 // operations back and compares those bytes with its local replication log.
-type ChatPushRoute = "workspace-log" | "shared-channel-log";
-
 export function assertChatAuthorship(
   rawOps: unknown[],
   actorUserId: string,
-  route: ChatPushRoute,
 ): void {
   for (const rawOp of rawOps) {
     if (!rawOp || typeof rawOp !== "object" || Array.isArray(rawOp)) continue;
@@ -1194,13 +1183,6 @@ export function assertChatAuthorship(
     }
     const bag = payload as Record<string, unknown>;
     const claimed = bag[policy.field];
-    if (
-      claimed === undefined &&
-      policy.onMissing === "allow-workspace-history" &&
-      route === "workspace-log"
-    ) {
-      continue;
-    }
     if (claimed === undefined || claimed === null) {
       throw authorshipMismatch();
     }

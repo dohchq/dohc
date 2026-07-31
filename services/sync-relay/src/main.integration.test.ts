@@ -250,17 +250,17 @@ describe("sync relay main process", () => {
     expect(mixed.status).toBe(403);
     expect(await logLength()).toBe(0);
 
-    // A message created in Alice's workspace before sign-in stays
-    // unattributed. The authenticated owner may upload it, but the relay must
-    // not stamp or otherwise change the replicated payload.
-    const localMessageOp = messageOp(0, undefined);
+    // A message created before sign-in has no verified relay author. The
+    // workspace route rejects it and leaves the log unchanged.
     const localMessage = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
       originId: "origin-before-sign-in",
-      ops: [localMessageOp],
+      ops: [messageOp(0, undefined)],
     });
-    expect(localMessage.status).toBe(200);
-    const [storedLocalMessage] = await logOps();
-    expect(storedLocalMessage.payload).toEqual(localMessageOp.payload);
+    expect(localMessage.status).toBe(403);
+    expect((await localMessage.json()) as Record<string, unknown>).toMatchObject({
+      code: "authorship_mismatch",
+    });
+    expect(await logLength()).toBe(0);
 
     // Alice authoring as HERSELF is admitted.
     const honest = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
@@ -268,7 +268,7 @@ describe("sync relay main process", () => {
       ops: [messageOp(0, alice), reactionOp(1, alice)],
     });
     expect(honest.status).toBe(200);
-    expect(await logLength()).toBe(3);
+    expect(await logLength()).toBe(2);
   });
 
   // Gate finding: the transport must cap request bodies AT THE STREAM. A

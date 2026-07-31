@@ -129,6 +129,22 @@ describe("cloud credential store", () => {
     }
   });
 
+  it("refuses to save credentials with a missing required field", async () => {
+    const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
+    for (const broken of [
+      { ...credentials, serverUrl: "" },
+      { ...credentials, email: "" },
+      { ...credentials, userId: "" },
+      { ...credentials, token: "" },
+      { ...credentials, relayUrl: "" },
+    ]) {
+      await expect(store.save(broken)).rejects.toThrow(
+        /serverUrl, email, userId, and token must be non-empty strings/u,
+      );
+    }
+    await expect(store.load()).resolves.toBeNull();
+  });
+
   it("clears credentials and is idempotent", async () => {
     const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
     await store.save(credentials);

@@ -89,6 +89,19 @@ export function createCloudCredentialStore(options: {
     },
 
     async save(credentials: CloudCredentials): Promise<void> {
+      if (
+        !credentials ||
+        !nonEmptyString(credentials.serverUrl) ||
+        !nonEmptyString(credentials.email) ||
+        !nonEmptyString(credentials.userId) ||
+        !nonEmptyString(credentials.token) ||
+        (credentials.relayUrl !== undefined &&
+          !nonEmptyString(credentials.relayUrl))
+      ) {
+        throw new Error(
+          "Cannot save cloud credentials: serverUrl, email, userId, and token must be non-empty strings; relayUrl must be non-empty when set.",
+        );
+      }
       // The OS keychain may be absent (Linux without a secret service, CI).
       // The "plain:" prefix documents that fallback on disk so it is never
       // silently lossy, and load() can tell the two formats apart.

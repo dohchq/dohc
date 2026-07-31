@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./ipc/channels";
 import { markPersonalFeedSeenReadOnlySafe } from "./workspaces/chatFollowAccess";
 import {
+  chatViewerAuthorId,
   createChatChannelIpcHandler,
   createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
@@ -80,6 +81,47 @@ describe("runtime main chat IPC boundaries", () => {
         replicationAuthorId: "verified-user-id",
       }),
     );
+  });
+
+  it("keeps a signed-out reaction local and omits the replication author", async () => {
+    const setReaction = vi.fn(
+      async (mutation: {
+        author: { authorId: string };
+        replicationAuthorId?: string;
+      }) => ({ reactionId: "reaction-1", mutation }),
+    );
+
+    await setChatReactionFromMain({
+      workspaceId: "workspace-1",
+      threadId: "thread-1",
+      messageId: "message-1",
+      emoji: "👍",
+      state: "added",
+      localFallbackAuthorId: "local-user-id",
+      localAuthorDisplayName: "Ice",
+      resolveReplicationAuthorId: async () => undefined,
+      revalidateReplicationAuthorId: async () => undefined,
+      setReaction,
+    });
+
+    const mutation = setReaction.mock.calls[0]![0];
+    expect(mutation.author.authorId).toBe("local-user-id");
+    expect(mutation).not.toHaveProperty("replicationAuthorId");
+  });
+
+  it("uses the same signed-in or local reaction identity for reaction reads", async () => {
+    await expect(
+      chatViewerAuthorId({
+        localFallbackAuthorId: "local-user-id",
+        resolveReplicationAuthorId: async () => "verified-user-id",
+      }),
+    ).resolves.toBe("verified-user-id");
+    await expect(
+      chatViewerAuthorId({
+        localFallbackAuthorId: "local-user-id",
+        resolveReplicationAuthorId: async () => undefined,
+      }),
+    ).resolves.toBe("local-user-id");
   });
 
   it("checks message identity before attachments and passes one captured author to the writer", async () => {

@@ -164,6 +164,31 @@ describe("CloudLogin", () => {
     );
   });
 
+  it("shows a recovery state when this account cannot use the workspace remote", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "other@dohc.dev",
+      workspaceSynced: true,
+      workspaceSyncConnected: false,
+      relayUrl: "http://localhost:1788",
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    expect((await screen.findByTestId("cloud-workspace-relink")).textContent).toContain(
+      "Sync is paused",
+    );
+    expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
+    expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+    fireEvent.click(screen.getByTestId("cloud-relink-workspace"));
+    await waitFor(() =>
+      expect(bridgeMock.cloudEnableSync).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+      }),
+    );
+    expect(await screen.findByTestId("cloud-workspace-synced")).toBeTruthy();
+  });
+
   it("omits the sync code when the session has no relay (nothing to join through)", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: true,

@@ -4435,6 +4435,108 @@ impl RelayTransport for FakeRelay {
     }
 }
 
+struct CommittedOldBatchRelay {
+    remote_ops: Vec<ReplicationEnvelope>,
+    pushes: Mutex<Vec<PushRequest>>,
+}
+
+impl RelayTransport for CommittedOldBatchRelay {
+    fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        let current_max_origin_seq = if req.ops.is_empty() {
+            self.remote_ops
+                .iter()
+                .filter(|op| op.origin_id == req.origin_id)
+                .map(|op| op.origin_seq)
+                .max()
+                .unwrap_or(-1)
+        } else {
+            req.ops.last().map_or(req.after_seq, |op| op.origin_seq)
+        };
+        let accepted = req.ops.len();
+        self.pushes.lock().expect("push requests").push(req);
+        Ok(PushResponse {
+            accepted,
+            inserted: accepted,
+            skipped: 0,
+            current_max_origin_seq,
+        })
+    }
+
+    fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError> {
+        if req.cursor != 0 {
+            return Err(RelayError::InvalidResponse);
+        }
+        Ok(PullResponse {
+            ops: self.remote_ops.clone(),
+            next_cursor: i64::try_from(self.remote_ops.len())
+                .map_err(|_| RelayError::InvalidResponse)?,
+            has_more: false,
+        })
+    }
+
+    fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
+        Ok(ProbeResponse { has_content: true })
+    }
+
+    fn claim_workspace(&self, _req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
+        Ok(ClaimResponse)
+    }
+
+    fn rotate_epoch(&self, _req: EpochRequest) -> Result<EpochResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn blobs_have(&self, _req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        Ok(BlobHaveResponse {
+            missing: Vec::new(),
+        })
+    }
+
+    fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::BlobMissing)
+    }
+
+    fn upload_key_envelope(
+        &self,
+        _req: KeyEnvelopeRequest,
+    ) -> Result<KeyEnvelopeResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn download_key_envelope(
+        &self,
+        _req: KeyEnvelopeDownloadRequest,
+    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
+        Err(RelayError::KeyEnvelopeMissing)
+    }
+
+    fn shared_channel_pull(
+        &self,
+        _req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn shared_channel_push(
+        &self,
+        _req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn share_view_pull(&self, _req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn share_blob(&self, _req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::ShareUnavailable)
+    }
+}
+
 #[derive(Default)]
 struct KeyConflictRelay {
     uploads: Mutex<Vec<KeyEnvelopeRequest>>,
@@ -4809,6 +4911,277 @@ fn seed_identity(engine: &mut EngineStore) {
     assert_eq!(outcome, TxnOutcome::Committed(0));
 }
 
+fn legacy_message_payload(
+    message_id: &str,
+    body: &str,
+    parent_message_id: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "messageId": message_id,
+        "threadId": "legacy-thread",
+        "authorKind": "human",
+        "authorDisplayName": "Legacy User",
+        "body": body,
+        "createdAtMs": 2_000,
+    });
+    if let Some(parent_message_id) = parent_message_id {
+        payload["parentMessageId"] = json!(parent_message_id);
+    }
+    payload
+}
+
+fn seed_chat_message_projection(
+    engine: &mut EngineStore,
+    message_order: i64,
+    payload: &serde_json::Value,
+    author_user_id: Option<&str>,
+) {
+    let thread_id = payload["threadId"].as_str().expect("thread id");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms) \
+                 VALUES ('ws',?1,'Local only',2000,2000)",
+                [thread_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_messages \
+                 (workspace_id,thread_id,message_order,message_id,author_kind, \
+                  author_display_name,author_user_id,parent_message_id,origin,body,created_at_ms) \
+                 VALUES ('ws',?1,?2,?3,'human','Legacy User',?4,?5,NULL,?6,2000)",
+                params![
+                    thread_id,
+                    message_order,
+                    payload["messageId"].as_str().expect("message id"),
+                    author_user_id,
+                    payload
+                        .get("parentMessageId")
+                        .and_then(|value| value.as_str()),
+                    payload["body"].as_str().expect("message body")
+                ],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed legacy chat projection");
+}
+
+fn journal_legacy_test_op(
+    engine: &mut EngineStore,
+    op_kind: &str,
+    payload: &serde_json::Value,
+) -> i64 {
+    match journal_local_replication_op(
+        engine, "ws", "local", "epoch-1", "stream-1", op_kind, payload, 2_000, &NoFaults,
+    )
+    .expect("journal legacy compatibility op")
+    {
+        TxnOutcome::Committed(origin_seq) => origin_seq,
+        TxnOutcome::Crashed { .. } => panic!("no faults were injected"),
+    }
+}
+
+fn seed_local_push_position(engine: &mut EngineStore, pushed_seq: i64) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES ('ws','local',?1)",
+                [pushed_seq],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed local push position");
+}
+
+fn journal_legacy_lww_ops(engine: &mut EngineStore) -> (i64, i64, i64, i64) {
+    let reaction_seq = journal_legacy_test_op(
+        engine,
+        "chat.reaction.set",
+        &json!({
+            "reactionId": "legacy-reaction",
+            "messageId": "safe-message",
+            "threadId": "legacy-thread",
+            "emoji": "👍",
+            "authorId": "user-1",
+            "authorKind": "human",
+            "authorDisplayName": "User 1",
+            "atMs": 2_001,
+            "state": "added"
+        }),
+    );
+    journal_legacy_test_op(
+        engine,
+        "chat.decision.set",
+        &json!({
+            "messageId": "safe-message",
+            "threadId": "legacy-thread",
+            "state": "open",
+            "atMs": 2_002
+        }),
+    );
+    let follow_seq = journal_legacy_test_op(
+        engine,
+        "chat.follow.set",
+        &json!({
+            "ownerUserId": "user-1",
+            "targetKind": "thread",
+            "targetId": "legacy-thread",
+            "state": "following",
+            "atMs": 2_003
+        }),
+    );
+    let feed_seq = journal_legacy_test_op(
+        engine,
+        "chat.feed.read.set",
+        &json!({
+            "ownerUserId": "user-1",
+            "lastSeenCreatedAtMs": 2_000,
+            "lastSeenMessageId": "safe-message",
+            "atMs": 2_004
+        }),
+    );
+    let decision_seq = journal_legacy_test_op(
+        engine,
+        "chat.decision.set",
+        &json!({
+            "messageId": "safe-message",
+            "threadId": "legacy-thread",
+            "state": "resolved",
+            "resolvedByMessageId": "safe-message",
+            "atMs": 2_005
+        }),
+    );
+    (reaction_seq, decision_seq, follow_seq, feed_seq)
+}
+
+fn seed_legacy_lww_projections(
+    engine: &mut EngineStore,
+    origin_id: &str,
+    reaction_seq: i64,
+    decision_seq: i64,
+    follow_seq: i64,
+    feed_seq: i64,
+) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_reactions \
+                 (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind, \
+                  author_display_name,state,at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','legacy-reaction','legacy-thread','safe-message','👍','user-1', \
+                         'human','User 1','added',2001,?1,?2)",
+                params![origin_id, reaction_seq],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_decisions \
+                 (workspace_id,thread_id,message_id,state,resolved_by_message_id,at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','legacy-thread','safe-message','resolved','safe-message',2005,?1,?2)",
+                params![origin_id, decision_seq],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_follows \
+                 (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','user-1','thread','legacy-thread','following',2003,?1,?2)",
+                params![origin_id, follow_seq],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_feed_read_state \
+                 (workspace_id,owner_user_id,last_seen_created_at_ms,last_seen_message_id,updated_at_ms, \
+                  origin_id,origin_seq) \
+                 VALUES ('ws','user-1',2000,'safe-message',2004,?1,?2)",
+                params![origin_id, feed_seq],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed legacy LWW projections");
+}
+
+fn legacy_lww_projection_coordinates(engine: &EngineStore) -> BTreeMap<String, (String, i64)> {
+    engine
+        .read_with(|conn| {
+            let mut coordinates = BTreeMap::new();
+            for (op_kind, query) in [
+                (
+                    "chat.reaction.set",
+                    "SELECT origin_id,origin_seq FROM chat_reactions \
+                     WHERE workspace_id='ws' AND reaction_id='legacy-reaction'",
+                ),
+                (
+                    "chat.decision.set",
+                    "SELECT origin_id,origin_seq FROM chat_decisions \
+                     WHERE workspace_id='ws' AND message_id='safe-message'",
+                ),
+                (
+                    "chat.follow.set",
+                    "SELECT origin_id,origin_seq FROM chat_follows \
+                     WHERE workspace_id='ws' AND owner_user_id='user-1' \
+                       AND target_kind='thread' AND target_id='legacy-thread'",
+                ),
+                (
+                    "chat.feed.read.set",
+                    "SELECT origin_id,origin_seq FROM chat_feed_read_state \
+                     WHERE workspace_id='ws' AND owner_user_id='user-1'",
+                ),
+            ] {
+                coordinates.insert(
+                    op_kind.to_owned(),
+                    conn.query_row(query, [], |row| Ok((row.get(0)?, row.get(1)?)))?,
+                );
+            }
+            Ok::<_, rusqlite::Error>(coordinates)
+        })
+        .expect("read legacy LWW projection coordinates")
+}
+
+fn legacy_lww_log_coordinates(
+    engine: &EngineStore,
+    origin_id: &str,
+) -> BTreeMap<String, (String, i64)> {
+    engine
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT op_kind,payload_json,origin_seq FROM replication_log \
+                 WHERE workspace_id='ws' AND origin_id=?1 ORDER BY origin_seq",
+            )?;
+            let rows = statement.query_map([origin_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            let mut coordinates = BTreeMap::new();
+            for row in rows {
+                let (op_kind, payload_json, origin_seq) = row?;
+                if !matches!(
+                    op_kind.as_str(),
+                    "chat.reaction.set"
+                        | "chat.decision.set"
+                        | "chat.follow.set"
+                        | "chat.feed.read.set"
+                ) {
+                    continue;
+                }
+                let payload: serde_json::Value = serde_json::from_str(&payload_json)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+                if op_kind == "chat.decision.set" && payload["state"] != "resolved" {
+                    continue;
+                }
+                coordinates.insert(op_kind, (origin_id.to_owned(), origin_seq));
+            }
+            Ok::<_, rusqlite::Error>(coordinates)
+        })
+        .expect("read legacy LWW log coordinates")
+}
+
 #[test]
 fn relay_pull_recovers_only_a_diverged_local_origin() {
     for (origin_id, expected) in [
@@ -4855,6 +5228,836 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
             "{origin_id}"
         );
     }
+}
+
+#[test]
+fn legacy_author_compat_quarantines_suffix_and_rebases_safe_later_ops() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES ('ws','local',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO shared_channel_push_state \
+                 (workspace_id,share_id,pushed_seq,dense_seq) VALUES ('ws','share',9,9)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed push positions");
+
+    let local_only = legacy_message_payload("local-only", "private history", None);
+    seed_chat_message_projection(&mut engine, 0, &local_only, None);
+    assert!(matches!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.message.append",
+            &local_only,
+            2_000,
+            &NoFaults,
+        ),
+        Ok(TxnOutcome::Committed(1))
+    ));
+    for (expected_seq, op_kind, payload) in [
+        (
+            2,
+            "chat.attachment.add",
+            json!({"messageId":"local-only","threadId":"legacy-thread"}),
+        ),
+        (
+            3,
+            "chat.decision.set",
+            json!({"messageId":"local-only","threadId":"legacy-thread","state":"open","atMs":2000}),
+        ),
+        (
+            4,
+            "chat.reaction.set",
+            json!({"messageId":"local-only","threadId":"legacy-thread","authorId":"user-1"}),
+        ),
+    ] {
+        assert!(matches!(
+            journal_local_replication_op(
+                &mut engine,
+                "ws",
+                "local",
+                "epoch-1",
+                "stream-1",
+                op_kind,
+                &payload,
+                2_000,
+                &NoFaults,
+            ),
+            Ok(TxnOutcome::Committed(seq)) if seq == expected_seq
+        ));
+    }
+    let mut authored_child = legacy_message_payload(
+        "relay-visible-child",
+        "safe later message",
+        Some("local-only"),
+    );
+    authored_child["authorUserId"] = json!("user-1");
+    seed_chat_message_projection(&mut engine, 1, &authored_child, Some("user-1"));
+    assert!(matches!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.message.append",
+            &authored_child,
+            2_000,
+            &NoFaults,
+        ),
+        Ok(TxnOutcome::Committed(5))
+    ));
+
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace_with_fresh_origin(&mut engine, "ws", "fresh-after-quarantine", &NoFaults)
+        .expect("quarantine and push safe suffix");
+
+    let (identity, old_rows, fresh_rows, shared_positions, local_projection) = engine
+        .read_with(|conn| {
+            let identity = conn.query_row(
+                "SELECT origin_id FROM sync_identity WHERE workspace_id='ws'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?;
+            let old_rows = {
+                let mut statement = conn.prepare(
+                    "SELECT origin_seq,op_kind FROM replication_log \
+                     WHERE workspace_id='ws' AND origin_id='local' ORDER BY origin_seq",
+                )?;
+                statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let fresh_rows = {
+                let mut statement = conn.prepare(
+                    "SELECT origin_seq,op_kind,payload_json FROM replication_log \
+                     WHERE workspace_id='ws' AND origin_id='fresh-after-quarantine' \
+                     ORDER BY origin_seq",
+                )?;
+                statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let shared_positions = conn.query_row(
+                "SELECT COUNT(*) FROM shared_channel_push_state WHERE workspace_id='ws'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let local_projection = conn.query_row(
+                "SELECT author_user_id,parent_message_id FROM chat_messages \
+                 WHERE workspace_id='ws' AND message_id='local-only'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )?;
+            Ok::<_, rusqlite::Error>((
+                identity,
+                old_rows,
+                fresh_rows,
+                shared_positions,
+                local_projection,
+            ))
+        })
+        .expect("read quarantined state");
+    assert_eq!(identity, "fresh-after-quarantine");
+    assert_eq!(old_rows, [(0, "probe.local".to_owned())]);
+    assert_eq!(fresh_rows.len(), 1);
+    assert_eq!(
+        (fresh_rows[0].0, fresh_rows[0].1.as_str()),
+        (0, "chat.message.append")
+    );
+    let fresh_payload: serde_json::Value =
+        serde_json::from_str(&fresh_rows[0].2).expect("fresh payload");
+    assert_eq!(fresh_payload["messageId"], "relay-visible-child");
+    assert!(fresh_payload.get("parentMessageId").is_none());
+    assert_eq!(shared_positions, 0);
+    assert_eq!(local_projection, (None, None));
+    let child_parent: Option<String> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT parent_message_id FROM chat_messages \
+                 WHERE workspace_id='ws' AND message_id='relay-visible-child'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("read local child parent");
+    assert_eq!(child_parent.as_deref(), Some("local-only"));
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "local").expect("abandoned old push position"),
+        5
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").expect("abandoned old ack"),
+        5
+    );
+    assert_eq!(
+        *client.transport().pushes.lock().expect("push count"),
+        2,
+        "the poison path probes the old origin before pushing the rebased suffix"
+    );
+
+    let mut stamped_echo = local_only.clone();
+    stamped_echo["authorUserId"] = json!("legacy-relay-user");
+    let echo_client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![envelope("local", 1, "chat.message.append", stamped_echo)],
+            next_cursor: 1,
+            has_more: false,
+        })),
+    });
+    assert!(matches!(
+        echo_client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        Ok(SyncPassOutcome::Complete { skipped: 1, .. })
+    ));
+    let local_author: Option<String> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_user_id FROM chat_messages \
+                 WHERE workspace_id='ws' AND message_id='local-only'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("read skipped legacy echo");
+    assert_eq!(local_author, None);
+}
+
+#[test]
+fn legacy_author_compat_quarantine_rebases_each_current_lww_projection_coordinate() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_local_push_position(&mut engine, 0);
+    let poison = legacy_message_payload("local-only-lww", "private history", None);
+    seed_chat_message_projection(&mut engine, 0, &poison, None);
+    assert_eq!(
+        journal_legacy_test_op(&mut engine, "chat.message.append", &poison),
+        1
+    );
+    let (reaction_seq, decision_seq, follow_seq, feed_seq) = journal_legacy_lww_ops(&mut engine);
+    seed_legacy_lww_projections(
+        &mut engine,
+        "local",
+        reaction_seq,
+        decision_seq,
+        follow_seq,
+        feed_seq,
+    );
+
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace_with_fresh_origin(&mut engine, "ws", "fresh-lww", &NoFaults)
+        .expect("quarantine and rebase LWW coordinates");
+
+    let projection_coordinates = legacy_lww_projection_coordinates(&engine);
+    let log_coordinates = legacy_lww_log_coordinates(&engine, "fresh-lww");
+    assert_eq!(projection_coordinates, log_coordinates);
+    for (op_kind, expected_seq) in [
+        ("chat.reaction.set", 0),
+        ("chat.decision.set", 4),
+        ("chat.follow.set", 2),
+        ("chat.feed.read.set", 3),
+    ] {
+        assert_eq!(
+            projection_coordinates.get(op_kind),
+            Some(&("fresh-lww".to_owned(), expected_seq)),
+            "{op_kind} must point at its exact rebased replication_log row"
+        );
+    }
+}
+
+#[test]
+fn legacy_author_compat_prunes_private_thread_ops_but_keeps_a_thread_needed_by_authored_work() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_local_push_position(&mut engine, 0);
+
+    assert_eq!(
+        journal_legacy_test_op(
+            &mut engine,
+            "chat.thread.create",
+            &json!({
+                "threadId": "private-thread",
+                "title": "Secret private title",
+                "createdAtMs": 2_000
+            }),
+        ),
+        1
+    );
+    let mut private_message = legacy_message_payload("private-message", "private body", None);
+    private_message["threadId"] = json!("private-thread");
+    seed_chat_message_projection(&mut engine, 0, &private_message, None);
+    assert_eq!(
+        journal_legacy_test_op(&mut engine, "chat.message.append", &private_message),
+        2
+    );
+    assert_eq!(
+        journal_legacy_test_op(
+            &mut engine,
+            "chat.follow.set",
+            &json!({
+                "ownerUserId": "private-user",
+                "targetKind": "thread",
+                "targetId": "private-thread",
+                "state": "following",
+                "atMs": 2_001
+            }),
+        ),
+        3
+    );
+    assert_eq!(
+        journal_legacy_test_op(
+            &mut engine,
+            "chat.feed.read.set",
+            &json!({
+                "ownerUserId": "private-user",
+                "lastSeenCreatedAtMs": 2_000,
+                "lastSeenMessageId": "private-message",
+                "atMs": 2_002
+            }),
+        ),
+        4
+    );
+    assert_eq!(
+        journal_legacy_test_op(
+            &mut engine,
+            "chat.thread.create",
+            &json!({
+                "threadId": "kept-thread",
+                "title": "Kept thread",
+                "createdAtMs": 2_003
+            }),
+        ),
+        5
+    );
+    let mut kept_poison = legacy_message_payload("kept-local-parent", "local parent", None);
+    kept_poison["threadId"] = json!("kept-thread");
+    seed_chat_message_projection(&mut engine, 0, &kept_poison, None);
+    assert_eq!(
+        journal_legacy_test_op(&mut engine, "chat.message.append", &kept_poison),
+        6
+    );
+    let mut kept_authored = legacy_message_payload(
+        "kept-authored-child",
+        "authored child",
+        Some("kept-local-parent"),
+    );
+    kept_authored["threadId"] = json!("kept-thread");
+    kept_authored["authorUserId"] = json!("user-1");
+    seed_chat_message_projection(&mut engine, 1, &kept_authored, Some("user-1"));
+    assert_eq!(
+        journal_legacy_test_op(&mut engine, "chat.message.append", &kept_authored),
+        7
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_follows \
+                 (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','private-user','thread','private-thread','following',2001,'local',3)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_feed_read_state \
+                 (workspace_id,owner_user_id,last_seen_created_at_ms,last_seen_message_id,updated_at_ms, \
+                  origin_id,origin_seq) \
+                 VALUES ('ws','private-user',2000,'private-message',2002,'local',4)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed private local projections");
+
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace_with_fresh_origin(&mut engine, "ws", "fresh-thread", &NoFaults)
+        .expect("quarantine private thread");
+
+    let (fresh_rows, domain_counts): (Vec<(i64, String, serde_json::Value)>, (i64, i64, i64, i64)) =
+        engine
+            .read_with(|conn| {
+                let fresh_rows = {
+                    let mut statement = conn.prepare(
+                        "SELECT origin_seq,op_kind,payload_json FROM replication_log \
+                         WHERE workspace_id='ws' AND origin_id='fresh-thread' ORDER BY origin_seq",
+                    )?;
+                    statement
+                        .query_map([], |row| {
+                            let payload_json = row.get::<_, String>(2)?;
+                            let payload = serde_json::from_str(&payload_json).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(error.into())
+                            })?;
+                            Ok((row.get(0)?, row.get(1)?, payload))
+                        })?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                let domain_counts = (
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM chat_threads WHERE workspace_id='ws' \
+                         AND thread_id IN ('private-thread','kept-thread')",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' \
+                         AND message_id IN ('private-message','kept-local-parent','kept-authored-child')",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM chat_follows WHERE workspace_id='ws' \
+                         AND owner_user_id='private-user' AND target_id='private-thread'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM chat_feed_read_state WHERE workspace_id='ws' \
+                         AND owner_user_id='private-user' AND last_seen_message_id='private-message'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                );
+                Ok::<_, rusqlite::Error>((fresh_rows, domain_counts))
+            })
+            .expect("read private-thread quarantine state");
+    assert_eq!(fresh_rows.len(), 2);
+    assert_eq!(
+        (fresh_rows[0].0, fresh_rows[0].1.as_str()),
+        (0, "chat.thread.create")
+    );
+    assert_eq!(fresh_rows[0].2["threadId"], "kept-thread");
+    assert_eq!(
+        (fresh_rows[1].0, fresh_rows[1].1.as_str()),
+        (1, "chat.message.append")
+    );
+    assert_eq!(fresh_rows[1].2["messageId"], "kept-authored-child");
+    assert!(fresh_rows[1].2.get("parentMessageId").is_none());
+    assert!(fresh_rows.iter().all(|(_, _, payload)| {
+        !payload.to_string().contains("private-thread")
+            && !payload.to_string().contains("Secret private title")
+    }));
+    assert_eq!(domain_counts, (2, 3, 1, 1));
+}
+
+#[test]
+fn legacy_author_compat_skips_authoritative_probe_for_an_ordinary_push() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let client = RelaySyncClient::new(FakeRelay::default());
+
+    client
+        .push_workspace_with_fresh_origin(&mut engine, "ws", "unused-fresh-origin", &NoFaults)
+        .expect("ordinary push");
+
+    assert_eq!(
+        *client.transport().pushes.lock().expect("push count"),
+        1,
+        "an ordinary push must not add the compatibility probe"
+    );
+    assert_eq!(
+        read_sync_identity(&engine, "ws")
+            .expect("read identity")
+            .expect("identity")
+            .origin_id,
+        "local"
+    );
+}
+
+#[test]
+fn legacy_author_compat_rejects_an_invalid_fresh_origin_before_transport_or_state_changes() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_local_push_position(&mut engine, 0);
+    let poison = legacy_message_payload("invalid-origin-poison", "private history", None);
+    seed_chat_message_projection(&mut engine, 0, &poison, None);
+    assert_eq!(
+        journal_legacy_test_op(&mut engine, "chat.message.append", &poison),
+        1
+    );
+    let client = RelaySyncClient::new(FakeRelay::default());
+
+    assert!(matches!(
+        client.push_workspace_with_fresh_origin(&mut engine, "ws", "", &NoFaults),
+        Err(RelayError::Local(_))
+    ));
+
+    assert_eq!(*client.transport().pushes.lock().expect("push count"), 0);
+    let (origin_id, pushed_seq, poison_rows): (String, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT origin_id FROM sync_identity WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT pushed_seq FROM sync_relay_push_state \
+                     WHERE workspace_id='ws' AND origin_id='local'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE workspace_id='ws' \
+                     AND origin_id='local' AND origin_seq=1 \
+                     AND op_kind='chat.message.append' \
+                     AND json_type(payload_json,'$.authorUserId') IS NULL",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read state after invalid fresh origin");
+    assert_eq!(
+        (origin_id.as_str(), pushed_seq, poison_rows),
+        ("local", 0, 1)
+    );
+}
+
+#[test]
+fn legacy_author_compat_adopts_a_fully_committed_old_batch_before_quarantine() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_local_push_position(&mut engine, 0);
+    let local_message =
+        legacy_message_payload("committed-message", "committed private history", None);
+    seed_chat_message_projection(&mut engine, 0, &local_message, None);
+    assert_eq!(
+        journal_legacy_test_op(&mut engine, "chat.message.append", &local_message),
+        1
+    );
+    let mut authored_child = legacy_message_payload(
+        "committed-authored-child",
+        "safe authored work",
+        Some("committed-message"),
+    );
+    authored_child["authorUserId"] = json!("user-child");
+    seed_chat_message_projection(&mut engine, 1, &authored_child, Some("user-child"));
+    assert_eq!(
+        journal_legacy_test_op(&mut engine, "chat.message.append", &authored_child),
+        2
+    );
+    let reaction = json!({
+        "reactionId": "committed-reaction",
+        "messageId": "committed-authored-child",
+        "threadId": "legacy-thread",
+        "emoji": "👍",
+        "authorId": "user-1",
+        "authorKind": "human",
+        "authorDisplayName": "User 1",
+        "atMs": 2_001,
+        "state": "added"
+    });
+    assert_eq!(
+        journal_legacy_test_op(&mut engine, "chat.reaction.set", &reaction),
+        3
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_reactions \
+                 (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind, \
+                  author_display_name,state,at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','committed-reaction','legacy-thread','committed-authored-child','👍', \
+                         'user-1','human','User 1','added',2001,'local',3)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed committed reaction projection");
+    let mut stamped_message = local_message.clone();
+    stamped_message["authorUserId"] = json!("user-legacy");
+    let remote_ops = vec![
+        envelope("local", 1, "chat.message.append", stamped_message.clone()),
+        envelope("local", 2, "chat.message.append", authored_child.clone()),
+        envelope("local", 3, "chat.reaction.set", reaction.clone()),
+    ];
+    let client = RelaySyncClient::new(CommittedOldBatchRelay {
+        remote_ops: remote_ops.clone(),
+        pushes: Mutex::new(Vec::new()),
+    });
+
+    assert!(matches!(
+        client.push_workspace_with_fresh_origin(&mut engine, "ws", "must-not-be-used", &NoFaults),
+        Ok(SyncPassOutcome::Complete { pushed: 0, .. })
+    ));
+
+    let pushes = client.transport().pushes.lock().expect("push requests");
+    assert_eq!(pushes.len(), 1);
+    assert!(
+        pushes[0].ops.is_empty(),
+        "only the authoritative probe is sent"
+    );
+    drop(pushes);
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "local").expect("push cursor"),
+        3
+    );
+    assert_eq!(
+        read_sync_identity(&engine, "ws")
+            .expect("read identity")
+            .expect("identity")
+            .origin_id,
+        "local"
+    );
+    let local_state: (String, Option<String>, String, String, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT author_user_id FROM chat_messages WHERE workspace_id='ws' \
+                     AND message_id='committed-message'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT parent_message_id FROM chat_messages WHERE workspace_id='ws' \
+                     AND message_id='committed-authored-child'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT body FROM chat_messages WHERE workspace_id='ws' \
+                     AND message_id='committed-authored-child'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT origin_id FROM chat_reactions WHERE workspace_id='ws' \
+                     AND reaction_id='committed-reaction'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT origin_seq FROM chat_reactions WHERE workspace_id='ws' \
+                     AND reaction_id='committed-reaction'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read adopted local state");
+    assert_eq!(
+        local_state,
+        (
+            "user-legacy".to_owned(),
+            Some("committed-message".to_owned()),
+            "safe authored work".to_owned(),
+            "local".to_owned(),
+            3
+        )
+    );
+
+    let (_replica_scratch, _replica_path, mut replica) = store();
+    replica
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms) \
+                 VALUES ('ws','legacy-thread','Replica thread',2000,2000)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed replica thread");
+    ack_replication_peer(&mut replica, "ws", "local", 0, &NoFaults).expect("ack committed prefix");
+    for operation in &remote_ops {
+        apply_replication_envelope(&mut replica, operation, &NoFaults, &NoLiveLeases)
+            .expect("apply committed remote operation");
+    }
+    let replica_state: (String, Option<String>, String, String, i64) = replica
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT author_user_id FROM chat_messages WHERE workspace_id='ws' \
+                     AND message_id='committed-message'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT parent_message_id FROM chat_messages WHERE workspace_id='ws' \
+                     AND message_id='committed-authored-child'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT body FROM chat_messages WHERE workspace_id='ws' \
+                     AND message_id='committed-authored-child'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT origin_id FROM chat_reactions WHERE workspace_id='ws' \
+                     AND reaction_id='committed-reaction'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT origin_seq FROM chat_reactions WHERE workspace_id='ws' \
+                     AND reaction_id='committed-reaction'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read replica state");
+    assert_eq!(replica_state, local_state);
+}
+
+#[test]
+fn legacy_author_compat_reconciles_exact_stamp_atomically() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let local = legacy_message_payload("legacy-stamped", "unchanged", None);
+    seed_chat_message_projection(&mut engine, 0, &local, None);
+    assert!(matches!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.message.append",
+            &local,
+            2_000,
+            &NoFaults,
+        ),
+        Ok(TxnOutcome::Committed(1))
+    ));
+    ack_replication_peer(&mut engine, "ws", "local", 0, &NoFaults).expect("ack prefix");
+    let mut stamped = local.clone();
+    stamped["authorUserId"] = json!("user-legacy");
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![envelope("local", 1, "chat.message.append", stamped.clone())],
+            next_cursor: 1,
+            has_more: false,
+        })),
+    });
+
+    assert!(matches!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        Ok(SyncPassOutcome::Complete { skipped: 1, .. })
+    ));
+    let (payload_json, author_user_id): (String, Option<String>) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id='ws' AND origin_id='local' AND origin_seq=1",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT author_user_id FROM chat_messages \
+                     WHERE workspace_id='ws' AND message_id='legacy-stamped'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read reconciled stamp");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&payload_json).expect("stored payload"),
+        stamped
+    );
+    assert_eq!(author_user_id.as_deref(), Some("user-legacy"));
+}
+
+#[test]
+fn legacy_author_compat_leaves_all_rows_when_one_stamp_changes_other_bytes() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let first = legacy_message_payload("legacy-first", "first", None);
+    let second = legacy_message_payload("legacy-second", "second", None);
+    for (order, payload) in [(0, &first), (1, &second)] {
+        seed_chat_message_projection(&mut engine, order, payload, None);
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.message.append",
+            payload,
+            2_000,
+            &NoFaults,
+        )
+        .expect("journal legacy message");
+    }
+    let mut exact = first.clone();
+    exact["authorUserId"] = json!("user-legacy");
+    let mut changed = second.clone();
+    changed["authorUserId"] = json!("user-legacy");
+    changed["body"] = json!("relay changed another field");
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![
+                envelope("local", 1, "chat.message.append", exact),
+                envelope("local", 2, "chat.message.append", changed),
+            ],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+
+    assert_eq!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        Err(RelayError::OriginDiverged)
+    );
+    let (stamped_logs, stamped_messages): (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND origin_id='local' AND origin_seq IN (1,2) \
+                       AND json_type(payload_json,'$.authorUserId') IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages \
+                     WHERE workspace_id='ws' AND message_id IN ('legacy-first','legacy-second') \
+                       AND author_user_id IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read fail-closed stamp state");
+    assert_eq!((stamped_logs, stamped_messages), (0, 0));
 }
 
 #[test]
@@ -9828,6 +11031,57 @@ fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
         crate::model::MAX_PULL_PAGES_PER_PASS + 1,
         "MUTATION: restoring the recover page ceiling rejects before the terminal page"
     );
+}
+
+#[test]
+fn legacy_author_compat_recover_origin_rebases_each_current_lww_projection_coordinate() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let (reaction_seq, decision_seq, follow_seq, feed_seq) = journal_legacy_lww_ops(&mut engine);
+    seed_legacy_lww_projections(
+        &mut engine,
+        "local",
+        reaction_seq,
+        decision_seq,
+        follow_seq,
+        feed_seq,
+    );
+    let recovery = RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![ReplicationEnvelope {
+                workspace_id: "ws".to_owned(),
+                origin_id: "local".to_owned(),
+                origin_seq: 0,
+                op_kind: "probe.local".to_owned(),
+                payload: json!({}),
+                recorded_at_ms: 1_000,
+            }],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]));
+
+    let recovered = recovery
+        .recover_origin(&mut engine, "ws", "recovered-lww", &NoFaults)
+        .expect("recover LWW suffix");
+    assert_eq!(recovered.shared_prefix_length, 1);
+
+    let projection_coordinates = legacy_lww_projection_coordinates(&engine);
+    let log_coordinates = legacy_lww_log_coordinates(&engine, "recovered-lww");
+    assert_eq!(projection_coordinates, log_coordinates);
+    for (op_kind, expected_seq) in [
+        ("chat.reaction.set", 0),
+        ("chat.decision.set", 4),
+        ("chat.follow.set", 2),
+        ("chat.feed.read.set", 3),
+    ] {
+        assert_eq!(
+            projection_coordinates.get(op_kind),
+            Some(&("recovered-lww".to_owned(), expected_seq)),
+            "{op_kind} must point at its exact recovered replication_log row"
+        );
+    }
 }
 
 #[test]

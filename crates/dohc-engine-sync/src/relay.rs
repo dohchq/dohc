@@ -1,14 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
+use dohc_engine_domain::{
+    DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText,
+    normalize_author_user_id,
+};
 use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 use crate::cursor::{
     RelayCursor, commit_relay_cursor, read_pushed_seq, rewind_pushed_seq, write_pushed_seq,
 };
-use crate::journal::{crashes, list_replication_ops, read_sync_identity};
+use crate::journal::{ack_tx, crashes, list_replication_ops, read_sync_identity};
 use crate::{
     ApplyOutcome, BlobContent, BlobHydration, RelayError, ReplicationEnvelope, SyncError,
     hydrate_blob_content,
@@ -445,6 +448,115 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
+    /// Prepare and run a production owner-lane push. Older engines journaled
+    /// signed-out chat messages even though those rows have no relay-verifiable
+    /// author. Retire that local-only suffix before sending any batch, then
+    /// continue on the caller-supplied fresh origin.
+    pub fn push_workspace_with_fresh_origin(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        fresh_origin_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<SyncPassOutcome, RelayError> {
+        crate::model::bounded(
+            fresh_origin_id,
+            "fresh origin_id must be non-empty and bounded",
+        )
+        .map_err(local)?;
+        if has_unpushed_authorless_chat_suffix(store, workspace_id)? {
+            self.adopt_committed_push_prefix(store, workspace_id, faults)?;
+            quarantine_authorless_chat_suffix(store, workspace_id, fresh_origin_id, faults)?;
+        }
+        self.push_workspace(store, workspace_id, faults)
+    }
+
+    fn adopt_committed_push_prefix(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), RelayError> {
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        let local_max =
+            local_max_origin_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
+        let pushed_seq =
+            read_pushed_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
+        let probe = self.transport.push(PushRequest {
+            workspace_id: workspace_id.to_owned(),
+            replication_epoch: identity.replication_epoch.clone(),
+            stream_identity: identity.stream_identity.clone(),
+            origin_id: identity.origin_id.clone(),
+            after_seq: pushed_seq,
+            ops: Vec::new(),
+        })?;
+        validate_probe_response(&probe)?;
+        let remote_max = probe.current_max_origin_seq;
+        if remote_max < pushed_seq || remote_max > local_max {
+            return Err(RelayError::OriginDiverged);
+        }
+        if remote_max == pushed_seq {
+            return Ok(());
+        }
+
+        let expected_count = usize::try_from(
+            remote_max
+                .checked_sub(pushed_seq)
+                .ok_or(RelayError::OriginDiverged)?,
+        )
+        .map_err(|_| RelayError::InvalidResponse)?;
+        let mut committed = BTreeMap::new();
+        let mut cursor = 0_i64;
+        loop {
+            let page = self.transport.pull(PullRequest {
+                workspace_id: workspace_id.to_owned(),
+                replication_epoch: identity.replication_epoch.clone(),
+                stream_identity: identity.stream_identity.clone(),
+                cursor,
+                limit: crate::MAX_PULL_OPS,
+            })?;
+            validate_pull_page(&page, workspace_id, cursor)?;
+            for op in page.ops {
+                if op.origin_id != identity.origin_id || op.origin_seq <= pushed_seq {
+                    continue;
+                }
+                if op.origin_seq > remote_max || committed.insert(op.origin_seq, op).is_some() {
+                    return Err(RelayError::OriginDiverged);
+                }
+            }
+            cursor = page.next_cursor;
+            if committed.len() == expected_count {
+                break;
+            }
+            if !page.has_more {
+                return Err(RelayError::InvalidResponse);
+            }
+        }
+        let committed = (pushed_seq + 1..=remote_max)
+            .map(|origin_seq| {
+                committed
+                    .remove(&origin_seq)
+                    .ok_or(RelayError::InvalidResponse)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        reconcile_legacy_author_stamps(
+            store,
+            workspace_id,
+            &identity.origin_id,
+            &committed,
+            faults,
+        )?;
+        preflight_collisions(store, workspace_id, &identity.origin_id, &committed)?;
+        match write_pushed_seq(store, workspace_id, &identity.origin_id, remote_max, faults)
+            .map_err(local)?
+        {
+            TxnOutcome::Committed(()) => Ok(()),
+            TxnOutcome::Crashed { .. } => Err(RelayError::Local("injected-crash".to_owned())),
+        }
+    }
+
     /// Pull and apply replicated operations. The returned cursor remains
     /// pending until the caller completes disk materialization and commits it.
     pub fn pull_chat_workspace(
@@ -500,6 +612,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         };
 
+        reconcile_legacy_author_stamps(store, workspace_id, &identity.origin_id, &ops, faults)?;
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
@@ -801,6 +914,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     ],
                 )
                 .map_err(SyncError::persist)?;
+                rebase_chat_projection_suffix(
+                    tx,
+                    workspace_id,
+                    &old_origin_id,
+                    shared_prefix_length,
+                    new_origin_id,
+                )?;
                 tx.execute(
                     "DELETE FROM replication_log \
                      WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>=?3",
@@ -1514,6 +1634,638 @@ fn local_blob_present(
             .map_err(SyncError::corrupt)
         })
         .map_err(local)
+}
+
+struct PendingLocalOp {
+    origin_seq: i64,
+    op_kind: String,
+    payload_json: String,
+    payload: serde_json::Value,
+    recorded_at_ms: i64,
+}
+
+fn has_unpushed_authorless_chat_suffix(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<bool, RelayError> {
+    store
+        .read_with(|conn| {
+            let origin_id = conn
+                .query_row(
+                    "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                    [workspace_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)?;
+            let Some(origin_id) = origin_id else {
+                return Ok(false);
+            };
+            let pushed_seq = conn
+                .query_row(
+                    "SELECT pushed_seq FROM sync_relay_push_state \
+                     WHERE workspace_id=?1 AND origin_id=?2",
+                    params![workspace_id, origin_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)?
+                .unwrap_or(-1);
+            let mut statement = conn
+                .prepare(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>?3 \
+                       AND op_kind='chat.message.append' \
+                     ORDER BY origin_seq",
+                )
+                .map_err(SyncError::corrupt)?;
+            let rows = statement
+                .query_map(params![workspace_id, origin_id, pushed_seq], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(SyncError::corrupt)?;
+            for payload_json in rows {
+                let payload: serde_json::Value =
+                    serde_json::from_str(&payload_json.map_err(SyncError::corrupt)?)
+                        .map_err(SyncError::corrupt)?;
+                if !has_normalized_chat_author(&payload) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+        .map_err(local)
+}
+
+fn quarantine_authorless_chat_suffix(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    fresh_origin_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RelayError> {
+    crate::model::bounded(
+        fresh_origin_id,
+        "fresh origin_id must be non-empty and bounded",
+    )
+    .map_err(local)?;
+    let outcome = store
+        .write_with(faults, |tx| {
+            let old_origin_id = tx
+                .query_row(
+                    "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                    [workspace_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)?;
+            let Some(old_origin_id) = old_origin_id else {
+                return Ok(false);
+            };
+            let pushed_seq = tx
+                .query_row(
+                    "SELECT pushed_seq FROM sync_relay_push_state \
+                     WHERE workspace_id=?1 AND origin_id=?2",
+                    params![workspace_id, old_origin_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)?
+                .unwrap_or(-1);
+            let suffix = {
+                let mut statement = tx
+                    .prepare(
+                        "SELECT origin_seq,op_kind,payload_json,recorded_at_ms \
+                         FROM replication_log \
+                         WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>?3 \
+                         ORDER BY origin_seq",
+                    )
+                    .map_err(SyncError::corrupt)?;
+                let rows = statement
+                    .query_map(params![workspace_id, old_origin_id, pushed_seq], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    })
+                    .map_err(SyncError::corrupt)?;
+                rows.map(|row| {
+                    let (origin_seq, op_kind, payload_json, recorded_at_ms) =
+                        row.map_err(SyncError::corrupt)?;
+                    let payload =
+                        serde_json::from_str(&payload_json).map_err(SyncError::corrupt)?;
+                    Ok(PendingLocalOp {
+                        origin_seq,
+                        op_kind,
+                        payload_json,
+                        payload,
+                        recorded_at_ms,
+                    })
+                })
+                .collect::<Result<Vec<_>, SyncError>>()?
+            };
+            let quarantined_sequences = suffix
+                .iter()
+                .filter(|op| {
+                    op.op_kind == "chat.message.append"
+                        && !has_normalized_chat_author(&op.payload)
+                })
+                .map(|op| op.origin_seq)
+                .collect::<BTreeSet<_>>();
+            if quarantined_sequences.is_empty() {
+                return Ok(false);
+            }
+            let quarantined_message_ids = suffix
+                .iter()
+                .filter(|op| quarantined_sequences.contains(&op.origin_seq))
+                .filter_map(|op| op.payload.get("messageId")?.as_str())
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>();
+            let quarantined_thread_ids = suffix
+                .iter()
+                .filter(|op| quarantined_sequences.contains(&op.origin_seq))
+                .filter_map(|op| op.payload.get("threadId")?.as_str())
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>();
+            let mut dropped_sequences = suffix
+                .iter()
+                .filter(|op| {
+                    quarantined_sequences.contains(&op.origin_seq)
+                        || dependent_chat_op_targets(
+                            &op.op_kind,
+                            &op.payload,
+                            &quarantined_message_ids,
+                        )
+                })
+                .map(|op| op.origin_seq)
+                .collect::<BTreeSet<_>>();
+
+            let fresh_origin_collision: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM replication_log \
+                     WHERE workspace_id=?1 AND origin_id=?2)",
+                    params![workspace_id, fresh_origin_id],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            if fresh_origin_collision {
+                return Err(SyncError::CoordinateDiverged);
+            }
+
+            let mut relay_visible_message_ids = BTreeSet::new();
+            let mut relay_visible_thread_ids = BTreeSet::new();
+            {
+                let mut statement = tx
+                    .prepare(
+                        "SELECT log.origin_id,log.origin_seq,log.payload_json,log.imported, \
+                                COALESCE(push.pushed_seq,-1) \
+                         FROM replication_log AS log \
+                         LEFT JOIN sync_relay_push_state AS push \
+                           ON push.workspace_id=log.workspace_id \
+                          AND push.origin_id=log.origin_id \
+                         WHERE log.workspace_id=?1 \
+                           AND log.op_kind='chat.message.append'",
+                    )
+                    .map_err(SyncError::corrupt)?;
+                let rows = statement
+                    .query_map([workspace_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    })
+                    .map_err(SyncError::corrupt)?;
+                for row in rows {
+                    let (origin_id, origin_seq, payload_json, imported, origin_pushed_seq) =
+                        row.map_err(SyncError::corrupt)?;
+                    let visible = if origin_id == old_origin_id && origin_seq > pushed_seq {
+                        !dropped_sequences.contains(&origin_seq)
+                    } else {
+                        imported == 1 || origin_seq <= origin_pushed_seq
+                    };
+                    if !visible {
+                        continue;
+                    }
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&payload_json).map_err(SyncError::corrupt)?;
+                    if let Some(message_id) = payload.get("messageId").and_then(|id| id.as_str()) {
+                        relay_visible_message_ids.insert(message_id.to_owned());
+                    }
+                    if let Some(thread_id) = payload.get("threadId").and_then(|id| id.as_str()) {
+                        relay_visible_thread_ids.insert(thread_id.to_owned());
+                    }
+                }
+            }
+
+            let dropped_thread_ids = suffix
+                .iter()
+                .filter(|op| op.op_kind == "chat.thread.create")
+                .filter_map(|op| {
+                    let thread_id = op.payload.get("threadId")?.as_str()?;
+                    (quarantined_thread_ids.contains(thread_id)
+                        && !relay_visible_thread_ids.contains(thread_id))
+                    .then(|| (op.origin_seq, thread_id.to_owned()))
+                })
+                .inspect(|(origin_seq, _)| {
+                    dropped_sequences.insert(*origin_seq);
+                })
+                .map(|(_, thread_id)| thread_id)
+                .collect::<BTreeSet<_>>();
+            for op in &suffix {
+                if op.op_kind == "chat.follow.set"
+                    && op.payload.get("targetKind").and_then(|value| value.as_str())
+                        == Some("thread")
+                    && op
+                        .payload
+                        .get("targetId")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|thread_id| dropped_thread_ids.contains(thread_id))
+                {
+                    dropped_sequences.insert(op.origin_seq);
+                }
+            }
+
+            let kept = suffix
+                .iter()
+                .filter(|op| !dropped_sequences.contains(&op.origin_seq))
+                .map(|op| {
+                    let payload_json = if op.op_kind == "chat.message.append"
+                        && op
+                            .payload
+                            .get("parentMessageId")
+                            .and_then(|parent| parent.as_str())
+                            .is_some_and(|parent| !relay_visible_message_ids.contains(parent))
+                    {
+                        let mut payload = op.payload.clone();
+                        payload
+                            .as_object_mut()
+                            .ok_or(SyncError::CoordinateDiverged)?
+                            .remove("parentMessageId");
+                        serde_json::to_string(&payload).map_err(SyncError::corrupt)?
+                    } else {
+                        op.payload_json.clone()
+                    };
+                    Ok((
+                        op.origin_seq,
+                        op.op_kind.clone(),
+                        payload_json,
+                        op.recorded_at_ms,
+                    ))
+                })
+                .collect::<Result<Vec<_>, SyncError>>()?;
+
+            for (new_seq, (old_seq, op_kind, payload_json, recorded_at_ms)) in
+                kept.iter().enumerate()
+            {
+                let new_seq = i64::try_from(new_seq).map_err(|_| SyncError::CoordinateDiverged)?;
+                tx.execute(
+                    "INSERT INTO replication_log \
+                     (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                     VALUES (?1,?2,?3,?4,?5,?6,0)",
+                    params![
+                        workspace_id,
+                        fresh_origin_id,
+                        new_seq,
+                        op_kind,
+                        payload_json,
+                        recorded_at_ms
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                rebase_chat_projection(
+                    tx,
+                    workspace_id,
+                    op_kind,
+                    &old_origin_id,
+                    *old_seq,
+                    fresh_origin_id,
+                    new_seq,
+                )?;
+            }
+            let abandoned_max = suffix
+                .last()
+                .map(|op| op.origin_seq)
+                .ok_or(SyncError::CoordinateDiverged)?;
+            tx.execute(
+                "DELETE FROM replication_log \
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>?3",
+                params![workspace_id, old_origin_id, pushed_seq],
+            )
+            .map_err(SyncError::persist)?;
+            let updated = tx
+                .execute(
+                    "UPDATE sync_identity SET origin_id=?1 WHERE workspace_id=?2 AND origin_id=?3",
+                    params![fresh_origin_id, workspace_id, old_origin_id],
+                )
+                .map_err(SyncError::persist)?;
+            if updated != 1 {
+                return Err(SyncError::CoordinateDiverged);
+            }
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES (?1,?2,?3) ON CONFLICT(workspace_id,origin_id) DO UPDATE SET \
+                 pushed_seq=excluded.pushed_seq",
+                params![workspace_id, old_origin_id, abandoned_max],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "DELETE FROM sync_relay_push_state WHERE workspace_id=?1 AND origin_id=?2",
+                params![workspace_id, fresh_origin_id],
+            )
+            .map_err(SyncError::persist)?;
+            ack_tx(tx, workspace_id, &old_origin_id, abandoned_max)?;
+            tx.execute(
+                "DELETE FROM shared_channel_push_state WHERE workspace_id=?1",
+                [workspace_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok(true)
+        })
+        .map_err(local)?;
+    match outcome {
+        TxnOutcome::Committed(_) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RelayError::Local("injected-crash".to_owned())),
+    }
+}
+
+fn has_normalized_chat_author(payload: &serde_json::Value) -> bool {
+    let Some(author_user_id) = payload
+        .get("authorUserId")
+        .and_then(|author| author.as_str())
+    else {
+        return false;
+    };
+    matches!(
+        normalize_author_user_id(Some(author_user_id)),
+        Ok(Some(normalized)) if normalized == author_user_id
+    )
+}
+
+fn dependent_chat_op_targets(
+    op_kind: &str,
+    payload: &serde_json::Value,
+    quarantined_message_ids: &BTreeSet<String>,
+) -> bool {
+    let target_is_quarantined = |field: &str| {
+        payload
+            .get(field)
+            .and_then(|value| value.as_str())
+            .is_some_and(|message_id| quarantined_message_ids.contains(message_id))
+    };
+    match op_kind {
+        "chat.attachment.add" | "chat.reaction.set" => target_is_quarantined("messageId"),
+        "chat.decision.set" => {
+            target_is_quarantined("messageId") || target_is_quarantined("resolvedByMessageId")
+        }
+        "chat.feed.read.set" => target_is_quarantined("lastSeenMessageId"),
+        _ => false,
+    }
+}
+
+fn rebase_chat_projection(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    op_kind: &str,
+    old_origin_id: &str,
+    old_origin_seq: i64,
+    new_origin_id: &str,
+    new_origin_seq: i64,
+) -> Result<(), SyncError> {
+    let table = match op_kind {
+        "chat.reaction.set" => "chat_reactions",
+        "chat.decision.set" => "chat_decisions",
+        "chat.follow.set" => "chat_follows",
+        "chat.feed.read.set" => "chat_feed_read_state",
+        _ => return Ok(()),
+    };
+    tx.execute(
+        &format!(
+            "UPDATE {table} SET origin_id=?1,origin_seq=?2 \
+             WHERE workspace_id=?3 AND origin_id=?4 AND origin_seq=?5"
+        ),
+        params![
+            new_origin_id,
+            new_origin_seq,
+            workspace_id,
+            old_origin_id,
+            old_origin_seq
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn rebase_chat_projection_suffix(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    old_origin_id: &str,
+    first_old_origin_seq: i64,
+    new_origin_id: &str,
+) -> Result<(), SyncError> {
+    for table in [
+        "chat_reactions",
+        "chat_decisions",
+        "chat_follows",
+        "chat_feed_read_state",
+    ] {
+        tx.execute(
+            &format!(
+                "UPDATE {table} SET origin_id=?1,origin_seq=origin_seq-?2 \
+                 WHERE workspace_id=?3 AND origin_id=?4 AND origin_seq>=?2"
+            ),
+            params![
+                new_origin_id,
+                first_old_origin_seq,
+                workspace_id,
+                old_origin_id
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    }
+    Ok(())
+}
+
+struct LegacyAuthorStamp {
+    origin_seq: i64,
+    local_payload_json: String,
+    remote_payload_json: String,
+    thread_id: String,
+    message_id: String,
+    author_user_id: String,
+}
+
+fn reconcile_legacy_author_stamps(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    local_origin_id: &str,
+    ops: &[ReplicationEnvelope],
+    faults: &dyn FaultInjector,
+) -> Result<(), RelayError> {
+    let outcome = store
+        .write_with(faults, |tx| {
+            let mut stamps = Vec::new();
+            let mut incompatible_collision = false;
+            for op in ops {
+                let existing = tx
+                    .query_row(
+                        "SELECT op_kind,payload_json,recorded_at_ms FROM replication_log \
+                         WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                        params![workspace_id, op.origin_id, op.origin_seq],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(SyncError::corrupt)?;
+                let Some((local_kind, local_payload_json, local_recorded_at_ms)) = existing else {
+                    continue;
+                };
+                let local_payload: serde_json::Value =
+                    match serde_json::from_str(&local_payload_json) {
+                        Ok(payload) => payload,
+                        Err(_) => {
+                            incompatible_collision = true;
+                            continue;
+                        }
+                    };
+                if local_kind == op.op_kind
+                    && local_recorded_at_ms == op.recorded_at_ms
+                    && canonical_json_bytes(&local_payload)? == canonical_json_bytes(&op.payload)?
+                {
+                    continue;
+                }
+                let stamp = if op.origin_id == local_origin_id
+                    && local_kind == "chat.message.append"
+                    && op.op_kind == "chat.message.append"
+                    && local_recorded_at_ms == op.recorded_at_ms
+                {
+                    legacy_author_stamp(
+                        op.origin_seq,
+                        local_payload_json,
+                        &local_payload,
+                        &op.payload,
+                    )?
+                } else {
+                    None
+                };
+                match stamp {
+                    Some(stamp) => stamps.push(stamp),
+                    None => incompatible_collision = true,
+                }
+            }
+            if incompatible_collision || stamps.is_empty() {
+                return Ok(false);
+            }
+
+            for stamp in &stamps {
+                let stored_author = tx
+                    .query_row(
+                        "SELECT author_user_id FROM chat_messages \
+                         WHERE workspace_id=?1 AND thread_id=?2 AND message_id=?3",
+                        params![workspace_id, stamp.thread_id, stamp.message_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .map_err(SyncError::corrupt)?;
+                match stored_author {
+                    Some(None) => {}
+                    Some(Some(author)) if author == stamp.author_user_id => {}
+                    _ => return Ok(false),
+                }
+            }
+
+            for stamp in &stamps {
+                let updated = tx
+                    .execute(
+                        "UPDATE replication_log SET payload_json=?1 \
+                         WHERE workspace_id=?2 AND origin_id=?3 AND origin_seq=?4 \
+                           AND op_kind='chat.message.append' AND payload_json=?5",
+                        params![
+                            stamp.remote_payload_json,
+                            workspace_id,
+                            local_origin_id,
+                            stamp.origin_seq,
+                            stamp.local_payload_json
+                        ],
+                    )
+                    .map_err(SyncError::persist)?;
+                if updated != 1 {
+                    return Err(SyncError::CoordinateDiverged);
+                }
+                tx.execute(
+                    "UPDATE chat_messages SET author_user_id=?1 \
+                     WHERE workspace_id=?2 AND thread_id=?3 AND message_id=?4 \
+                       AND author_user_id IS NULL",
+                    params![
+                        stamp.author_user_id,
+                        workspace_id,
+                        stamp.thread_id,
+                        stamp.message_id
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok(true)
+        })
+        .map_err(local)?;
+    match outcome {
+        TxnOutcome::Committed(_) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RelayError::Local("injected-crash".to_owned())),
+    }
+}
+
+fn legacy_author_stamp(
+    origin_seq: i64,
+    local_payload_json: String,
+    local_payload: &serde_json::Value,
+    remote_payload: &serde_json::Value,
+) -> Result<Option<LegacyAuthorStamp>, SyncError> {
+    let (serde_json::Value::Object(local), serde_json::Value::Object(remote)) =
+        (local_payload, remote_payload)
+    else {
+        return Ok(None);
+    };
+    if local.contains_key("authorUserId") {
+        return Ok(None);
+    }
+    let Some(author_user_id) = remote.get("authorUserId").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    let normalized = normalize_author_user_id(Some(author_user_id))
+        .ok()
+        .flatten();
+    if normalized.as_deref() != Some(author_user_id) {
+        return Ok(None);
+    }
+    let mut without_author = remote.clone();
+    without_author.remove("authorUserId");
+    if canonical_json_bytes(&serde_json::Value::Object(local.clone()))?
+        != canonical_json_bytes(&serde_json::Value::Object(without_author))?
+    {
+        return Ok(None);
+    }
+    let Some(thread_id) = local.get("threadId").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    let Some(message_id) = local.get("messageId").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    Ok(Some(LegacyAuthorStamp {
+        origin_seq,
+        local_payload_json,
+        remote_payload_json: serde_json::to_string(remote_payload).map_err(SyncError::corrupt)?,
+        thread_id: thread_id.to_owned(),
+        message_id: message_id.to_owned(),
+        author_user_id: author_user_id.to_owned(),
+    }))
 }
 
 fn preflight_collisions(

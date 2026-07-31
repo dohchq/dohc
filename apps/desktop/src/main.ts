@@ -333,8 +333,13 @@ import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { claimDmHome, readDmHome } from "./workspaces/dmHomeStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
+import {
+  pinVerifiedLegacyWorkspaceRemotes,
+  syncEnrollmentRemoteWorkspaceId,
+} from "./workspaces/legacyWorkspaceRemotePin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import {
+  chatViewerAuthorId,
   createChatChannelIpcHandler,
   createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
@@ -1521,6 +1526,37 @@ function relayClientForWorkspace(input: {
     throw new Error("Rust engine relay client is unavailable.");
   }
   return rustEngineRelayClient.bind(input);
+}
+
+async function pinLegacyWorkspaceRemotesForCurrentAccount(): Promise<void> {
+  const credentials = cachedCredentials;
+  if (!credentials?.relayUrl) return;
+  const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
+  const result = await pinVerifiedLegacyWorkspaceRemotes({
+    workspaces: listWorkspaces(),
+    credentials,
+    verifyOwnership: async (workspace) => {
+      await relayClientForWorkspace({
+        workspaceId: workspace.remote!.remoteWorkspaceId,
+        rootPath: workspace.rootPath,
+        relay,
+      }).probe();
+    },
+    isCurrent: (workspace, verifiedCredentials) => {
+      const current = findWorkspace(workspace.workspaceId);
+      const currentRemote = current?.remote;
+      return (
+        cachedCredentials === verifiedCredentials &&
+        currentRemote !== undefined &&
+        currentRemote.ownerUserId === undefined &&
+        currentRemote.serverUrl === workspace.remote?.serverUrl &&
+        currentRemote.remoteWorkspaceId ===
+          workspace.remote?.remoteWorkspaceId
+      );
+    },
+    pin: setWorkspaceRemote,
+  });
+  if (result.pinned.length > 0) notifyRenderer();
 }
 
 function engineForWorkspace(
@@ -3740,6 +3776,7 @@ function registerIpcHandlers(
         await activity.stopEngines();
         await closeAllRelayTransportWorkspaces();
       }
+      await pinLegacyWorkspaceRemotesForCurrentAccount();
       // Attach engines to already-open cloud-enabled workspaces that were
       // opened local-only because no session existed yet.
       activity.reconcileCloud(engineForWorkspace);
@@ -3751,6 +3788,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = CloudStatusPayload.parse(payload ?? {});
     const status = await cloudLogin().status();
+    await warmCredentialCache();
     const workspace = input.workspaceId ? findWorkspace(input.workspaceId) : undefined;
     let workspaceSecretState: WorkspaceSecretState | undefined;
     if (workspace) {
@@ -3769,6 +3807,12 @@ function registerIpcHandlers(
       ...(input.workspaceId
         ? {
             workspaceSynced: !!workspace?.remote,
+            workspaceSyncConnected:
+              !!workspace?.remote &&
+              workspaceRemoteMatchesCredentials(
+                workspace.remote,
+                cachedCredentials,
+              ),
             ...(workspaceSecretState ? { workspaceSecretState } : {}),
           }
         : {}),
@@ -3786,10 +3830,10 @@ function registerIpcHandlers(
     notifyRenderer();
   });
 
-  // Enabling sync claims the workspace id on the RELAY (first claimant owns
-  // it; members re-enable idempotently; strangers get the relay's fixed 404 →
-  // "already claimed"), records the remote identity, and starts the merge
-  // engine: pull, then push everything local. Requires a signed-in session.
+  // Enabling sync claims the recorded remote workspace id, or the local id on
+  // first enrollment. The first claimant owns it; the owner can retry, and a
+  // different account gets the relay's fixed 404. The handler then records the
+  // verified binding and starts the merge engine.
   //
   // The relay's POST /sync/workspaces is the SOLE claim authority: workspace-api
   // is now auth-only and 404s every non-auth route, so there is no separate
@@ -3803,6 +3847,10 @@ function registerIpcHandlers(
     if (!credentials) throw new Error("Sign in to dohc Cloud first");
     if (!credentials.relayUrl) throw new Error("Cloud sync requires a relay URL");
     setCachedCredentials(credentials);
+    const remoteWorkspaceId = syncEnrollmentRemoteWorkspaceId(
+      workspace,
+      credentials,
+    );
 
     {
       const relay = {
@@ -3810,7 +3858,7 @@ function registerIpcHandlers(
         token: credentials.token,
       };
       const daemonRelay = relayClientForWorkspace({
-        workspaceId: workspace.workspaceId,
+        workspaceId: remoteWorkspaceId,
         rootPath: workspace.rootPath,
         relay,
       });
@@ -3832,7 +3880,7 @@ function registerIpcHandlers(
         sessions,
       );
       await enrollWorkspaceKeyEnvelope({
-        workspaceId: workspace.workspaceId,
+        workspaceId: remoteWorkspaceId,
         dataKey,
         ...(input.passphrase === undefined
           ? {}
@@ -3845,7 +3893,7 @@ function registerIpcHandlers(
 
     setWorkspaceRemote(workspace.workspaceId, {
       serverUrl: credentials.serverUrl,
-      remoteWorkspaceId: workspace.workspaceId,
+      remoteWorkspaceId,
       ownerUserId: credentials.userId,
     });
     await activity.enableCloud(workspace);
@@ -6123,14 +6171,22 @@ function registerIpcHandlers(
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
-    await warmCredentialCache();
+    const viewerAuthorId = await chatViewerAuthorId({
+      localFallbackAuthorId: localReactorFallbackId(),
+      resolveReplicationAuthorId: async () =>
+        (
+          await chatRelayIdentityFor(workspace.workspaceId, {
+            channelId: input.channelId,
+          })
+        ).authorUserId,
+    });
     const threads = await linkedChatStoreFor(workspace).listChannelThreads({
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
     });
     return ListChannelThreadsResult.parse({
       threads: threads.map(channelThreadForIpc),
-      viewerAuthorId: localUserId(),
+      viewerAuthorId,
     });
   });
 
@@ -6246,14 +6302,22 @@ function registerIpcHandlers(
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
-    await warmCredentialCache();
+    const viewerAuthorId = await chatViewerAuthorId({
+      localFallbackAuthorId: localReactorFallbackId(),
+      resolveReplicationAuthorId: async () =>
+        (
+          await chatRelayIdentityFor(workspace.workspaceId, {
+            threadId: input.threadId,
+          })
+        ).authorUserId,
+    });
     const reactions = await linkedChatStoreFor(workspace).listReactions({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
     });
     return ListChatReactionsResult.parse({
       reactions: reactions.map(chatReactionForIpc),
-      viewerAuthorId: localUserId(),
+      viewerAuthorId,
     });
   });
 
@@ -7682,7 +7746,10 @@ if (!app.requestSingleInstanceLock()) {
 
     // Load persisted cloud credentials after the first window exists so local
     // workspaces do not pay credential-store I/O on the visible-launch path.
-    void warmCredentialCache().then(() => activity.reconcileCloud(engineForWorkspace));
+    void warmCredentialCache().then(async () => {
+      await pinLegacyWorkspaceRemotesForCurrentAccount();
+      activity.reconcileCloud(engineForWorkspace);
+    });
 
     // Auto-updates: packaged builds use electron-builder's baked app-update.yml
     // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.

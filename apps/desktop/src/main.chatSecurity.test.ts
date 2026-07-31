@@ -75,7 +75,7 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("syncDms")).toContain("if (relay && !readOnly)");
   });
 
-  it("registers the production reaction handler with both sync effects", () => {
+  it("connects the production reaction handler to its behavior-tested boundary", () => {
     const handler = handlerSource("setChatReaction");
     expect(handler).toContain("setChatReactionFromMain({");
     expect(handler).toContain("revalidateReplicationAuthorId:");
@@ -86,7 +86,7 @@ describe("main-process chat authorization", () => {
     expect(handler).toContain("activity.queueCloudSync(workspaceId)");
   });
 
-  it("routes both message composers through the behavior-tested identity gate", () => {
+  it("connects both message composers to the behavior-tested identity gate", () => {
     for (const channel of ["sendChatMessage", "startChannelThread"]) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain("writeChatMessageFromMain({");
@@ -94,14 +94,10 @@ describe("main-process chat authorization", () => {
       expect(handler, channel).toContain(
         "revalidateChatWrite(workspace, target, authorUserId)",
       );
-      expect(handler.indexOf("await assertSharedChannelWritable({")).toBeLessThan(
-        handler.indexOf("writeChatMessageFromMain({"),
-      );
     }
   });
 
-  it("pins workspace and joined-channel relay work to the enrolled account", () => {
-    expect(mainSource.match(/ownerUserId: credentials\.userId/g)).toHaveLength(2);
+  it("connects account-pinned relay work to its behavior-tested helpers", () => {
     expect(handlerSource("joinSharedChannel")).toContain(
       "recipientUserId: joinedRecipientUserId",
     );
@@ -112,7 +108,6 @@ describe("main-process chat authorization", () => {
     expect(mainSource).toContain(
       "workspaceRemoteMatchesCredentials(remote, credentials)",
     );
-    expect(mainSource.match(/workspaceRemoteMatchesCredentials\(/g)).toHaveLength(5);
     expect(mainSource).not.toContain("credentialMatchesRemote");
     expect(mainSource).toContain(
       "!!remote && workspaceRemoteMatchesCredentials(remote, cachedCredentials)",
@@ -120,17 +115,21 @@ describe("main-process chat authorization", () => {
     expect(mainSource).toContain(
       "workspaceRemoteMatchesCredentials(workspace.remote, credentials)",
     );
-    expect(mainSource).toContain(
-      "This workspace needs a new cloud account link before it can use cloud features.",
-    );
-    expect(mainSource).toContain(
-      "Sign in to the account that synced this workspace.",
-    );
     expect(handlerSource("cloudLoginPoll")).toContain(
       "previousUserId !== cachedCredentials.userId",
     );
     expect(handlerSource("cloudLoginPoll")).toContain(
       "if (relayChanged || accountChanged)",
+    );
+    expect(handlerSource("cloudLoginPoll")).toContain(
+      "await pinLegacyWorkspaceRemotesForCurrentAccount()",
+    );
+    expect(mainSource).toContain("}).probe()");
+    expect(handlerSource("cloudEnableSync")).toContain(
+      "syncEnrollmentRemoteWorkspaceId(",
+    );
+    expect(handlerSource("cloudEnableSync")).toContain(
+      "workspaceId: remoteWorkspaceId",
     );
   });
 

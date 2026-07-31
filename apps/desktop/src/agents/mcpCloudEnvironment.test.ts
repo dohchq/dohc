@@ -58,5 +58,17 @@ describe("mcpCloudEnvironment", () => {
         ownerName: "Ice",
       }),
     ).toBeUndefined();
+    expect(
+      mcpCloudEnvironment({
+        workspace: {
+          remote: {
+            serverUrl: "https://cloud.test",
+            remoteWorkspaceId: "remote-workspace-1",
+          },
+        },
+        credentials,
+        ownerName: "Ice",
+      }),
+    ).toBeUndefined();
   });
 });

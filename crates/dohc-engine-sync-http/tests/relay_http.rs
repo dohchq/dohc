@@ -629,8 +629,8 @@ fn pull_rejects_byte_different_coordinate_collision_before_apply() {
     });
     let error = RelaySyncClient::new(transport(&server))
         .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
-        .expect_err("different coordinate bytes must diverge");
-    assert_eq!(error, RelayError::OriginDiverged);
+        .expect_err("a foreign coordinate collision must fail closed");
+    assert_eq!(error, RelayError::InvalidResponse);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
 }
 

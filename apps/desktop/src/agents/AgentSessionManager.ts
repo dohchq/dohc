@@ -5,6 +5,7 @@ import type {
   AgentEvent,
   AgentProbe,
   AgentSession,
+  AgentSessionStartInput,
   PermissionDecision,
   PermissionOption,
 } from "./AgentDriver";
@@ -78,9 +79,9 @@ export interface AgentSessionManagerOptions {
   registry: AgentDriverRegistry;
   integration: AgentIntegration;
   rootFor(workspaceId: string): string | null;
-  mcpFor(rootPath: string):
-    | { command: string; args: string[]; env?: Record<string, string> }
-    | Promise<{ command: string; args: string[]; env?: Record<string, string> }>;
+  mcpFor(
+    rootPath: string,
+  ): AgentSessionStartInput["mcp"] | Promise<AgentSessionStartInput["mcp"]>;
   now?: () => number;
 }
 
@@ -385,6 +386,10 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
     sessions.set(input.workspaceId, state);
     try {
       const mcp = await options.mcpFor(root);
+      // A stop can end or remove this provisional state while MCP setup waits.
+      if (state.ended || sessions.get(input.workspaceId) !== state) {
+        return panelSnapshot(input.workspaceId);
+      }
       const session = await driver.startSession({
         workspaceRoot: root,
         mode: "approval-required",
@@ -412,6 +417,9 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
       await session.prompt({ text: input.prompt });
       if (!state.ended && state.status === "ready") state.status = "running";
     } catch (error) {
+      if (state.ended || sessions.get(input.workspaceId) !== state) {
+        return panelSnapshot(input.workspaceId);
+      }
       state.status = "failed";
       state.ended = true;
       state.endedAt = now();

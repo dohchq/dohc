@@ -1883,8 +1883,8 @@ describe("sync relay epoch and stream identity enforcement", () => {
 // WS-MU-C0 — the relay verifies that a chat op's claimed author equals
 // the authenticated pusher (actor.userId) before admitting it to the log. These
 // mirror PR-18's isolation rigor: a forged author is rejected atomically and
-// leaves the log unchanged; the honest path is admitted; and a workspace owner
-// can replay an unattributed message created locally before sign-in.
+// leaves the log unchanged. The honest path is admitted. An unattributed local
+// message cannot enter either relay log.
 describe("MU-C0 verified chat authorship", () => {
   function messageOp(
     originSeq: number,
@@ -1968,23 +1968,20 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toHaveLength(2);
   });
 
-  it("admits a local message with no authorUserId without rewriting it", async () => {
+  it("rejects a workspace message with no authorUserId and leaves the log unchanged", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
-    const localMessage = messageOp(0, undefined);
     const missing = await h(
       request(
         "a",
         "/sync/workspace-a/log",
-        jsonBody({ originId: "origin-a", ops: [localMessage] }),
+        jsonBody({ originId: "origin-a", ops: [messageOp(0, undefined)] }),
       ),
     );
-    expect(missing.status).toBe(200);
-    const [stored] = (await logOps(h)) as Array<{
-      payload: Record<string, unknown>;
-    }>;
-    expect(stored.payload).toEqual(localMessage.payload);
+    expect(missing.status).toBe(403);
+    expect(await json(missing)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+    expect(await logOps(h)).toEqual([]);
   });
 
   it("rejects a message.append forging another user's authorUserId, leaving the log unchanged", async () => {

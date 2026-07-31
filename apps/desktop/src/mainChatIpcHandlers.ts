@@ -171,6 +171,15 @@ export async function setChatReactionFromMain<Result>(input: {
   });
 }
 
+export async function chatViewerAuthorId(input: {
+  localFallbackAuthorId: string;
+  resolveReplicationAuthorId: () => Promise<string | undefined>;
+}): Promise<string> {
+  return (
+    (await input.resolveReplicationAuthorId()) ?? input.localFallbackAuthorId
+  );
+}
+
 export async function writeChatMessageFromMain<Attachment, Result>(input: {
   resolveAuthorUserId: () => Promise<string | undefined>;
   resolveAttachments: () => Promise<Attachment[]>;
