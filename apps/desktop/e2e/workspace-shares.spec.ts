@@ -2,11 +2,8 @@ import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  claimRelayWorkspace,
-  createVersionedTextStore,
-  pushWorkspaceToRelay,
-} from "@dohc/workspace-engine";
+import { createVersionedTextStore, pushWorkspaceToRelay } from "@dohc/workspace-engine";
+import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
@@ -43,19 +40,6 @@ function granterConnection(baseUrl: string) {
   return { baseUrl, token: GRANTER_TOKEN };
 }
 
-async function relayJson(
-  baseUrl: string,
-  token: string,
-  path: string,
-  init: RequestInit = {},
-): Promise<{ status: number; body: string }> {
-  const headers = new Headers(init.headers);
-  headers.set("authorization", `Bearer ${token}`);
-  if (init.body) headers.set("content-type", "application/json");
-  const response = await fetch(`${baseUrl}${path}`, { ...init, headers });
-  return { status: response.status, body: await response.text() };
-}
-
 test("grant side: share a file by email from the explorer, copy the code, and end it from Settings", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
@@ -71,10 +55,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     ]);
 
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
-    await claimRelayWorkspace({
-      workspaceId,
-      relay: granterConnection(relay.baseUrl),
-    });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     await seedWorkspaceRegistry(temp, [
       {
         workspaceId,
@@ -199,7 +180,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await granterWrite("docs/shared.md", "# Shared\n\nThe comet-tail draft.\n");
     await granterWrite("docs/nested/deep.md", "Deep shared body.\n");
     await granterWrite("private/hidden.md", "The kraken ledger stays private.\n");
-    await claimRelayWorkspace({ workspaceId, relay: granterConnection(relay.baseUrl) });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     await pushWorkspaceToRelay({
       rootDir: granterDir,
       workspaceId,
@@ -433,8 +414,9 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
     await granterWrite("docs/brief.md", "# Brief\n\nThe lighthouse memo.\n");
     await granterWrite("private/hidden.md", "The kraken ledger stays private.\n");
     await claimRelayWorkspace({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
       workspaceId: granterWorkspaceId,
-      relay: granterConnection(relay.baseUrl),
     });
     await pushWorkspaceToRelay({
       rootDir: granterDir,

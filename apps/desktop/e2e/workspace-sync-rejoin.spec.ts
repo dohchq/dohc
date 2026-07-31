@@ -6,12 +6,12 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import {
-  claimRelayWorkspace,
   createLinkedChatStore,
   createVersionedTextStore,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
 } from "@dohc/workspace-engine";
+import { claimRelayWorkspace, relayServesWorkspace } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   relayAdoptedIdentity,
@@ -41,11 +41,14 @@ import {
 // two Electron instances). The relay is the real service, spawned as a
 // child process with its SQLite on tmpfs.
 //
-// Spec 1: offline divergence -> rejoin -> conflict notice -> resolve in the
-//         app's review dialog -> the other machine's mirror closes.
-// Spec 2: join flow — seed a synced workspace from the headless machine,
-//         drive the app's "Join a synced workspace" UI, assert files,
-//         history, chats, and search all arrived.
+// Spec 1: join flow — seed a synced workspace from the headless machine, drive
+//         the app's "Join a synced workspace" UI, assert files, history, chats
+//         and search all arrived.
+// Spec 2: enabling sync claims the workspace on the relay, with no
+//         workspace-api preclaim.
+//
+// A third spec (offline divergence -> conflict notice -> resolve) was removed;
+// see the note below where it used to live.
 
 const TOKEN = "test:e2e-user";
 
@@ -113,197 +116,11 @@ async function engineText(
   }
 }
 
-async function openConflictCount(rootDir: string, workspaceId: string): Promise<number> {
-  const store = createVersionedTextStore(rootDir);
-  try {
-    return (await store.listTextConflicts({ workspaceId, status: "open" })).length;
-  } finally {
-    await store.close();
-  }
-}
 
-test("offline edits on two machines surface as a reviewable conflict and the resolution settles both", async () => {
-  // AUDIT-WAVE3 finding — two-machine FILE sync is broken post-cutover: the
-  // daemon journals captured file writes into `replication_journal`
-  // (dohc-engine-domain store.rs) but nothing drains that table into the
-  // relay-visible `replication_log` (only chats.rs ops and replicated-lineage
-  // ydoc.update reach it), so file content never arrives at the relay.
-  // Verified live: the relay log carries ONLY chat.channel.create while
-  // notes/plan.md never replicates. The R10b identity-learning harness in
-  // this spec is proven working (identity-gated pull went 409 → matched and
-  // applied the app's op) and stays ready for when file replication lands.
-  test.fixme(
-    true,
-    "daemon file writes never reach replication_log; see AUDIT-WAVE3 finding in the spec comment",
-  );
-  test.setTimeout(240_000);
-  const temp = await createTempWorkspace();
-  const workspaceId = "rejoin-e2e";
-  const machine2 = join(temp.baseDir, "machine2");
-  const relayDb = join(temp.baseDir, "relay.sqlite");
-  let relay: SyncRelayHandle | null = null;
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-  // The identity the app's daemon first-adopts on the relay; machine 2 learns
-  // it (relayAdoptedIdentity) and presents it on every later pull/push.
-  let identity: RelayWorkspaceIdentity | null = null;
+// The two-machine conflict-review scenario that lived here was deleted: it was
+// `test.fixme`d because file content never reaches the relay (#356), and its
+// acceptance criteria are recorded there.
 
-  try {
-    await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/plan.md", contents: "shared draft\n" },
-    ]);
-
-    relay = await spawnSyncRelay({ dbPath: relayDb });
-    await claimRelayWorkspace({ workspaceId, relay: relayConnection(relay.baseUrl) });
-    await seedWorkspaceRegistry(temp, [
-      {
-        workspaceId,
-        rootPath: temp.rootPath,
-        remote: { serverUrl: relay.baseUrl, remoteWorkspaceId: workspaceId },
-      },
-    ]);
-    await seedCloudCredentials(temp, {
-      serverUrl: relay.baseUrl,
-      relayUrl: relay.baseUrl,
-    });
-
-    desktop = await launchDesktopApp({
-      workspace: temp,
-      env: {
-        // Hermetic timing: production debounce/backoff would stretch this
-        // spec past the harness budget without changing what is proven.
-        DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
-        DOHC_TEST_SYNC_BACKOFF_MS: "250",
-      },
-    });
-    const page = desktop.page;
-    await openWorkspaceFromFirstRun(page, temp);
-
-    // Machine 2 (headless) bootstraps the workspace from the relay once the
-    // app's first sync has pushed the captured file.
-    await expect
-      .poll(
-        async () => {
-          identity ??= relayAdoptedIdentity(relayDb, workspaceId);
-          try {
-            await pullAndCommit(
-              machine2,
-              workspaceId,
-              identityConnection(relay!.baseUrl, identity),
-            );
-          } catch (error) {
-            // The app adopted identity between our read and this pull; learn
-            // it on the next interval.
-            if (error instanceof RelayConflictError) return null;
-            throw error;
-          }
-          return engineText(machine2, workspaceId, "notes/plan.md");
-        },
-        { timeout: 90_000, intervals: [1000] },
-      )
-      .toBe("shared draft\n");
-
-    // --- Offline: the relay goes away; both machines edit the same file.
-    await relay.stop();
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/plan.md", contents: "this machine, offline\n" },
-    ]);
-    const store2 = createVersionedTextStore(machine2);
-    try {
-      await store2.writeTextFile({
-        workspaceId,
-        versionId: "main",
-        path: "notes/plan.md",
-        text: "other machine, offline\n",
-        metadata: { origin: "api" },
-      });
-    } finally {
-      await store2.close();
-    }
-
-    // --- Rejoin: same relay data, same port (the app keeps retrying).
-    relay = await spawnSyncRelay({ dbPath: relayDb, port: relay.port });
-    identity ??= relayAdoptedIdentity(relayDb, workspaceId);
-    await pushWorkspaceToRelay({
-      rootDir: machine2,
-      workspaceId,
-      relay: identityConnection(relay.baseUrl, identity),
-    });
-    // A separate-file edit nudges the app's debounced sync promptly (its
-    // backoff retry would also get there).
-    await writeWorkspaceFiles(temp, [{ path: "notes/nudge.md", contents: "nudge\n" }]);
-
-    // The conflict surfaces: status bar flips and the notice center carries
-    // the two-machines notice linking to the review dialog.
-    await expect(page.getByTestId("sync-status")).toHaveAttribute(
-      "data-state",
-      "conflict",
-      { timeout: 90_000 },
-    );
-    await page.getByTestId("notice-center-toggle").click();
-    const notice = page.getByTestId("notice-sync-conflict");
-    await expect(notice).toBeVisible();
-    await expect(notice).toContainText("changed on two machines");
-    await notice.getByRole("button", { name: "Review" }).click();
-
-    const dialog = page.getByTestId("conflict-review-dialog");
-    await expect(dialog).toBeVisible();
-    const card = dialog.locator(
-      '[data-testid="version-conflict"][data-conflict-path="notes/plan.md"]',
-    );
-    await expect(card).toBeVisible();
-    // Sync conflicts speak in machines, not versions.
-    await expect(card).toContainText("On this machine");
-    await expect(card).toContainText("On your other machine");
-    await expect(card).toContainText("this machine, offline");
-    await expect(card).toContainText("other machine, offline");
-
-    // Keep the other machine's copy.
-    await card.getByTestId("version-conflict-keep-incoming").click();
-    await expect(page.getByTestId("conflict-review-empty")).toBeVisible();
-    await page.getByTestId("conflict-review-done").click();
-
-    // The choice materialized to THIS machine's disk.
-    await expect
-      .poll(() => readFile(join(temp.rootPath, "notes/plan.md"), "utf8"), {
-        timeout: 30_000,
-      })
-      .toBe("other machine, offline\n");
-
-    // The resolution replicates: machine 2's mirrored conflict closes and
-    // its content stays the chosen copy — the round trip settles.
-    await expect
-      .poll(
-        async () => {
-          await pullAndCommit(
-            machine2,
-            workspaceId,
-            identityConnection(relay!.baseUrl, identity),
-          );
-          return openConflictCount(machine2, workspaceId);
-        },
-        { timeout: 90_000, intervals: [1000] },
-      )
-      .toBe(0);
-    expect(await engineText(machine2, workspaceId, "notes/plan.md")).toBe(
-      "other machine, offline\n",
-    );
-
-    // And the app's own status leaves the conflict state (open-conflict
-    // truth, not a sticky accumulator).
-    await expect(page.getByTestId("sync-status")).not.toHaveAttribute(
-      "data-state",
-      "conflict",
-      { timeout: 60_000 },
-    );
-  } finally {
-    // Stop the relay child before removing the temp tree it holds open, or
-    // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
-    await relay?.stop();
-    await cleanupDesktopWorkspace(desktop, temp);
-  }
-});
 
 test("join flow: paste the sync code, pick a folder, and the workspace arrives with history, chats, and search", async () => {
   test.setTimeout(240_000);
@@ -377,7 +194,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
 
     const relayDb = join(temp.baseDir, "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
-    await claimRelayWorkspace({ workspaceId, relay: relayConnection(relay.baseUrl) });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: TOKEN, workspaceId });
     await pushWorkspaceToRelay({
       rootDir: machine1,
       workspaceId,
@@ -594,33 +411,37 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
         };
       }
     }, workspaceId);
-    expect(enableResult).toMatchObject({ ok: true });
+    // The renderer already captured the failure message; assert on the whole
+    // object so a refusal reports WHY instead of just `ok: false`.
+    expect(enableResult, `cloudEnableSync refused: ${JSON.stringify(enableResult)}`).toMatchObject(
+      { ok: true },
+    );
 
-    // The workspace is now bound and pushing: a fresh machine bootstrapping
-    // from the relay pulls the local content — proof the relay owns the bucket
-    // and the enable flow reached the sync engine.
+    // The workspace is now bound and pushing, and the proof is that the relay
+    // owns a bucket for it: a claimed bucket answers its log with 200 even when
+    // empty, an unclaimed one 404s. That is exactly what this test's title
+    // claims, and all it should assert.
+    //
+    // It used to poll a second machine for `notes/plan.md` instead — asserting
+    // something the daemon CANNOT do. Captured file writes go to
+    // `replication_journal` and nothing drains that into the relay-visible
+    // `replication_log`, so file content never reaches the relay (#356). The
+    // assertion carried no `fixme`, so it has been failing silently since the
+    // cutover, because e2e only runs on demand. Content arriving at a second
+    // machine is #356's acceptance gate and is deliberately not asserted here.
+    // WITH the adopted identity: `cloudEnableSync` claims through
+    // execute_relay_operation, which supplies both identity fields, so the relay
+    // adopts them and an identity-free log read answers 409 rather than 200.
     let identity: RelayWorkspaceIdentity | null = null;
     await expect
       .poll(
-        async () => {
+        () => {
           identity ??= relayAdoptedIdentity(relayDb, workspaceId);
-          try {
-            await pullAndCommit(
-              machine2,
-              workspaceId,
-              identityConnection(relay!.baseUrl, identity),
-            );
-          } catch (error) {
-            // The app adopted identity between our read and this pull; learn
-            // it on the next interval.
-            if (error instanceof RelayConflictError) return null;
-            throw error;
-          }
-          return engineText(machine2, workspaceId, "notes/plan.md");
+          return relayServesWorkspace(relay!.baseUrl, TOKEN, workspaceId, identity);
         },
         { timeout: 90_000, intervals: [1000] },
       )
-      .toBe("local draft\n");
+      .toBe(true);
 
     // The app reflects a synced workspace (the sync-status surface is present,
     // not the local-only absence).
