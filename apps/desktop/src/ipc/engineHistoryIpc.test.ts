@@ -5,7 +5,7 @@ import {
   type EngineMomentAuthorNamer,
 } from "./engineHistoryIpc";
 import { EngineMomentDetailRecord, WorkspaceVersionConflict } from "./bridgeContract";
-import type { VersionedTextMoment } from "@dohc/workspace-engine";
+import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
 
 const namer: EngineMomentAuthorNamer = (author) =>
