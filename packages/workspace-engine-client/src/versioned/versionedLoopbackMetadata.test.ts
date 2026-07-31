@@ -702,6 +702,78 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid-metadata/);
   });
 
+  it("refuses over-cap RENAME and DELETE metadata before resolving the version", async () => {
+    // The daemon validates metadata before the actor resolves the version, so an
+    // over-cap field plus an unknown versionId answers `invalid-metadata`. Safe to
+    // match now that a Rust test pins the reason it was in doubt: a refused write
+    // creates no version (rpc_write_surface a_refused_write_creates_no_version).
+    const engine = new VersionedLoopbackEngine();
+    await openWorkspace(engine);
+    const overCap = "s".repeat(16 * 1024 + 1);
+    for (const [method, extra] of [
+      [VERSIONED_METHOD.textRename, { fromPath: "a.md", toPath: "b.md" }],
+      [VERSIONED_METHOD.textDelete, { path: "a.md" }],
+    ] as const) {
+      await expect(
+        send(engine, method, {
+          workspaceId: WORKSPACE,
+          versionId: "no-such-version",
+          origin: "local-file",
+          summary: overCap,
+          ...extra,
+        }),
+      ).rejects.toThrow(/invalid-metadata/);
+    }
+  });
+
+  it("refuses a RESTORE that only supplies the legacy metadataOrigin", async () => {
+    // SecretsRestoreParams requires `origin` and denies unknown fields, so the
+    // text-write compatibility fallback to `metadataOrigin` accepts a request the
+    // daemon rejects while deserializing. And the recorded moment used to hardcode
+    // "restore", which silently discarded any other accepted origin.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=legacy\n",
+      origin: "local-file",
+      momentId: "moment-legacy-origin",
+    });
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsRestore, {
+        workspaceId: WORKSPACE,
+        path: ".env",
+        beforeMomentId: "moment-legacy-origin",
+        momentId: "moment-legacy-refused",
+        metadataOrigin: "restore",
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+
+    // And an accepted origin other than "restore" is PRESERVED on the moment.
+    await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=second\n",
+      origin: "local-file",
+      momentId: "moment-legacy-second",
+    });
+    await send(engine, VERSIONED_METHOD.secretsRestore, {
+      workspaceId: WORKSPACE,
+      path: ".env",
+      beforeMomentId: "moment-legacy-origin",
+      momentId: "moment-origin-preserved",
+      origin: "api",
+    });
+    const moment = await send(engine, VERSIONED_METHOD.secretsMomentsGet, {
+      workspaceId: WORKSPACE,
+      momentId: "moment-origin-preserved",
+    });
+    expect((moment.metadata as Record<string, unknown>).origin).toBe("api");
+  });
+
   it("refuses over-cap RESTORE metadata before it looks for the moment", async () => {
     // Fourth handler in this file where the fake read state before validating
     // metadata. The daemon validates origin then metadata immediately after

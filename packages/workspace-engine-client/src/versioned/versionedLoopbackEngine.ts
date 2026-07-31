@@ -163,6 +163,18 @@ function optionalNumber(object: JsonObject, key: string): number | undefined {
   return value;
 }
 
+// `secrets.restore` only. SecretsRestoreParams takes `origin` as a required field
+// with deny_unknown_fields, so there is no legacy `metadataOrigin` fallback to
+// honour — accepting one lets the fake through a request the daemon refuses while
+// deserializing.
+function restoreOrigin(object: JsonObject): VersionedOrigin {
+  const origin = optionalString(object, "origin");
+  if (origin === undefined || !ACCEPTED_ORIGINS.has(origin)) {
+    throw new Error("invalid-metadata");
+  }
+  return origin as VersionedOrigin;
+}
+
 function requiredOrigin(object: JsonObject): VersionedOrigin {
   const origin = optionalString(object, "origin");
   if (origin !== undefined) {
@@ -915,12 +927,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
+    // Before state is read — see metadataField.
+    const metadata = this.momentMetadataFields(params);
     const version = this.version(state, requiredString(params, "versionId", "rename"));
     const fromPath = requiredString(params, "fromPath", "rename");
     const toPath = requiredString(params, "toPath", "rename");
     const origin = requiredOrigin(params);
-    // Before state is read — see metadataField.
-    const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
       ? this.generatedRequestId("moment", requestId, toPath)
@@ -984,11 +996,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
+    // Before state is read — see metadataField.
+    const metadata = this.momentMetadataFields(params);
     const version = this.version(state, requiredString(params, "versionId", "delete"));
     const path = requiredString(params, "path", "delete");
     const origin = requiredOrigin(params);
-    // Before state is read — see metadataField.
-    const metadata = this.momentMetadataFields(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
       ? this.generatedRequestId("moment", requestId, path)
@@ -1708,7 +1720,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // to ignore params.origin entirely and hardcode "restore" below, which made it
     // accept requests production rejects while a comment here claimed the ordering
     // was matched.
-    requiredOrigin(params);
+    // `origin` strictly, NOT via requiredOrigin: that helper falls back to the
+    // legacy `metadataOrigin`, while SecretsRestoreParams requires `origin` and
+    // denies unknown fields, so the fallback accepts a request the daemon rejects
+    // at deserialization.
+    const origin = restoreOrigin(params);
     const metadata = this.secretMomentMetadata(params);
     const sourceMoment = state.secretMoments.get(beforeMomentId);
     if (!sourceMoment) throw new Error("moment-not-found");
@@ -1732,7 +1748,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       path,
       momentId,
       operation,
-      "restore",
+      origin,
       metadata.summary,
       metadata.correlationId,
     );
