@@ -193,16 +193,9 @@ fn committed_write_replays_from_wal_on_reopen() {
         writer
             .commit_compound(&sample_write("r1", "d1", "replayed", 1), &NO_FAULTS)
             .expect("write");
-        // Open the keeper and start an OPEN read transaction so it holds a
-        // shared lock across the writer's close — that keeps SQLite from
-        // checkpointing (and deleting) the WAL. A read-only connection that has
-        // not yet queried holds no lock, so an explicit read snapshot is
-        // required.
+        // The keeper holds an open read transaction across the writer's close,
+        // which keeps SQLite from checkpointing (and deleting) the WAL.
         let keeper = open_readonly_keeper(&db).expect("keeper");
-        keeper.execute_batch("BEGIN").expect("begin read txn");
-        let _seen: i64 = keeper
-            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
-            .expect("read snapshot");
         drop(writer);
         keeper
     };

@@ -67,16 +67,39 @@ pub fn write_foreign_unversioned_db(db_path: &Path) -> FixtureResult {
 
 /// Open a read-only connection that keeps the WAL alive: while it is held, a
 /// writer's close is NOT the last connection, so SQLite does not checkpoint on
-/// that close. This lets a test prove data is recoverable *from the WAL*
-/// (before any checkpoint folds it into the main file) on reopen.
+/// that close. This lets a test read the WAL itself, or prove data is
+/// recoverable *from* it, before a checkpoint folds it into the main file.
+///
+/// Opening alone is not enough — a connection that has never queried holds no
+/// lock, and the close checkpoints anyway. So this also opens a read
+/// transaction and takes a snapshot. That was originally left to each caller
+/// and one caller got it wrong, scanning a WAL that had already been deleted.
+///
+/// Call this AFTER the writer has committed: a read-only connection cannot
+/// create the `-shm` file a WAL database needs, so it must find one already
+/// there. Then drop the writer while this is held.
 pub fn open_readonly_keeper(db_path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.execute_batch("BEGIN")?;
+    // Any read will do; `sqlite_schema` exists in every database.
+    let _snapshot: i64 =
+        conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
+    Ok(conn)
 }
 
 /// The `-wal` sidecar path for a database file.
 pub fn wal_sidecar(db_path: &Path) -> std::path::PathBuf {
+    sidecar(db_path, "-wal")
+}
+
+/// The `-shm` sidecar path for a database file.
+pub fn shm_sidecar(db_path: &Path) -> std::path::PathBuf {
+    sidecar(db_path, "-shm")
+}
+
+fn sidecar(db_path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut os = db_path.as_os_str().to_owned();
-    os.push("-wal");
+    os.push(suffix);
     std::path::PathBuf::from(os)
 }
 

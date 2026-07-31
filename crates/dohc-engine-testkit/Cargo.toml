@@ -7,6 +7,10 @@ publish.workspace = true
 description = "CAL-1 calibration slice: fixtures (scratch workspaces, path aliases, adversarial v1/foreign databases) and the in-process crash/restart harness with named fault points. Dormant test infrastructure; not wired into the product."
 
 [dependencies]
+# `EngineDbScan` scans for the base64 form of a secret plaintext, because
+# ciphertext reaches SQLite as base64 TEXT. The encoder must be the one
+# production uses, or the scan would look for the wrong bytes.
+dohc-engine-crypto = { path = "../dohc-engine-crypto" }
 # The testkit is the crash tier: it turns ON the storage fault-injection seam.
 # Feature unification then arms the seam for the whole `cargo test --workspace`
 # build (storage, runtime, and these integration traces), while a release
