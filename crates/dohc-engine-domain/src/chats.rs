@@ -8308,18 +8308,22 @@ fn journal_decision_set(
     Ok(())
 }
 
-fn relay_log_has_entity(
+fn relay_log_has_local_thread_structure(
     tx: &Transaction<'_>,
     workspace_id: &str,
-    op_kind: &str,
-    json_path: &str,
-    entity_id: &str,
+    thread_id: &str,
 ) -> Result<bool, DomainError> {
     tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM replication_log \
-         WHERE workspace_id = ?1 AND op_kind = ?2 \
-           AND json_extract(payload_json, ?3) = ?4)",
-        params![workspace_id, op_kind, json_path, entity_id],
+        "SELECT EXISTS( \
+           SELECT 1 FROM sync_identity AS identity \
+           JOIN replication_log AS operation \
+             ON operation.workspace_id = identity.workspace_id \
+            AND operation.origin_id = identity.origin_id \
+            AND operation.imported = 0 \
+            AND operation.op_kind = 'chat.thread.create' \
+            AND json_extract(operation.payload_json, '$.threadId') = ?2 \
+           WHERE identity.workspace_id = ?1)",
+        params![workspace_id, thread_id],
         |row| row.get(0),
     )
     .map_err(DomainError::sql_corrupt)
@@ -8358,13 +8362,10 @@ fn ensure_thread_structure_exported(
     thread_id: &str,
     recorded_at_ms: i64,
 ) -> Result<(), DomainError> {
-    if relay_log_has_entity(
-        tx,
-        workspace_id,
-        "chat.thread.create",
-        "$.threadId",
-        thread_id,
-    )? {
+    // Imported refusals remain in replication_log, and imported valid rows
+    // carry another origin. Mint this structure once on the current local
+    // origin so every local message stream orders thread.create before use.
+    if relay_log_has_local_thread_structure(tx, workspace_id, thread_id)? {
         return Ok(());
     }
 

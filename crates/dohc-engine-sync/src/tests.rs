@@ -2942,6 +2942,177 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
 }
 
 #[test]
+fn refused_thread_log_cannot_suppress_the_current_thread_export() {
+    let (_scratch, _path, mut first_peer) = store();
+    imported_chat_fixture(&mut first_peer, "refused-thread-collision");
+    let refused = envelope(
+        "refused-thread-collision",
+        3,
+        "chat.thread.create",
+        json!({
+            "threadId": "refused-thread-id",
+            "title": "Invalid owner shape",
+            "createdAtMs": 30,
+            "channelSlug": "imported",
+            "linkedObjectId": "object-collision",
+            "linkedAtMs": 30
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut first_peer, &refused, &NoFaults));
+    let (refused_rows, refused_projection_rows): (i64, i64) = first_peer
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND imported=1 \
+                       AND op_kind='chat.thread.create' \
+                       AND json_extract(payload_json,'$.threadId')='refused-thread-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_threads \
+                     WHERE workspace_id='ws' AND thread_id='refused-thread-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("durable refused-thread state");
+    assert_eq!(refused_rows, 1, "the refused envelope remains durable");
+    assert_eq!(
+        refused_projection_rows, 0,
+        "the refused envelope must not create a thread projection"
+    );
+
+    LinkedChatStore::new(&mut first_peer)
+        .start_channel_thread(
+            &StartChannelThread {
+                workspace_id: "ws".to_owned(),
+                channel_id: "channel-imported".to_owned(),
+                thread_id: "refused-thread-id".to_owned(),
+                message_id: "message-after-refused-thread".to_owned(),
+                title: Some("Valid local thread".to_owned()),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Verified".to_owned(),
+                author_user_id: Some("verified-user".to_owned()),
+                origin: None,
+                body: "The valid thread must reach peers first.".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 31,
+                request_id: Some("local-thread-after-refusal".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("local thread with a refused remote id");
+    LinkedChatStore::new(&mut first_peer)
+        .send_message(
+            &SendMessage {
+                workspace_id: "ws".to_owned(),
+                thread_id: "refused-thread-id".to_owned(),
+                message_id: "second-message-after-refused-thread".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Verified".to_owned(),
+                author_user_id: Some("verified-user".to_owned()),
+                parent_message_id: None,
+                origin: None,
+                body: "The thread structure must export only once.".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 32,
+                request_id: Some("second-local-message-after-refusal".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("second local message in the collision thread");
+
+    let outbound: Vec<ReplicationEnvelope> = first_peer
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT operation.origin_id,operation.origin_seq,operation.op_kind, \
+                        operation.payload_json,operation.recorded_at_ms \
+                 FROM replication_log AS operation \
+                 JOIN sync_identity AS identity \
+                   ON identity.workspace_id=operation.workspace_id \
+                  AND identity.origin_id=operation.origin_id \
+                 WHERE operation.workspace_id='ws' AND operation.imported=0 \
+                   AND json_extract(operation.payload_json,'$.threadId')='refused-thread-id' \
+                 ORDER BY operation.origin_seq",
+            )?;
+            statement
+                .query_map([], |row| {
+                    let payload_json: String = row.get(3)?;
+                    Ok(ReplicationEnvelope {
+                        workspace_id: "ws".to_owned(),
+                        origin_id: row.get(0)?,
+                        origin_seq: row.get(1)?,
+                        op_kind: row.get(2)?,
+                        payload: serde_json::from_str(&payload_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                payload_json.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        recorded_at_ms: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("outbound thread and message envelopes");
+    assert_eq!(
+        outbound
+            .iter()
+            .map(|operation| operation.op_kind.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "chat.thread.create",
+            "chat.message.append",
+            "chat.message.append"
+        ],
+        "the current origin must export one valid structure before its messages"
+    );
+
+    let (_second_scratch, _second_path, mut second_peer) = store();
+    for operation in &outbound {
+        assert_eq!(
+            apply_chat_envelope(&mut second_peer, operation, &NoFaults)
+                .expect("apply collision recovery envelope"),
+            ApplyOutcome::Applied(())
+        );
+    }
+    let (message_body, message_rows, pending_rows): (String, i64, i64) = second_peer
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT body FROM chat_messages \
+                     WHERE workspace_id='ws' AND thread_id='refused-thread-id' \
+                       AND message_id='message-after-refused-thread'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages \
+                     WHERE workspace_id='ws' AND thread_id='refused-thread-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM chat_pending_replication", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .expect("second-peer collision recovery state");
+    assert_eq!(
+        message_body, "The valid thread must reach peers first.",
+        "the peer must apply the message after resolving its current thread"
+    );
+    assert_eq!(message_rows, 2, "both current-origin messages must apply");
+    assert_eq!(pending_rows, 0, "the message must not remain parked");
+}
+
+#[test]
 fn imported_message_refuses_unsafe_created_at_ms_without_row_and_acks() {
     let (_scratch, _path, mut engine) = store();
     imported_chat_fixture(&mut engine, "unsafe-message-time");
