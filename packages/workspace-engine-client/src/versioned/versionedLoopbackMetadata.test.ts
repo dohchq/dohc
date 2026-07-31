@@ -509,6 +509,61 @@ describe("loopback moment metadata", () => {
     expect(text?.metadataCorrelationId).toBeUndefined();
   });
 
+  it("replays an exact TEXT retry that carried an explicit null", async () => {
+    // Fixing null on the way IN left the replay comparison re-reading the raw
+    // fields, so a fixed-momentId retry of a request the first write had accepted
+    // threw instead of answering `deduped: true`. The daemon exact-replays it.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const write = {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "notes.md",
+      text: "retry me",
+      origin: "local-file",
+      momentId: "moment-null-retry",
+      summary: null,
+      correlationId: null,
+    };
+    const first = await send(engine, VERSIONED_METHOD.textWrite, write);
+    expect(first.deduped).toBeFalsy();
+    const retry = await send(engine, VERSIONED_METHOD.textWrite, write);
+    expect(retry.deduped).toBe(true);
+  });
+
+  it("refuses bad METADATA before bad bytes on writeBlob, reversing write's order", async () => {
+    // The blob handler validates origin, metadata and author BEFORE decoding or
+    // looking up the bytes, the opposite of versionedBinary.write. So the same
+    // doubly-invalid request gets a DIFFERENT refusal from each, and a fake that
+    // used one order for both would certify the wrong one.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const overCap = "s".repeat(16 * 1024 + 1);
+    await expect(
+      send(engine, VERSIONED_METHOD.binaryWriteBlob, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "logo.png",
+        sha256: "a".repeat(64),
+        bytesBase64: "!!!not base64!!!",
+        origin: "local-file",
+        summary: overCap,
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+
+    // ...while the plain write answers for the bytes instead.
+    await expect(
+      send(engine, VERSIONED_METHOD.binaryWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "logo.png",
+        bytesBase64: "!!!not base64!!!",
+        origin: "local-file",
+        summary: overCap,
+      }),
+    ).rejects.toThrow(/invalid-input/);
+  });
+
   it("refuses bad BYTES before bad metadata, in the daemon's order", async () => {
     // Hoisting the metadata parse to fix the dedup hole first put it above the
     // byte decode, which inverted the refusal precedence: a request with both

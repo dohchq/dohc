@@ -610,10 +610,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
         existingMoment.after?.contentKind === "text" &&
         existingMoment.after.text === text &&
         existingMoment.wire.metadataOrigin === origin &&
+        // Compared against the ALREADY-NORMALIZED metadata. Re-reading the raw
+        // fields here threw on an explicit `summary: null` that the first write
+        // had accepted, so a fixed-momentId retry of a request the daemon
+        // exact-replays (store.rs) got a refusal instead of `deduped: true`.
         (existingMoment.wire.metadataSummary ?? null) ===
-          (optionalString(params, "summary") ?? null) &&
+          (metadata.metadataSummary ?? null) &&
         (existingMoment.wire.metadataCorrelationId ?? null) ===
-          (optionalString(params, "correlationId") ?? null) &&
+          (metadata.metadataCorrelationId ?? null) &&
         (existingMoment.writeAuthorFingerprint ?? null) === authorFingerprint;
       if (exact) {
         const recorded = copyFile(existingMoment.after!);
@@ -884,6 +888,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const expectedSha = requiredString(params, "sha256", "binary blob write").toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(expectedSha)) throw new Error("invalid-input");
+    // The blob handler validates origin, metadata and author BEFORE it decodes
+    // or looks up the bytes (lib.rs versionedBinary.writeBlob), the OPPOSITE
+    // order from versionedBinary.write, which decodes first. So a request that
+    // is wrong in both ways answers `invalid-metadata` here and `invalid-input`
+    // there. binaryWrite re-derives these; this call is for the refusal order.
+    requiredOrigin(params);
+    metadataField(params, "summary");
+    metadataField(params, "correlationId");
     const encoded = optionalString(params, "bytesBase64");
     const bytes =
       encoded === undefined
