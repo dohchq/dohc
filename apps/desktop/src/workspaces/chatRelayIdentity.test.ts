@@ -5,6 +5,7 @@ import {
   joinedChannelMatchesCredentials,
   resolveChatRelayIdentity,
   resolveWorkspaceRelayAuthorId,
+  syncEnrollmentRemoteWorkspaceId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityStore,
 } from "./chatRelayIdentity";
@@ -68,17 +69,6 @@ describe("resolveWorkspaceRelayAuthorId", () => {
         userId: "user-2",
       }),
     ).toBeUndefined();
-    expect(
-      resolveWorkspaceRelayAuthorId(
-        workspace({
-          remote: {
-            serverUrl: "https://cloud.test/",
-            remoteWorkspaceId: "remote-workspace-1",
-          },
-        }),
-        credentials,
-      ),
-    ).toBeUndefined();
     expect(resolveWorkspaceRelayAuthorId(workspace(), null)).toBeUndefined();
     expect(
       resolveWorkspaceRelayAuthorId(workspace({ remote: undefined }), credentials),
@@ -87,19 +77,10 @@ describe("resolveWorkspaceRelayAuthorId", () => {
 });
 
 describe("persisted relay account pins", () => {
-  it("rejects legacy workspace remotes and same-server account mismatches", () => {
+  it("rejects same-server account mismatches", () => {
     expect(workspaceRemoteMatchesCredentials(workspace().remote!, credentials)).toBe(
       true,
     );
-    expect(
-      workspaceRemoteMatchesCredentials(
-        {
-          serverUrl: "https://cloud.test/",
-          remoteWorkspaceId: "remote-workspace-1",
-        },
-        credentials,
-      ),
-    ).toBe(false);
     expect(
       workspaceRemoteMatchesCredentials(
         {
@@ -112,14 +93,8 @@ describe("persisted relay account pins", () => {
     ).toBe(false);
   });
 
-  it("requires the joined channel relay and account pins", () => {
+  it("requires the joined channel relay and account", () => {
     expect(joinedChannelMatchesCredentials(joinedChannel, credentials)).toBe(true);
-    expect(
-      joinedChannelMatchesCredentials(
-        { ...joinedChannel, recipientUserId: undefined },
-        credentials,
-      ),
-    ).toBe(false);
     expect(
       joinedChannelMatchesCredentials(joinedChannel, {
         ...credentials,
@@ -170,18 +145,6 @@ describe("resolveChatRelayIdentity", () => {
       }),
     ).resolves.toEqual({ joinedChannel });
 
-    const legacyJoinedChannel = {
-      ...joinedChannel,
-      recipientUserId: undefined,
-    };
-    await expect(
-      resolveChatRelayIdentity({
-        workspace: workspace({ sharedChannels: [legacyJoinedChannel] }),
-        credentials,
-        store,
-        target: { channelId: "channel-shared" },
-      }),
-    ).resolves.toEqual({ joinedChannel: legacyJoinedChannel });
   });
 
   it("uses the workspace cloud identity outside joined channels", async () => {
@@ -234,17 +197,6 @@ describe("assertSharedChannelMessageIdentity", () => {
     ).toThrowError("Sign in to the account that joined this shared channel.");
   });
 
-  it("requires legacy channels to be left and joined again", () => {
-    expect(() =>
-      assertSharedChannelMessageIdentity({
-        joinedChannel: { ...joinedChannel, recipientUserId: undefined },
-        credentials,
-      }),
-    ).toThrowError(
-      "This shared channel needs a new account link. Leave it, then join it again.",
-    );
-  });
-
   it("allows matching shared-channel identity and local messages", () => {
     expect(() =>
       assertSharedChannelMessageIdentity({
@@ -259,5 +211,34 @@ describe("assertSharedChannelMessageIdentity", () => {
         credentials: null,
       }),
     ).not.toThrow();
+  });
+});
+
+describe("syncEnrollmentRemoteWorkspaceId", () => {
+  it("reuses the current account's remote id", () => {
+    expect(syncEnrollmentRemoteWorkspaceId(workspace(), credentials)).toBe(
+      "remote-workspace-1",
+    );
+    expect(
+      syncEnrollmentRemoteWorkspaceId(
+        workspace({ remote: undefined }),
+        credentials,
+      ),
+    ).toBe("workspace-1");
+  });
+
+  it("rejects a different server or account", () => {
+    expect(() =>
+      syncEnrollmentRemoteWorkspaceId(workspace(), {
+        ...credentials,
+        serverUrl: "https://other-cloud.test",
+      }),
+    ).toThrowError("Sign in to the cloud server this workspace uses.");
+    expect(() =>
+      syncEnrollmentRemoteWorkspaceId(workspace(), {
+        ...credentials,
+        userId: "user-2",
+      }),
+    ).toThrowError("Sign in to the account that synced this workspace.");
   });
 });

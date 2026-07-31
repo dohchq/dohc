@@ -1898,7 +1898,6 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: RelayWorkspaceParams = parse(params)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
-        let fresh_origin_id = recovered_origin_id()?;
         let outcome = self
             .relay_execute(
                 ctx,
@@ -1906,7 +1905,6 @@ impl EngineService {
                 configuration,
                 RelayOperation::Push {
                     workspace_id: open.workspace_id.clone(),
-                    fresh_origin_id,
                 },
                 "sync.push",
             )

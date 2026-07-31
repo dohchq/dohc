@@ -272,7 +272,6 @@ impl std::fmt::Debug for RelayConfiguration {
 pub enum RelayOperation {
     Push {
         workspace_id: String,
-        fresh_origin_id: String,
     },
     Pull {
         workspace_id: String,
@@ -6321,11 +6320,8 @@ fn execute_relay_operation(
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let client = RelaySyncClient::new(transport);
     match operation {
-        RelayOperation::Push {
-            workspace_id,
-            fresh_origin_id,
-        } => client
-            .push_workspace_with_fresh_origin(store, &workspace_id, &fresh_origin_id, &NoFaults)
+        RelayOperation::Push { workspace_id } => client
+            .push_workspace(store, &workspace_id, &NoFaults)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::Pull { workspace_id } => client

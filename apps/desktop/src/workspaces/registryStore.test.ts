@@ -75,36 +75,6 @@ describe("registry store", () => {
     });
   });
 
-  it("reads remote and joined-channel records written before account pins existed", async () => {
-    await writeFile(
-      registryPath,
-      JSON.stringify({
-        version: 1,
-        workspaces: [
-          {
-            ...personal,
-            remote: {
-              serverUrl: "https://cloud.dohc.example",
-              remoteWorkspaceId: "rw-99",
-            },
-            sharedChannels: [
-              {
-                shareId: "share-1",
-                channelWireId: "wire-team",
-                access: "read-write",
-                granterEmail: "owner@example.com",
-                relayUrl: "http://relay.test",
-              },
-            ],
-          },
-        ],
-      }),
-    );
-    const legacy = createRegistryStore(registryPath).find("ws-1");
-    expect(legacy?.remote?.ownerUserId).toBeUndefined();
-    expect(legacy?.sharedChannels?.[0]?.recipientUserId).toBeUndefined();
-  });
-
   it("persists and clears the first-pull join maintenance gate", () => {
     store.register({ ...personal, joinBootstrapPending: true });
     const reopened = createRegistryStore(registryPath);

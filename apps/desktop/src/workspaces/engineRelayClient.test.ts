@@ -552,6 +552,7 @@ describe("EngineRelayClient", () => {
             access: "read-only",
             granterEmail: "owner@example.com",
             relayUrl: relay.baseUrl,
+            recipientUserId: "member-1",
           },
         ],
         pull: async (input) =>

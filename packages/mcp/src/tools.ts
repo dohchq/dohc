@@ -983,7 +983,7 @@ export async function deleteWorkspacePath(
 interface RemoteIdentity {
   serverUrl: string;
   remoteWorkspaceId: string;
-  ownerUserId?: string;
+  ownerUserId: string;
 }
 
 interface RegistryWorkspace {
@@ -1049,7 +1049,8 @@ function validRemote(remote: unknown): remote is RemoteIdentity {
     remote !== null &&
     typeof remote === "object" &&
     nonEmptyString((remote as RemoteIdentity).serverUrl) &&
-    nonEmptyString((remote as RemoteIdentity).remoteWorkspaceId)
+    nonEmptyString((remote as RemoteIdentity).remoteWorkspaceId) &&
+    nonEmptyString((remote as RemoteIdentity).ownerUserId)
   );
 }
 
@@ -1060,19 +1061,6 @@ async function remoteForCurrentWorkspace(
   if (validRemote(entry?.remote)) {
     return { workspaceId: entry?.workspaceId, ...entry.remote };
   }
-
-  // A workspace can carry a sync manifest even if the desktop registry is not
-  // available to this MCP process (e.g. copied config or test fixture). Treat
-  // the manifest as a fallback binding, never as an auth credential.
-  const manifest = await readSyncManifest(ctx);
-  if (nonEmptyString(manifest?.serverUrl) && nonEmptyString(manifest?.remoteWorkspaceId)) {
-    return {
-      workspaceId: manifest.workspaceId,
-      serverUrl: manifest.serverUrl,
-      remoteWorkspaceId: manifest.remoteWorkspaceId,
-    };
-  }
-
   return null;
 }
 
@@ -1160,7 +1148,6 @@ function credentialStatusFor(
         | "missing"
         | "encrypted"
         | "invalid"
-        | "workspace-owner-missing"
         | "server-mismatch"
         | "account-mismatch";
     }
@@ -1168,9 +1155,6 @@ function credentialStatusFor(
   if (!remote) return { cloudConnected: false, credentialStatus: "not-needed" };
   if (!credentials.ok) {
     return { cloudConnected: false, credentialStatus: credentials.status };
-  }
-  if (!nonEmptyString(remote.ownerUserId)) {
-    return { cloudConnected: false, credentialStatus: "workspace-owner-missing" };
   }
   if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {
     return { cloudConnected: false, credentialStatus: "server-mismatch" };

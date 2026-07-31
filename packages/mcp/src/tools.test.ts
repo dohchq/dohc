@@ -122,7 +122,7 @@ async function bindCloudWorkspace(
   options: {
     serverUrl?: string;
     remoteWorkspaceId?: string;
-    ownerUserId?: string | null;
+    ownerUserId?: string;
     credentialUserId?: string | null;
     token?: string;
     credentials?: boolean;
@@ -130,7 +130,7 @@ async function bindCloudWorkspace(
 ) {
   const serverUrl = options.serverUrl ?? "http://cloud.test";
   const remoteWorkspaceId = options.remoteWorkspaceId ?? "ws-1";
-  const ownerUserId = options.ownerUserId === undefined ? "user-1" : options.ownerUserId;
+  const ownerUserId = options.ownerUserId ?? "user-1";
   const credentialUserId =
     options.credentialUserId === undefined ? "user-1" : options.credentialUserId;
   await writeFile(
@@ -146,7 +146,7 @@ async function bindCloudWorkspace(
           remote: {
             serverUrl,
             remoteWorkspaceId,
-            ...(ownerUserId === null ? {} : { ownerUserId }),
+            ownerUserId,
           },
         },
       ],
@@ -464,24 +464,12 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("workspace_status treats a legacy credential without userId as signed out", async () => {
+  it("workspace_status treats a stored credential without userId as signed out", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx, { credentialUserId: null });
       expect(await workspaceStatus(ctx)).toMatchObject({
         cloudConnected: false,
         credentialStatus: "missing",
-      });
-    });
-  });
-
-  it("workspace_status disconnects a legacy remote without an owner pin", async () => {
-    await withWorkspace(async (ctx) => {
-      await bindCloudWorkspace(ctx, { ownerUserId: null });
-      expect(await workspaceStatus(ctx)).toMatchObject({
-        synced: true,
-        scope: "cloud",
-        cloudConnected: false,
-        credentialStatus: "workspace-owner-missing",
       });
     });
   });

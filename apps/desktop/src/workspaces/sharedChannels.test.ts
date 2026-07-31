@@ -34,6 +34,7 @@ function joined(overrides: Partial<JoinedSharedChannel> = {}): JoinedSharedChann
     granterEmail: "owner@example.com",
     relayUrl: "http://relay.test",
     ...overrides,
+    recipientUserId: overrides.recipientUserId ?? "member-1",
   };
 }
 

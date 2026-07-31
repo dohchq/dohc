@@ -121,15 +121,22 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("cloudLoginPoll")).toContain(
       "if (relayChanged || accountChanged)",
     );
-    expect(handlerSource("cloudLoginPoll")).toContain(
-      "await pinLegacyWorkspaceRemotesForCurrentAccount()",
-    );
-    expect(mainSource).toContain("}).probe()");
+    expect(mainSource).not.toContain("pinLegacyWorkspaceRemotesForCurrentAccount");
     expect(handlerSource("cloudEnableSync")).toContain(
       "syncEnrollmentRemoteWorkspaceId(",
     );
     expect(handlerSource("cloudEnableSync")).toContain(
       "workspaceId: remoteWorkspaceId",
+    );
+  });
+
+  it("revalidates owner agent-message authorship after the authorization await", () => {
+    const start = mainSource.indexOf("authorizeServiceNote: async");
+    const end = mainSource.indexOf("onMessagePosted:", start);
+    const authorizeServiceNote = mainSource.slice(start, end);
+
+    expect(authorizeServiceNote).toContain(
+      "identity.authorUserId === verifiedUserId &&",
     );
   });
 

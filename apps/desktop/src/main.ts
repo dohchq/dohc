@@ -313,6 +313,7 @@ import {
   joinedChannelMatchesCredentials,
   resolveChatRelayIdentity,
   resolveWorkspaceRelayAuthorId,
+  syncEnrollmentRemoteWorkspaceId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
@@ -333,10 +334,6 @@ import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { claimDmHome, readDmHome } from "./workspaces/dmHomeStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
-import {
-  pinVerifiedLegacyWorkspaceRemotes,
-  syncEnrollmentRemoteWorkspaceId,
-} from "./workspaces/legacyWorkspaceRemotePin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import {
   chatViewerAuthorId,
@@ -1189,11 +1186,6 @@ async function remoteForWorkspace(workspaceId: string) {
   const credentials = cachedCredentials;
   if (!credentials) throw new Error("Sign in to dohc Cloud first.");
   if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
-    if (!remote.ownerUserId) {
-      throw new Error(
-        "This workspace needs a new cloud account link before it can use cloud features.",
-      );
-    }
     if (
       normalizeServerUrl(credentials.serverUrl) !==
       normalizeServerUrl(remote.serverUrl)
@@ -1367,8 +1359,6 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
     if (!syncCredentials?.relayUrl) return;
     const relayUrl = syncCredentials.relayUrl;
     // A joined channel syncs only for the relay account that joined it.
-    // Legacy rows without an account pin stay readable and are skipped rather
-    // than risking a wrong-account 404 being recorded as "ended".
     const matching = channels.filter((channel) =>
       joinedChannelMatchesCredentials(channel, syncCredentials),
     );
@@ -1526,37 +1516,6 @@ function relayClientForWorkspace(input: {
     throw new Error("Rust engine relay client is unavailable.");
   }
   return rustEngineRelayClient.bind(input);
-}
-
-async function pinLegacyWorkspaceRemotesForCurrentAccount(): Promise<void> {
-  const credentials = cachedCredentials;
-  if (!credentials?.relayUrl) return;
-  const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
-  const result = await pinVerifiedLegacyWorkspaceRemotes({
-    workspaces: listWorkspaces(),
-    credentials,
-    verifyOwnership: async (workspace) => {
-      await relayClientForWorkspace({
-        workspaceId: workspace.remote!.remoteWorkspaceId,
-        rootPath: workspace.rootPath,
-        relay,
-      }).probe();
-    },
-    isCurrent: (workspace, verifiedCredentials) => {
-      const current = findWorkspace(workspace.workspaceId);
-      const currentRemote = current?.remote;
-      return (
-        cachedCredentials === verifiedCredentials &&
-        currentRemote !== undefined &&
-        currentRemote.ownerUserId === undefined &&
-        currentRemote.serverUrl === workspace.remote?.serverUrl &&
-        currentRemote.remoteWorkspaceId ===
-          workspace.remote?.remoteWorkspaceId
-      );
-    },
-    pin: setWorkspaceRemote,
-  });
-  if (result.pinned.length > 0) notifyRenderer();
 }
 
 function engineForWorkspace(
@@ -2191,8 +2150,8 @@ const chatDispatchService = createChatDispatchService({
         threadId,
       });
       return (
-        identity.joinedChannel === null ||
-        (verifiedUserId !== undefined && identity.authorUserId === verifiedUserId)
+        identity.authorUserId === verifiedUserId &&
+        (identity.joinedChannel === null || verifiedUserId !== undefined)
       );
     } catch (error) {
       if (!(error instanceof SharedChannelReadOnlyError)) throw error;
@@ -3776,7 +3735,6 @@ function registerIpcHandlers(
         await activity.stopEngines();
         await closeAllRelayTransportWorkspaces();
       }
-      await pinLegacyWorkspaceRemotesForCurrentAccount();
       // Attach engines to already-open cloud-enabled workspaces that were
       // opened local-only because no session existed yet.
       activity.reconcileCloud(engineForWorkspace);
@@ -7746,8 +7704,7 @@ if (!app.requestSingleInstanceLock()) {
 
     // Load persisted cloud credentials after the first window exists so local
     // workspaces do not pay credential-store I/O on the visible-launch path.
-    void warmCredentialCache().then(async () => {
-      await pinLegacyWorkspaceRemotesForCurrentAccount();
+    void warmCredentialCache().then(() => {
       activity.reconcileCloud(engineForWorkspace);
     });
 

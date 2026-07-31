@@ -50,6 +50,7 @@ function joined(overrides: Partial<JoinedSharedChannel> & { channelWireId: strin
     granterEmail: "alice@x.com",
     relayUrl: "http://relay.test",
     ...overrides,
+    recipientUserId: overrides.recipientUserId ?? "member-1",
   };
 }
 

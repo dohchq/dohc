@@ -35,7 +35,6 @@ export function workspaceRemoteMatchesCredentials(
 ): boolean {
   return (
     credentials !== null &&
-    remote.ownerUserId !== undefined &&
     serverUrlsMatch(remote.serverUrl, credentials.serverUrl) &&
     remote.ownerUserId === credentials.userId
   );
@@ -47,7 +46,6 @@ export function joinedChannelMatchesCredentials(
 ): boolean {
   return (
     credentials?.relayUrl !== undefined &&
-    channel.recipientUserId !== undefined &&
     channel.recipientUserId === credentials.userId &&
     relayUrlsMatch(credentials.relayUrl, channel.relayUrl)
   );
@@ -59,12 +57,26 @@ export function resolveWorkspaceRelayAuthorId(
 ): string | undefined {
   if (
     !workspace.remote ||
-    !workspace.remote.ownerUserId ||
     !workspaceRemoteMatchesCredentials(workspace.remote, credentials)
   ) {
     return;
   }
   return workspace.remote.ownerUserId;
+}
+
+export function syncEnrollmentRemoteWorkspaceId(
+  workspace: Pick<RegistryEntry, "workspaceId" | "remote">,
+  credentials: Pick<CloudCredentials, "serverUrl" | "userId">,
+): string {
+  const remote = workspace.remote;
+  if (!remote) return workspace.workspaceId;
+  if (!serverUrlsMatch(remote.serverUrl, credentials.serverUrl)) {
+    throw new Error("Sign in to the cloud server this workspace uses.");
+  }
+  if (remote.ownerUserId !== credentials.userId) {
+    throw new Error("Sign in to the account that synced this workspace.");
+  }
+  return remote.remoteWorkspaceId;
 }
 
 export async function resolveChatRelayIdentity(input: {
@@ -97,11 +109,6 @@ export function assertSharedChannelMessageIdentity(input: {
   authorUserId?: string;
 }): void {
   if (!input.joinedChannel) return;
-  if (!input.joinedChannel.recipientUserId) {
-    throw new Error(
-      "This shared channel needs a new account link. Leave it, then join it again.",
-    );
-  }
   if (!input.credentials) {
     throw new Error("Sign in to dohc Cloud to send a message in this shared channel.");
   }
