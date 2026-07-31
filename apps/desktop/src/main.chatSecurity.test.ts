@@ -116,12 +116,13 @@ describe("main-process chat authorization", () => {
       "workspaceRemoteMatchesCredentials(workspace.remote, credentials)",
     );
     const loginPoll = handlerSource("cloudLoginPoll");
+    expect(loginPoll).toContain("await adoptCompletedCloudLoginSession({");
     const loginReplacementSteps = [
-      "clearCachedCredentials();",
-      "await activity.stopEngines();",
-      "await closeAllRelayTransportWorkspaces();",
-      "await refreshCredentialCache();",
-      "activity.reconcileCloud(engineForWorkspace);",
+      "clearCachedCredentials()",
+      "activity.stopEngines()",
+      "closeAllRelayTransportWorkspaces()",
+      "refreshCredentialCache()",
+      "activity.reconcileCloud(engineForWorkspace)",
     ];
     let previousStep = -1;
     for (const step of loginReplacementSteps) {

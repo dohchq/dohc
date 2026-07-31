@@ -21,6 +21,9 @@ export interface EngineWorkspace {
   workspaceId: string;
   rootPath: string;
   shareMount?: true;
+  // One-shot maintenance/bootstrap opens can suppress capture, then close the
+  // session before the ordinary desktop activity opens it with capture.
+  captureMode?: "none";
 }
 
 export interface EngineWorkspaceBinding {
@@ -400,6 +403,7 @@ export class EngineWorkspaceSessions {
     const hasCaptureAuthor = this.captureAuthors.has(workspace.workspaceId);
     const shareMount =
       workspace.shareMount === true || this.shareMounts.has(workspace.workspaceId);
+    const captureDisabled = shareMount || workspace.captureMode === "none";
     const raw = await requester.request(
       WORKSPACE_METHOD.open,
       {
@@ -409,8 +413,8 @@ export class EngineWorkspaceSessions {
         // A daemon-side open must therefore preserve running claims on both a
         // fresh desktop boot and a sidecar-only rebind.
         recoverRunningDispatches: false,
-        ...(shareMount ? { captureMode: "none" as const } : {}),
-        ...(!shareMount && hasCaptureAuthor
+        ...(captureDisabled ? { captureMode: "none" as const } : {}),
+        ...(!captureDisabled && hasCaptureAuthor
           ? {
               captureAuthor:
                 this.captureAuthors.get(workspace.workspaceId) ?? null,

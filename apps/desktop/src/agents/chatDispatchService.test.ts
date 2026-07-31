@@ -2804,6 +2804,7 @@ describe("chatDispatchService", () => {
     });
     expect(openingMessages[0]).toMatchObject({
       author: { kind: "agent" },
+      authorUserId: "user_local",
       origin: "cli",
     });
 

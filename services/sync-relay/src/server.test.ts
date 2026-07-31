@@ -165,6 +165,7 @@ describe("sync relay handler", () => {
       request(null, "/sync/workspace-a/blobs/have", jsonBody({ sha256s: [blobSha] })),
       request(null, "/sync/workspace-a/keys", { method: "GET" }),
       request(null, "/sync/workspace-a/keys", { method: "PUT", body: "{}" }),
+      request(null, "/sync/workspace-a/bootstrap", { method: "GET" }),
       request(null, "/sync/workspace-a/epoch", jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 })),
       request(null, "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op(0)] })),
       request(null, "/sync/workspace-a/log?since=0", { method: "GET" }),
@@ -196,6 +197,7 @@ describe("sync relay handler", () => {
       (ws: string) => request("intruder", `/sync/${ws}/blobs/have`, jsonBody({ sha256s: [blobSha] })),
       (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "GET" }),
       (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "PUT", body: "{}" }),
+      (ws: string) => request("intruder", `/sync/${ws}/bootstrap`, { method: "GET" }),
       (ws: string) => request("intruder", `/sync/${ws}/epoch`, jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 })),
       (ws: string) => request("intruder", `/sync/${ws}/log`, jsonBody({ originId: "origin-b", ops: [op(0)] })),
       (ws: string) => request("intruder", `/sync/${ws}/log?since=0`, { method: "GET" }),
@@ -1014,6 +1016,95 @@ describe("sync relay handler", () => {
 });
 
 describe("sync relay epoch and stream identity enforcement", () => {
+  it("returns content presence and the current identity in one owner-only bootstrap read", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+
+    const empty = await h(
+      request("a", "/sync/workspace-a/bootstrap", { method: "GET" }),
+    );
+    expect(empty.status).toBe(200);
+    expect(await json(empty)).toEqual({
+      ok: true,
+      hasContent: false,
+      replicationEpoch: null,
+      streamIdentity: null,
+    });
+
+    const pushed = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(withIdentity({ originId: "origin-a", ops: [op(0)] })),
+      ),
+    );
+    expect(pushed.status).toBe(200);
+
+    const established = await h(
+      request("a", "/sync/workspace-a/bootstrap", { method: "GET" }),
+    );
+    expect(established.status).toBe(200);
+    expect(await json(established)).toEqual({
+      ok: true,
+      hasContent: true,
+      replicationEpoch: EPOCH_1,
+      streamIdentity: STREAM_1,
+    });
+
+    const rotated = await h(
+      request(
+        "a",
+        "/sync/workspace-a/epoch",
+        jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+      ),
+    );
+    expect(rotated.status).toBe(200);
+    expect(
+      await json(
+        await h(
+          request("a", "/sync/workspace-a/bootstrap", { method: "GET" }),
+        ),
+      ),
+    ).toEqual({
+      ok: true,
+      hasContent: false,
+      replicationEpoch: EPOCH_2,
+      streamIdentity: STREAM_2,
+    });
+
+    const pushedAfterRotation = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(
+          withIdentity(
+            { originId: "origin-b", ops: [op(0)] },
+            EPOCH_2,
+            STREAM_2,
+          ),
+        ),
+      ),
+    );
+    expect(pushedAfterRotation.status).toBe(200);
+    expect(
+      await json(
+        await h(
+          request("a", "/sync/workspace-a/bootstrap", { method: "GET" }),
+        ),
+      ),
+    ).toEqual({
+      ok: true,
+      hasContent: true,
+      replicationEpoch: EPOCH_2,
+      streamIdentity: STREAM_2,
+    });
+    expect(
+      (await h(request("a", "/sync/workspace-a/bootstrap", { method: "POST" })))
+        .status,
+    ).toBe(405);
+  });
+
   it("first identity-bearing push claims the workspace identity and matching pushes keep it", async () => {
     const storage = await testStorage();
     const h = handler(storage);

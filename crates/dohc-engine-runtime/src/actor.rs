@@ -88,8 +88,8 @@ use dohc_engine_sync::{
     PushResponse, RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport,
     ReplicationEnvelope, ShareBlobRequest, ShareCursor, ShareViewPullOutcome, ShareViewRequest,
     ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
-    SharedChannelResponse, SyncPassOutcome, apply_conflict_envelope, read_replayed_refusal,
-    read_sync_identity, retain_refusal_for_direct_retry,
+    SharedChannelResponse, SyncPassOutcome, adopt_join_identity, apply_conflict_envelope,
+    read_replayed_refusal, read_sync_identity, retain_refusal_for_direct_retry,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
@@ -285,6 +285,17 @@ pub enum RelayOperation {
     },
     Claim {
         workspace_id: String,
+        new_origin_id: String,
+        new_replication_epoch: String,
+        new_stream_identity: String,
+        created_at_ms: i64,
+    },
+    AdoptJoinIdentity {
+        workspace_id: String,
+        new_origin_id: String,
+        replication_epoch: String,
+        stream_identity: String,
+        created_at_ms: i64,
     },
     RecoverOrigin {
         workspace_id: String,
@@ -758,6 +769,7 @@ pub enum RelayOperationOutcome {
     CursorCommitted,
     Probe(bool),
     Claimed,
+    JoinIdentityAdopted,
     Recovered(RecoverResponse),
     KeyEnvelopeUploaded { etag: String },
     KeyEnvelopeDownloaded { envelope_json: String, etag: String },
@@ -6347,9 +6359,34 @@ fn execute_relay_operation(
                 .map(|response| RelayOperationOutcome::Probe(response.has_content))
                 .map_err(RuntimeError::from)
         }
-        RelayOperation::Claim { workspace_id } => {
-            let identity = read_sync_identity(store, &workspace_id)?
-                .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?;
+        RelayOperation::Claim {
+            workspace_id,
+            new_origin_id,
+            new_replication_epoch,
+            new_stream_identity,
+            created_at_ms,
+        } => {
+            let identity = match read_sync_identity(store, &workspace_id)? {
+                Some(identity) => identity,
+                None => {
+                    match adopt_join_identity(
+                        store,
+                        &workspace_id,
+                        &new_origin_id,
+                        &new_replication_epoch,
+                        &new_stream_identity,
+                        created_at_ms,
+                        &NoFaults,
+                    )? {
+                        TxnOutcome::Committed(_) => {}
+                        TxnOutcome::Crashed { .. } => {
+                            return Err(RuntimeError::OperationCrashed);
+                        }
+                    }
+                    read_sync_identity(store, &workspace_id)?
+                        .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?
+                }
+            };
             client.claim_workspace(ClaimRequest {
                 workspace_id,
                 replication_epoch: identity.replication_epoch,
@@ -6357,6 +6394,24 @@ fn execute_relay_operation(
             })?;
             Ok(RelayOperationOutcome::Claimed)
         }
+        RelayOperation::AdoptJoinIdentity {
+            workspace_id,
+            new_origin_id,
+            replication_epoch,
+            stream_identity,
+            created_at_ms,
+        } => match adopt_join_identity(
+            store,
+            &workspace_id,
+            &new_origin_id,
+            &replication_epoch,
+            &stream_identity,
+            created_at_ms,
+            &NoFaults,
+        )? {
+            TxnOutcome::Committed(_) => Ok(RelayOperationOutcome::JoinIdentityAdopted),
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
         RelayOperation::RecoverOrigin {
             workspace_id,
             new_origin_id,

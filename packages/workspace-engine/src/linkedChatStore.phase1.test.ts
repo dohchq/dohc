@@ -148,6 +148,132 @@ function decisionEnvelope(input: {
 }
 
 describe("phase-one linked chat model", () => {
+  it("keeps unsigned messages and their derived state local", async () => {
+    const engine = await makeEngine("unsigned-local");
+    const channel = await engine.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const opCountBeforeMessages = replicationOps(engine).length;
+    const started = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Local opening",
+      needsDecision: true,
+      attachments: [{ objectId: "object-local-opening", pathHint: "opening.md" }],
+    });
+    const reply = await engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+      parentMessageId: started.message.id,
+      author: { kind: "agent", displayName: "Your agent" },
+      body: "Local reply",
+      needsDecision: true,
+      attachments: [{ objectId: "object-local-reply", pathHint: "reply.md" }],
+    });
+    const reaction = await engine.store.setReaction({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+      messageId: reply.id,
+      emoji: "👍",
+      author: { authorId: "local-user", kind: "human", displayName: "You" },
+      state: "added",
+    });
+
+    expect(replicationOps(engine)).toHaveLength(opCountBeforeMessages);
+    expect(
+      (await engine.store.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: started.thread.id,
+      })).map((message) => message.id),
+    ).toEqual([started.message.id, reply.id]);
+    expect(await engine.store.listThreadDecisions(WORKSPACE_ID, started.thread.id)).toHaveLength(2);
+    expect(await engine.store.listThreadAttachments(WORKSPACE_ID, started.thread.id)).toHaveLength(2);
+    expect(await engine.store.listReactions({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+    })).toEqual([reaction]);
+  });
+
+  it("rejects a mismatched reaction replication author without changing local state", async () => {
+    const engine = await makeEngine("reaction-author-mismatch");
+    const channel = await engine.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const started = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      authorUserId: "user-a",
+      body: "Authored opening",
+    });
+    const opCountBeforeReaction = replicationOps(engine).length;
+
+    await expect(engine.store.setReaction({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+      messageId: started.message.id,
+      emoji: "👍",
+      author: { authorId: "user-a", kind: "human", displayName: "You" },
+      replicationAuthorId: "user-b",
+      state: "added",
+    })).rejects.toMatchObject({ code: "invalid-sender" });
+
+    expect(replicationOps(engine)).toHaveLength(opCountBeforeReaction);
+    expect(await engine.store.listReactions({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+    })).toEqual([]);
+  });
+
+  it("journals verified messages, decisions, attachments, and reactions", async () => {
+    const engine = await makeEngine("verified-journal");
+    const channel = await engine.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const opCountBeforeMessages = replicationOps(engine).length;
+    const started = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      authorUserId: "verified-user",
+      body: "Verified opening",
+      needsDecision: true,
+      attachments: [{ objectId: "object-verified-opening", pathHint: "opening.md" }],
+    });
+    const reply = await engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+      parentMessageId: started.message.id,
+      author: { kind: "agent", displayName: "Your agent" },
+      authorUserId: "verified-user",
+      body: "Verified reply",
+      needsDecision: true,
+      attachments: [{ objectId: "object-verified-reply", pathHint: "reply.md" }],
+    });
+    await engine.store.setReaction({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+      messageId: reply.id,
+      emoji: "🎉",
+      author: { authorId: "verified-user", kind: "human", displayName: "You" },
+      replicationAuthorId: "verified-user",
+      state: "added",
+    });
+
+    const ops = replicationOps(engine).slice(opCountBeforeMessages);
+    expect(ops.map((op) => op.opKind)).toEqual([
+      "chat.thread.create",
+      "chat.message.append",
+      "chat.decision.set",
+      "chat.attachment.add",
+      "chat.message.append",
+      "chat.decision.set",
+      "chat.attachment.add",
+      "chat.reaction.set",
+    ]);
+    const messageOps = ops.filter((op) => op.opKind === "chat.message.append");
+    expect(messageOps.map((op) => op.payload.authorUserId)).toEqual([
+      "verified-user",
+      "verified-user",
+    ]);
+    expect(messageOps[1]?.payload.parentMessageId).toBe(started.message.id);
+  });
+
   it("round-trips CLI origin locally and omits it from ordinary message ops", async () => {
     const engine = await makeEngine("cli-origin-local");
     const channel = await engine.store.ensureGeneralChannel({
@@ -157,6 +283,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       channelId: channel.id,
       author: { kind: "human", displayName: "You" },
+      authorUserId: "cli-user",
       origin: "cli",
       body: "CLI opening",
     });
@@ -164,6 +291,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       threadId: started.thread.id,
       author: { kind: "agent", displayName: "Your agent" },
+      authorUserId: "cli-user",
       origin: "cli",
       body: "CLI reply",
     });
@@ -171,6 +299,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       threadId: started.thread.id,
       author: { kind: "human", displayName: "You" },
+      authorUserId: "cli-user",
       body: "Ordinary reply",
     });
 
@@ -213,6 +342,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       channelId: channel.id,
       author: { kind: "human", displayName: "You" },
+      authorUserId: "cli-user",
       origin: "cli",
       body: "CLI opening",
     });
@@ -220,6 +350,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       threadId: started.thread.id,
       author: { kind: "agent", displayName: "Your agent" },
+      authorUserId: "cli-user",
       origin: "cli",
       body: "CLI reply",
     });
@@ -869,6 +1000,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       channelId: channel.id,
       author: { kind: "human", displayName: "You" },
+      authorUserId: "attachment-user",
       body: "Review this file",
       attachments: [
         { objectId: "object-plan", pathHint: "plans/launch.md" },
@@ -938,6 +1070,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       channelId: channel.id,
       author: { kind: "human", displayName: "You" },
+      authorUserId: "attachment-user",
       body: "Boundary heading",
       attachments: [{
         objectId: "object-boundary",
@@ -1011,6 +1144,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       channelId: channel.id,
       author: { kind: "human", displayName: "You" },
+      authorUserId: "attachment-user",
       body: "Shared file",
       attachments: [{ objectId: "object-private", pathHint: "private/plan.md" }],
     });
@@ -1648,6 +1782,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       channelId: channel.id,
       author: { kind: "human", displayName: "You" },
+      authorUserId: "mention-user",
       body: "Hello @Agent and @agent",
     });
     expect(await source.store.listMentionsForHandle(WORKSPACE_ID, "agent")).toEqual([
@@ -1678,6 +1813,7 @@ describe("phase-one linked chat model", () => {
       workspaceId: WORKSPACE_ID,
       threadId: started.thread.id,
       author: { kind: "human", displayName: "You" },
+      authorUserId: "mention-user",
       body: "New work for @agent",
     });
     expect(

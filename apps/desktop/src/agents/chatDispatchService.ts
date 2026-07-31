@@ -1650,6 +1650,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           channelId: agentChannel.id,
           title: SELF_TEST_THREAD_TITLE,
           author: { kind: "agent", displayName: identity.displayName },
+          ...(identity.verifiedUserId
+            ? { authorUserId: identity.verifiedUserId }
+            : {}),
           origin: "cli",
           body: SELF_TEST_SCRATCH_BODY,
         });

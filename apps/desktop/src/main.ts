@@ -333,7 +333,11 @@ import {
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { claimDmHome, readDmHome } from "./workspaces/dmHomeStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
-import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
+import {
+  adoptCompletedCloudLoginSession,
+  createCloudLogin,
+  type CloudLogin,
+} from "./workspaces/cloudLogin";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import {
@@ -369,6 +373,7 @@ import {
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  type RelayWorkspaceBootstrapResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
@@ -3749,17 +3754,22 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const result = await cloudLogin().poll();
     if (result.status === "complete") {
-      clearCachedCredentials();
       // A completed login can rotate the bearer token without changing the
       // server or user id. Rebuild every relay-bound engine from the new
       // credential snapshot instead of letting an existing engine keep the
       // previous token.
-      await activity.stopEngines();
-      await closeAllRelayTransportWorkspaces();
-      await refreshCredentialCache();
-      // Attach engines to already-open cloud-enabled workspaces that were
-      // opened local-only because no session existed yet.
-      activity.reconcileCloud(engineForWorkspace);
+      await adoptCompletedCloudLoginSession({
+        clearCachedCredentials: () => clearCachedCredentials(),
+        stopEngines: async () => await activity.stopEngines(),
+        closeRelayTransportWorkspaces: async () =>
+          await closeAllRelayTransportWorkspaces(),
+        refreshCredentialCache: async () => await refreshCredentialCache(),
+        // Attach engines to already-open cloud-enabled workspaces that were
+        // opened local-only because no session existed yet.
+        reconcileCloud: () => {
+          activity.reconcileCloud(engineForWorkspace);
+        },
+      });
     }
     return CloudLoginPollResult.parse(result);
   });
@@ -3923,8 +3933,9 @@ function registerIpcHandlers(
 
     // Pre-flight against the relay BEFORE creating anything locally.
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
+    let probe: RelayWorkspaceBootstrapResult;
     try {
-      const probe = await probeWorkspaceRelay(relayTransportRoutes, {
+      probe = await probeWorkspaceRelay(relayTransportRoutes, {
         workspaceId: parsed.workspaceId,
         relay,
       });
@@ -3957,11 +3968,25 @@ function registerIpcHandlers(
       bootstrap: "join",
     });
     const summary = WorkspaceSummary.parse(created);
-    registerWorkspace({ ...created, joinBootstrapPending: true });
-    refreshNativeWorkspaceSurfaces();
     try {
-      // Open first (watcher + engine capture on an empty folder), THEN bind
-      // the remote and enable sync. joinBootstrap makes the engine PULL-FIRST:
+      // Bootstrap the relay coordinate through a capture-free daemon session
+      // BEFORE registration exposes the workspace or activity.open can build
+      // capture and start its watcher. An unset relay is claimed; otherwise
+      // the pristine daemon adopts the relay's existing epoch and stream with
+      // its own new origin. The bootstrap session closes before the captured
+      // activity session opens.
+      const daemonRelay = relayClientForWorkspace({
+        workspaceId: parsed.workspaceId,
+        rootPath: created.rootPath,
+        relay,
+      });
+      await daemonRelay.bootstrapJoinIdentity(probe.identity);
+
+      registerWorkspace({ ...created, joinBootstrapPending: true });
+      refreshNativeWorkspaceSurfaces();
+
+      // Now open capture, bind the remote, and enable the pull-first engine.
+      // joinBootstrap makes the engine PULL-FIRST:
       // its start() is the first pull (materialize + cursor commit), and no
       // push can reach the relay before that pull succeeds — a fresh join can
       // never seed boilerplate into the remote or conflict against it.

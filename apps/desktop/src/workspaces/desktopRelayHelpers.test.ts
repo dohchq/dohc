@@ -17,9 +17,14 @@ function relay(fetch: typeof globalThis.fetch) {
 }
 
 describe("desktop relay helpers", () => {
-  it("probes only the first relay log item", async () => {
+  it("reads content presence and the authoritative relay identity together", async () => {
     const fetchMock = vi.fn<typeof globalThis.fetch>(async () =>
-      Response.json({ ops: [{ relaySeq: 1 }] }),
+      Response.json({
+        ok: true,
+        hasContent: true,
+        replicationEpoch: "epoch-a",
+        streamIdentity: "stream-a",
+      }),
     );
 
     await expect(
@@ -27,15 +32,47 @@ describe("desktop relay helpers", () => {
         workspaceId: "workspace/a",
         relay: relay(fetchMock),
       }),
-    ).resolves.toEqual({ hasContent: true });
+    ).resolves.toEqual({
+      hasContent: true,
+      identity: {
+        replicationEpoch: "epoch-a",
+        streamIdentity: "stream-a",
+      },
+    });
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://relay.test/sync/workspace%2Fa/log?since=0&limit=1",
+      "https://relay.test/sync/workspace%2Fa/bootstrap",
       expect.objectContaining({
         headers: expect.any(Headers),
       }),
     );
     const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
     expect(headers.get("authorization")).toBe("Bearer relay-token");
+  });
+
+  it("rejects a partial or control-character relay identity", async () => {
+    for (const response of [
+      {
+        ok: true,
+        hasContent: true,
+        replicationEpoch: "epoch-a",
+        streamIdentity: null,
+      },
+      {
+        ok: true,
+        hasContent: true,
+        replicationEpoch: "epoch-a\u0000suffix",
+        streamIdentity: "stream-a",
+      },
+    ]) {
+      await expect(
+        probeRelayWorkspace({
+          workspaceId: "workspace-a",
+          relay: relay(
+            vi.fn<typeof globalThis.fetch>(async () => Response.json(response)),
+          ),
+        }),
+      ).rejects.toThrow("Relay bootstrap response is invalid.");
+    }
   });
 
   it("maps probe authorization and availability failures to contract errors", async () => {

@@ -30,6 +30,55 @@ export interface CloudLogin {
   credentials(): Promise<CloudCredentials | null>;
 }
 
+export interface CompletedCloudLoginSessionOptions {
+  clearCachedCredentials(): void;
+  stopEngines(): Promise<void>;
+  closeRelayTransportWorkspaces(): Promise<void>;
+  refreshCredentialCache(): Promise<void>;
+  reconcileCloud(): void;
+}
+
+export async function adoptCompletedCloudLoginSession(
+  options: CompletedCloudLoginSessionOptions,
+): Promise<void> {
+  options.clearCachedCredentials();
+  const failures: unknown[] = [];
+
+  for (const cleanup of [
+    options.stopEngines,
+    options.closeRelayTransportWorkspaces,
+  ]) {
+    try {
+      await cleanup();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+
+  try {
+    await options.refreshCredentialCache();
+  } catch (error) {
+    failures.push(error);
+    throwTransitionFailures(failures);
+  }
+
+  try {
+    options.reconcileCloud();
+  } catch (error) {
+    failures.push(error);
+  }
+
+  if (failures.length > 0) throwTransitionFailures(failures);
+}
+
+function throwTransitionFailures(failures: unknown[]): never {
+  if (failures.length === 1) throw failures[0];
+  throw new AggregateError(
+    failures,
+    "Cloud login session transition did not complete.",
+  );
+}
+
 type PendingLogin = {
   epoch: number;
   serverUrl: string;

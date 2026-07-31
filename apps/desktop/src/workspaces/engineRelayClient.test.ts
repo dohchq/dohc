@@ -118,6 +118,8 @@ class MockDaemon implements EngineDaemonClient {
           };
         case "sync.claim":
           return { claimed: true };
+        case "sync.adoptJoinIdentity":
+          return { adopted: true };
         case "sync.probe":
           return { hasContent: true };
         case "share.channel.pull":
@@ -340,6 +342,68 @@ describe("EngineRelayClient", () => {
       },
     ]);
     await sessions.closeAll();
+  });
+
+  it("claims only an unset relay identity and adopts an established identity", async () => {
+    const { daemon, sessions, client } = await harness();
+
+    await expect(client.bootstrapJoinIdentity(null)).resolves.toBeUndefined();
+    await expect(
+      client.bootstrapJoinIdentity({
+        replicationEpoch: "epoch-relay",
+        streamIdentity: "stream-relay",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(
+      daemon.requests
+        .filter((request) =>
+          ["sync.claim", "sync.adoptJoinIdentity"].includes(request.method),
+        )
+        .map((request) => ({ method: request.method, params: request.params })),
+    ).toEqual([
+      { method: "sync.claim", params: { workspaceId: "workspace-a" } },
+      {
+        method: "sync.adoptJoinIdentity",
+        params: {
+          workspaceId: "workspace-a",
+          replicationEpoch: "epoch-relay",
+          streamIdentity: "stream-relay",
+        },
+      },
+    ]);
+    expect(daemon.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.claim",
+      "workspace.close",
+      "workspace.open",
+      "sync.adoptJoinIdentity",
+      "workspace.close",
+    ]);
+    for (const request of daemon.requests.filter(
+      (request) => request.method === "workspace.open",
+    )) {
+      expect(request.params).toMatchObject({ captureMode: "none" });
+    }
+    await sessions.closeAll();
+  });
+
+  it("orders join identity bootstrap before registration and activity capture", async () => {
+    const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
+    const bootstrap = source.indexOf(
+      "await daemonRelay.bootstrapJoinIdentity(probe.identity);",
+    );
+    const registration = source.indexOf(
+      "registerWorkspace({ ...created, joinBootstrapPending: true });",
+      bootstrap,
+    );
+    const activityOpen = source.indexOf(
+      "await openWorkspaceActivity(created",
+      bootstrap,
+    );
+    expect(bootstrap).toBeGreaterThanOrEqual(0);
+    expect(registration).toBeGreaterThan(bootstrap);
+    expect(activityOpen).toBeGreaterThan(registration);
   });
 
   it("refreshes a share view and commits its opaque daemon cursor", async () => {
@@ -622,12 +686,19 @@ describe("EngineRelayClient", () => {
     expect(routes.modeFor("workspace-probed")).toBe("daemon");
     finishProbe(
       globalThis.Response.json({
-        ops: [{}],
-        nextCursor: 1,
-        hasMore: false,
+        ok: true,
+        hasContent: true,
+        replicationEpoch: "epoch-probed",
+        streamIdentity: "stream-probed",
       }),
     );
-    await expect(probe).resolves.toEqual({ hasContent: true });
+    await expect(probe).resolves.toEqual({
+      hasContent: true,
+      identity: {
+        replicationEpoch: "epoch-probed",
+        streamIdentity: "stream-probed",
+      },
+    });
     expect(
       routes.modeFor("workspace-probed"),
       "a late probe cleanup must not release a newer daemon route",

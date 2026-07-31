@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { createCloudLogin, type CloudLoginStore } from "./cloudLogin";
+import {
+  adoptCompletedCloudLoginSession,
+  createCloudLogin,
+  type CloudLoginStore,
+} from "./cloudLogin";
 
 function memoryStore(): CloudLoginStore & { saved: CloudCredentials | null } {
   const box = {
@@ -422,5 +426,56 @@ describe("cloud device-flow login", () => {
 
     tokenResponse.resolve(Response.json({ access_token: "session-token-xyz" }));
     await expect(first).resolves.toMatchObject({ status: "complete" });
+  });
+});
+
+describe("completed cloud login session", () => {
+  it("adopts the saved credentials after a relay-close failure", async () => {
+    const savedCredentials: CloudCredentials = {
+      serverUrl: "http://cloud.test",
+      relayUrl: "ws://relay.test",
+      email: "new@dohc.test",
+      userId: "usr_new",
+      token: "new-session-token",
+    };
+    let cachedCredentials: CloudCredentials | null = {
+      ...savedCredentials,
+      email: "old@dohc.test",
+      userId: "usr_old",
+      token: "old-session-token",
+    };
+    const steps: string[] = [];
+    const relayCloseFailure = new Error("relay close failed");
+
+    const transition = adoptCompletedCloudLoginSession({
+      clearCachedCredentials() {
+        steps.push("clear credentials");
+        cachedCredentials = null;
+      },
+      async stopEngines() {
+        steps.push("stop engines");
+      },
+      async closeRelayTransportWorkspaces() {
+        steps.push("close relay workspaces");
+        throw relayCloseFailure;
+      },
+      async refreshCredentialCache() {
+        steps.push("refresh credentials");
+        cachedCredentials = savedCredentials;
+      },
+      reconcileCloud() {
+        steps.push(`reconcile ${cachedCredentials?.token ?? "signed-out"}`);
+      },
+    });
+
+    await expect(transition).rejects.toBe(relayCloseFailure);
+    expect(cachedCredentials).toEqual(savedCredentials);
+    expect(steps).toEqual([
+      "clear credentials",
+      "stop engines",
+      "close relay workspaces",
+      "refresh credentials",
+      "reconcile new-session-token",
+    ]);
   });
 });

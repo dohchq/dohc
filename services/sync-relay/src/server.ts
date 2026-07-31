@@ -53,6 +53,7 @@ type SyncRelayRoute =
   | { route: "blob"; workspaceId: string; sha256: string }
   | { route: "blob-have"; workspaceId: string }
   | { route: "gc"; workspaceId: string }
+  | { route: "bootstrap"; workspaceId: string }
   | { route: "epoch"; workspaceId: string }
   | { route: "keys"; workspaceId: string }
   | { route: "log"; workspaceId: string }
@@ -558,6 +559,17 @@ export function createSyncRelayHandler({
         );
       }
 
+      if (route.route === "bootstrap" && request.method === "GET") {
+        const bootstrap = storage.getWorkspaceBootstrap(route.workspaceId);
+        return jsonResponse({
+          ok: true,
+          hasContent: bootstrap.hasContent,
+          replicationEpoch: bootstrap.identity?.replicationEpoch ?? null,
+          streamIdentity: bootstrap.identity?.streamIdentity ?? null,
+        });
+      }
+      if (route.route === "bootstrap") throw methodNotAllowed();
+
       if (route.route === "epoch" && request.method === "POST") {
         const input = await readJsonObject(request);
         const replicationEpoch = parseWorkspaceIdentityValue(
@@ -912,6 +924,9 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "log") {
     return { route: "log", workspaceId };
+  }
+  if (parts.length === 3 && parts[2] === "bootstrap") {
+    return { route: "bootstrap", workspaceId };
   }
   if (parts.length === 3 && parts[2] === "epoch") {
     return { route: "epoch", workspaceId };

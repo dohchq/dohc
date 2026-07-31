@@ -1,15 +1,12 @@
 import type { WorkspaceId } from "@dohc/workspace-contracts/engine";
 import {
+  decodeRelayWorkspaceBootstrap,
   RelayConflictError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
-  type ProbeRelayWorkspaceResult,
+  type RelayWorkspaceBootstrapResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-
-interface RelayLogPage {
-  ops: unknown[];
-}
 
 function relayUrl(relay: SyncRelayConnection, path: string): string {
   return `${relay.baseUrl.replace(/\/+$/u, "")}${path}`;
@@ -36,10 +33,10 @@ async function jsonRelay<T>(
 export async function probeRelayWorkspace(input: {
   workspaceId: WorkspaceId;
   relay: SyncRelayConnection;
-}): Promise<ProbeRelayWorkspaceResult> {
-  const page = await jsonRelay<RelayLogPage>(
+}): Promise<RelayWorkspaceBootstrapResult> {
+  const bootstrap = await jsonRelay<unknown>(
     input.relay,
-    `/sync/${encodeURIComponent(input.workspaceId)}/log?since=0&limit=1`,
+    `/sync/${encodeURIComponent(input.workspaceId)}/bootstrap`,
   );
-  return { hasContent: page.ops.length > 0 };
+  return decodeRelayWorkspaceBootstrap(bootstrap);
 }

@@ -301,6 +301,7 @@ describe("sync folder replication", () => {
         workspaceId: WORKSPACE_ID,
         threadId: thread.id,
         author: { kind: "human", displayName: "Ice" },
+        authorUserId: "sync-user",
         body: "hello journal",
       });
 
@@ -372,6 +373,7 @@ describe("sync folder replication", () => {
         workspaceId: WORKSPACE_ID,
         threadId: thread.id,
         author: { kind: "agent", displayName: "Agent" },
+        authorUserId: "sync-user",
         body: "chat alpha import",
       });
     } finally {
@@ -1400,6 +1402,7 @@ describe("sync folder replication", () => {
         workspaceId: WORKSPACE_ID,
         threadId: thread.id,
         author: { kind: "human", displayName: "Ice" },
+        authorUserId: "sync-user",
         body: "chat imported keyword",
       });
     } finally {
@@ -1441,18 +1444,21 @@ describe("sync folder replication", () => {
         channelId: general.id,
         title: "",
         author: { kind: "human", displayName: "Ice" },
+        authorUserId: "sync-user",
         body: "channel first searchable",
       });
       await chats.sendMessage({
         workspaceId: WORKSPACE_ID,
         threadId: started.thread.id,
         author: { kind: "agent", displayName: "Agent" },
+        authorUserId: "sync-user",
         body: "channel second message",
       });
       await chats.sendMessage({
         workspaceId: WORKSPACE_ID,
         threadId: started.thread.id,
         author: { kind: "human", displayName: "Ice" },
+        authorUserId: "sync-user",
         body: "channel third message",
       });
     } finally {
@@ -1527,6 +1533,7 @@ describe("sync folder replication", () => {
         channelId: generalA.id,
         title: "A thread",
         author: { kind: "agent", displayName: "Agent A" },
+        authorUserId: "sync-user-a",
         body: "hello from A",
       });
       await chatsB.startChannelThread({
@@ -1534,6 +1541,7 @@ describe("sync folder replication", () => {
         channelId: generalB.id,
         title: "B thread",
         author: { kind: "agent", displayName: "Agent B" },
+        authorUserId: "sync-user-b",
         body: "hello from B",
       });
       await syncBothWays(a, b, "sync-general");
@@ -3157,6 +3165,7 @@ describe("sync folder replication", () => {
         channelId: general.id,
         title: "Fuzz thread",
         author: { kind: "agent", displayName: "Agent A" },
+        authorUserId: "fuzz-user-a",
         body: "seed chat",
       });
       sharedThreadId = started.thread.id;
@@ -3319,6 +3328,7 @@ describe("sync folder replication", () => {
             workspaceId: WORKSPACE_ID,
             threadId: sharedThreadId,
             author: { kind: "agent", displayName: side === "a" ? "Agent A" : "Agent B" },
+            authorUserId: side === "a" ? "fuzz-user-a" : "fuzz-user-b",
             body: `chat ${side} ${iteration}.${opIndex} seed ${seed}`,
           });
           continue;

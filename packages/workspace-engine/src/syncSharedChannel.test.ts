@@ -524,10 +524,10 @@ describe("pullSharedChannel", () => {
       shareId: SHARE_ID,
       channelWireId: WIRE,
     });
-    expect(pushedA.pushed).toBe(1);
+    expect(pushedA.pushed).toBe(2);
 
     // Workspace B in the SAME root joins the same share. Its pull must start
-    // from ITS OWN cursor (3 seed ops + A's pushed echo), not resume A's...
+    // from ITS OWN cursor (3 seed ops + A's structure and message), not resume A's...
     const second = await pullSharedChannel({
       rootDir: root,
       workspaceId: workspaceB,
@@ -535,7 +535,7 @@ describe("pullSharedChannel", () => {
       shareId: SHARE_ID,
       channelWireId: WIRE,
     });
-    expect(second.applied).toBe(4);
+    expect(second.applied).toBe(5);
     // ...and its push must scan B's OWN journal from the start, not skip
     // everything below A's scanned watermark.
     const chatsB = createLinkedChatStore(root);
@@ -557,7 +557,7 @@ describe("pullSharedChannel", () => {
       shareId: SHARE_ID,
       channelWireId: WIRE,
     });
-    expect(pushedB.pushed).toBe(1);
+    expect(pushedB.pushed).toBe(2);
     expect(JSON.stringify(fake.appends.at(-1))).toContain("from B");
   });
 
@@ -752,18 +752,23 @@ describe("pushSharedChannel", () => {
       shareId: SHARE_ID,
       channelWireId: WIRE,
     });
-    expect(pushed.pushed).toBe(1);
+    expect(pushed.pushed).toBe(2);
     expect(fake.appends).toHaveLength(1);
     const batch = fake.appends[0]!;
-    expect(batch.ops).toHaveLength(1);
+    expect(batch.ops).toHaveLength(2);
     expect(batch.ops[0]).toMatchObject({
       originSeq: 0,
+      opKind: "chat.thread.create",
+      payload: { threadId: "thread-team-1" },
+    });
+    expect(batch.ops[1]).toMatchObject({
+      originSeq: 1,
       opKind: "chat.message.append",
       payload: { messageId: expect.any(String), threadId: "thread-team-1", body: "my reply" },
     });
     expect(JSON.stringify(batch)).not.toContain("PRIVATE-note");
 
-    // A second local send continues the DENSE share sequence (0, then 1)
+    // A second local send continues the DENSE share sequence (0, 1, then 2)
     // even though the local journal interleaved out-of-scope ops between.
     const chats2 = createLinkedChatStore(root);
     try {
@@ -778,7 +783,7 @@ describe("pushSharedChannel", () => {
       await chats2.close();
     }
     await pushSharedChannel({ rootDir: root, workspaceId: WORKSPACE, relay, shareId: SHARE_ID, channelWireId: WIRE });
-    expect(fake.appends[1]!.ops[0]).toMatchObject({ originSeq: 1, payload: { body: "second reply" } });
+    expect(fake.appends[1]!.ops[0]).toMatchObject({ originSeq: 2, payload: { body: "second reply" } });
 
     // The relay now serves this member's own appends back; the next pull
     // must skip them (no duplicate messages, applied 0).
@@ -806,6 +811,7 @@ describe("pushSharedChannel", () => {
         workspaceId: WORKSPACE,
         threadId: "thread-team-1",
         author: { kind: "human", displayName: "Member" },
+        authorUserId: "member",
         body: "should be refused",
       });
     } finally {
@@ -824,6 +830,6 @@ describe("pushSharedChannel", () => {
       shareId: SHARE_ID,
       channelWireId: WIRE,
     });
-    expect(retry.pushed).toBe(1);
+    expect(retry.pushed).toBe(2);
   });
 });

@@ -757,6 +757,180 @@ fn fault_sync_during_journal_txn_rolls_back_domain_and_position() {
 }
 
 #[test]
+fn join_identity_adoption_creates_only_an_absent_coordinate_and_is_idempotent() {
+    let (_scratch, _path, mut engine) = store();
+    assert_eq!(
+        adopt_join_identity(
+            &mut engine,
+            "ws",
+            "origin-joined",
+            "epoch-relay",
+            "stream-relay",
+            2,
+            &NoFaults,
+        )
+        .expect("adopt relay identity"),
+        TxnOutcome::Committed(AdoptJoinIdentityOutcome::Adopted)
+    );
+    assert_eq!(
+        read_sync_identity(&engine, "ws").expect("identity"),
+        Some(SyncIdentity {
+            workspace_id: "ws".to_owned(),
+            origin_id: "origin-joined".to_owned(),
+            replication_epoch: "epoch-relay".to_owned(),
+            stream_identity: "stream-relay".to_owned(),
+        })
+    );
+
+    assert_eq!(
+        adopt_join_identity(
+            &mut engine,
+            "ws",
+            "origin-must-not-replace",
+            "epoch-relay",
+            "stream-relay",
+            3,
+            &NoFaults,
+        )
+        .expect("retry same coordinate"),
+        TxnOutcome::Committed(AdoptJoinIdentityOutcome::AlreadyMatched)
+    );
+    assert_eq!(
+        read_sync_identity(&engine, "ws")
+            .expect("identity")
+            .expect("present")
+            .origin_id,
+        "origin-joined"
+    );
+}
+
+#[test]
+fn join_identity_adoption_rejects_non_relay_identity_text_without_writing() {
+    let (_scratch, _path, mut engine) = store();
+    let cases = [
+        ("ws-origin", " origin-joined", "epoch-relay", "stream-relay"),
+        ("ws-epoch", "origin-joined", "epoch-relay ", "stream-relay"),
+        (
+            "ws-stream",
+            "origin-joined",
+            "epoch-relay",
+            "stream\u{0000}relay",
+        ),
+        (
+            "ws-bom",
+            "origin-joined",
+            "\u{feff}epoch-relay",
+            "stream-relay",
+        ),
+    ];
+
+    for (workspace_id, origin_id, replication_epoch, stream_identity) in cases {
+        assert!(matches!(
+            adopt_join_identity(
+                &mut engine,
+                workspace_id,
+                origin_id,
+                replication_epoch,
+                stream_identity,
+                2,
+                &NoFaults,
+            ),
+            Err(SyncError::InvalidInput { .. })
+        ));
+        assert!(
+            read_sync_identity(&engine, workspace_id)
+                .expect("identity")
+                .is_none(),
+            "invalid identity text must not create a row for {workspace_id}"
+        );
+    }
+}
+
+#[test]
+fn join_identity_adoption_refuses_a_different_existing_identity() {
+    let (_scratch, _path, mut engine) = store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('ws','origin-old','epoch-old','stream-old',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed different identity");
+
+    assert!(matches!(
+        adopt_join_identity(
+            &mut engine,
+            "ws",
+            "origin-joined",
+            "epoch-relay",
+            "stream-relay",
+            2,
+            &NoFaults,
+        ),
+        Err(SyncError::InvalidInput {
+            reason: "join identity adoption found a different local sync identity"
+        })
+    ));
+    let identity = read_sync_identity(&engine, "ws")
+        .expect("identity")
+        .expect("present");
+    assert_eq!(identity.origin_id, "origin-old");
+    assert_eq!(identity.replication_epoch, "epoch-old");
+    assert_eq!(identity.stream_identity, "stream-old");
+}
+
+#[test]
+fn join_identity_adoption_refuses_existing_log_or_cursor_state() {
+    let (_scratch, _path, mut engine) = store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log \
+                 (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                 VALUES ('ws-log','origin-old',0,'workspace.init','{}',1,0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO sync_relay_cursors \
+                 (workspace_id,cursor,replication_epoch,stream_identity) \
+                 VALUES ('ws-cursor','0','epoch-old','stream-old')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed non-pristine state");
+
+    for workspace_id in ["ws-log", "ws-cursor"] {
+        assert!(matches!(
+            adopt_join_identity(
+                &mut engine,
+                workspace_id,
+                "origin-joined",
+                "epoch-relay",
+                "stream-relay",
+                2,
+                &NoFaults,
+            ),
+            Err(SyncError::InvalidInput {
+                reason: "join identity adoption requires pristine local replication state"
+            })
+        ));
+        assert!(
+            read_sync_identity(&engine, workspace_id)
+                .expect("identity")
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn fault_sync_before_apply_commit_reopens_unapplied_and_unacked() {
     let (_scratch, path, mut engine) = store();
     let op = envelope("peer", 0, "probe.apply", json!({}));

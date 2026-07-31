@@ -8,6 +8,8 @@ import {
   SharedChannelReadOnlyError,
   type PendingConflictResolve,
   type ProbeRelayWorkspaceResult,
+  type RelayWorkspaceBootstrapResult,
+  type RelayWorkspaceIdentity,
   type PullSharedChannelResult,
   type PullShareViewResult,
   type PullWorkspaceFromRelayResult,
@@ -175,7 +177,7 @@ export async function probeWorkspaceRelay(
     workspaceId: string;
     relay: SyncRelayConnection;
   },
-): Promise<ProbeRelayWorkspaceResult> {
+): Promise<RelayWorkspaceBootstrapResult> {
   routes.bind({
     ...input,
     rootPath: `relay-probe:${input.workspaceId}`,
@@ -458,6 +460,7 @@ export interface EngineRelayWorkspaceClient {
   commitCursor(cursor: Record<string, JsonValue | undefined>): Promise<void>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
+  bootstrapJoinIdentity(identity: RelayWorkspaceIdentity | null): Promise<void>;
   probe(): Promise<ProbeRelayWorkspaceResult>;
   uploadKeyEnvelope(input: {
     envelopeJson: string;
@@ -526,7 +529,8 @@ export class EngineRelayClient {
       ...(input.shareMount === true ? { shareMount: true as const } : {}),
     };
     const connectionKey = `${input.rootPath}\u0000${input.relay.token}`;
-    const request = async (
+    const requestFor = async (
+      targetWorkspace: EngineWorkspace,
       method: string,
       params: Record<string, JsonValue | undefined>,
     ): Promise<JsonValue> =>
@@ -539,7 +543,7 @@ export class EngineRelayClient {
         }
         try {
           return await this.sessions.run(
-            workspace,
+            targetWorkspace,
             async ({ client, workspace: handle }) => {
               const requester = new WorkspaceDaemonRequester(client);
               return await requester.request(method, params, {
@@ -553,6 +557,19 @@ export class EngineRelayClient {
           translateRelayError(method, error);
         }
       });
+    const request = async (
+      method: string,
+      params: Record<string, JsonValue | undefined>,
+    ): Promise<JsonValue> => await requestFor(workspace, method, params);
+    const bootstrapRequest = async (
+      method: string,
+      params: Record<string, JsonValue | undefined>,
+    ): Promise<JsonValue> =>
+      await requestFor(
+        { ...workspace, captureMode: "none" },
+        method,
+        params,
+      );
 
     const commitCursor = async (
       cursor: Record<string, JsonValue | undefined>,
@@ -566,6 +583,38 @@ export class EngineRelayClient {
       );
       if (!booleanField(result, "committed", "sync.commitCursor")) {
         throw new Error("Rust engine sync.commitCursor did not commit.");
+      }
+    };
+
+    const claimWith = async (
+      requester: typeof request,
+    ): Promise<void> => {
+      const result = resultRecord(
+        await requester("sync.claim", { workspaceId: workspace.workspaceId }),
+        "sync.claim",
+      );
+      if (!booleanField(result, "claimed", "sync.claim")) {
+        throw new Error("Rust engine sync.claim did not claim the workspace.");
+      }
+    };
+    const claim = async (): Promise<void> => await claimWith(request);
+
+    const adoptJoinIdentity = async (
+      identity: RelayWorkspaceIdentity,
+      requester: typeof request,
+    ): Promise<void> => {
+      const result = resultRecord(
+        await requester("sync.adoptJoinIdentity", {
+          workspaceId: workspace.workspaceId,
+          replicationEpoch: identity.replicationEpoch,
+          streamIdentity: identity.streamIdentity,
+        }),
+        "sync.adoptJoinIdentity",
+      );
+      if (!booleanField(result, "adopted", "sync.adoptJoinIdentity")) {
+        throw new Error(
+          "Rust engine sync.adoptJoinIdentity did not adopt the relay identity.",
+        );
       }
     };
 
@@ -679,13 +728,19 @@ export class EngineRelayClient {
           ),
         };
       },
-      claim: async () => {
-        const result = resultRecord(
-          await request("sync.claim", { workspaceId: workspace.workspaceId }),
-          "sync.claim",
-        );
-        if (!booleanField(result, "claimed", "sync.claim")) {
-          throw new Error("Rust engine sync.claim did not claim the workspace.");
+      claim,
+      bootstrapJoinIdentity: async (identity) => {
+        try {
+          if (identity === null) {
+            await claimWith(bootstrapRequest);
+            return;
+          }
+          await adoptJoinIdentity(identity, bootstrapRequest);
+        } finally {
+          // The bootstrap session is intentionally capture-free. Close it so
+          // activity.open creates the ordinary captured session only after the
+          // authoritative coordinate is durable.
+          await this.sessions.closeWorkspace(workspace.workspaceId);
         }
       },
       probe: async () => {
