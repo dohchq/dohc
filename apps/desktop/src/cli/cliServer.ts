@@ -27,7 +27,7 @@ import type {
   LinkedChatStore,
   VersionedTextMoment,
   VersionedTextMomentSummary,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/engine";
 import {
   MAX_GRANULAR_CHAT_QUERY_CHARS,
   type ChatUnreadFileThread,

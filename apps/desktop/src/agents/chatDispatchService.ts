@@ -14,7 +14,7 @@ import type {
   ChatChannelKind,
   ChatMessage,
   LinkedChatStore,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/engine";
 import type { RunnerSettings } from "../settings/userSettings";
 import {
   killChildTreeWin32,

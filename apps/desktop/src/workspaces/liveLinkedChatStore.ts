@@ -10,7 +10,7 @@ import {
   type ChatChannelSummary,
   type ChatFeedPage,
   type ChatFileMention,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/engine";
 import type {
   EngineWorkspace,
   EngineWorkspaceRunOptions,
