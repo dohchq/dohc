@@ -78,7 +78,15 @@ export class CredentialSessionCache<Credentials> {
       this.credentials = credentials;
       this.publish();
     })();
-    this.ready = attempt.catch(() => undefined);
+    const ready = attempt.then(
+      () => undefined,
+      () => {
+        if (this.generation === generation && this.ready === ready) {
+          this.ready = null;
+        }
+      },
+    );
+    this.ready = ready;
     return attempt;
   }
 

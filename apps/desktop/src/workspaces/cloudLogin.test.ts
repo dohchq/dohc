@@ -478,4 +478,45 @@ describe("completed cloud login session", () => {
       "reconcile new-session-token",
     ]);
   });
+
+  it("reports cleanup and refresh failures without reconciling stale state", async () => {
+    const cleanupFailure = new Error("cleanup failed");
+    const refreshFailure = new Error("refresh failed");
+    let reconciled = false;
+
+    const transition = adoptCompletedCloudLoginSession({
+      clearCachedCredentials() {},
+      async stopEngines() {
+        throw cleanupFailure;
+      },
+      async closeRelayTransportWorkspaces() {},
+      async refreshCredentialCache() {
+        throw refreshFailure;
+      },
+      reconcileCloud() {
+        reconciled = true;
+      },
+    });
+
+    await expect(transition).rejects.toMatchObject({
+      errors: [cleanupFailure, refreshFailure],
+    });
+    expect(reconciled).toBe(false);
+  });
+
+  it("reports a reconciliation failure after refreshing credentials", async () => {
+    const reconcileFailure = new Error("reconcile failed");
+
+    await expect(
+      adoptCompletedCloudLoginSession({
+        clearCachedCredentials() {},
+        async stopEngines() {},
+        async closeRelayTransportWorkspaces() {},
+        async refreshCredentialCache() {},
+        reconcileCloud() {
+          throw reconcileFailure;
+        },
+      }),
+    ).rejects.toBe(reconcileFailure);
+  });
 });

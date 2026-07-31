@@ -260,7 +260,9 @@ pub fn adopt_join_identity(
                    EXISTS(SELECT 1 FROM shared_channel_cursors WHERE workspace_id = ?1) OR \
                    EXISTS(SELECT 1 FROM shared_channel_peers WHERE workspace_id = ?1) OR \
                    EXISTS(SELECT 1 FROM shared_channel_push_state WHERE workspace_id = ?1) OR \
-                   EXISTS(SELECT 1 FROM share_view_cursors WHERE workspace_id = ?1)",
+                   EXISTS(SELECT 1 FROM share_view_cursors WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM chat_pending_replication WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id = ?1)",
                 [workspace_id],
                 |row| row.get(0),
             )

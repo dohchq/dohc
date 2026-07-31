@@ -885,7 +885,7 @@ fn join_identity_adoption_refuses_a_different_existing_identity() {
 }
 
 #[test]
-fn join_identity_adoption_refuses_existing_log_or_cursor_state() {
+fn join_identity_adoption_refuses_any_existing_replication_state() {
     let (_scratch, _path, mut engine) = store();
     engine
         .write_with(&NoFaults, |tx| {
@@ -903,11 +903,85 @@ fn join_identity_adoption_refuses_existing_log_or_cursor_state() {
                 [],
             )
             .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO replication_peers (workspace_id,origin_id,acked_seq) \
+                 VALUES ('ws-peer','origin-old',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES ('ws-push','origin-old',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO shared_channel_cursors (workspace_id,share_id,cursor) \
+                 VALUES ('ws-channel-cursor','share-old','0')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO shared_channel_peers \
+                 (workspace_id,share_id,origin_id,applied_origin_seq,dense_seq) \
+                 VALUES ('ws-channel-peer','share-old','origin-old',0,0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO shared_channel_push_state (workspace_id,share_id,pushed_seq) \
+                 VALUES ('ws-channel-push','share-old',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO share_view_cursors (workspace_id,share_id,cursor) \
+                 VALUES ('ws-view-cursor','share-old','0')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_pending_replication \
+                 (workspace_id,origin_id,origin_seq,dependency_kind,dependency_id) \
+                 VALUES ('ws-chat-pending','origin-old',0,'message-thread','thread-old')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO versioned_workspaces (workspace_id,main_version_id) \
+                 VALUES ('ws-ydoc-pending','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws-ydoc-pending','object-ydoc-pending',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates \
+                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+                 VALUES ('ws-ydoc-pending','main','object-ydoc-pending','origin-old',0,1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
         })
         .expect("seed non-pristine state");
 
-    for workspace_id in ["ws-log", "ws-cursor"] {
+    for workspace_id in [
+        "ws-log",
+        "ws-cursor",
+        "ws-peer",
+        "ws-push",
+        "ws-channel-cursor",
+        "ws-channel-peer",
+        "ws-channel-push",
+        "ws-view-cursor",
+        "ws-chat-pending",
+        "ws-ydoc-pending",
+    ] {
         assert!(matches!(
             adopt_join_identity(
                 &mut engine,
