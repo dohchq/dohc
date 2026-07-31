@@ -3486,6 +3486,16 @@ entry told the reader to match 24.16.0 "exactly", which would have sent them to 
 non-canonical environment. Verified the FTS5 difference directly with a two-line
 `CREATE VIRTUAL TABLE ... USING fts5` probe.
 
+**And "use the pin" was not enough, because the repo's own declaration disagreed with it.** The
+root `package.json` claimed `"node": "^20.19.0 || ^22.13.0 || >=24.0.0"`, so a developer on a
+version it advertises could not run this suite — that is a broken supported-version contract, not
+a false negative on their part. It is broken more deeply than FTS5: `node:sqlite` does not exist
+at all in Node 20, and it is imported from **production** code (`apps/desktop/src/main.ts`,
+`services/sync-relay/src/storage.ts`, `services/sqlite-worker/src/sqliteEngine.ts`), so the Node 20
+arm never described a working install of anything. Narrowed to `">=24.14.0"`, matching every other
+place the version is written down. Deleting the legacy package does not make the old range correct
+again, since the production `node:sqlite` imports outlive it.
+
 ### The blocker that verification found instead
 
 The three secret-capture tests that cannot migrate — they read raw `engine.db` bytes to prove
@@ -3530,9 +3540,13 @@ all substring artifacts of *derive*, *driver* and *receive*. The accurate claim 
 one: of 50 `assert_ne!` calls, **zero assert IV or ciphertext difference**. A number that is
 wrong in an audit cannot support deleting the proof it is auditing.
 
-Nonce reuse under AES-GCM with one key leaks the GHASH authentication key and the XOR of the two
-plaintexts. It is catastrophic **and silent**: encryption still succeeds and every existing test
-stays green. There is a real structural mitigation — one public sealing entry, always
+Nonce reuse under AES-GCM with one key always leaks the XOR of the two plaintexts, so it reveals
+their differences outright; where they are identical it reveals that too, which for a secret means
+an observer of the database learns the value did not change. Depending on the records it can also
+enable GHASH-key recovery or tag forgery, though the reused-nonce-with-identical-plaintext case
+this test compares yields identical records and on its own reveals no key. That qualification does
+not soften the blocker: it is catastrophic **and silent**, because encryption still succeeds and
+every existing test stays green. There is a real structural mitigation — one public sealing entry, always
 `getrandom`, the deterministic variant feature-gated — which is why it survived. **A structural
 guarantee is not a test.** Treating it as a hard blocker on deletion.
 
