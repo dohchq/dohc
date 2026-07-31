@@ -7,7 +7,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import {
   type LinkedChatStore,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./ipc/channels";
 import {

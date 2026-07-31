@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { type VersionedTextStore } from "@dohc/workspace-engine";
+import { type VersionedTextStore } from "@dohc/workspace-contracts/engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import {
   VERSIONED_METHOD,
