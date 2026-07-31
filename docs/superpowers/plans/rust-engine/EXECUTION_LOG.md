@@ -3493,11 +3493,24 @@ non-canonical environment. Verified the FTS5 difference directly with a two-line
 root `package.json` claimed `"node": "^20.19.0 || ^22.13.0 || >=24.0.0"`, so a developer on a
 version it advertises could not run this suite — that is a broken supported-version contract, not
 a false negative on their part. It is broken more deeply than FTS5: `node:sqlite` does not exist
-at all in Node 20, and it is imported from **production** code (`apps/desktop/src/main.ts`,
-`services/sync-relay/src/storage.ts`, `services/sqlite-worker/src/sqliteEngine.ts`), so the Node 20
-arm never described a working install of anything. Narrowed to `">=24.14.0"`, matching every other
-place the version is written down. Deleting the legacy package does not make the old range correct
-again, since the production `node:sqlite` imports outlive it.
+at all in Node 20, and it is reached from **production** code, so the Node 20 arm never described a
+working install of anything. Narrowed to `">=24.14.0"`, matching every other place the version is
+written down. Deleting the legacy package does not make the old range correct again, since the
+production `node:sqlite` callers outlive it.
+
+The importers, corrected — an earlier draft of this entry named `apps/desktop/src/main.ts`, which
+contains only a *comment* mentioning `node:sqlite`, not an import. Review caught it. The real
+production callers all reach it through `createRequire`, which is why a plain import grep finds
+nothing: `apps/desktop/src/workspaces/workspaceDatabase.ts:37`,
+`services/sync-relay/src/storage.ts:246`, `services/sqlite-worker/src/sqliteEngine.ts:68`.
+
+**And the floor is a support policy, not a measured failure boundary — worth stating plainly,
+because the two are easy to confuse.** The only versions actually measured are 22.14, which fails
+(`no such module: fts5`), and 24.16, which passes. Nothing here shows Node 24.0-24.13 failing. The
+floor is set at the pinned 24.14.0 because supporting versions the repo does not pin, does not run
+in any workflow, and does not ship is exactly what produced this bug: a declared range nobody had
+ever executed. If someone needs a lower 24.x, the honest move is to measure it and lower the floor
+to what was measured, not to widen the declaration back to a guess.
 
 **Narrowing one manifest is not the whole change, because the range was copied into five places.**
 Review found the self-host Compose stack still on `node:22-bookworm-slim` for all three JavaScript
