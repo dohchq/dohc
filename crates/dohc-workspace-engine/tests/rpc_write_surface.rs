@@ -3661,10 +3661,9 @@ async fn a_refused_write_creates_no_version() {
         )
         .await;
     let error = refused.expect_err("malformed base64 must be refused");
-    assert_eq!(
+    assert!(
         format!("{error:?}").contains("invalid-input"),
-        true,
-        "{error:?}"
+        "expected invalid-input, got {error:?}"
     );
 
     let after = call(&transport, &handle, 4, "versions.list", json!({})).await;
