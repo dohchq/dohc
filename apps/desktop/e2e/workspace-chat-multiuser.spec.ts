@@ -2,12 +2,12 @@ import { expect, test, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  claimRelayWorkspace,
   createLinkedChatStore,
   fetchSharedChannelInfo,
   pullSharedChannel,
   pushSharedChannel,
 } from "@dohc/workspace-engine";
+import { claimRelayWorkspace } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
@@ -130,10 +130,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
     await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
 
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
-    await claimRelayWorkspace({
-      workspaceId,
-      relay: { baseUrl: relay.baseUrl, token: GRANTER_TOKEN },
-    });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     // A synced workspace: presence WORKSPACE scope only resolves for a
     // relay-claimed workspace on the signed-in server, and the sync engine
     // attaches at open so the owner's chat.thread.create replicates to the
