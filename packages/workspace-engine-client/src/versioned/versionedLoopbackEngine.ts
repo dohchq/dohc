@@ -1715,16 +1715,19 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = requiredString(params, "path", "secret restore");
     const beforeMomentId = requiredString(params, "beforeMomentId", "secret restore");
     const momentId = requiredString(params, "momentId", "secret restore");
+    // Parsed BEFORE any state is read, which is where the daemon does it:
+    // secrets_restore validates the origin and then the metadata fields
+    // immediately after deserialization, before it looks up the source moment
+    // (lib.rs). Sitting below these checks meant an over-cap field on a request
+    // that ALSO named a missing beforeMomentId answered `moment-not-found` where
+    // the daemon answers `invalid-metadata`. My own comment here already said
+    // "before it looks at state"; the placement contradicted it.
+    const metadata = this.secretMomentMetadata(params);
     const sourceMoment = state.secretMoments.get(beforeMomentId);
     if (!sourceMoment) throw new Error("moment-not-found");
     if (sourceMoment.wire.path !== path) throw new Error("invalid-input");
     const version = this.version(state, sourceMoment.wire.versionId);
     const prior = version.secrets.get(path);
-    // Parsed BEFORE the no-op return too: the daemon deserializes
-    // SecretsRestoreParams before it looks at state, so a malformed request that
-    // happens to be a no-op is still refused. Returning success here would let a
-    // loopback-backed test certify a request production rejects.
-    const metadata = this.secretMomentMetadata(params);
     if (prior === sourceMoment.before) {
       return {
         restored: sourceMoment.before === undefined ? "deleted" : "text",

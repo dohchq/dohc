@@ -637,6 +637,25 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid-metadata/);
   });
 
+  it("refuses over-cap RESTORE metadata before it looks for the moment", async () => {
+    // Fourth handler in this file where the fake read state before validating
+    // metadata. The daemon validates origin then metadata immediately after
+    // deserialization, before looking up the source moment, so a request that is
+    // wrong in BOTH ways must answer for the metadata.
+    const engine = new VersionedLoopbackEngine();
+    await openWorkspace(engine);
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsRestore, {
+        workspaceId: WORKSPACE,
+        path: ".env",
+        beforeMomentId: "moment-that-does-not-exist",
+        momentId: "moment-restore-capped",
+        origin: "restore",
+        summary: "s".repeat(16 * 1024 + 1),
+      }),
+    ).rejects.toThrow(/invalid-metadata/);
+  });
+
   it("refuses malformed secret metadata WITHOUT changing the secret", async () => {
     // The daemon refuses a malformed request atomically, before touching state.
     // An earlier draft of this fix evaluated `optionalString` inside the
