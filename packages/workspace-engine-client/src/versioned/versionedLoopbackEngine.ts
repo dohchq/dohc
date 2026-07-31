@@ -1476,10 +1476,17 @@ export class VersionedLoopbackEngine implements EngineTransport {
     summary: string | null;
     correlationId: string | null;
   } {
-    return {
-      summary: optionalString(params, "summary") ?? null,
-      correlationId: optionalString(params, "correlationId") ?? null,
+    // JSON `null` is the VALID absent value, not a type error: the daemon
+    // deserializes these as `Option<String>`. Passing null straight to
+    // optionalString made the fake reject requests production accepts — the
+    // opposite of the no-op hole below, and in one helper.
+    const field = (key: string): string | null => {
+      const raw = params[key];
+      if (raw === undefined || raw === null) return null;
+      if (typeof raw !== "string") throw new Error(`${key} is invalid.`);
+      return raw;
     };
+    return { summary: field("summary"), correlationId: field("correlationId") };
   }
 
   private secretWrite(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
@@ -1648,6 +1655,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (sourceMoment.wire.path !== path) throw new Error("invalid-input");
     const version = this.version(state, sourceMoment.wire.versionId);
     const prior = version.secrets.get(path);
+    // Parsed BEFORE the no-op return too: the daemon deserializes
+    // SecretsRestoreParams before it looks at state, so a malformed request that
+    // happens to be a no-op is still refused. Returning success here would let a
+    // loopback-backed test certify a request production rejects.
+    const metadata = this.secretMomentMetadata(params);
     if (prior === sourceMoment.before) {
       return {
         restored: sourceMoment.before === undefined ? "deleted" : "text",
@@ -1655,7 +1667,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
         path,
       };
     }
-    const metadata = this.secretMomentMetadata(params);
     this.assertFreshSecretMoment(state, momentId);
     if (sourceMoment.before === undefined) version.secrets.delete(path);
     else version.secrets.set(path, sourceMoment.before);

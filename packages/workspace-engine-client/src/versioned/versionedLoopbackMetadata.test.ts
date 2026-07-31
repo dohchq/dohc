@@ -282,6 +282,73 @@ describe("loopback moment metadata", () => {
     expect(Object.keys(moments[0].author as object)).not.toContain("agentRunId");
   });
 
+  it("accepts an explicit null summary, as the daemon does", async () => {
+    // The daemon deserializes these as `Option<String>`, where JSON null is the
+    // valid absent value. An earlier draft passed null to a string validator, so
+    // the fake REJECTED requests production accepts — the opposite error from the
+    // no-op hole below, and both were in the same helper.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const written = await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=x\n",
+      origin: "local-file",
+      momentId: "moment-null-meta",
+      summary: null,
+      correlationId: null,
+    });
+    const moment = written.moment as Record<string, unknown>;
+    expect(moment.metadataSummary ?? null).toBeNull();
+    expect(moment.metadataCorrelationId ?? null).toBeNull();
+  });
+
+  it("refuses malformed restore metadata even when the restore is a no-op", async () => {
+    // The daemon deserializes SecretsRestoreParams BEFORE looking at state, so a
+    // malformed request that happens to be a no-op is still refused. An earlier
+    // draft parsed after the no-op return, which reported success.
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=v1\n",
+      origin: "local-file",
+      momentId: "moment-restore-base",
+    });
+    await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=v2\n",
+      origin: "local-file",
+      momentId: "moment-restore-second",
+    });
+    // Restore once so the secret already equals the selected before-state; the
+    // SECOND restore is then the no-op branch. Reaching it needs two writes and
+    // two restores — my first draft used one write, whose `before` is undefined,
+    // so `prior === sourceMoment.before` was false and it took the MUTATION path.
+    // That draft passed and proved nothing; the mutation check is what exposed it.
+    await send(engine, VERSIONED_METHOD.secretsRestore, {
+      workspaceId: WORKSPACE,
+      path: ".env",
+      beforeMomentId: "moment-restore-second",
+      momentId: "moment-restore-first-pass",
+      origin: "restore",
+    });
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsRestore, {
+        workspaceId: WORKSPACE,
+        path: ".env",
+        beforeMomentId: "moment-restore-second",
+        momentId: "moment-restore-noop",
+        summary: 42,
+      }),
+    ).rejects.toThrow(/summary is invalid/);
+  });
+
   it("refuses malformed secret metadata WITHOUT changing the secret", async () => {
     // The daemon refuses a malformed request atomically, before touching state.
     // An earlier draft of this fix evaluated `optionalString` inside the
