@@ -253,6 +253,45 @@ mod tests {
         assert_eq!(opened.as_bytes(), text);
     }
 
+    // Nonce reuse under AES-GCM with one key leaks the GHASH authentication key
+    // and the XOR of both plaintexts, and it is SILENT: sealing still succeeds.
+    // `seal` is the only public sealing entry, so this is where freshness must be
+    // pinned.
+    //
+    // MUTATION: replace the `getrandom` draw in `seal` with a constant
+    // `[0u8; SECRET_IV_BYTES]`, or with any function of the plaintext (e.g.
+    // `sha256(plaintext)[..12]`) -> all three assert_ne! below fail.
+    #[test]
+    fn seal_draws_a_fresh_iv_for_identical_plaintext() {
+        let k = key();
+        // Same key, same workspace, same path, same plaintext: every input that
+        // could make the two seals agree is held equal on purpose, so the ONLY
+        // thing that can make them differ is a freshly drawn nonce.
+        let text = b"API_KEY=identical-every-time";
+        let first = seal(&k, "ws1", ".env", text).unwrap();
+        let second = seal(&k, "ws1", ".env", text).unwrap();
+        assert_ne!(
+            first.iv(),
+            second.iv(),
+            "each seal must draw a fresh 96-bit nonce"
+        );
+        assert_ne!(
+            first.ciphertext(),
+            second.ciphertext(),
+            "a fresh nonce must change the keystream, so identical plaintext must \
+             not produce identical ciphertext"
+        );
+        assert_ne!(
+            first.tag(),
+            second.tag(),
+            "a fresh nonce must change the GHASH tag"
+        );
+        // Positive control: both really are seals of the SAME plaintext, so the
+        // inequalities above cannot be passing because the inputs differed.
+        assert_eq!(open(&k, "ws1", ".env", &first).unwrap().as_bytes(), text);
+        assert_eq!(open(&k, "ws1", ".env", &second).unwrap().as_bytes(), text);
+    }
+
     #[test]
     fn empty_plaintext_seals_and_opens() {
         let k = key();

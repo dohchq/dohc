@@ -153,29 +153,31 @@ impl EngineDbScan {
         }
     }
 
-    /// A secret plaintext must appear in **neither** form: not as its raw
-    /// bytes, and not base64-encoded. Ciphertext lands in `TEXT` columns as
-    /// standard base64, so a raw-bytes scan alone would miss a plaintext that
-    /// took the base64 path into the database.
+    /// A secret plaintext must appear in **none** of three forms: raw UTF-8
+    /// bytes, standard base64, and UTF-16LE.
+    ///
+    /// Each covers a different way a leak hides from the others. Ciphertext
+    /// lands in `TEXT` columns as standard base64, so a write site that
+    /// base64-encoded the plaintext on the way in would slip past a raw scan.
+    /// UTF-16LE catches a plaintext that reached the file through a UTF-16
+    /// encoder -- every other byte is a NUL, so the UTF-8 needle never matches.
     ///
     /// # Panics
     ///
-    /// When either form is found, or when `plaintext` is empty.
+    /// When any form is found, or when `plaintext` is empty.
     pub fn assert_secret_plaintext_absent(&self, plaintext: &str) {
         self.assert_absent("secret plaintext", plaintext.as_bytes());
         self.assert_absent(
             "base64 of the secret plaintext",
             encode_standard(plaintext.as_bytes()).as_bytes(),
         );
+        let utf16le: Vec<u8> = plaintext
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        self.assert_absent("UTF-16LE of the secret plaintext", &utf16le);
     }
 
-    /// Positive control against the store's own data: every `ciphertext_base64`
-    /// held in `secret_files` must be findable in the scanned bytes.
-    ///
-    /// This is stronger than counting rows. It proves the scan covered the very
-    /// bytes the secret was written into, so an absence assertion over the same
-    /// bytes is a real result.
-    ///
     /// Assert a `-wal` sidecar was among the files read, and that it holds
     /// bytes. Without this, a scan whose WAL was checkpointed away still passes
     /// every absence assertion -- over the main file alone, which holds only the
@@ -204,6 +206,13 @@ impl EngineDbScan {
         );
     }
 
+    /// Positive control against the store's own data: every `ciphertext_base64`
+    /// held in `secret_files` must be findable in the scanned bytes.
+    ///
+    /// This is stronger than counting rows. It proves the scan covered the very
+    /// bytes the secret was written into, so an absence assertion over the same
+    /// bytes is a real result.
+    ///
     /// # Panics
     ///
     /// When `secret_files` is empty (there would be nothing to prove), when the
