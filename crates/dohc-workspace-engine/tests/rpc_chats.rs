@@ -1126,6 +1126,7 @@ async fn review_round_7_normalizes_persisted_chat_identities() {
             "messageId": "message-round-7",
             "authorKind": "human",
             "authorDisplayName": "Alice",
+            "authorUserId": "  user-round-7  ",
             "body": "round seven",
             "nowMs": 20,
         }),
@@ -1133,6 +1134,7 @@ async fn review_round_7_normalizes_persisted_chat_identities() {
     .await;
     assert_eq!(started["thread"]["id"], json!("thread-round-7"));
     assert_eq!(started["message"]["threadId"], json!("thread-round-7"));
+    assert_eq!(started["message"]["authorUserId"], json!("user-round-7"));
     for (thread_id, message_id) in [
         (format!("bad{}thread", '\u{0001}'), "bad-control"),
         ("x".repeat(257), "bad-overlong"),
