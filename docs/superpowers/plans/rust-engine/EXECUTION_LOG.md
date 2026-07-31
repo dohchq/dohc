@@ -3447,3 +3447,137 @@ the package being deleted. Cross-language conformance is proven against a fixtur
 from that contract. #409 records the one real gap: no end-to-end share-view-pull test with a
 secret path, which matters most for DELETE ops because the write-sink floor deliberately
 admits secret paths for deletes, leaving the boundary check as the only gate.
+
+## 2026-07-31 — checking the preconditions before deleting, and finding two
+
+Six more suites moved onto the daemon path (#414, #415, #417, #423, #424, #426) and the import
+ratchet landed (#402). The legacy package is down to two production runtime importers, both on
+one branch, with a guard that fails if anything adds a third.
+
+Then the plan was to delete it. The order was: verify the parity baseline first, because that is
+the only step that could change the plan. It did — but not where expected.
+
+### The 114 tests that ran nowhere now run, and they pass
+
+`packages/workspace-engine` has 114 tests gated on `process.platform === "linux"`, and the PR
+gate is dispatch-only, so on a Windows dev machine they always skipped and a local run reported
+`19 passed` with 114 quiet skips. They are the port's parity baseline, so every "the daemon
+matches legacy behaviour here" claim rested on tests nobody had executed.
+
+Executed on Linux at `a8be8dd1`: **128 passed, 5 skipped** against Windows' 19 passed, 114
+skipped. 109 of the 114 pass; the remaining 5 are the win32-only half. Nothing failed. #420
+records the recipe.
+
+**The setup was the whole difficulty, and the first attempt produced a spectacular false
+negative.** WSL had Node 18 and no version manager and no passwordless sudo; Node 18 cannot run
+these tests at all, because the legacy engine reaches `node:sqlite` through `createRequire`. A
+no-sudo tarball install of Node **22.14** then produced `25 files failed / 408 failed | 29
+passed` — which looks exactly like catastrophic product breakage and is nothing of the kind. The
+cause was `no such module: fts5`: that tarball's bundled SQLite lacks FTS5, which the Node 24.16
+the repo runs on Windows has. **Match the Node version exactly.** Verified the difference
+directly with a two-line `CREATE VIRTUAL TABLE ... USING fts5` probe.
+
+### The blocker that verification found instead
+
+The three secret-capture tests that cannot migrate — they read raw `engine.db` bytes to prove
+plaintext never lands on disk — were slated to die with the package. Auditing what would be lost
+found that most of it has no Rust equivalent:
+
+- the **merge path** on-disk proof: covered nowhere at all
+- **"secrets never create conflict records"**: nowhere in Rust; asserted only in the test being deleted
+- the **base64-of-plaintext** form: nowhere, and it is a distinct claim — ciphertext is stored as
+  base64 TEXT, so a buggy implementation that base64ed the plaintext would evade the utf8 scan
+- the **version switch** proof: only in a Playwright spec that neither `pnpm test` nor CI runs,
+  which is a demotion rather than a migration
+
+Only the plain-write case genuinely survives in `cargo test`. Filed as #425.
+
+### And then the crypto audit, which is the serious one
+
+The at-rest cryptography proofs — IV freshness, tamper detection, AAD binding, wrong-key
+rejection, key custody — live in `secretFileStore.test.ts`, inside the package being deleted. A
+property-by-property audit against the Rust crates: 19 properties, **11 covered at equal-or-
+greater strength**, and Rust is genuinely *stronger* on two (it tests tag tampering, which the TS
+file never did despite a test title implying it, and it asserts IV-verbatim copying on fork).
+
+**But IV/nonce freshness has no Rust equivalent of any kind.** TS asserts it directly by writing
+the same plaintext three times and comparing rows. In Rust the only IV assertion anywhere is
+`assert_eq!(sealed.iv().len(), SECRET_IV_BYTES)` — a length check, which is the textbook
+non-proof. Every `assert_ne!` in the workspace was searched: 43 hits, none on an IV or a
+ciphertext. The two IV assertions that do exist run the opposite direction, asserting IVs are
+*identical* to prove verbatim copy.
+
+Nonce reuse under AES-GCM with one key leaks the GHASH authentication key and the XOR of the two
+plaintexts. It is catastrophic **and silent**: encryption still succeeds and every existing test
+stays green. There is a real structural mitigation — one public sealing entry, always
+`getrandom`, the deterministic variant feature-gated — which is why it survived. **A structural
+guarantee is not a test.** Treating it as a hard blocker on deletion.
+
+The audit also produced a trap worth recording for whoever writes the replacement: a store-level
+AAD splice test must copy `byte_length` along with the sealed fields, or use equal-length
+plaintexts. `SealedSecret::from_base64` has a length precheck that returns `InvalidBase64` on a
+mismatch, so the test would pass for the wrong reason. Assert the exact code, not `is_err()`.
+
+### Six fakes disagreeing with the engine, and the symmetry I had missed
+
+The migrations found six places where `VersionedLoopbackEngine` and the daemon disagreed about
+something a test relied on. **Not one was found by reading the fake** — every one surfaced as a
+test failing, a mutation surviving, or a reviewer disagreeing.
+
+Five had the fake modelling **less** than the daemon: dropped moment metadata (text), the same
+again for binary writes, the same again for *every secret path*, dropped moment authorship — which
+meant the **agent-attribution tests were passing against a fixture that cannot represent an
+author** — and no `DaemonRefusalError` shape at all, so error-code assertions were checking the
+fake's invention.
+
+One had it modelling **more**: my own fix copied a moment author raw, and `AgentAuthor` permits
+extension fields the daemon normalises away, so the fake's own response failed the client's strict
+parser. A write that works against the real engine broke against the fixture.
+
+**A fake is wrong in both directions**, and I had only been watching one.
+
+### Three corrections to my own fixes, in a row, on one field
+
+Worth recording as a sequence because each looked right when made:
+
+1. The loopback hardcoded `author: null`. Fixed by carrying it.
+2. That fix copied the author **raw** — making the fake stricter than the daemon. Fixed by normalising.
+3. That normalisation mirrored `parsed_moment_author` — the **read** path, for malformed historical
+   rows. The write path is `validated_author`, which **refuses**. So the fake accepted writes
+   production rejects, and the test I had written to lock in `{ corrupt: true }` was wrong with it.
+
+And separately, twice: **parse before you commit, not where the value is used.** Author validation
+ran after the mutation on one PR; secret metadata did the same on another, so a malformed
+`summary` left the secret changed, recorded no moment, and still returned a refusal. Two
+occurrences is a habit, not an accident.
+
+### Measurement lying, three times
+
+- `grep -c` **exits 1 when it finds zero matches**, so a verification chain ending in a
+  failure-count grep reported a fully green monorepo as failed.
+- `^ *×` **misses pnpm's package-prefixed output**, so a recursive run reported `1 failed` while
+  the check said `0`. That hidden failure was real: a stale staged daemon binary predating a Rust
+  fix — which is the new e2e guard doing exactly its job, across worktrees.
+- The Node/FTS5 false negative above.
+
+Read the per-package `Tests` line. The exit code is not the verdict, and neither is a grep.
+
+### The import ratchet, and why it stops where it does
+
+#402 took **thirteen review rounds**, every finding in the detector and none in the allowlist: a
+regex clause spanning statements, dynamic `import()`, `createRequire` aliases (the worst, because
+the repo *documents* that production deliberately avoids the name `require`), template literals,
+relative paths into the package, `module.require`, `.d.mts`, `.tsx` parsed as `.ts` (111 files),
+shadowed bindings, eval-worker bodies, and — after I had twice argued the surface was
+adversarial-only — **a vacuity guard that could itself go vacuous** once the allowlist reached
+zero.
+
+The finding count per round went 2, 4, 5, 6, 7, 9, 10, 15. That is divergence, not diminishing
+returns, and it is inherent: every spelling of "load a module" is a new finding. Landed at
+thirteen with seven deferred and reasoned, and filed #421 proposing a module-graph check instead.
+
+**#421 should then be closed as superseded, and the reasoning is a correction to my own
+recommendation.** I first said the graph check matters most once the allowlist reaches zero. That
+is backwards: once the package is **deleted**, importing it fails at build time. The compiler
+becomes the guard, and it is stronger than anything a test could approximate. #421's value exists
+only in the window before deletion.
