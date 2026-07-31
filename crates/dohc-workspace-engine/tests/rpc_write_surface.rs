@@ -3631,6 +3631,51 @@ async fn origin_closed_set_rejects_capture_and_ydoc() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_write_creates_no_version() {
+    // A write that is refused must leave NO trace, including no implicitly created
+    // `main`. Nothing asserted this, and the question is not academic: the
+    // TypeScript loopback resolves its version through a helper that CREATES
+    // `main` when absent, and it did so BEFORE validating the request — so the
+    // fake left a version behind on a refusal. That divergence (dohc-ai/dohc#439)
+    // could not be settled without knowing what the daemon does, which is this.
+    //
+    // MUTATION: make the binary write ensure the version before decoding its
+    // bytes, and the second assertion fails.
+    let (_scratch, transport, handle) = fixture("refused-write-atomicity").await;
+    let before = call(&transport, &handle, 2, "versions.list", json!({})).await;
+    assert_eq!(
+        before["versions"].as_array().map(Vec::len),
+        Some(0),
+        "the fixture must start with no versions, or this proves nothing"
+    );
+
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "versionedBinary.write",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": "x.bin", "bytesBase64": "!!!", "origin": "api" }),
+            ),
+        )
+        .await;
+    let error = refused.expect_err("malformed base64 must be refused");
+    assert_eq!(
+        format!("{error:?}").contains("invalid-input"),
+        true,
+        "{error:?}"
+    );
+
+    let after = call(&transport, &handle, 4, "versions.list", json!({})).await;
+    assert_eq!(
+        after["versions"].as_array().map(Vec::len),
+        Some(0),
+        "a refused write must not create a version: {after}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutation_metadata_fields_are_bounded_at_every_rpc_entry() {
     // MUTATION: remove endpoint validation -> these calls fall through to
     // state/path errors or accept a field the TypeScript contract rejects.
