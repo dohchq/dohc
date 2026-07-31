@@ -8,8 +8,8 @@ use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
     ChatChannelKind, ChatReactionState, CreateFileThread, FollowState, FollowTargetKind,
     GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES, ResolveDecision,
-    SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SetFollow, SetReaction, StartChannelThread,
-    VersionedTextStore, attachment_id_for, channel_slug_for_name,
+    SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SendMessage, SetFollow, SetReaction,
+    StartChannelThread, VersionedTextStore, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -2779,6 +2779,166 @@ fn imported_message_append_refuses_each_oracle_invalid_field() {
             3
         );
     }
+}
+
+#[test]
+fn refused_message_log_cannot_export_local_derived_state_or_parent() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "refused-message-collision");
+    let refused = envelope(
+        "refused-message-collision",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "refused-message-id",
+            "threadId": "thread-imported",
+            "authorKind": "other",
+            "authorDisplayName": "Remote",
+            "authorUserId": "remote-user",
+            "body": "This envelope is terminally refused.",
+            "createdAtMs": 30
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &refused, &NoFaults));
+
+    LinkedChatStore::new(&mut engine)
+        .send_message(
+            &SendMessage {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "refused-message-id".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Local".to_owned(),
+                author_user_id: None,
+                parent_message_id: None,
+                origin: None,
+                body: "This message stays local.".to_owned(),
+                needs_decision: true,
+                attachments: Vec::new(),
+                now_ms: 31,
+                request_id: Some("local-message-after-refusal".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("local message with a refused remote id");
+    LinkedChatStore::new(&mut engine)
+        .set_reaction(
+            &SetReaction {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "refused-message-id".to_owned(),
+                emoji: "👍".to_owned(),
+                author_id: "verified-user".to_owned(),
+                replication_author_id: Some("verified-user".to_owned()),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Verified".to_owned(),
+                state: ChatReactionState::Added,
+                now_ms: 32,
+                request_id: "reaction-after-refusal".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("local reaction to a non-exported message");
+    LinkedChatStore::new(&mut engine)
+        .send_message(
+            &SendMessage {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "authored-child".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Verified".to_owned(),
+                author_user_id: Some("verified-user".to_owned()),
+                parent_message_id: Some("refused-message-id".to_owned()),
+                origin: None,
+                body: "This authored child must not export the local parent.".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 33,
+                request_id: Some("authored-child-after-refusal".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("authored child of a non-exported message");
+    LinkedChatStore::new(&mut engine)
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "refused-message-id".to_owned(),
+                resolved_by_message_id: "authored-child".to_owned(),
+                now_ms: 34,
+                request_id: "resolve-after-refusal".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("resolve the local-only decision");
+
+    let (
+        refused_log_rows,
+        decision_op_rows,
+        reaction_op_rows,
+        decision_state,
+        reaction_rows,
+        child_parent_type,
+    ): (i64, i64, i64, String, i64, Option<String>) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='chat.message.append' \
+                       AND json_extract(payload_json,'$.messageId')='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='chat.decision.set' \
+                       AND json_extract(payload_json,'$.messageId')='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='chat.reaction.set' \
+                       AND json_extract(payload_json,'$.messageId')='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT state FROM chat_decisions \
+                     WHERE workspace_id='ws' AND message_id='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_reactions \
+                     WHERE workspace_id='ws' AND message_id='refused-message-id'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT json_type(payload_json,'$.parentMessageId') \
+                     FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='chat.message.append' \
+                       AND json_extract(payload_json,'$.messageId')='authored-child'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read refused-message collision evidence");
+    assert_eq!(refused_log_rows, 1, "the refused envelope remains durable");
+    assert_eq!(decision_op_rows, 0, "local decisions must not export");
+    assert_eq!(reaction_op_rows, 0, "local reactions must not export");
+    assert_eq!(
+        decision_state, "resolved",
+        "local decision state remains usable"
+    );
+    assert_eq!(reaction_rows, 1, "local reaction state remains usable");
+    assert_eq!(
+        child_parent_type, None,
+        "an authored child must not reference a non-exported parent"
+    );
 }
 
 #[test]

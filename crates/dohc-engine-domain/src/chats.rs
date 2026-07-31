@@ -3008,11 +3008,10 @@ impl<'a> LinkedChatStore<'a> {
             }
             let replicate = author_user_c.is_some();
             let parent_is_exported = match &parent_c {
-                Some(parent_message_id) if replicate => relay_log_has_entity(
+                Some(parent_message_id) if replicate => relay_log_has_authored_message(
                     tx,
                     &input.workspace_id,
-                    "chat.message.append",
-                    "$.messageId",
+                    &input.thread_id,
                     parent_message_id,
                 )?,
                 _ => false,
@@ -3162,11 +3161,10 @@ impl<'a> LinkedChatStore<'a> {
                 ));
             }
             let replicate = input.replication_author_id.is_some()
-                && relay_log_has_entity(
+                && relay_log_has_authored_message(
                     tx,
                     &input.workspace_id,
-                    "chat.message.append",
-                    "$.messageId",
+                    &thread_id,
                     &input.message_id,
                 )?;
             let prior_at_ms: Option<i64> = tx
@@ -8296,13 +8294,7 @@ fn journal_decision_set(
                 serde_json::json!(resolver),
             );
     }
-    if relay_log_has_entity(
-        tx,
-        workspace_id,
-        "chat.message.append",
-        "$.messageId",
-        message_id,
-    )? {
+    if relay_log_has_authored_message(tx, workspace_id, thread_id, message_id)? {
         insert_local_replication_op(
             tx,
             workspace_id,
@@ -8328,6 +8320,33 @@ fn relay_log_has_entity(
          WHERE workspace_id = ?1 AND op_kind = ?2 \
            AND json_extract(payload_json, ?3) = ?4)",
         params![workspace_id, op_kind, json_path, entity_id],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+fn relay_log_has_authored_message(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> Result<bool, DomainError> {
+    // Terminally refused imports remain in replication_log without a projection.
+    // Bind the log row to the current authored message before exporting derived state.
+    tx.query_row(
+        "SELECT EXISTS( \
+           SELECT 1 FROM chat_messages AS message \
+           JOIN replication_log AS operation \
+             ON operation.workspace_id = message.workspace_id \
+            AND operation.op_kind = 'chat.message.append' \
+            AND json_extract(operation.payload_json, '$.threadId') = message.thread_id \
+            AND json_extract(operation.payload_json, '$.messageId') = message.message_id \
+            AND json_extract(operation.payload_json, '$.authorUserId') = message.author_user_id \
+           WHERE message.workspace_id = ?1 \
+             AND message.thread_id = ?2 \
+             AND message.message_id = ?3 \
+             AND message.author_user_id IS NOT NULL)",
+        params![workspace_id, thread_id, message_id],
         |row| row.get(0),
     )
     .map_err(DomainError::sql_corrupt)
