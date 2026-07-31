@@ -26,6 +26,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
 import { createSecretFileStore, createVersionedTextStore } from "@dohc/workspace-engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client";
+import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 
@@ -184,23 +186,40 @@ async function runScenario(scenario: FixtureScenario): Promise<Record<string, Pa
     errors.push({ context, error });
   };
 
-  let engine = createWorkspaceEngineCapture({
-    workspaceId: WORKSPACE_ID,
-    rootPath: root,
-    onError,
-  });
-  engine.start();
-  await engine.flush();
+  const openOracleCapture = () => {
+    const store = createVersionedTextStore(root);
+    const secretStore = createSecretFileStore(root);
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      store,
+      secretStore,
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+      onError,
+    });
+    return {
+      capture,
+      async stop() {
+        await capture.stop();
+        await store.close().catch(() => undefined);
+        await secretStore.close().catch(() => undefined);
+      },
+    };
+  };
+
+  let running = openOracleCapture();
+  running.capture.start();
+  await running.capture.flush();
   for (const step of scenario.steps) {
     await applyToDisk(root, step);
-    engine.captureBatch([
+    running.capture.captureBatch([
       { path: step.path, operation: step.op === "delete" ? "delete" : "update" },
     ]);
     // Flush PER STEP so ordering is real: without it a write-then-delete
     // would coalesce and the write would never be observed.
-    await engine.flush();
+    await running.capture.flush();
   }
-  await engine.stop();
+  await running.stop();
 
   if (scenario.offline.length > 0) {
     for (const step of scenario.offline) {
@@ -208,10 +227,10 @@ async function runScenario(scenario: FixtureScenario): Promise<Record<string, Pa
     }
     // A fresh engine's startup reconciliation is what notices offline
     // mutations — the same contract the Rust rehydration seed implements.
-    engine = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath: root, onError });
-    engine.start();
-    await engine.flush();
-    await engine.stop();
+    running = openOracleCapture();
+    running.capture.start();
+    await running.capture.flush();
+    await running.stop();
   }
 
   // A broken oracle must fail loudly, not emit a golden of an empty

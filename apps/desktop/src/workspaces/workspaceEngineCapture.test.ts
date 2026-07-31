@@ -1,7 +1,13 @@
 import type { MomentAuthor } from "@dohc/workspace-contracts";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
-import type { VersionedTextStore } from "@dohc/workspace-engine";
-import { createVersionedTextStore } from "@dohc/workspace-engine";
+import type {
+  SecretFileStore,
+  VersionedTextStore,
+} from "@dohc/workspace-engine";
+import {
+  createSecretFileStore,
+  createVersionedTextStore,
+} from "@dohc/workspace-engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
@@ -115,13 +121,13 @@ const WORKSPACE_ID = "engine-capture-test";
 
 interface CaptureOptions {
   store?: VersionedTextStore;
+  secretStore?: SecretFileStore;
   now?: () => number;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (outcome: { ok: boolean }) => void;
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
   rustEngineSessions?: EngineWorkspaceSessions;
-  useRustEngine?: boolean;
   daemonOwnsCapture?: boolean;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionRustOptions,
@@ -129,10 +135,24 @@ interface CaptureOptions {
 }
 
 function capture(root: string, options: CaptureOptions = {}) {
+  const { store, secretStore, rustEngineSessions, ...rest } = options;
+  const usesLegacyFixture = rustEngineSessions === undefined;
   return createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
-    ...options,
+    rustEngineSessions:
+      rustEngineSessions ?? mockLiveSessions(new VersionedLoopbackEngine()),
+    ...(store
+      ? { store }
+      : usesLegacyFixture
+        ? { store: createVersionedTextStore(root) }
+        : {}),
+    ...(secretStore
+      ? { secretStore }
+      : usesLegacyFixture
+        ? { secretStore: createSecretFileStore(root) }
+        : {}),
+    ...rest,
   });
 }
 
@@ -1913,7 +1933,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
 });
 
 describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
-  it("attaches per open workspace and flushes the last capture on stopAll", async () => {
+  it("attaches per open workspace and flushes the last capture before closing", async () => {
     const root = await tempRoot();
     const workspace: CreatedWorkspace = {
       workspaceId: "engine-capture-lifecycle",
@@ -1926,13 +1946,8 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     const recorded = new Promise<void>((resolve) => {
       resolveRecorded = resolve;
     });
-    // LEFT ON THE LEGACY FIXTURE deliberately, write and read together. This
-    // test's claim is DURABLE post-close state — that the drain landed the
-    // moment before shutdown finished, in a form a new process would see — and
-    // it reads through a fresh SQLite connection to prove it. A loopback cannot:
-    // `mockLiveSessions` does not apply `workspace.close` and the fake stays
-    // callable, so a wire read would still pass if shutdown order regressed and
-    // closed the adapter before a late capture.
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
     const activity = createWorkspaceActivity(
       () => resolveRecorded?.(),
       {
@@ -1941,6 +1956,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
           return createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
+            rustEngineSessions: mockLiveSessions(loopback, requests),
           });
         },
       },
@@ -1957,15 +1973,17 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     // drain — the last capture is recorded in the engine when it resolves.
     await activity.stopAll();
 
-    // Read through a FRESH SQLite connection, deliberately still the legacy
-    // reader for this one assertion. The point of this test is DURABLE
-    // post-close state: that the drain landed the moment before shutdown
-    // finished, in a form a new process would see. An in-memory loopback cannot
-    // express that — `mockLiveSessions` does not apply `workspace.close` and the
-    // fake stays callable indefinitely, so a wire read here would still pass if
-    // shutdown order regressed and closed the adapter before a late capture.
-    const moments = readEngineMoments(root);
-    expect(moments.some((m) => m.path === "flushed.md")).toBe(true);
+    const writeIndex = requests.findIndex(
+      (request) =>
+        request.method === VERSIONED_METHOD.textWrite &&
+        (request.params as { path?: unknown }).path === "flushed.md",
+    );
+    const closeIndex = requests.findIndex(
+      (request, index) =>
+        index > writeIndex && request.method === "workspace.close",
+    );
+    expect(writeIndex).toBeGreaterThanOrEqual(0);
+    expect(closeIndex).toBeGreaterThan(writeIndex);
   }, 15_000);
 
   it("registerExpectedEngineEvents reaches the open workspace's capture", async () => {
@@ -2278,15 +2296,11 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 });
 
-describe("engine selection is stated, not inferred", () => {
-  // The provider-session engine used to be derived from `!options.store`, so
-  // injecting a store to observe it silently selected the legacy engine — and the
-  // injectable openRustYDocProviderSession seam became unreachable in exactly the
-  // tests that wanted it. These two cases pin the flag, and the second is the
-  // control: without it the assertion in the first would pass for the wrong reason.
+describe("Rust engine session selection", () => {
+  // An injected store can observe capture operations, but it cannot select the
+  // retired in-process Y.Doc provider.
   async function openWith(
     root: string,
-    extra: { useRustEngine?: boolean },
   ): Promise<{ providerOpened: number; storeReads: number }> {
     const loopback = new VersionedLoopbackEngine();
     const legacyStore = createVersionedTextStore(root);
@@ -2303,7 +2317,6 @@ describe("engine selection is stated, not inferred", () => {
     const engine = capture(root, {
       store: observedStore,
       rustEngineSessions: mockLiveSessions(loopback),
-      ...extra,
       openRustYDocProviderSession: async () => {
         providerOpened += 1;
         const doc = new Y.Doc();
@@ -2334,47 +2347,9 @@ describe("engine selection is stated, not inferred", () => {
     return { providerOpened, storeReads };
   }
 
-  it("reaches the daemon provider session WITH a store injected when told to", async () => {
+  it("uses the Rust provider session when a store is injected", async () => {
     const root = await tempRoot();
-    const { providerOpened } = await openWith(root, { useRustEngine: true });
-    // Before this option existed, injecting `store` forced the legacy branch and
-    // this seam was never called.
+    const { providerOpened } = await openWith(root);
     expect(providerOpened).toBe(1);
-  });
-
-  it("defaults to the daemon when sessions are supplied, store injected or not", async () => {
-    // The new default. Previously an injected store would have forced the legacy
-    // branch here, which is the coupling this change removes.
-    const root = await tempRoot();
-    const { providerOpened } = await openWith(root, {});
-    expect(providerOpened).toBe(1);
-  });
-
-  it("refuses daemon-owned capture on a store it builds itself, rather than no-op flushing", async () => {
-    const root = await tempRoot();
-    const loopback = new VersionedLoopbackEngine();
-    // daemonOwnsCapture quiesces via `flushCapture`, which the legacy store this
-    // would construct does not implement — every call site is `?.()`, so the
-    // pairing would skip the flush silently and still report success. An
-    // INJECTED store may implement it, so the guard must not refuse that case:
-    // the health test above injects a legacy store augmented with flushCapture.
-    expect(() =>
-      capture(root, {
-        rustEngineSessions: mockLiveSessions(loopback),
-        useRustEngine: false,
-        daemonOwnsCapture: true,
-      }),
-    ).toThrow(/daemonOwnsCapture requires the Rust engine/);
-  });
-
-  it("CONTROL: an explicit false selects the legacy engine and does NOT reach it", async () => {
-    // Proves the flag is what decides, not the fixture. My first draft used the
-    // absence of the flag as the control and it failed immediately — with sessions
-    // supplied, absence now means daemon. Without a case that reaches ZERO, both
-    // assertions above would pass against an implementation that ignored the flag
-    // and always used the daemon seam.
-    const root = await tempRoot();
-    const { providerOpened } = await openWith(root, { useRustEngine: false });
-    expect(providerOpened).toBe(0);
   });
 });

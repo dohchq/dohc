@@ -12,11 +12,8 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // engine state — the same reason workspaceFiles/workspaceGraph/workspaceSearch
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
-import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import {
-  createSecretFileStore,
-  createVersionedTextStore,
+  MAX_VERSIONED_BINARY_FILE_BYTES,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type SecretFileMoment,
@@ -26,21 +23,16 @@ import {
   type VersionedTextMoment,
   type VersionedTextMomentSummary,
   type VersionedTextStore,
-  type YDocContentKind,
-} from "@dohc/workspace-engine";
+} from "@dohc/workspace-contracts/engine";
+import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import {
-  openEngineYDocProviderSession,
-  type EngineYDocProviderSession,
-} from "../collab/ydocEngineProviderSession";
-import {
-  openEngineYdocProviderSessionRust,
-  type EngineYdocProviderSessionRust,
-  type EngineYdocProviderSessionRustOptions,
-} from "../collab/ydocEngineProviderSessionRust";
-import {
+  openEngineYdocProviderSession,
   isYdocSessionNotFoundRefusal,
   YdocReleasedWithSettleFailureError,
+  type EngineYdocProviderSession,
+  type EngineYdocProviderSessionOptions,
   type EngineTransport,
+  type YdocContentKind,
 } from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
 import {
@@ -251,6 +243,17 @@ export interface WorkspaceVersionConflictResolveOutcome {
 // claim it.
 export type EngineYDocSaveState = "settling" | "saved" | "error";
 
+// The desktop adds restart recovery and adapts external-edit outcomes around
+// the Rust client session. Keep that small delta local instead of importing
+// the retired in-process provider's public type into production.
+export type WorkspaceEngineYDocProviderSession = Omit<
+  EngineYdocProviderSession,
+  "lineage" | "applyLocalUpdate" | "applyExternalMarkdownEdit"
+> & {
+  applyLocalUpdate(update: Uint8Array): void;
+  applyExternalMarkdownEdit(markdown: string): Promise<{ supported: boolean }>;
+};
+
 export interface WorkspaceEngineCapture {
   // Kicks the background startup reconciliation (closed-period edits — and,
   // after a mid-switch crash, the recovery pass). Runs on the capture chain,
@@ -267,21 +270,19 @@ export interface WorkspaceEngineCapture {
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
-  // file, REUSING this capture's VersionedTextStore instance (single-writer
-  // safety — a second store on the same engine.db is a second write connection
-  // and node:sqlite deadlocks). The session journals editor edits as
-  // ydoc.update ops and, on each debounced settle, projects the markdown to
-  // engine.db AND writes the on-disk .md through this capture's contained disk
-  // writer. While the session is live its path is marked live-ydoc-driven, so
+  // file through this capture's Rust workspace sessions. The session journals
+  // editor edits as ydoc.update ops and, on each debounced settle, projects the
+  // Markdown in the daemon and mirrors the on-disk .md through this capture's
+  // disk writer. While the session is live its path is marked live-ydoc-driven, so
   // the watcher's observation of the settle's own .md write is DEFERRED (never
   // re-captured as an ordinary moment.append — which on a shared workspace
   // would double-replicate and collide (P0D) with the ydoc.update stream). The
   // returned session's close() lifts the guard. Rejects (secret path,
-  // not-found, already-live) propagate to the caller, which falls back.
+  // not-found, already-live) propagate to the caller, which uses the plain editor.
   openYDocSession(input: {
     path: string;
     onRemoteUpdate: (update: Uint8Array) => void;
-    contentKind?: YDocContentKind;
+    contentKind?: YdocContentKind;
     // The HONEST save state for this document, reported on every settle:
     // "settling" when one starts, "saved" only when the projection AND the
     // .md actually landed, "error" when the settle failed and the file on
@@ -289,7 +290,7 @@ export interface WorkspaceEngineCapture {
     // nothing at all — the doc kept reading "Saved" over a stale (or empty)
     // file, which is silent data loss.
     onSaveState?: (state: EngineYDocSaveState, token: number) => void;
-  }): Promise<EngineYDocProviderSession>;
+  }): Promise<WorkspaceEngineYDocProviderSession>;
   // WS-G2-C-2 (gate fix 3): flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does NOT run through the capture chain
   // itself (the delete IPC deletes on disk directly). Without this, a later
@@ -406,10 +407,9 @@ export interface WorkspaceEngineCapture {
 export interface WorkspaceEngineCaptureOptions {
   workspaceId: string;
   rootPath: string;
-  // Injectable for tests; defaults to the workspace's .dohc/engine store.
+  // Injectable for tests; production uses the required Rust workspace sessions.
   store?: VersionedTextStore;
-  // Injectable for tests; defaults to the workspace's encrypted secret store
-  // (PR 08) sharing the same engine.db.
+  // Injectable for tests; production uses the daemon's encrypted secret store.
   secretStore?: SecretFileStore;
   now?: () => number;
   // Injectable id seam (oracle/tests) for the correlationId stamped on every
@@ -441,20 +441,17 @@ export interface WorkspaceEngineCaptureOptions {
   // author.
   activeAgentRun?: () => ActiveAgentRun | null;
   // The reconnect-safe session owner supplies the daemon-backed text, secret,
-  // and Y.Doc paths. Injectable stores still take precedence in focused tests.
-  rustEngineSessions?: EngineWorkspaceSessions;
-  // Which engine owns the Y.Doc provider session, stated rather than inferred.
-  // Defaults to "the daemon, when sessions were supplied". Set it explicitly to
-  // wrap a daemon-backed store without dropping onto the legacy engine.
-  useRustEngine?: boolean;
+  // and Y.Doc paths. Production cannot construct a capture without it.
+  // Injectable stores still take precedence in focused tests.
+  rustEngineSessions: EngineWorkspaceSessions;
   // The real Rust daemon owns filesystem observation and version
   // materialization. Tests backed by the in-process loopback omit this because
   // that transport has no autonomous watcher or disk writer.
   daemonOwnsCapture?: boolean;
   // Injectable only to simulate daemon generations in focused restart tests.
   openRustYDocProviderSession?: (
-    options: EngineYdocProviderSessionRustOptions,
-  ) => Promise<EngineYdocProviderSessionRust>;
+    options: EngineYdocProviderSessionOptions,
+  ) => Promise<EngineYdocProviderSession>;
 }
 
 export interface EngineDiskWriter {
@@ -830,32 +827,8 @@ export function createWorkspaceEngineCapture(
   };
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
 
-  // Which engine owns the Y.Doc provider session. Injected stores are honoured
-  // either way — `store`/`secretStore` are assigned before the `??=` fallbacks
-  // below — so this is only about the engine, not about the stores.
-  //
-  // It used to be inferred from `!options.store && !options.secretStore`, which
-  // made injecting a store the way to select the legacy engine. That coupled two
-  // unrelated decisions: a caller who wrapped a store to observe it silently lost
-  // the daemon, and the injectable `openRustYDocProviderSession` seam became
-  // unreachable in exactly the tests that wanted it.
-  const useRustEngine =
-    options.useRustEngine ?? options.rustEngineSessions !== undefined;
-  // Daemon-owned capture quiesces through `flushCapture`, which the store we
-  // would create here does not implement — every call site is an optional-call
-  // no-op, so version operations would read state the daemon had not settled and
-  // report success. An injected store may implement it (some tests inject a
-  // legacy store augmented with one), so this only refuses the store we build.
-  if (options.daemonOwnsCapture && !useRustEngine && !options.store) {
-    throw new Error(
-      "daemonOwnsCapture requires the Rust engine: the legacy store cannot flush daemon capture.",
-    );
-  }
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
-    if (!options.rustEngineSessions) {
-      throw new Error("Rust engine workspace sessions are unavailable.");
-    }
     liveStores ??= createCaptureLiveStores(
       { workspaceId, rootPath },
       options.rustEngineSessions,
@@ -910,7 +883,7 @@ export function createWorkspaceEngineCapture(
     // The version active when the session opened. A version op invalidates it,
     // which is exactly why every version op must vacate live sessions first.
     versionId: string;
-    session: EngineYDocProviderSession;
+    session: WorkspaceEngineYDocProviderSession;
     // "live": healthy; sha-precise suppression, external edits captured.
     // "dead-generation": the daemon generation died; the canonical doc still
     // holds the user's text and a later op can rebuild a generation around it.
@@ -930,7 +903,7 @@ export function createWorkspaceEngineCapture(
   async function openRestartSafeRustYDocSession(input: {
     versionId: string;
     path: string;
-    contentKind?: YDocContentKind;
+    contentKind?: YdocContentKind;
     onDead: () => void;
     onAlive: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
@@ -943,21 +916,21 @@ export function createWorkspaceEngineCapture(
     ) => void | Promise<void>;
     onSettleStart: (token: number) => void;
     onSettleError: (error: unknown, token: number) => void;
-  }): Promise<EngineYDocProviderSession> {
-    const sessions = options.rustEngineSessions!;
+  }): Promise<WorkspaceEngineYDocProviderSession> {
+    const sessions = options.rustEngineSessions;
     const openProvider =
       options.openRustYDocProviderSession ??
-      openEngineYdocProviderSessionRust;
+      openEngineYdocProviderSession;
     const workspace = { workspaceId, rootPath };
     let canonicalDoc: Y.Doc | null = null;
-    let current: EngineYdocProviderSessionRust | null = null;
-    let releaseObligation: EngineYdocProviderSessionRust | null = null;
+    let current: EngineYdocProviderSession | null = null;
+    let releaseObligation: EngineYdocProviderSession | null = null;
     let closed = false;
     let dead = false;
     const deadSessionToken = {};
     let operationChain: Promise<void> = Promise.resolve();
     const openingRemoteUpdates = new WeakMap<
-      EngineYdocProviderSessionRust,
+      EngineYdocProviderSession,
       { updates: Uint8Array[]; installed: boolean }
     >();
 
@@ -971,7 +944,7 @@ export function createWorkspaceEngineCapture(
     };
 
     const markDead = (
-      unreleased: EngineYdocProviderSessionRust | null,
+      unreleased: EngineYdocProviderSession | null,
     ): void => {
       releaseObligation ??= unreleased;
       current = null;
@@ -996,7 +969,7 @@ export function createWorkspaceEngineCapture(
     };
 
     const releaseGeneration = async (
-      generation: EngineYdocProviderSessionRust,
+      generation: EngineYdocProviderSession,
     ): Promise<void> => {
       try {
         await generation.close({ settle: false });
@@ -1020,7 +993,7 @@ export function createWorkspaceEngineCapture(
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
-    ): Promise<EngineYdocProviderSessionRust> =>
+    ): Promise<EngineYdocProviderSession> =>
       await sessions.run(
         workspace,
         async (binding) => {
@@ -1029,7 +1002,7 @@ export function createWorkspaceEngineCapture(
               "Rust engine client does not expose Y.Doc event delivery.",
             );
           }
-          let opened: EngineYdocProviderSessionRust | null = null;
+          let opened: EngineYdocProviderSession | null = null;
           const opening = { updates: [] as Uint8Array[], installed: false };
           const requestReconnect = (error: unknown): void => {
             if (
@@ -1086,7 +1059,7 @@ export function createWorkspaceEngineCapture(
     // Y.Doc never changes identity across daemon generations.
     const adoptGeneration = async (
       doc: Y.Doc,
-      replacement: EngineYdocProviderSessionRust,
+      replacement: EngineYdocProviderSession,
     ): Promise<void> => {
       try {
         const opening = openingRemoteUpdates.get(replacement);
@@ -1132,7 +1105,7 @@ export function createWorkspaceEngineCapture(
     };
 
     const rebind = async (
-      failed: EngineYdocProviderSessionRust,
+      failed: EngineYdocProviderSession,
       options?: { releaseBeforeOpen?: boolean },
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
@@ -1147,7 +1120,7 @@ export function createWorkspaceEngineCapture(
         if (current !== failed || closed) return;
         current = null;
       }
-      let replacement: EngineYdocProviderSessionRust;
+      let replacement: EngineYdocProviderSession;
       try {
         replacement = await openGeneration(false);
       } catch (error) {
@@ -1191,7 +1164,7 @@ export function createWorkspaceEngineCapture(
       );
 
     const executeWithReconnect = async <T>(
-      operation: (session: EngineYdocProviderSessionRust) => Promise<T>,
+      operation: (session: EngineYdocProviderSession) => Promise<T>,
     ): Promise<T> => {
       if (closed) throw closedError();
       // Settling and closing are the paths that PERSIST. A dead session still
@@ -1358,9 +1331,7 @@ export function createWorkspaceEngineCapture(
   // The encrypted secret store (PR 08) shares engine.db; opened lazily so
   // workspaces without secret files never touch the key path.
   function secretStoreFor(): SecretFileStore {
-    secretStore ??= useRustEngine
-      ? daemonStores().secretStore
-      : createSecretFileStore(rootPath);
+    secretStore ??= daemonStores().secretStore;
     return secretStore;
   }
 
@@ -1412,9 +1383,7 @@ export function createWorkspaceEngineCapture(
   function engineStore(): Promise<CaptureVersionedTextStore> {
     if (!initialized) {
       const attempt = (async () => {
-        store ??= useRustEngine
-          ? daemonStores().store
-          : createVersionedTextStore(rootPath);
+        store ??= daemonStores().store;
         await store.ensureMainVersion({ workspaceId });
         return store;
       })();
@@ -2240,11 +2209,9 @@ export function createWorkspaceEngineCapture(
     registerExpectedEngineEvents,
 
     async openYDocSession(input) {
-      // Reuse THIS capture's store (single-writer safety): the driver writes
-      // only through store.runInEngineWriteLane / store.writeProjectedTextFile,
-      // so it shares the store's one write connection + serialized lane. A
-      // second createVersionedTextStore on the same engine.db would be a second
-      // write connection and node:sqlite deadlocks.
+      // Resolve the active version through this capture's store, then open the
+      // provider through the same Rust workspace-session owner. Capture,
+      // version work, and Y.Doc work therefore share one daemon workspace lease.
       const engine = await engineStore();
       const versionId = await activeVersionIdOf(engine);
       const reportSaveState = (
@@ -2325,48 +2292,33 @@ export function createWorkspaceEngineCapture(
         reportSaveState("error", token);
       };
       let entry: LiveYDocSession | null = null;
-      const session = useRustEngine
-        ? await openRestartSafeRustYDocSession({
-            versionId,
-            path: input.path,
-            ...(input.contentKind
-              ? { contentKind: input.contentKind }
-              : {}),
-            onDead: () => {
-              if (
-                entry !== null &&
-                liveYDocSessions.get(input.path) === entry &&
-                entry.status === "live"
-              ) {
-                entry.status = "dead-generation";
-              }
-            },
-            onAlive: () => {
-              if (
-                entry !== null &&
-                liveYDocSessions.get(input.path) === entry &&
-                entry.status === "dead-generation"
-              ) {
-                entry.status = "live";
-              }
-            },
-            onRemoteUpdate: input.onRemoteUpdate,
-            onSettled,
-            onSettleStart,
-            onSettleError,
-          })
-        : await openEngineYDocProviderSession({
-            store: engine,
-            rootDir: rootPath,
-            workspaceId,
-            versionId,
-            path: input.path,
-            ...(input.contentKind ? { contentKind: input.contentKind } : {}),
-            onRemoteUpdate: input.onRemoteUpdate,
-            onSettled,
-            onSettleStart,
-            onSettleError,
-          });
+      const session = await openRestartSafeRustYDocSession({
+        versionId,
+        path: input.path,
+        ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+        onDead: () => {
+          if (
+            entry !== null &&
+            liveYDocSessions.get(input.path) === entry &&
+            entry.status === "live"
+          ) {
+            entry.status = "dead-generation";
+          }
+        },
+        onAlive: () => {
+          if (
+            entry !== null &&
+            liveYDocSessions.get(input.path) === entry &&
+            entry.status === "dead-generation"
+          ) {
+            entry.status = "live";
+          }
+        },
+        onRemoteUpdate: input.onRemoteUpdate,
+        onSettled,
+        onSettleStart,
+        onSettleError,
+      });
       // Register the live session only after the open succeeds (a secret/
       // not-found/already-live rejection propagates to the caller and never
       // guards a path that has no session). The close below drops the entry
