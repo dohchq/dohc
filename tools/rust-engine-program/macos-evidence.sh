@@ -47,12 +47,28 @@ echo "== macOS evidence ($MODE) — $(uname -mrs) =="
 # evidence, so accepting a runtime the repo declares unsupported would let it
 # vouch for a run nobody can reproduce. Kept in sync with the manifest by hand —
 # there is no shared source, and this copy had already gone stale once.
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-NODE_MINOR="$(node -p 'process.versions.node.split(".")[1]' 2>/dev/null || echo 0)"
-if [ "$NODE_MAJOR" -lt 24 ] \
+# Comparing major/minor by hand is not enough. `24.14.0-rc.1` has major 24 and
+# minor 14, so a numeric check waves it through, while npm semver does NOT
+# satisfy `>=24.14.0` for any prerelease of it. Since this script certifies
+# bankable evidence, ask Node itself for the whole version and refuse anything
+# carrying a prerelease tag.
+NODE_VERSION="$(node -p 'process.versions.node' 2>/dev/null || echo 0.0.0)"
+NODE_MAJOR="${NODE_VERSION%%.*}"
+NODE_REST="${NODE_VERSION#*.}"
+NODE_MINOR="${NODE_REST%%.*}"
+case "$NODE_VERSION" in
+  *-*) NODE_PRERELEASE=1 ;;
+  *) NODE_PRERELEASE=0 ;;
+esac
+if [ "$NODE_PRERELEASE" -eq 1 ] \
+  || [ "$NODE_MAJOR" -lt 24 ] \
   || { [ "$NODE_MAJOR" -eq 24 ] && [ "$NODE_MINOR" -lt 14 ]; }; then
   echo "ERROR: node $(node --version) does not satisfy package.json engines" >&2
   echo "       (>=24.14.0). The repo pins 24.14.0 in .node-version and .nvmrc." >&2
+  if [ "$NODE_PRERELEASE" -eq 1 ]; then
+    echo "       A prerelease build never satisfies that range under npm semver," >&2
+    echo "       and this script must not certify evidence on one." >&2
+  fi
   exit 2
 fi
 
