@@ -757,7 +757,7 @@ describe("EngineRelayClient", () => {
     let originMarker = false;
     let readOnlyMarker = false;
     const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.push") {
+      if (request.method === "sync.push" || request.method === "sync.pull") {
         throw new DaemonRefusalError(
           {
             code: "INVALID_PARAMS",
@@ -784,8 +784,12 @@ describe("EngineRelayClient", () => {
     const { client, sessions } = await harness(daemon);
 
     await expect(client.push()).rejects.toBeInstanceOf(DaemonRefusalError);
+    await expect(client.pull()).rejects.toBeInstanceOf(DaemonRefusalError);
     originMarker = true;
     await expect(client.push()).rejects.toBeInstanceOf(
+      RelayOriginDivergedError,
+    );
+    await expect(client.pull()).rejects.toBeInstanceOf(
       RelayOriginDivergedError,
     );
     await expect(

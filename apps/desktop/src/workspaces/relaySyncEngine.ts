@@ -187,7 +187,17 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           await operations.push();
         }
       }
-      return operations.pull();
+      try {
+        return await operations.pull();
+      } catch (error) {
+        if (!(error instanceof RelayOriginDivergedError)) throw error;
+        // A pull can find that this machine's local origin disagrees with its
+        // own relay echo. Re-baseline that origin, preserve its local suffix,
+        // and retry the pass instead of backing off against the same page.
+        await operations.recoverOrigin();
+        if (!bootstrapPass) await operations.push();
+        return operations.pull();
+      }
     });
     // Only a FULLY successful pull (materialized + cursor committed inside
     // runRelaySync) completes the bootstrap; a throw above leaves the next

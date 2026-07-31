@@ -394,7 +394,15 @@ describe("share grants", () => {
       {
         originSeq: opSeq++,
         opKind: "chat.message.append",
-        payload: { messageId: "m1", threadId: "t1", authorKind: "user", authorDisplayName: "G", body: "secret chat", createdAtMs: 1 },
+        payload: {
+          messageId: "m1",
+          threadId: "t1",
+          authorKind: "user",
+          authorDisplayName: "G",
+          authorUserId: GRANTER,
+          body: "secret chat",
+          createdAtMs: 1,
+        },
         recordedAtMs: 1200,
       },
     ]);

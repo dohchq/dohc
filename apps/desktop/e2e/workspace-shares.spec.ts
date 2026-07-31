@@ -67,6 +67,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
       email: "e2e-granter@dohc.test",
+      userId: "e2e-granter",
       token: GRANTER_TOKEN,
     });
 
@@ -206,6 +207,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
       email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
       token: RECIPIENT_TOKEN,
     });
     desktop = await launchDesktopApp({ workspace: temp });
@@ -448,6 +450,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
       email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
       token: RECIPIENT_TOKEN,
     });
 

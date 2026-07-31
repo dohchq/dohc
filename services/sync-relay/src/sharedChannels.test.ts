@@ -445,9 +445,8 @@ describe("shared channels (MU-C4)", () => {
     expect(forgedReaction.status).toBe(403);
     expect((await json(forgedReaction)).code).toBe("authorship_mismatch");
 
-    // A missing authorUserId is STAMPED to the authenticated pusher, so an
-    // anonymous append still lands verified.
-    const stamped = await h(
+    // The member must send the authenticated user id in the replicated bytes.
+    const missingAuthor = await h(
       request(
         MEMBER_A,
         `/sync/shares/${shareId}/log`,
@@ -457,12 +456,13 @@ describe("shared channels (MU-C4)", () => {
         }),
       ),
     );
-    expect(stamped.status).toBe(200);
+    expect(missingAuthor.status).toBe(403);
+    expect((await json(missingAuthor)).code).toBe("authorship_mismatch");
     const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)));
-    const stampedOp = (ownerLog.ops as Array<{ payload: Record<string, unknown> }>).find(
+    const missingOp = (ownerLog.ops as Array<{ payload: Record<string, unknown> }>).find(
       (op) => op.payload.messageId === "msg-anon",
     );
-    expect(stampedOp?.payload.authorUserId).toBe(MEMBER_A);
+    expect(missingOp).toBeUndefined();
   });
 
   it("rejects a batch containing ANY op outside the shared channel, atomically", async () => {

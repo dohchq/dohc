@@ -146,6 +146,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
       email: GRANTER_EMAIL,
+      userId: GRANTER_USER,
       token: GRANTER_TOKEN,
     });
 
@@ -289,13 +290,14 @@ test("owner + participant chat and co-presence converge in the real app", async 
     } finally {
       await memberStore.close();
     }
-    await pushSharedChannel({
+    const pushed = await pushSharedChannel({
       rootDir: memberDir,
       workspaceId: memberWs,
       relay: relayConn,
       shareId,
       channelWireId,
     });
+    expect(pushed.pushed).toBeGreaterThan(0);
 
     // The member's ops are in the OWNER's workspace bucket (share-namespaced
     // origin); the owner ingests them through its NORMAL workspace pull, which

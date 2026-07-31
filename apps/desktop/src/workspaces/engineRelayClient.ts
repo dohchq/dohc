@@ -436,7 +436,7 @@ function translateRelayError(method: string, error: unknown): never {
     throw new RelayWorkspaceUnavailableError();
   }
   if (
-    method === "sync.push" &&
+    (method === "sync.push" || method === "sync.pull") &&
     error.wireCode === "INVALID_PARAMS" &&
     error.message === "relay-origin-diverged"
   ) {

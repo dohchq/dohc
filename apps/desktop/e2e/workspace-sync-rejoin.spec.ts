@@ -205,6 +205,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
+      userId: "e2e-user",
     });
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
@@ -377,6 +378,7 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
+      userId: "e2e-user",
     });
 
     desktop = await launchDesktopApp({

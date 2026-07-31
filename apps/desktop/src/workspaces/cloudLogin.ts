@@ -90,11 +90,17 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         // The Better Auth user id (opaque uuid) becomes the reactor author key —
         // never the email — so no PII replicates into the CRDT.
         const userId = body?.user?.id;
+        if (!userId) {
+          pending = null;
+          throw new Error(
+            "Cloud login failed because the server returned no user identity. Contact the server administrator.",
+          );
+        }
         await options.store.save({
           serverUrl,
           ...(relayUrl ? { relayUrl } : {}),
           email,
-          ...(userId ? { userId } : {}),
+          userId,
           token: data.access_token,
         });
         pending = null;

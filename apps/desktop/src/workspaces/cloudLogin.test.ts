@@ -65,7 +65,9 @@ describe("cloud device-flow login", () => {
         approved
           ? { body: { access_token: "session-token-xyz" } }
           : { status: 400, body: { error: "authorization_pending" } },
-      "/api/auth/get-session": () => ({ body: { user: { email: "ice@dohc.test" } } }),
+      "/api/auth/get-session": () => ({
+        body: { user: { email: "ice@dohc.test", id: "usr_ice" } },
+      }),
     });
     const login = createCloudLogin({
       store,
@@ -83,6 +85,7 @@ describe("cloud device-flow login", () => {
     expect(store.saved).toEqual({
       serverUrl: "http://cloud.test",
       email: "ice@dohc.test",
+      userId: "usr_ice",
       token: "session-token-xyz",
     });
     expect(await login.status()).toEqual({
@@ -119,12 +122,33 @@ describe("cloud device-flow login", () => {
     expect(store.saved?.userId).not.toBe(store.saved?.email);
   });
 
-  it("persists an explicitly supplied relay URL with the approved session", async () => {
+  it("does not create a signed-in session without a Better Auth user id", async () => {
     const store = memoryStore();
     const { impl } = fakeFetch({
       "/api/auth/device/code": () => ({ body: DEVICE }),
       "/api/auth/device/token": () => ({ body: { access_token: "session-token-xyz" } }),
       "/api/auth/get-session": () => ({ body: { user: { email: "ice@dohc.test" } } }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+
+    await login.start();
+    await expect(login.poll()).rejects.toThrow(/server returned no user identity/i);
+    expect(store.saved).toBeNull();
+    await expect(login.poll()).rejects.toThrow(/no cloud login in progress/i);
+  });
+
+  it("persists an explicitly supplied relay URL with the approved session", async () => {
+    const store = memoryStore();
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "session-token-xyz" } }),
+      "/api/auth/get-session": () => ({
+        body: { user: { email: "ice@dohc.test", id: "usr_ice" } },
+      }),
     });
     const login = createCloudLogin({
       store,
@@ -185,7 +209,12 @@ describe("cloud device-flow login", () => {
 
   it("logout() clears credentials and status reads disconnected", async () => {
     const store = memoryStore();
-    store.saved = { serverUrl: "http://cloud.test", email: "x@y.z", token: "t" };
+    store.saved = {
+      serverUrl: "http://cloud.test",
+      email: "x@y.z",
+      userId: "usr_x",
+      token: "t",
+    };
     const login = createCloudLogin({
       store,
       defaultServerUrl: "http://cloud.test",

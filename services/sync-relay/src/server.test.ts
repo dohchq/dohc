@@ -1880,10 +1880,10 @@ describe("sync relay epoch and stream identity enforcement", () => {
   });
 });
 
-// WS-MU-C0 — the relay stamps/verifies that a chat op's claimed author equals
+// WS-MU-C0 — the relay verifies that a chat op's claimed author equals
 // the authenticated pusher (actor.userId) before admitting it to the log. These
 // mirror PR-18's isolation rigor: a forged author is rejected atomically and
-// leaves the log unchanged; the honest path is admitted; solo ops are untouched.
+// leaves the log unchanged; the honest path is admitted; missing authors fail closed.
 describe("MU-C0 verified chat authorship", () => {
   function messageOp(
     originSeq: number,
@@ -1967,26 +1967,20 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toHaveLength(2);
   });
 
-  it("stamps the authenticated pusher onto a message.append that omits authorUserId", async () => {
-    // The relay only ever sees AUTHENTICATED pushes, so an append that omits
-    // authorUserId is not "solo" here — it is attributable to its pusher. The
-    // relay stamps actor.userId so the replicated op is VERIFIED, never NULL.
-    // (The genuine solo/no-relay omission survives only in the engine-local
-    // path, which never traverses the relay.)
+  it("rejects a message.append with no authorUserId, leaving the log unchanged", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
-    const stamped = await h(
+    const missing = await h(
       request(
         "a",
         "/sync/workspace-a/log",
         jsonBody({ originId: "origin-a", ops: [messageOp(0, undefined)] }),
       ),
     );
-    expect(stamped.status).toBe(200);
-    const ops = await logOps(h);
-    expect(ops).toHaveLength(1);
-    expect((ops[0] as { payload: { authorUserId?: string } }).payload.authorUserId).toBe("a");
+    expect(missing.status).toBe(403);
+    expect(await json(missing)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+    expect(await logOps(h)).toEqual([]);
   });
 
   it("rejects a message.append forging another user's authorUserId, leaving the log unchanged", async () => {

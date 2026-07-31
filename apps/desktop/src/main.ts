@@ -1468,13 +1468,9 @@ function mcpRuntimeConfigFor(rootPath: string): {
           DOHC_MCP_CLOUD_EMAIL: cachedCredentials.email,
           DOHC_MCP_OWNER_NAME: localUserDisplayName(),
           DOHC_MCP_CLOUD_TOKEN: cachedCredentials.token,
-          // WS-MU-C0: the OPAQUE Better Auth user id, so the agent's chat sends
-          // stamp a VERIFIED authorUserId the relay accepts as actor.userId.
-          // Present only when the session carries it (older credential files omit
-          // it — the agent then sends solo, byte-identical to today).
-          ...(cachedCredentials.userId
-            ? { DOHC_MCP_CLOUD_USER_ID: cachedCredentials.userId }
-            : {}),
+          // WS-MU-C0: the opaque Better Auth user id that the relay verifies as
+          // actor.userId before it accepts an authored chat operation.
+          DOHC_MCP_CLOUD_USER_ID: cachedCredentials.userId,
         }
       : undefined;
   return {
@@ -1811,20 +1807,17 @@ function localReactorFallbackId(): string {
 // raw email would replicate to every peer (PII/GDPR exposure) and persist in
 // the immutable CRDT history. Prefer the Better Auth user id (an opaque uuid)
 // when signed in; that is forward-compatible with MU-C0, which verifies
-// authorId === actor.userId server-side. Signed out (or an older credential
-// file with no userId) falls back to a persisted per-install uuid. The
-// email→display-name mapping stays LOCAL in localUserDisplayName().
+// authorId === actor.userId server-side. Signed out falls back to a persisted
+// per-install uuid. The email→display-name mapping stays LOCAL in
+// localUserDisplayName().
 function localUserId(): string {
   return cachedCredentials?.userId ?? localReactorFallbackId();
 }
 
-// The VERIFIED relay identity a signed-in send stamps on a chat message
-// (WS-MU-C0). Present ONLY when signed in to the relay: the OPAQUE Better Auth
-// user id the relay verifies as `actor.userId` before admitting the op. Solo /
-// signed-out returns undefined, so message.append omits `authorUserId` and stays
-// byte-identical to the pre-MU-C0 shape (unlike reactions, which anchor on a
-// stable local fallback id even offline). NEVER the email — identity is opaque;
-// the email is display-only via localUserDisplayName().
+// The verified relay identity for a signed-in chat message (WS-MU-C0). A
+// signed-in session always carries the opaque Better Auth user id that the relay
+// verifies as `actor.userId`. Signed-out sends omit `authorUserId`. Reactions
+// still use the stable local fallback id offline. The email stays display-only.
 function relayAuthorUserId(): string | undefined {
   return cachedCredentials?.userId;
 }
@@ -5556,8 +5549,8 @@ function registerIpcHandlers(
     });
     // WS-MU-C0: the credential cache must be warm BEFORE relayAuthorUserId()
     // reads it — a send racing an unfinished async cache load would otherwise
-    // stamp solo (authorUserId omitted) and lose relay provenance for a
-    // signed-in user's message. warmCredentialCache is idempotent.
+    // omit authorUserId from a signed-in user's message. The relay refuses that
+    // payload. warmCredentialCache is idempotent.
     await warmCredentialCache();
     const attachments = await resolveChatFileReferences(
       workspace,
@@ -5571,7 +5564,7 @@ function registerIpcHandlers(
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
       author: { kind: "human", displayName: localUserDisplayName() },
-      // WS-MU-C0: stamp the verified relay identity when signed in (the relay
+      // WS-MU-C0: include the verified relay identity when signed in (the relay
       // checks it === actor.userId); omit it solo. Identity is main-derived,
       // never renderer-supplied.
       authorUserId: relayAuthorUserId(),
@@ -6061,8 +6054,8 @@ function registerIpcHandlers(
       target: { channelId: input.channelId },
     });
     // WS-MU-C0: warm the credential cache before relayAuthorUserId() reads it,
-    // so a thread opened before the async cache load finishes still stamps the
-    // signed-in author (never falsely solo). Idempotent.
+    // so a thread opened before the async cache load finishes still includes the
+    // signed-in author. Idempotent.
     await warmCredentialCache();
     const attachments = await resolveChatFileReferences(
       workspace,
@@ -6075,7 +6068,7 @@ function registerIpcHandlers(
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
       author: { kind: "human", displayName: localUserDisplayName() },
-      // WS-MU-C0: stamp the verified relay identity when signed in; omit solo.
+      // WS-MU-C0: include the verified relay identity when signed in; omit solo.
       authorUserId: relayAuthorUserId(),
       body: input.body,
       ...(attachments.length > 0 ? { attachments } : {}),

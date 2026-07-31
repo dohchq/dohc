@@ -215,7 +215,13 @@ export async function seedWorkspaceRegistry(
 // The relay's SYNC_RELAY_TEST_AUTH seam accepts `test:<user>` bearers.
 export async function seedCloudCredentials(
   workspace: Pick<TempWorkspace, "homeDir">,
-  input: { serverUrl: string; relayUrl: string; email?: string; token?: string },
+  input: {
+    serverUrl: string;
+    relayUrl: string;
+    userId: string;
+    email?: string;
+    token?: string;
+  },
 ): Promise<void> {
   await mkdir(workspace.homeDir, { recursive: true });
   await writeFile(
@@ -226,6 +232,7 @@ export async function seedCloudCredentials(
         serverUrl: input.serverUrl,
         relayUrl: input.relayUrl,
         email: input.email ?? "e2e@dohc.dev",
+        userId: input.userId,
         token: `plain:${input.token ?? "test:e2e-user"}`,
       },
       null,
