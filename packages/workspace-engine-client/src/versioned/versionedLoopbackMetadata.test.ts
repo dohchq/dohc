@@ -946,6 +946,7 @@ describe("loopback moment metadata", () => {
   });
 
   it("rejects invalid content before version lookup or main creation", async () => {
+    const overCapText = "x".repeat(128 * 1024 + 1);
     const overCapBytes = Array.from({ length: 48 * 1024 + 1 }, () => 1);
     const overCaptureBytes = Buffer.alloc(5 * 1024 * 1024 + 1, 1);
     const cases: Array<{
@@ -954,6 +955,28 @@ describe("loopback moment metadata", () => {
       params: Record<string, unknown>;
       error: RegExp;
     }> = [
+      {
+        name: "textWrite content cap before protected-path rejection",
+        method: VERSIONED_METHOD.textWrite,
+        params: {
+          versionId: "main",
+          path: ".env",
+          text: overCapText,
+          origin: "local-file",
+        },
+        error: /content-exceeds-inband-cap/,
+      },
+      {
+        name: "binaryWrite decode before protected-path rejection",
+        method: VERSIONED_METHOD.binaryWrite,
+        params: {
+          versionId: "main",
+          path: ".env",
+          bytesBase64: "!!!not base64!!!",
+          origin: "local-file",
+        },
+        error: /invalid-input/,
+      },
       {
         name: "binaryWrite content cap",
         method: VERSIONED_METHOD.binaryWrite,
@@ -1161,6 +1184,97 @@ describe("loopback moment metadata", () => {
     }
   });
 
+  it("deserializes rename and delete request fields before resolving the version", async () => {
+    const handlers = [
+      {
+        name: "textRename",
+        method: VERSIONED_METHOD.textRename,
+        params: {
+          versionId: "no-such-version",
+          fromPath: "before.md",
+          toPath: "after.md",
+          origin: "local-file",
+        },
+      },
+      {
+        name: "textDelete",
+        method: VERSIONED_METHOD.textDelete,
+        params: {
+          versionId: "no-such-version",
+          path: "notes.md",
+          origin: "local-file",
+        },
+      },
+    ] as const;
+
+    for (const handler of handlers) {
+      for (const [field, value] of [
+        ["requestId", 1],
+        ["nowMs", "now"],
+      ] as const) {
+        await expectRefusalWithoutVersion(
+          `${handler.name}: malformed ${field}`,
+          handler.method,
+          { ...handler.params, [field]: value },
+          /invalid parameters/,
+        );
+      }
+      await expectRefusalWithoutVersion(
+        `${handler.name}: malformed idempotencyKey`,
+        handler.method,
+        handler.params,
+        /idempotencyKey is invalid/,
+        { idempotencyKey: 1 },
+      );
+    }
+  });
+
+  it("treats nullable rename and delete request fields as absent", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "before.md",
+      text: "hello",
+      origin: "local-file",
+    });
+
+    const nullableFields = {
+      workspaceId: null,
+      metadataOrigin: null,
+      summary: null,
+      correlationId: null,
+      author: null,
+      authorJson: null,
+      requestId: null,
+      nowMs: null,
+    };
+    const renamed = await send(engine, VERSIONED_METHOD.textRename, {
+      ...nullableFields,
+      versionId,
+      fromPath: "before.md",
+      toPath: "after.md",
+      origin: "local-file",
+    });
+    expect((renamed.after as { path?: unknown }).path).toBe("after.md");
+
+    const deleted = await send(engine, VERSIONED_METHOD.textDelete, {
+      ...nullableFields,
+      versionId,
+      path: "after.md",
+      origin: "local-file",
+    });
+    expect((deleted.before as { path?: unknown }).path).toBe("after.md");
+    await expect(
+      send(engine, VERSIONED_METHOD.textRead, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "after.md",
+      }),
+    ).resolves.toEqual({});
+  });
+
   it("treats null binary sources as absent", async () => {
     for (const bytes of [
       { bytes: [1], bytesBase64: null },
@@ -1225,6 +1339,71 @@ describe("loopback moment metadata", () => {
         params: { ...blobParams, bytes: null },
       },
       {
+        name: "textRename",
+        method: VERSIONED_METHOD.textRename,
+        params: {
+          versionId: "main",
+          fromPath: "before.md",
+          toPath: "after.md",
+          origin: "local-file",
+          stray: true,
+        },
+      },
+      {
+        name: "textDelete",
+        method: VERSIONED_METHOD.textDelete,
+        params: {
+          versionId: "main",
+          path: "notes.md",
+          origin: "local-file",
+          stray: true,
+        },
+      },
+      {
+        name: "secretWrite",
+        method: VERSIONED_METHOD.secretsWrite,
+        params: {
+          versionId: "main",
+          path: ".env",
+          text: "API_KEY=value\n",
+          origin: "local-file",
+          momentId: "secret-write-unknown-field",
+          stray: true,
+        },
+      },
+      {
+        name: "secretDelete",
+        method: VERSIONED_METHOD.secretsDelete,
+        params: {
+          versionId: "main",
+          path: ".env",
+          origin: "local-file",
+          momentId: "secret-delete-unknown-field",
+          stray: true,
+        },
+      },
+      {
+        name: "secretWrite legacy origin alias",
+        method: VERSIONED_METHOD.secretsWrite,
+        params: {
+          versionId: "main",
+          path: ".env",
+          text: "API_KEY=value\n",
+          metadataOrigin: "local-file",
+          momentId: "secret-write-legacy-origin",
+        },
+      },
+      {
+        name: "secretDelete legacy origin alias",
+        method: VERSIONED_METHOD.secretsDelete,
+        params: {
+          versionId: "main",
+          path: ".env",
+          metadataOrigin: "local-file",
+          momentId: "secret-delete-legacy-origin",
+        },
+      },
+      {
         name: "versionsEnsureMain",
         method: VERSIONED_METHOD.versionsEnsureMain,
         params: { stray: true },
@@ -1238,6 +1417,166 @@ describe("loopback moment metadata", () => {
         testCase.params,
         /invalid parameters/,
       );
+    }
+  });
+
+  it("rejects unknown mutation fields without changing existing state", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    for (const path of ["before.md", "delete.md"]) {
+      await send(engine, VERSIONED_METHOD.textWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path,
+        text: path,
+        origin: "local-file",
+      });
+    }
+    await send(engine, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: ".env",
+      text: "API_KEY=original\n",
+      origin: "local-file",
+      momentId: "secret-unknown-field-seed",
+    });
+
+    for (const [name, method, params] of [
+      [
+        "textRename",
+        VERSIONED_METHOD.textRename,
+        {
+          workspaceId: WORKSPACE,
+          versionId,
+          fromPath: "before.md",
+          toPath: "after.md",
+          origin: "local-file",
+          stray: true,
+        },
+      ],
+      [
+        "textDelete",
+        VERSIONED_METHOD.textDelete,
+        {
+          workspaceId: WORKSPACE,
+          versionId,
+          path: "delete.md",
+          origin: "local-file",
+          stray: true,
+        },
+      ],
+      [
+        "secretWrite",
+        VERSIONED_METHOD.secretsWrite,
+        {
+          workspaceId: WORKSPACE,
+          versionId,
+          path: ".env",
+          text: "API_KEY=changed\n",
+          origin: "local-file",
+          momentId: "secret-write-unknown-field-existing",
+          stray: true,
+        },
+      ],
+      [
+        "secretDelete",
+        VERSIONED_METHOD.secretsDelete,
+        {
+          workspaceId: WORKSPACE,
+          versionId,
+          path: ".env",
+          origin: "local-file",
+          momentId: "secret-delete-unknown-field-existing",
+          stray: true,
+        },
+      ],
+    ] as const) {
+      await expect(send(engine, method, params), name).rejects.toThrow(/invalid parameters/);
+    }
+
+    for (const path of ["before.md", "delete.md"]) {
+      const read = await send(engine, VERSIONED_METHOD.textRead, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path,
+      });
+      expect(read.text, path).toBe(path);
+    }
+    await expect(
+      send(engine, VERSIONED_METHOD.textRead, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: "after.md",
+      }),
+    ).resolves.toEqual({});
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsMaterialize, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: ".env",
+      }),
+    ).resolves.toEqual({ text: "API_KEY=original\n" });
+  });
+
+  it("requires every daemon-required secret write and delete field", async () => {
+    for (const field of [
+      "workspaceId",
+      "versionId",
+      "path",
+      "text",
+      "origin",
+      "momentId",
+    ]) {
+      const engine = new VersionedLoopbackEngine();
+      const versionId = await openWorkspace(engine);
+      const params: Record<string, unknown> = {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: ".env",
+        text: "API_KEY=value\n",
+        origin: "local-file",
+        momentId: `secret-write-missing-${field}`,
+      };
+      delete params[field];
+      await expect(
+        send(engine, VERSIONED_METHOD.secretsWrite, params),
+        `secretWrite: missing ${field}`,
+      ).rejects.toThrow(/invalid parameters/);
+      const listed = await send(engine, VERSIONED_METHOD.secretsList, {
+        workspaceId: WORKSPACE,
+        versionId,
+      });
+      expect(listed.secrets, `secretWrite: missing ${field}`).toEqual([]);
+    }
+
+    for (const field of ["workspaceId", "versionId", "path", "origin", "momentId"]) {
+      const engine = new VersionedLoopbackEngine();
+      const versionId = await openWorkspace(engine);
+      await send(engine, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: ".env",
+        text: "API_KEY=value\n",
+        origin: "local-file",
+        momentId: `secret-delete-seed-${field}`,
+      });
+      const params: Record<string, unknown> = {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: ".env",
+        origin: "local-file",
+        momentId: `secret-delete-missing-${field}`,
+      };
+      delete params[field];
+      await expect(
+        send(engine, VERSIONED_METHOD.secretsDelete, params),
+        `secretDelete: missing ${field}`,
+      ).rejects.toThrow(/invalid parameters/);
+      const listed = await send(engine, VERSIONED_METHOD.secretsList, {
+        workspaceId: WORKSPACE,
+        versionId,
+      });
+      expect(listed.secrets as unknown[], `secretDelete: missing ${field}`).toHaveLength(1);
     }
   });
 

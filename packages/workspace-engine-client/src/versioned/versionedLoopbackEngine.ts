@@ -84,6 +84,52 @@ const BINARY_BLOB_WRITE_PARAM_FIELDS = new Set<string>([
   "sha256",
   "bytesBase64",
 ]);
+const TEXT_RENAME_PARAM_FIELDS = new Set<string>([
+  "workspaceId",
+  "versionId",
+  "fromPath",
+  "toPath",
+  "origin",
+  "metadataOrigin",
+  "summary",
+  "correlationId",
+  "author",
+  "authorJson",
+  "requestId",
+  "nowMs",
+]);
+const TEXT_DELETE_PARAM_FIELDS = new Set<string>([
+  "workspaceId",
+  "versionId",
+  "path",
+  "origin",
+  "metadataOrigin",
+  "summary",
+  "correlationId",
+  "author",
+  "authorJson",
+  "requestId",
+  "nowMs",
+]);
+const SECRET_WRITE_PARAM_FIELDS = new Set<string>([
+  "workspaceId",
+  "versionId",
+  "path",
+  "text",
+  "origin",
+  "momentId",
+  "summary",
+  "correlationId",
+]);
+const SECRET_DELETE_PARAM_FIELDS = new Set<string>([
+  "workspaceId",
+  "versionId",
+  "path",
+  "origin",
+  "momentId",
+  "summary",
+  "correlationId",
+]);
 const WORKSPACE_ONLY_PARAM_FIELDS = new Set<string>(["workspaceId"]);
 
 interface LoopbackFile {
@@ -143,6 +189,34 @@ interface ParsedWriteFields {
   nowMs?: number;
 }
 
+interface ParsedTextRenameFields {
+  versionId: string;
+  fromPath: string;
+  toPath: string;
+  requestId?: string;
+  nowMs?: number;
+}
+
+interface ParsedTextDeleteFields {
+  versionId: string;
+  path: string;
+  requestId?: string;
+  nowMs?: number;
+}
+
+interface ParsedSecretWriteFields {
+  versionId: string;
+  path: string;
+  text: string;
+  momentId: string;
+}
+
+interface ParsedSecretDeleteFields {
+  versionId: string;
+  path: string;
+  momentId: string;
+}
+
 export interface SeedVersionedTextInput {
   workspace: string;
   versionId?: string;
@@ -191,6 +265,28 @@ function rejectUnknownFields(object: JsonObject, allowed: ReadonlySet<string>): 
   }
 }
 
+function serdeRequiredParamString(object: JsonObject, key: string): string {
+  const value = object[key];
+  if (typeof value !== "string") throw new Error("invalid parameters");
+  return value;
+}
+
+function serdeOptionalParamString(object: JsonObject, key: string): string | undefined {
+  const value = object[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error("invalid parameters");
+  return value;
+}
+
+function serdeOptionalParamNumber(object: JsonObject, key: string): number | undefined {
+  const value = object[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new Error("invalid parameters");
+  }
+  return value;
+}
+
 function optionalString(object: JsonObject, key: string): string | undefined {
   const value = object[key];
   if (value === undefined) return undefined;
@@ -233,6 +329,76 @@ function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFiel
     momentId: serdeOptionalString(params, "momentId"),
     requestId: serdeOptionalString(params, "requestId") ?? idempotencyKey,
     nowMs: serdeOptionalNumber(params, "nowMs"),
+  };
+}
+
+function parseTextRenameFields(
+  params: JsonObject,
+  request: Request,
+): ParsedTextRenameFields {
+  rejectUnknownFields(params, TEXT_RENAME_PARAM_FIELDS);
+  const idempotencyKey = requestIdempotencyKey(request);
+  serdeOptionalParamString(params, "workspaceId");
+  serdeOptionalParamString(params, "origin");
+  serdeOptionalParamString(params, "metadataOrigin");
+  serdeOptionalParamString(params, "summary");
+  serdeOptionalParamString(params, "correlationId");
+  serdeOptionalParamString(params, "authorJson");
+  return {
+    versionId: serdeRequiredParamString(params, "versionId"),
+    fromPath: serdeRequiredParamString(params, "fromPath"),
+    toPath: serdeRequiredParamString(params, "toPath"),
+    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    nowMs: serdeOptionalParamNumber(params, "nowMs"),
+  };
+}
+
+function parseTextDeleteFields(
+  params: JsonObject,
+  request: Request,
+): ParsedTextDeleteFields {
+  rejectUnknownFields(params, TEXT_DELETE_PARAM_FIELDS);
+  const idempotencyKey = requestIdempotencyKey(request);
+  serdeOptionalParamString(params, "workspaceId");
+  serdeOptionalParamString(params, "origin");
+  serdeOptionalParamString(params, "metadataOrigin");
+  serdeOptionalParamString(params, "summary");
+  serdeOptionalParamString(params, "correlationId");
+  serdeOptionalParamString(params, "authorJson");
+  return {
+    versionId: serdeRequiredParamString(params, "versionId"),
+    path: serdeRequiredParamString(params, "path"),
+    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    nowMs: serdeOptionalParamNumber(params, "nowMs"),
+  };
+}
+
+function parseSecretWriteFields(params: JsonObject, request: Request): ParsedSecretWriteFields {
+  rejectUnknownFields(params, SECRET_WRITE_PARAM_FIELDS);
+  requestIdempotencyKey(request);
+  serdeRequiredParamString(params, "workspaceId");
+  serdeRequiredParamString(params, "origin");
+  serdeOptionalParamString(params, "summary");
+  serdeOptionalParamString(params, "correlationId");
+  return {
+    versionId: serdeRequiredParamString(params, "versionId"),
+    path: serdeRequiredParamString(params, "path"),
+    text: serdeRequiredParamString(params, "text"),
+    momentId: serdeRequiredParamString(params, "momentId"),
+  };
+}
+
+function parseSecretDeleteFields(params: JsonObject, request: Request): ParsedSecretDeleteFields {
+  rejectUnknownFields(params, SECRET_DELETE_PARAM_FIELDS);
+  requestIdempotencyKey(request);
+  serdeRequiredParamString(params, "workspaceId");
+  serdeRequiredParamString(params, "origin");
+  serdeOptionalParamString(params, "summary");
+  serdeOptionalParamString(params, "correlationId");
+  return {
+    versionId: serdeRequiredParamString(params, "versionId"),
+    path: serdeRequiredParamString(params, "path"),
+    momentId: serdeRequiredParamString(params, "momentId"),
   };
 }
 
@@ -575,9 +741,32 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private handleRequest(request: Request): JsonValue {
     const workspace = this.requireWorkspaceHandle(request);
-    const state = this.workspace(workspace);
     const params = asObject(request.params, `${request.method} params`);
-    this.validateWorkspaceParam(params, workspace);
+    let parsedTextRename: ParsedTextRenameFields | undefined;
+    let parsedTextDelete: ParsedTextDeleteFields | undefined;
+    let parsedSecretWrite: ParsedSecretWriteFields | undefined;
+    let parsedSecretDelete: ParsedSecretDeleteFields | undefined;
+    switch (request.method) {
+      case VERSIONED_METHOD.textRename:
+        parsedTextRename = parseTextRenameFields(params, request);
+        break;
+      case VERSIONED_METHOD.textDelete:
+        parsedTextDelete = parseTextDeleteFields(params, request);
+        break;
+      case VERSIONED_METHOD.secretsWrite:
+        parsedSecretWrite = parseSecretWriteFields(params, request);
+        break;
+      case VERSIONED_METHOD.secretsDelete:
+        parsedSecretDelete = parseSecretDeleteFields(params, request);
+        break;
+    }
+    this.validateWorkspaceParam(
+      params,
+      workspace,
+      request.method === VERSIONED_METHOD.textRename ||
+        request.method === VERSIONED_METHOD.textDelete,
+    );
+    const state = this.workspace(workspace);
     switch (request.method) {
       case VERSIONED_METHOD.textWrite:
         return this.textWrite(state, workspace, params, request);
@@ -590,9 +779,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
       case VERSIONED_METHOD.binaryWriteBlob:
         return this.binaryWriteBlob(state, workspace, params, request);
       case VERSIONED_METHOD.textRename:
-        return this.textRename(state, workspace, params, request);
+        return this.textRename(state, workspace, params, parsedTextRename!);
       case VERSIONED_METHOD.textDelete:
-        return this.textDelete(state, workspace, params, request);
+        return this.textDelete(state, workspace, params, parsedTextDelete!);
       case VERSIONED_METHOD.textRollback:
         return this.textRollback(state, params, request);
       case VERSIONED_METHOD.textList:
@@ -621,7 +810,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       case VERSIONED_METHOD.versionsCompareFiles:
         return this.compareFiles(state, params);
       case VERSIONED_METHOD.secretsWrite:
-        return this.secretWrite(state, workspace, params);
+        return this.secretWrite(state, workspace, params, parsedSecretWrite!);
       case VERSIONED_METHOD.secretsList:
         return this.secretList(state, params);
       case VERSIONED_METHOD.secretsStateExists:
@@ -632,7 +821,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       case VERSIONED_METHOD.secretsMaterialize:
         return this.secretMaterialize(state, params);
       case VERSIONED_METHOD.secretsDelete:
-        return this.secretDelete(state, workspace, params);
+        return this.secretDelete(state, workspace, params, parsedSecretDelete!);
       case VERSIONED_METHOD.secretsFork:
         return this.secretFork(state, params);
       case VERSIONED_METHOD.secretsCompare:
@@ -668,13 +857,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const versionId = requiredString(params, "versionId", "write");
     const text = requiredString(params, "text", "write");
     const writeFields = parseWriteFields(params, request);
-    if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
     if (utf8Length(text) > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
       throw new Error("content-exceeds-inband-cap");
     }
     const origin = requiredOrigin(params);
     // Before every replay/dedup/unchanged return — see metadataField.
     const metadata = this.momentMetadataFields(params);
+    if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
     const version = this.mutationVersion(state, workspace, versionId);
     const requestId = writeFields.requestId;
     const objectId = writeFields.objectId ??
@@ -829,7 +1018,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = requiredString(params, "path", "binary write");
     const versionId = requiredString(params, "versionId", "binary write");
     const writeFields = preparsedWriteFields ?? parseWriteFields(params, request);
-    if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
     const rawBytes = params.bytes === null ? undefined : params.bytes;
     const rawBase64 = serdeOptionalString(params, "bytesBase64");
     let bytes: number[];
@@ -851,6 +1039,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const origin = requiredOrigin(params);
     // The daemon decodes and caps bytes before it validates metadata.
     const metadata = this.momentMetadataFields(params);
+    if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
     const version = this.mutationVersion(state, workspace, versionId);
     const requestId = writeFields.requestId;
     const objectId = writeFields.objectId ??
@@ -1011,15 +1200,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     state: WorkspaceState,
     workspace: string,
     params: JsonObject,
-    request: Request,
+    parsed: ParsedTextRenameFields,
   ): JsonValue {
-    const versionId = requiredString(params, "versionId", "rename");
-    const fromPath = requiredString(params, "fromPath", "rename");
-    const toPath = requiredString(params, "toPath", "rename");
+    const { versionId, fromPath, toPath, requestId, nowMs } = parsed;
     const origin = requiredOrigin(params);
     const metadata = this.momentMetadataFields(params);
     const version = this.version(state, versionId);
-    const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
       ? this.generatedRequestId("moment", requestId, toPath)
       : `moment-${this.nextMomentId++}`;
@@ -1037,7 +1223,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       throw new Error("target-path-exists");
     }
     this.assertFreshMoment(state, momentId);
-    const now = optionalNumber(params, "nowMs") ?? this.clock++;
+    const now = nowMs ?? this.clock++;
     const after: LoopbackFile = {
       ...copyFile(before),
       updatedAtMs: now,
@@ -1080,14 +1266,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     state: WorkspaceState,
     workspace: string,
     params: JsonObject,
-    request: Request,
+    parsed: ParsedTextDeleteFields,
   ): JsonValue {
-    const versionId = requiredString(params, "versionId", "delete");
-    const path = requiredString(params, "path", "delete");
+    const { versionId, path, requestId, nowMs } = parsed;
     const origin = requiredOrigin(params);
     const metadata = this.momentMetadataFields(params);
     const version = this.version(state, versionId);
-    const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const momentId = requestId
       ? this.generatedRequestId("moment", requestId, path)
       : `moment-${this.nextMomentId++}`;
@@ -1101,7 +1285,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (replay) return replay;
     const before = this.file(version, path);
     this.assertFreshMoment(state, momentId);
-    const now = optionalNumber(params, "nowMs") ?? this.clock++;
+    const now = nowMs ?? this.clock++;
     const tombstone: LoopbackFile = {
       objectId: before.objectId,
       contentKind: before.contentKind,
@@ -1637,15 +1821,17 @@ export class VersionedLoopbackEngine implements EngineTransport {
     };
   }
 
-  private secretWrite(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const path = requiredString(params, "path", "secret write");
-    const versionId = requiredString(params, "versionId", "secret write");
-    const text = requiredString(params, "text", "secret write");
+  private secretWrite(
+    state: WorkspaceState,
+    workspace: string,
+    params: JsonObject,
+    parsed: ParsedSecretWriteFields,
+  ): JsonValue {
+    const { path, versionId, text, momentId } = parsed;
     if (utf8Length(text) > MAX_SECRET_FILE_BYTES) {
       throw new Error("content-exceeds-inband-cap");
     }
     const origin = requiredOrigin(params);
-    const momentId = requiredString(params, "momentId", "secret write");
     const metadata = this.secretMomentMetadata(params);
     if (!isSecretClassifiedPath(path)) throw new Error("not-secret-path");
     const version = state.versions.get(versionId);
@@ -1706,11 +1892,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
       : { text: null, byteLength, inbandLimitBytes: INBAND_LIMIT_BYTES };
   }
 
-  private secretDelete(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const versionId = requiredString(params, "versionId", "secret delete");
-    const path = requiredString(params, "path", "secret delete");
+  private secretDelete(
+    state: WorkspaceState,
+    workspace: string,
+    params: JsonObject,
+    parsed: ParsedSecretDeleteFields,
+  ): JsonValue {
+    const { versionId, path, momentId } = parsed;
     const origin = requiredOrigin(params);
-    const momentId = requiredString(params, "momentId", "secret delete");
     const metadata = this.secretMomentMetadata(params);
     if (!isSecretClassifiedPath(path)) throw new Error("not-secret-path");
     const version = state.versions.get(versionId);
@@ -1977,8 +2166,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return request.workspace;
   }
 
-  private validateWorkspaceParam(params: JsonObject, workspace: string): void {
-    const candidate = optionalString(params, "workspaceId");
+  private validateWorkspaceParam(
+    params: JsonObject,
+    workspace: string,
+    nullIsAbsent = false,
+  ): void {
+    const candidate = nullIsAbsent
+      ? serdeOptionalString(params, "workspaceId")
+      : optionalString(params, "workspaceId");
     if (candidate !== undefined && candidate !== workspace) throw new Error("invalid-workspace");
   }
 
