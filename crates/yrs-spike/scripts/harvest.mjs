@@ -9,8 +9,9 @@
 // LOCAL and are never committed.
 //
 // Usage: node harvest.mjs <path-to-copied-engine.db>
-// Requires Node >= 22.13 (node:sqlite); the repo's engines range also
-// allows Node 20, which cannot run this script.
+// Requires Node >= 22.13 for node:sqlite. The repo's engines range is now
+// >=24.14.0, which subsumes that floor; it used to allow Node 20, which cannot
+// run this script at all.
 
 import { createRequire } from "node:module";
 import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";

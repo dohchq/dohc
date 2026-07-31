@@ -3447,3 +3447,230 @@ the package being deleted. Cross-language conformance is proven against a fixtur
 from that contract. #409 records the one real gap: no end-to-end share-view-pull test with a
 secret path, which matters most for DELETE ops because the write-sink floor deliberately
 admits secret paths for deletes, leaving the boundary check as the only gate.
+
+## 2026-07-31 — checking the preconditions before deleting, and finding two
+
+Six more suites moved onto the daemon path (#414, #415, #417, #423, #424, #426) and the import
+ratchet landed (#402). The legacy package is down to two production runtime importers, both on
+one branch, with a guard that fails if anything adds a third.
+
+Then the plan was to delete it. The order was: verify the parity baseline first, because that is
+the only step that could change the plan. It did — but not where expected.
+
+### The 114 tests that ran nowhere now run, and they pass
+
+`packages/workspace-engine` has 114 tests gated on `process.platform === "linux"`, and the PR
+gate is dispatch-only, so on a Windows dev machine they always skipped and a local run reported
+`19 passed` with 114 quiet skips. They are the port's parity baseline, so every "the daemon
+matches legacy behaviour here" claim rested on tests nobody had executed.
+
+Executed on Linux at `a8be8dd1`: **128 passed, 5 skipped** against Windows' 19 passed, 114
+skipped. **All 114 pass.** I first wrote "109 of 114, the other 5 are win32-only" and that
+arithmetic is wrong — codex caught it reviewing this entry. The suite is 133 tests; the 5 Linux
+skips are win32-only tests drawn from the **19 that pass on Windows**, not from the 114. So
+Linux ran 114 Linux-gated plus 14 always-run = 128. Nothing failed. I understated my own
+result, which is a more interesting error than overstating it: the check I ran was better than
+the number I published. #420 records the recipe.
+
+**The setup was the whole difficulty, and the first attempt produced a spectacular false
+negative.** WSL had Node 18 and no version manager and no passwordless sudo; Node 18 cannot run
+these tests at all, because the legacy engine reaches `node:sqlite` through `createRequire`. A
+no-sudo tarball install of Node **22.14** then produced `25 files failed / 408 failed | 29
+passed` — which looks exactly like catastrophic product breakage and is nothing of the kind. The
+cause was `no such module: fts5`: that tarball's bundled SQLite lacks FTS5. So the run was a false
+negative about the product and, at the same time, a true positive about the repository — 22.14 was
+a version the root `package.json` claimed to support, which makes this a compatibility failure the
+repo owned, not an error by whoever installed it. That half is fixed below.
+
+**Match the version the repo pins, which is 24.14.0** — `.node-version`, `.nvmrc`,
+`docs/development/local-dev.md` and the desktop-release workflow all say so. The evidence above
+was produced on 24.16.0, which is what this machine happens to run; an earlier draft of this
+entry told the reader to match 24.16.0 "exactly", which would have sent them to a
+non-canonical environment. Verified the FTS5 difference directly with a two-line
+`CREATE VIRTUAL TABLE ... USING fts5` probe.
+
+**And "use the pin" was not enough, because the repo's own declaration disagreed with it.** The
+root `package.json` claimed `"node": "^20.19.0 || ^22.13.0 || >=24.0.0"`, so a developer on a
+version it advertises could not run this suite — that is a broken supported-version contract, not
+a false negative on their part. It is broken more deeply than FTS5: `node:sqlite` does not exist
+at all in Node 20, and it is reached from **production** code, so the Node 20 arm never described a
+working install of anything. Narrowed to `">=24.14.0"`, matching every other place the version is
+written down. Deleting the legacy package does not make the old range correct again, since the
+production `node:sqlite` callers outlive it.
+
+The callers, corrected twice. An earlier draft named `apps/desktop/src/main.ts`, which contains only
+a *comment* mentioning `node:sqlite`, not a call. Review caught that; the replacement list was then
+still incomplete, and review caught that too. Every production caller reaches it through
+`createRequire`, which is why a plain import grep finds nothing at all. The complete set outside the
+package being deleted, five of them:
+
+- `apps/desktop/src/workspaces/workspaceDatabase.ts:37`
+- `apps/desktop/src/cli/cliServer.ts:232`
+- `packages/mcp/src/tools.ts:410`
+- `services/sync-relay/src/storage.ts:246`
+- `services/sqlite-worker/src/sqliteEngine.ts:68`
+
+(plus `crates/yrs-spike/scripts/harvest.mjs:24`, a dev script, not shipped.) All five outlive the
+legacy package, which is the point: the Node floor is not a consequence of the package being
+deleted. Two rounds of getting this list wrong is the argument for enumerating it here rather than
+naming an example and trusting the reader to re-derive it.
+
+**And the floor is a support policy, not a measured failure boundary — worth stating plainly,
+because the two are easy to confuse.** The only versions actually measured are 22.14, which fails
+(`no such module: fts5`), and 24.16, which passes. Nothing here shows Node 24.0-24.13 failing. The
+floor is set at the pinned 24.14.0 because supporting versions the repo does not pin, does not run
+in any workflow, and does not ship is exactly what produced this bug: a declared range nobody had
+ever executed. If someone needs a lower 24.x, the honest move is to measure it and lower the floor
+to what was measured, not to widen the declaration back to a guess.
+
+**Narrowing one manifest is not the whole change, because the range was copied into five places.**
+Review found the self-host Compose stack still on `node:22-bookworm-slim` for all three JavaScript
+containers, each running the root `pnpm install` — so the declaration made the repo's own documented
+self-host runtime unsupported. And `tools/rust-engine-program/macos-evidence.sh` carried its own
+hand-written copy of the old range, which would have kept certifying bankable macOS evidence on a
+runtime the repo no longer supports. Two workflow comments and `crates/yrs-spike/scripts/harvest.mjs`
+held stale copies too, the last of which asserted the range "allows Node 20", now false. All five
+updated; a grep for the old range across `*.sh`, `*.mjs`, `*.json` and `*.yml` now returns nothing.
+
+The lesson is the duplication, not the versions: a declared constraint with five hand-maintained
+copies will be wrong in at least one of them, and the copy inside an evidence-certifying script is
+the expensive one.
+
+### The blocker that verification found instead
+
+The three secret-capture tests that cannot migrate — they read raw `engine.db` bytes to prove
+plaintext never lands on disk — were slated to die with the package. Auditing what would be lost
+found that most of it has no Rust equivalent:
+
+- the **merge path** on-disk proof: covered nowhere at all
+- **"secrets never create conflict records"**: nowhere in Rust; asserted only in the test being deleted
+- the **base64-of-plaintext** form: nowhere, and it is a distinct claim — ciphertext is stored as
+  base64 TEXT, so a buggy implementation that base64ed the plaintext would evade the utf8 scan
+- the **version switch** proof: only in a Playwright spec that neither `pnpm test` nor CI runs,
+  which is a demotion rather than a migration
+
+Only the plain-write case genuinely survives in `cargo test`. Filed as #425.
+
+### And then the crypto audit, which is the serious one
+
+The at-rest cryptography proofs — IV freshness, tamper detection, AAD binding, wrong-key
+rejection, key custody — live in `secretFileStore.test.ts`, inside the package being deleted. A
+property-by-property audit against the Rust crates: 19 properties, **11 covered at equal-or-
+greater strength**, and Rust is stronger on tag tampering, which the TS file never tested despite a
+test title implying it.
+
+One overstatement in that audit, caught reviewing this entry: I recorded Rust as also stronger
+on IV-verbatim copying "on fork". The direct IV-equality assertions cover cross-version **apply
+and restore**; `fork_copies_secret_tips_verbatim` only decrypts the destination to the same
+plaintext and checks a fork-base row exists, so **re-encrypting during a fork would satisfy both
+assertions**. Fork IV-verbatim is not directly asserted on either side, and retiring the TS proof
+would leave it unpinned.
+
+**But nothing in Rust asserts IV/nonce FRESHNESS.** TS asserts it directly by writing the same
+plaintext three times and comparing rows. Rust does have IV assertions — a length check,
+`assert_eq!(sealed.iv().len(), SECRET_IV_BYTES)`, and equality assertions that prove verbatim
+copying on apply and restore — but **none asserts that two seals of the same plaintext produce
+different IVs**, which is the property that matters.
+
+Being exact about this took two corrections, both fair for a security audit. An earlier draft
+said "the only IV assertion anywhere is a length check", which contradicted the very next
+sentence acknowledging the equality assertions. It also cited "43 `assert_ne!` hits, none on an
+IV or ciphertext". The real count is **50**, and a naive grep appears to find four IV matches —
+all substring artifacts of *derive*, *driver* and *receive*. The accurate claim is the narrow
+one: of 50 `assert_ne!` calls, **zero assert IV or ciphertext difference**. A number that is
+wrong in an audit cannot support deleting the proof it is auditing.
+
+Nonce reuse under AES-GCM with one key always leaks the XOR of the two plaintexts, so it reveals
+their differences outright; where they are identical it reveals that too, which for a secret means
+an observer of the database learns the value did not change. Depending on the records it can also
+enable GHASH-key recovery or tag forgery, though the reused-nonce-with-identical-plaintext case
+this test compares yields identical records and on its own reveals no key. That qualification does
+not soften the blocker: it is catastrophic **and silent**, because encryption still succeeds and
+every existing test stays green. There is a real structural mitigation — one public sealing entry, always
+`getrandom`, the deterministic variant feature-gated — which is why it survived. **A structural
+guarantee is not a test.** Treating it as a hard blocker on deletion.
+
+The audit also produced a trap worth recording for whoever writes the replacement: a store-level
+AAD splice test must copy `byte_length` along with the sealed fields, or use equal-length
+plaintexts. `SealedSecret::from_base64` has a length precheck that returns `InvalidBase64` on a
+mismatch, so the test would pass for the wrong reason. Assert the exact code, not `is_err()`.
+
+### Six fakes disagreeing with the engine, and the symmetry I had missed
+
+The migrations found six places where `VersionedLoopbackEngine` and the daemon disagreed about
+something a test relied on. **Not one was found by reading the fake** — every one surfaced as a
+test failing, a mutation surviving, or a reviewer disagreeing.
+
+Five had the fake modelling **less** than the daemon: dropped moment metadata (text), the same
+again for binary writes, the same again for *every secret path*, dropped moment authorship — which
+meant the **agent-attribution tests were passing against a fixture that cannot represent an
+author** — and no `DaemonRefusalError` shape at all, so error-code assertions were checking the
+fake's invention.
+
+One had it modelling **more**: my own fix copied a moment author raw, and `AgentAuthor` permits
+extension fields the daemon normalises away, so the fake's own response failed the client's strict
+parser. A write that works against the real engine broke against the fixture.
+
+**A fake is wrong in both directions**, and I had only been watching one.
+
+### Three corrections to my own fixes, in a row, on one field
+
+Worth recording as a sequence because each looked right when made:
+
+1. The loopback hardcoded `author: null`. Fixed by carrying it.
+2. That fix copied the author **raw** — making the fake stricter than the daemon. Fixed by normalising.
+3. That normalisation mirrored `parsed_moment_author` — the **read** path, for malformed historical
+   rows. The write path is `validated_author`, which **refuses**. So the fake accepted writes
+   production rejects, and the test I had written to lock in `{ corrupt: true }` was wrong with it.
+
+And separately, twice: **parse before you commit, not where the value is used.** Author validation
+ran after the mutation on one PR; secret metadata did the same on another, so a malformed
+`summary` left the secret changed, recorded no moment, and still returned a refusal. Two
+occurrences is a habit, not an accident.
+
+### Measurement lying, three times
+
+- `grep -c` **exits 1 when it finds zero matches**, so a verification chain ending in a
+  failure-count grep reported a fully green monorepo as failed.
+- `^ *×` **misses pnpm's package-prefixed output**, so a recursive run reported `1 failed` while
+  the check said `0`. That hidden failure was real: a stale staged daemon binary predating a Rust
+  fix — which is the new e2e guard doing exactly its job, across worktrees.
+- The Node/FTS5 false negative above.
+
+Scoped narrowly, because the general version of this lesson is dangerous: for the canonical
+JavaScript job, `pnpm run test`'s **nonzero exit IS the verdict**, and setup scripts or
+non-Vitest tests can fail without ever emitting a per-package `Tests` line. "Read the Tests
+line, not the exit code" would therefore discard real failures. The correct rules are narrower:
+**do not put a failure-counting `grep` last in a pipeline** (it inverts the exit status), **use
+a pnpm-prefix-aware pattern** when counting failures, and **for the Rust gate specifically**,
+read the `== summary ==` block, because that gate can exit 0 while its own summary says FAIL.
+
+### The import ratchet, and why it stops where it does
+
+#402 took **thirteen review rounds**, every finding in the detector and none in the allowlist: a
+regex clause spanning statements, dynamic `import()`, `createRequire` aliases (the worst, because
+the repo *documents* that production deliberately avoids the name `require`), template literals,
+relative paths into the package, `module.require`, `.d.mts`, `.tsx` parsed as `.ts` (111 files),
+shadowed bindings, eval-worker bodies, and — after I had twice argued the surface was
+adversarial-only — **a vacuity guard that could itself go vacuous** once the allowlist reached
+zero.
+
+The finding count per round went 2, 4, 5, 6, 7, 9, 10, 15. That is divergence, not diminishing
+returns, and it is inherent: every spelling of "load a module" is a new finding. Landed at
+thirteen with seven deferred and reasoned, and filed #421 proposing a module-graph check instead.
+
+**#421 must NOT be closed as superseded, and that is my third position on it.** I first said
+the graph check matters most once the allowlist reaches zero; then that deletion supersedes it,
+because importing a deleted package fails at build time. **Both were wrong, and codex caught the
+second one reviewing this entry.**
+
+The compiler only resolves STATIC imports. The guard exists because thirteen rounds established
+that the interesting forms are not static — `createRequire(...)`, const-bound and computed dynamic
+imports, and specifiers embedded in evaluated worker source. TypeScript does not resolve those
+module strings at typecheck, so they compile cleanly and fail only when a user executes the path.
+Deleting the package AND the guard would let the dependency return as a runtime-only regression —
+exactly the class the guard was built for, and exactly the class the compiler cannot see.
+
+So the guard should survive the deletion, re-pointed at "nothing may load this name" rather than
+"this package has two importers". Twice I reasoned from "the compiler will catch it" without
+asking which forms the compiler actually resolves.

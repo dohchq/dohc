@@ -24,7 +24,7 @@ services:
   # start the auth services against tables that do not exist yet. It exits 0 on
   # success; workspace-api and sync-relay gate on that completion.
   postgres-migrate:
-    image: node:22-bookworm-slim
+    image: node:24-bookworm-slim
     working_dir: /workspace
     restart: "no"
     depends_on:
@@ -44,7 +44,7 @@ services:
   # bearer tokens that the sync relay validates. This service owns no
   # application routes.
   workspace-api:
-    image: node:22-bookworm-slim
+    image: node:24-bookworm-slim
     working_dir: /workspace
     depends_on:
       postgres:
@@ -67,7 +67,7 @@ services:
       - .:/workspace
 
   sync-relay:
-    image: node:22-bookworm-slim
+    image: node:24-bookworm-slim
     working_dir: /workspace
     depends_on:
       postgres:
