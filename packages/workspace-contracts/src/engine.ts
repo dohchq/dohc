@@ -14,19 +14,19 @@
  * | ThreadMessage | ChatMessage | renamed | Engine ships messages under the chat-specific name. |
  * | WorkspaceLinkRef | LinkedChatFileRef | partial | Only the chat-file link case is implemented; a general link-ref vocabulary is not implemented. |
  * | VersionRef | Not implemented | not implemented | The engine currently uses plain version ids (VersionId) plus ad hoc fork-related fields where needed. |
- * | Phase0EffectivePolicyInput / Phase0EffectivePolicyResult | resolveEffectivePolicy + EffectivePolicyResult (from @dohc/workspace-engine) | partial | Covers path/file policy plus search/capture ownership only; actor permissions, sharing, chat-export, and object-family inputs are not implemented yet. |
+ * | Phase0EffectivePolicyInput / Phase0EffectivePolicyResult | resolveEffectivePolicy + EffectivePolicyResult (from @dohc/security-contract) | partial | Covers path/file policy plus search/capture ownership only; actor permissions, sharing, chat-export, and object-family inputs are not implemented yet. |
  * | WorkspaceEvent / DurabilityEvent | Not implemented | not implemented | The engine coalesces writes directly into moments (VersionedTextMoment) instead of emitting a separate durability/event log. |
  *
  * Ownership notes:
  * - ChangeAuthor and NonEmptyLocalAuthorLabel are canonically owned here;
  *   @dohc/workspace-core re-exports them (it depends on this package), which
  *   keeps the branded local-author label one nominal type everywhere.
- * - The Engine*-prefixed private types at the bottom are structural copies of
- *   @dohc/workspace-core / workspace-engine changeSetStore shapes that this
- *   package cannot import without a dependency cycle. They are pinned to the real
- *   types by exact-identity compile checks in
- *   packages/workspace-engine/src/engineContracts.compile.ts, so drift fails
- *   the engine typecheck.
+ * - The Engine*-prefixed private history and provenance types at the bottom are
+ *   structural copies of @dohc/workspace-core shapes that this package cannot
+ *   import without a dependency cycle. Exact-identity compile checks in
+ *   packages/workspace-core/src/engineContracts.compile.ts pin their core-owned
+ *   fields to the corresponding core types, so drift fails the workspace-core
+ *   typecheck.
  */
 
 export type WorkspaceObjectId = string;
