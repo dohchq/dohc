@@ -899,6 +899,42 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return dispatch === undefined ? undefined : jsonClone(dispatch);
   }
 
+  reclaimRunningDispatches(workspace: string, nowMs: number): string[] {
+    const state = this.workspaces.get(workspace);
+    if (state === undefined) return [];
+    const running = [...state.dispatches.values()]
+      .filter((dispatch) => dispatch.state === "running")
+      .sort(
+        (left, right) =>
+          left.updatedAtMs - right.updatedAtMs ||
+          compareText(left.triggerMessageId, right.triggerMessageId),
+      );
+    if (running.length === 0) return [];
+
+    const atMs = this.tick(nowMs);
+    const requeued: string[] = [];
+    for (const dispatch of running) {
+      const run =
+        dispatch.runId === undefined ? undefined : state.runs.get(dispatch.runId);
+      if (run !== undefined && run.endedAtMs === undefined) {
+        run.endedAtMs = atMs;
+        run.exitCode = -1;
+        run.failureReason = "reclaimed-crashed";
+      }
+      if (dispatch.attemptCount < 2) {
+        dispatch.state = "pending";
+        delete dispatch.runId;
+        delete dispatch.failureReason;
+        requeued.push(dispatch.triggerMessageId);
+      } else {
+        dispatch.state = "failed";
+        dispatch.failureReason = "reclaim-exhausted";
+      }
+      dispatch.updatedAtMs = atMs;
+    }
+    return requeued;
+  }
+
   seedRun(input: SeedRunInput): ChatRun {
     const state = this.workspace(input.workspaceId);
     if (state.runs.has(input.runId)) throw new Error("target-exists");
