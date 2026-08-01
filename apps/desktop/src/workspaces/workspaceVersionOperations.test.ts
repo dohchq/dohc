@@ -204,9 +204,20 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         const index = conflicts.findIndex((conflict) => conflict.id === afterConflictId);
         conflicts = index < 0 ? conflicts : conflicts.slice(index + 1);
       }
+      const limit =
+        typeof params.limit === "number" &&
+        Number.isSafeInteger(params.limit) &&
+        params.limit > 0
+          ? params.limit
+          : conflicts.length;
+      const page = conflicts.slice(0, limit);
       return {
         id: request.id,
-        result: { conflicts, nextAfterConflictId: null },
+        result: {
+          conflicts: page,
+          nextAfterConflictId:
+            conflicts.length > page.length && page.length > 0 ? page.at(-1)!.id : null,
+        },
       };
     }
 
