@@ -537,13 +537,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     runActivity,
     storeResolves,
     now,
-    readDispatch: (triggerMessageId, threadId) =>
-      engine.seedDispatch({
-        workspaceId: WORKSPACE_ID,
-        triggerMessageId,
-        threadId,
-        state: "pending",
-      }),
+    readDispatch: (triggerMessageId, threadId) => {
+      const dispatch = engine.readDispatch(WORKSPACE_ID, triggerMessageId);
+      if (dispatch === undefined || dispatch.threadId !== threadId) {
+        throw new Error(`Expected dispatch ${triggerMessageId} for thread ${threadId}.`);
+      }
+      return dispatch;
+    },
     setNextChatTimestamp: (value) => {
       nextChatTimestamp = value;
     },
