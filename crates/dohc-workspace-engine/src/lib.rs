@@ -10717,6 +10717,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
             DomainError::InvalidVersionName => Some("invalid-version-name"),
             DomainError::DuplicateId => Some("duplicate-id"),
             DomainError::ForkBaseNotFound => Some("fork-base-not-found"),
+            DomainError::ConflictNotFound => Some("conflict-not-found"),
             DomainError::ConflictStaleTarget => Some("conflict-stale-target"),
             DomainError::BinaryHeadNotText => Some("binary-head-not-text"),
             DomainError::InvalidPath { .. } => Some("invalid-path"),
