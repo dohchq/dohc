@@ -10,6 +10,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
+  endJoinedChannel,
   joinedSharedChannelForTarget,
   mergeJoinedChannel,
   relayFetchWithTimeout,
@@ -263,6 +264,22 @@ describe("mergeJoinedChannel", () => {
     );
     expect(rejoinedSameShare.map((row) => row.shareId)).toEqual(["share-other", "share-old"]);
     expect(rejoinedSameShare[1]!.access).toBe("read-only");
+  });
+});
+
+describe("endJoinedChannel", () => {
+  it("keeps an ended provenance tombstone instead of deleting the joined row", () => {
+    const existing = [
+      joined({ shareId: "share-leave", channelWireId: "wire-leave" }),
+      joined({ shareId: "share-other", channelWireId: "wire-other" }),
+    ];
+
+    const ended = endJoinedChannel(existing, "share-leave");
+
+    expect(ended).toEqual([
+      joined({ shareId: "share-leave", channelWireId: "wire-leave", ended: true }),
+      joined({ shareId: "share-other", channelWireId: "wire-other" }),
+    ]);
   });
 });
 
