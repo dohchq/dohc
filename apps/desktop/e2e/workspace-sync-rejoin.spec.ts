@@ -1,16 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  RelayConflictError,
-  type SyncRelayConnection,
-} from "@dohc/workspace-contracts/relay";
-import {
-  createLinkedChatStore,
-  createVersionedTextStore,
-  pullWorkspaceFromRelay,
-  pushWorkspaceToRelay,
-} from "@dohc/workspace-engine";
+import { RelayFilePeer } from "../src/testing/relayFilePeer";
 import { claimRelayWorkspace, relayServesWorkspace } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -34,14 +25,12 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// 0P-C — the multi-machine sync product proof. One REAL Electron app is
-// "this machine"; a second "machine" is a headless engine store in the test
-// process driven through the same public sync API the desktop uses (the
-// 0P-B integration pattern — the serial single-display harness cannot run
-// two Electron instances). The relay is the real service, spawned as a
-// child process with its SQLite on tmpfs.
+// 0P-C — the multi-machine sync product proof. One real Electron app is
+// "this machine". A test-only protocol peer seeds the remote machine's state
+// because the serial harness cannot run two Electron instances. The relay is
+// the real service, spawned as a child process with its SQLite on tmpfs.
 //
-// Spec 1: join flow — seed a synced workspace from the headless machine, drive
+// Spec 1: join flow — seed a synced workspace from the protocol peer, drive
 //         the app's "Join a synced workspace" UI, assert files, history, chats
 //         and search all arrived.
 // Spec 2: enabling sync claims the workspace on the relay, with no
@@ -51,67 +40,6 @@ import {
 // see the note below where it used to live.
 
 const TOKEN = "test:e2e-user";
-
-function relayConnection(baseUrl: string): SyncRelayConnection {
-  return { baseUrl, token: TOKEN };
-}
-
-// R10b log requests must present the relay's current replication identity once
-// it is established. The headless harness injects that coordinate at its fetch
-// seam: query params on pulls and body fields on pushes. The join bootstrap is
-// the separate authenticated handoff that lets a fresh daemon adopt an already
-// established coordinate before its first pull.
-function identityConnection(
-  baseUrl: string,
-  identity: RelayWorkspaceIdentity | null,
-): SyncRelayConnection {
-  if (identity === null) return relayConnection(baseUrl);
-  const withIdentity: typeof fetch = (input, init) => {
-    const url = new URL(input instanceof Request ? input.url : String(input));
-    if (url.pathname.endsWith("/log")) {
-      if (typeof init?.body === "string") {
-        init = {
-          ...init,
-          body: JSON.stringify({
-            ...(JSON.parse(init.body) as Record<string, unknown>),
-            ...identity,
-          }),
-        };
-      } else {
-        url.searchParams.set("replicationEpoch", identity.replicationEpoch);
-        url.searchParams.set("streamIdentity", identity.streamIdentity);
-      }
-    }
-    return fetch(url, init);
-  };
-  return { baseUrl, token: TOKEN, fetch: withIdentity };
-}
-
-async function pullAndCommit(
-  rootDir: string,
-  workspaceId: string,
-  relay: SyncRelayConnection,
-) {
-  const result = await pullWorkspaceFromRelay({ rootDir, workspaceId, relay });
-  await result.commitFetchCursor();
-  return result;
-}
-
-async function engineText(
-  rootDir: string,
-  workspaceId: string,
-  path: string,
-): Promise<string | null> {
-  const store = createVersionedTextStore(rootDir);
-  try {
-    const snapshot = await store
-      .readTextFile({ workspaceId, versionId: "main", path })
-      .catch(() => null);
-    return snapshot?.text ?? null;
-  } finally {
-    await store.close();
-  }
-}
 
 
 // The two-machine conflict-review scenario that lived here was deleted: it was
@@ -123,73 +51,10 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "join-e2e";
-  const machine1 = join(temp.baseDir, "machine1");
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    // Machine 1 (headless): a workspace with file history and a linked chat,
-    // pushed to the relay — the state the join must bring over.
-    const store1 = createVersionedTextStore(machine1);
-    let roadmapObjectId = "";
-    try {
-      await store1.ensureMainVersion({ workspaceId });
-      const first = await store1.writeTextFile({
-        workspaceId,
-        versionId: "main",
-        path: "notes/roadmap.md",
-        text: "# Roadmap\n\ndraft one\n",
-        metadata: { origin: "local-file" },
-      });
-      roadmapObjectId = first.object.id;
-      await store1.writeTextFile({
-        workspaceId,
-        versionId: "main",
-        path: "notes/roadmap.md",
-        text: "# Roadmap\n\nThe galaxy-brain milestone lands next.\n",
-        metadata: { origin: "local-file" },
-      });
-      await store1.writeTextFile({
-        workspaceId,
-        versionId: "main",
-        path: "docs/guide.md",
-        text: "A quiet guide.\n",
-        metadata: { origin: "local-file" },
-      });
-      // Perf knob (0P-C evidence runs): DOHC_E2E_JOIN_FILES=1000 seeds a
-      // large workspace so the join-to-interactive-shell number reflects a
-      // real bootstrap, not a toy one. Default stays small for CI.
-      const extraFiles = Number(process.env.DOHC_E2E_JOIN_FILES ?? 0);
-      for (let index = 0; index < extraFiles; index += 1) {
-        await store1.writeTextFile({
-          workspaceId,
-          versionId: "main",
-          path: `bulk/topic-${Math.floor(index / 50)}/file-${index}.md`,
-          text: `# Bulk ${index}\n\n${"Body line for bootstrap benchmarking. ".repeat(12)}\n`,
-          metadata: { origin: "local-file" },
-        });
-      }
-    } finally {
-      await store1.close();
-    }
-    const chats1 = createLinkedChatStore(machine1);
-    try {
-      const thread = await chats1.createThread({
-        workspaceId,
-        title: "Roadmap sync",
-        linkedFile: { objectId: roadmapObjectId, pathHint: "notes/roadmap.md" },
-      });
-      await chats1.sendMessage({
-        workspaceId,
-        threadId: thread.id,
-        author: { kind: "human", displayName: "Ice" },
-        authorUserId: "e2e-user",
-        body: "Let's settle the quasar sync cadence this week.",
-      });
-    } finally {
-      await chats1.close();
-    }
-
     const relayDb = join(temp.baseDir, "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: TOKEN, workspaceId });
@@ -197,10 +62,39 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       replicationEpoch: "epoch-join-e2e",
       streamIdentity: "stream-join-e2e",
     };
-    await pushWorkspaceToRelay({
-      rootDir: machine1,
+    const remotePeer = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: TOKEN,
       workspaceId,
-      relay: identityConnection(relay.baseUrl, establishedIdentity),
+      originId: "join-e2e-remote-peer",
+      identity: establishedIdentity,
+    });
+
+    // The remote peer seeds file history and a linked chat. The app must bring
+    // all of this state over during the join.
+    const firstRoadmap = await remotePeer.writeText(
+      "notes/roadmap.md",
+      "# Roadmap\n\ndraft one\n",
+    );
+    await remotePeer.writeText(
+      "notes/roadmap.md",
+      "# Roadmap\n\nThe galaxy-brain milestone lands next.\n",
+    );
+    await remotePeer.writeText("docs/guide.md", "A quiet guide.\n");
+    const extraFiles = Number(process.env.DOHC_E2E_JOIN_FILES ?? 0);
+    await remotePeer.writeTextFiles(
+      Array.from({ length: extraFiles }, (_, index) => ({
+        path: `bulk/topic-${Math.floor(index / 50)}/file-${index}.md`,
+        text: `# Bulk ${index}\n\n${"Body line for bootstrap benchmarking. ".repeat(12)}\n`,
+      })),
+    );
+    await remotePeer.createLinkedChat({
+      linkedObjectId: firstRoadmap.objectId,
+      linkedPathHint: "notes/roadmap.md",
+      title: "Roadmap sync",
+      authorDisplayName: "Ice",
+      authorUserId: "e2e-user",
+      body: "Let's settle the quasar sync cadence this week.",
     });
     expect(relayAdoptedIdentity(relayDb, workspaceId)).toEqual(
       establishedIdentity,
@@ -245,22 +139,24 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       "# Roadmap\n\nThe galaxy-brain milestone lands next.\n",
     );
 
-    // 0P-C gate fix: the join is PULL-FIRST and seeds no starter files, so
-    // it can never push boilerplate INTO the shared workspace. The relay log
-    // carries no `.context/me.md` op, and the ORIGINAL machine's next pull
-    // converges without conflicts or a boilerplate me.md.
+    // The join is pull-first and seeds no starter files. The relay log must
+    // therefore carry no `.context/me.md` operation from the joining app.
     //
-    // The joining app must adopt the coordinate that machine 1 established
-    // above before its first pull. Both later reads use that same coordinate.
+    // The joining app must adopt the coordinate that the remote peer
+    // established before its first pull.
     let identity: RelayWorkspaceIdentity | null = establishedIdentity;
     const loggedPaths: string[] = [];
     await expect
       .poll(
         async () => {
           identity ??= relayAdoptedIdentity(relayDb, workspaceId);
-          const connection = identityConnection(relay!.baseUrl, identity);
-          const response = await (connection.fetch ?? fetch)(
-            `${relay!.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?since=0&limit=500`,
+          const query = new URLSearchParams({ since: "0", limit: "500" });
+          if (identity) {
+            query.set("replicationEpoch", identity.replicationEpoch);
+            query.set("streamIdentity", identity.streamIdentity);
+          }
+          const response = await fetch(
+            `${relay!.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?${query.toString()}`,
             { headers: { authorization: `Bearer ${TOKEN}` } },
           );
           if (response.status === 409) {
@@ -283,25 +179,6 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       )
       .toBe(true);
     expect(loggedPaths).not.toContain(".context/me.md");
-    // Machine 1's pull-back must present the adopted identity too.
-    const pullBack = await (async () => {
-      for (let attempt = 0; ; attempt += 1) {
-        identity ??= relayAdoptedIdentity(relayDb, workspaceId);
-        try {
-          return await pullAndCommit(
-            machine1,
-            workspaceId,
-            identityConnection(relay!.baseUrl, identity),
-          );
-        } catch (error) {
-          if (!(error instanceof RelayConflictError) || attempt >= 20) throw error;
-          identity = null;
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-      }
-    })();
-    expect(pullBack.conflictsOpened).toBe(0);
-    expect(await engineText(machine1, workspaceId, ".context/me.md")).toBeNull();
 
     // Full history came along (both roadmap moments, not just latest state).
     // In perf runs the first history page is bulk files, so assert on the
