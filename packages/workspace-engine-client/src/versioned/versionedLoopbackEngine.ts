@@ -1666,9 +1666,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private textRollback(state: WorkspaceState, params: JsonObject, request: Request): JsonValue {
+    const path = normalizedEnginePath(
+      requiredString(params, "path", "rollback"),
+      "addressable",
+    );
     requiredOrigin(params);
+    this.validatedAuthorValue(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
-    const replay = this.replay(state, requestId, params);
+    const normalizedParams = { ...params, path };
+    const replay = this.replay(state, requestId, normalizedParams);
     if (replay) {
       return {
         ...replay,
@@ -1678,7 +1684,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
       };
     }
     const version = this.version(state, requiredString(params, "versionId", "rollback"));
-    const path = requiredString(params, "path", "rollback");
     const mutationId = requiredString(params, "mutationMomentId", "rollback");
     const mutation = state.moments.get(mutationId);
     if (
@@ -1732,7 +1737,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       materialized: materializeEnqueued,
       materializeOutcome: materializeEnqueued ? "applied" : "skipped",
     };
-    this.recordReplay(state, requestId, params, result);
+    this.recordReplay(state, requestId, normalizedParams, result);
     return result;
   }
 
@@ -2228,8 +2233,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretMaterialize(state: WorkspaceState, params: JsonObject): JsonValue {
-    const path = requiredString(params, "path", "secret materialize");
-    if (!isSecretClassifiedPath(path)) throw new Error("not-secret-path");
+    const path = normalizedSecretPath(
+      requiredString(params, "path", "secret materialize"),
+    );
     const versionId = requiredString(params, "versionId", "secret materialize");
     const version = state.versions.get(versionId);
     if (!version) throw new Error("invalid-version");
@@ -2300,12 +2306,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretApply(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const path = requiredString(params, "path", "secret apply");
+    const path = normalizedSecretPath(requiredString(params, "path", "secret apply"));
     const momentId = requiredString(params, "momentId", "secret apply");
     const origin = requiredOrigin(params);
     // Above both version lookups, which is safe here because `state.versions.get`
     // only reads — the #439 handlers use `mutationVersion`, which creates.
     const { summary, correlationId } = this.secretMomentMetadata(params);
+    validateSecretMomentId(momentId);
     const source = state.versions.get(requiredString(params, "sourceVersionId", "secret apply"));
     const target = state.versions.get(requiredString(params, "targetVersionId", "secret apply"));
     if (!source || !target) throw new Error("invalid-version");
@@ -2334,7 +2341,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretRestore(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const path = requiredString(params, "path", "secret restore");
+    const rawPath = requiredString(params, "path", "secret restore");
     const beforeMomentId = requiredString(params, "beforeMomentId", "secret restore");
     const momentId = requiredString(params, "momentId", "secret restore");
     // Origin then metadata, both before any state is read — the daemon's order
@@ -2350,6 +2357,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // at deserialization.
     const origin = restoreOrigin(params);
     const metadata = this.secretMomentMetadata(params);
+    validateSecretMomentId(beforeMomentId);
+    validateSecretMomentId(momentId);
+    const path = normalizedSecretPath(rawPath);
     const sourceMoment = state.secretMoments.get(beforeMomentId);
     if (!sourceMoment) throw new Error("moment-not-found");
     if (sourceMoment.wire.path !== path) throw new Error("invalid-input");

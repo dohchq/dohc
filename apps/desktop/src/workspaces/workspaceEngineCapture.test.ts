@@ -235,7 +235,7 @@ async function liveTrackedFiles(
     id: -1,
     method: VERSIONED_METHOD.textList,
     workspace,
-    params: { workspaceId: workspace, versionId, limit: 500 },
+    params: { versionId, limit: 500 },
   });
   const files = (response.result as { files: Array<Record<string, JsonValue>> }).files;
   return files.map((file) => ({
@@ -269,7 +269,7 @@ async function liveMomentPaths(
     id: -1,
     method: VERSIONED_METHOD.momentsList,
     workspace,
-    params: { workspaceId: workspace, limit: 500 },
+    params: { limit: 500 },
   });
   const moments = (response.result as { moments: Array<Record<string, JsonValue>> }).moments;
   return moments.map((moment) => String(moment.path));

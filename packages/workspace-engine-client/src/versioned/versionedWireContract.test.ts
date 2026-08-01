@@ -813,6 +813,70 @@ describe("loopback contract enforcement", () => {
     ).toBe("first");
   });
 
+  it("validates rollback author metadata before changing state", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "rollback-author.md",
+      text: "keep me",
+      origin: "api",
+      momentId: "rollback-author-moment",
+    });
+
+    await expect(
+      call(engine, 2, VERSIONED_METHOD.textRollback, {
+        versionId: "main",
+        path: "rollback-author.md",
+        mutationMomentId: "rollback-author-moment",
+        origin: "restore",
+        author: { kind: "agent", agentId: "", onBehalfOf: "user-1" },
+      }),
+    ).rejects.toThrow("invalid-metadata");
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 3, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "rollback-author.md",
+        }),
+      )?.text,
+    ).toBe("keep me");
+    expect(
+      decodeMomentsGetResult(
+        await call(engine, 4, VERSIONED_METHOD.momentsGet, {
+          momentId: "rollback-author-moment",
+        }),
+      )?.momentId,
+    ).toBe("rollback-author-moment");
+  });
+
+  it("normalizes the rollback path before matching its mutation", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "notes/rollback.md",
+      text: "remove me",
+      origin: "api",
+      momentId: "normalized-rollback-moment",
+    });
+
+    decodeVersionedTextRollbackResult(
+      await call(engine, 2, VERSIONED_METHOD.textRollback, {
+        versionId: "main",
+        path: "notes/./rollback.md",
+        mutationMomentId: "normalized-rollback-moment",
+        origin: "restore",
+      }),
+    );
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 3, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "notes/rollback.md",
+        }),
+      ),
+    ).toBeNull();
+  });
+
   it("refuses rollback when later history exists on the mutation object", async () => {
     const engine = new VersionedLoopbackEngine();
     await call(engine, 1, VERSIONED_METHOD.textWrite, {
@@ -1362,6 +1426,138 @@ describe("loopback contract enforcement", () => {
     expect(engine.secretValue(WORKSPACE, "main", ".env")).toBeUndefined();
   });
 
+  it("normalizes accepted secret aliases across materialize, apply, and restore", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
+    await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "A",
+      origin: "api",
+      momentId: "alias-main-a",
+    });
+    expect(
+      decodeSecretsMaterializeResult(
+        await call(engine, 2, VERSIONED_METHOD.secretsMaterialize, {
+          versionId: "main",
+          path: "%2eenv",
+        }),
+      ),
+    ).toEqual({ text: "A" });
+
+    const feature = decodeVersionRecord(
+      await call(engine, 3, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        fromVersionId: "main",
+        name: "secret alias feature",
+      }),
+    );
+    await call(engine, 4, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: feature.id,
+      path: "%2eenv",
+      text: "B",
+      origin: "api",
+      momentId: "alias-feature-b",
+    });
+    const applied = decodeSecretApplyResult(
+      await call(engine, 5, VERSIONED_METHOD.secretsApply, {
+        workspaceId: WORKSPACE,
+        sourceVersionId: feature.id,
+        targetVersionId: "main",
+        path: "%2eenv",
+        momentId: "alias-apply",
+        origin: "api",
+      }),
+    );
+    expect(applied.moment?.path).toBe(".env");
+    expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe("B");
+
+    await call(engine, 6, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "C",
+      origin: "api",
+      momentId: "alias-main-c",
+    });
+    const restored = decodeSecretRestoreResult(
+      await call(engine, 7, VERSIONED_METHOD.secretsRestore, {
+        workspaceId: WORKSPACE,
+        path: "%2eenv",
+        beforeMomentId: "alias-main-c",
+        momentId: "alias-restore",
+        origin: "restore",
+      }),
+    );
+    expect(restored.path).toBe(".env");
+    expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe("B");
+  });
+
+  it("rejects empty apply and restore moment ids without changing secrets", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
+    await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "A",
+      origin: "api",
+      momentId: "empty-id-main-a",
+    });
+    const feature = decodeVersionRecord(
+      await call(engine, 2, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        fromVersionId: "main",
+        name: "empty secret id feature",
+      }),
+    );
+    await call(engine, 3, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: feature.id,
+      path: ".env",
+      text: "B",
+      origin: "api",
+      momentId: "empty-id-feature-b",
+    });
+
+    await expect(
+      call(engine, 4, VERSIONED_METHOD.secretsApply, {
+        workspaceId: WORKSPACE,
+        sourceVersionId: feature.id,
+        targetVersionId: "main",
+        path: ".env",
+        momentId: "",
+        origin: "api",
+      }),
+    ).rejects.toThrow("invalid-input");
+    expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe("A");
+
+    await call(engine, 5, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "C",
+      origin: "api",
+      momentId: "empty-id-main-c",
+    });
+    await expect(
+      call(engine, 6, VERSIONED_METHOD.secretsRestore, {
+        workspaceId: WORKSPACE,
+        path: ".env",
+        beforeMomentId: "empty-id-main-c",
+        momentId: "",
+        origin: "restore",
+      }),
+    ).rejects.toThrow("invalid-input");
+    expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe("C");
+  });
+
   it("secret restore equality is a no-op with the original moment id", async () => {
     const engine = new VersionedLoopbackEngine();
     await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
@@ -1533,13 +1729,13 @@ describe("loopback contract enforcement", () => {
     await expect(
       call(engine, 3, VERSIONED_METHOD.secretsRestore, {
         workspaceId: WORKSPACE,
-        path: ".other",
+        path: ".env.other",
         beforeMomentId: "restore-path-b",
         momentId: "restore-wrong-path",
         origin: "restore",
        }),
     ).rejects.toThrow("invalid-input");
-    expect(engine.secretValue(WORKSPACE, "main", ".other")).toBeUndefined();
+    expect(engine.secretValue(WORKSPACE, "main", ".env.other")).toBeUndefined();
   });
 
   it("restores a secret into the source moment version while another version is active", async () => {
