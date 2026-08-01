@@ -17,7 +17,7 @@ makes it a differential: two independent implementations, one expected answer.
 
 ## Why the generator was removed
 
-R16 deletes `packages/workspace-engine`. Once it goes, the only implementation
+R16 deleted `packages/workspace-engine`. The only implementation
 left that could regenerate these goldens is the Rust daemon — which this same file
 is used to grade. The daemon would be certifying itself, and a single regeneration
 would bake any Rust capture bug in permanently, silently, and forever.

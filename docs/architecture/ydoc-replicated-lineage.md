@@ -1,9 +1,8 @@
 # The replicated Y.Doc lineage, and how its base is claimed
 
 This is a **constraint record**, not an algorithm. It exists because the closest
-thing to a reference is scheduled for deletion:
-`packages/workspace-engine/src/ydocEngineDriver.ts` is the legacy TypeScript
-engine's Y.Doc driver, and R16 removes that package. The Rust daemon has the
+thing to a reference was the deleted legacy TypeScript Y.Doc driver. R16
+removed that package. The Rust daemon has the
 storage columns and the emit condition, but **no working origination path**.
 
 Read the legacy driver as *one narrower implementation*, not a recipe. It gets
@@ -12,10 +11,10 @@ others — the `base_claimed` predicate, promotion of a lineage that already hol
 updates, and the reservation identity among them. A porter who treats it as a
 complete design will reproduce its gaps.
 
-Written down here rather than left in a deleted file's history, because the
+Written down here rather than left only in the deleted file's history. The
 oracle case that proves this behaviour (`ydoc.before-base-claim`,
-`TEST_ORACLE.md`) has its harness *inside* the file being deleted. Delete the
-file and the test disappears silently along with its subject.
+`TEST_ORACLE.md`) had its harness inside that file, so the test disappeared
+with its subject.
 
 Nothing here is a claim about current behaviour. **No rich document has ever
 replicated** — see #378 and #356. This is a specification to build against, not

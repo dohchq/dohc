@@ -1,9 +1,8 @@
 //! dohc engine crypto — R08 secrets capability shard.
 //!
 //! The security-critical core for secret-backed files: AES-256-GCM AEAD with
-//! byte-exact cross-engine parity to the TS engine
-//! (`packages/workspace-engine/src/secretFileStore.ts` +
-//! `secretKeyEnvelope.ts`), the scrypt-wrapped workspace data-key envelope, and
+//! byte-exact parity with the frozen TypeScript oracle recorded before the
+//! legacy engine package was deleted, the scrypt-wrapped workspace data-key envelope, and
 //! the redaction-safe [`SecretPlaintext`] / [`SecretDataKey`] types that make
 //! cleartext impossible to log or serialize by accident.
 //!

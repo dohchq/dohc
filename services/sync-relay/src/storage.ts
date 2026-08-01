@@ -1576,8 +1576,8 @@ function asObject(value: unknown): Record<string, unknown> | null {
 }
 
 // Every blob sha an op REQUIRES the relay to already hold before the op may be
-// durably logged. This MUST mirror workspace-engine collectBlobHashesFromOp
-// exactly: the push client uploads precisely this set (text + binary) before
+// durably logged. This MUST mirror dohc-engine-sync collect_blob_refs exactly:
+// the push client uploads precisely this set (text + binary) before
 // POST /log, so validating the same set neither rejects an honest push nor
 // lets a referencing op slip through unvalidated. Enumerated by op kind:
 //   - moment.append:      payloadBefore/After/before blob shas (both content

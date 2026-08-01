@@ -595,7 +595,7 @@ export function filterOpForShare(
       return { allowed: false };
     }
     // Build a MINIMAL served payload from the allowlist of fields the
-    // recipient's replay actually needs (workspace-engine syncShareView).
+    // recipient's Rust share-view replay actually needs.
     // Everything else in the stored moment — author, metadata.summary,
     // metadata.correlationId, moment/object ids, lineage (before* fields),
     // and raw recorded timestamps — is dropped so nothing beyond the

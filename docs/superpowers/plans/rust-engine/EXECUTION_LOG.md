@@ -3674,3 +3674,26 @@ exactly the class the guard was built for, and exactly the class the compiler ca
 So the guard should survive the deletion, re-pointed at "nothing may load this name" rather than
 "this package has two importers". Twice I reasoned from "the compiler will catch it" without
 asking which forms the compiler actually resolves.
+
+## 2026-08-02 — R16 legacy TypeScript engine deletion closeout (#463)
+
+R16 deleted all 57 tracked files in `packages/workspace-engine` and the orphaned
+`scripts/engine-sync-folder.ts`. The script was the important inventory miss: it loaded the
+package by a deep relative path, so a package-name scan could never find it. The deletion also
+removed the obsolete key-envelope negative-import test; the surviving enrollment suite proves
+the positive daemon `keys.upload` and `keys.download` route instead.
+
+The desktop manifest, Electron bundle allowlist, release workflow, and lockfile no longer own or
+invoke the retired package. pnpm 10.24.0 changed only the desktop dependency and deleted workspace
+importer in the lockfile. The runtime-load ratchet remains with an empty allowlist. It now asserts
+that the package directory is absent and scans `apps`, `packages`, `services`, `scripts`, and
+`tools`, with a live sentinel in each root. Its dynamic import, `createRequire`, evaluated worker,
+deep-relative, parser, and vacuity proofs remain intact.
+
+Local Linux evidence before the exact-head workflow: frozen install PASS; root typecheck PASS;
+database-backed root tests with the real debug daemon PASS (19 projects; desktop 193 files,
+2,353 passed and 3 skipped); desktop release-script tests PASS (13/13); strict exact-name scan
+of live executable, configuration, manifest, and lockfile surfaces PASS; `git diff --check` PASS.
+The first saturated root-test run hit one unrelated site-runner
+timing assertion; that file passed 17/17 in isolation and the complete root suite then passed.
+The canonical exact-head JavaScript and Rust workflow results are recorded on the deletion PR.

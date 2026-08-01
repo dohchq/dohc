@@ -1,18 +1,14 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
 
-// R16 ratchet. The legacy TypeScript engine `@dohc/workspace-engine` is being
-// deleted in favour of the Rust daemon. Deleting it is blocked on work tracked
-// on #391, but NOTHING should be allowed to add a new production dependency on
-// it while that work is in flight — every new importer is another thing to
-// unpick later.
+// R16 ratchet. The legacy TypeScript engine package was deleted in favour of
+// the Rust daemon. No production source may restore a dependency on it.
 //
-// So this asserts SET EQUALITY against the list below, not "no more than".
-// Adding an importer fails, and so does removing one without editing the list:
-// the shrinking is the point, and it should be a deliberate, reviewed edit that
-// records the win rather than a number that quietly drifts.
+// This asserts SET EQUALITY against the empty list below. Adding an importer
+// fails, and a separate assertion prevents someone from weakening the guard by
+// adding that importer to the allowlist.
 //
 // Type-only imports are fine — they carry no runtime dependency and vanish at
 // build time — so they are not listed and not counted.
@@ -32,7 +28,8 @@ import ts from "typescript";
 // stands on its own terms; the parser tests below pin it either way.
 
 const REPO_ROOT = resolve(__dirname, "..", "..", "..", "..");
-const LEGACY_PACKAGE = "@dohc/workspace-engine";
+const LEGACY_PACKAGE_NAME = "workspace-engine";
+const LEGACY_PACKAGE = `@dohc/${LEGACY_PACKAGE_NAME}`;
 
 // Production files with a RUNTIME import of the legacy engine. Never grow this
 // list. The Rust daemon now owns every production engine path.
@@ -43,7 +40,7 @@ const LEGACY_PACKAGE = "@dohc/workspace-engine";
 // after the migration reached zero production importers.
 const ALLOWED = [] as const;
 
-const SCAN_ROOTS = ["apps", "packages", "services"];
+const SCAN_ROOTS = ["apps", "packages", "services", "scripts", "tools"];
 
 // Shipping code, in any language that reaches a user. `.js` is included because
 // two packages expose JavaScript launchers as their `bin` — packages/cli
@@ -51,10 +48,10 @@ const SCAN_ROOTS = ["apps", "packages", "services"];
 // either would ship while a TypeScript-only scan stayed green.
 const SCANNED_SOURCE = /\.(tsx?|jsx?|mjs|cjs|mts|cts)$/;
 
-// Not production: the legacy package itself, test files, Playwright specs, and
-// build/QA tooling.
+// Not production: test files, Playwright specs, and build/QA tooling nested in
+// a package. Root scripts and tools are scanned because executable maintenance
+// code can still load a workspace package.
 function isProductionSource(posixPath: string): boolean {
-  if (posixPath.startsWith("packages/workspace-engine/")) return false;
   if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(posixPath)) return false;
   if (posixPath.includes("/e2e/")) return false;
   if (posixPath.includes("/scripts/")) return false;
@@ -71,9 +68,7 @@ function isProductionSource(posixPath: string): boolean {
     return false;
   }
   // Compile-check modules exist so tsc proves a contract still type-checks; they
-  // are consumed by a test and exported from nothing. Two exist today
-  // (workspace-contracts/src/engine.compile.ts,
-  // workspace-engine/src/engineContracts.compile.ts) and a value-shaped legacy
+  // are consumed by a test and exported from nothing. A value-shaped legacy
   // import in one would be QA tooling, not a shipped dependency.
   if (/\.compile\.[cm]?tsx?$/.test(posixPath)) return false;
   // Declaration files carry no runtime import — everything in them is erased,
@@ -128,7 +123,7 @@ function walk(dir: string, out: string[]): void {
 // `import` and its parenthesis, the specifier appearing inside a string or a
 // comment, `loader.require(…)` masquerading as `require(…)`. The compiler
 // already knows the difference, so ask it.
-const LEGACY_SOURCE_DIR = "packages/workspace-engine/";
+const LEGACY_SOURCE_DIR = `packages/${LEGACY_PACKAGE_NAME}/`;
 
 // The package name, OR a relative path that lands inside the package. Reaching
 // into another package's source by relative path is an established pattern here
@@ -271,8 +266,8 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
   // `import { Worker as ThreadWorker }` is an ordinary refactor away, and a
   // name-only check would stop inspecting evaluated bodies the moment it happened.
   const workerNames = new Set<string>(["Worker"]);
-  // `const name = "@dohc/workspace-engine"; await import(name)` resolves the
-  // package just the same, and factoring a specifier into a constant is a
+  // A constant holding the retired package name resolves the package just the
+  // same, and factoring a specifier into a constant is a
   // routine refactor. Multi-valued so a name declared twice keeps BOTH — see
   // resolveSpecifiers on why that direction is the safe one.
   const stringConsts = new Map<string, readonly string[]>();
@@ -428,6 +423,10 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     .filter((p) => hasRuntimeLegacyImport(readFileSync(join(REPO_ROOT, p), "utf8"), p))
     .sort();
 
+  it("keeps the retired package directory absent", () => {
+    expect(existsSync(join(REPO_ROOT, LEGACY_SOURCE_DIR))).toBe(false);
+  });
+
   it("actually reached every scan root — a scan that matched nothing would pass vacuously", () => {
     // Without this, a broken REPO_ROOT or an over-eager skip list turns the
     // assertion below into [] === [] the moment the allowlist empties.
@@ -450,6 +449,8 @@ describe("legacy engine production imports (R16 ratchet)", () => {
       "apps/desktop/src/main.ts",
       "packages/workspace-contracts/src/engine.ts",
       "services/sync-relay/src/errorCodes.ts",
+      "scripts/check-brand.mjs",
+      "tools/rust-engine-program/run-rust-checks.mjs",
     ]) {
       expect(scanned, `scan root for ${sentinel} was not walked`).toContain(
         sentinel,
@@ -465,8 +466,7 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     // Set equality alone passes if someone adds an importer AND its path in one
     // change, so this is a second, louder tripwire. EXACT rather than an upper
     // bound: a ceiling that only caps drifts loose as the list shrinks, and
-    // shrinking is the whole point — removing an importer should have to edit
-    // this number, which is how the win gets recorded instead of assumed.
+    // the package has been retired and must stay retired.
     expect(ALLOWED.length).toBe(0);
   });
 
@@ -543,9 +543,8 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     // other than `require`: a bundler emitting a CommonJS shim injects its own
     // top-level `const require`, so a second declaration is a SyntaxError. Real
     // examples: workspaceDatabase.ts:35 `requireFromHere`, cliServer.ts:229 and
-    // mcp/tools.ts:398 `requireModule`, and the legacy package's own
-    // linkedChatStore.ts:199. Matching only `require` left the ratchet open
-    // along the exact path the codebase already prefers.
+    // mcp/tools.ts:398 `requireModule`. Matching only `require` left the
+    // ratchet open along the exact path the codebase already prefers.
     const viaAlias = [
       `import { createRequire } from "node:module";`,
       `const requireFromHere = createRequire(import.meta.url);`,
@@ -792,7 +791,7 @@ const m = require(name);`;
     expect(isProductionSource("apps/desktop/lib/engine.config.ts")).toBe(true);
     // Compile-check modules prove a contract type-checks; they ship nowhere.
     expect(isProductionSource("packages/workspace-contracts/src/engine.compile.ts")).toBe(false);
-    expect(isProductionSource("packages/workspace-engine/src/engineContracts.compile.ts")).toBe(
+    expect(isProductionSource("packages/workspace-core/src/engineContracts.compile.ts")).toBe(
       false,
     );
     // A source file merely CONTAINING "compile" is production.
@@ -841,7 +840,7 @@ const m = require(name);`;
   it("resolves a relative path that reaches into the legacy package", () => {
     // Reaching into another package's source by relative path is an established
     // pattern here, so a name-only comparison would miss a real dependency.
-    const rel = `import { createVersionedTextStore } from "../../../../packages/workspace-engine/src/index";`;
+    const rel = `import { createVersionedTextStore } from "../../../../${LEGACY_SOURCE_DIR}src/index";`;
     expect(hasRuntimeLegacyImport(rel, "apps/desktop/src/workspaces/thing.ts")).toBe(true);
     // Same depth, a DIFFERENT package — must not match.
     const other = `import { x } from "../../../../packages/workspace-contracts/src/engine";`;
@@ -851,7 +850,7 @@ const m = require(name);`;
       false,
     );
     // Type-only stays erased even by relative path.
-    const relType = `import type { VersionedTextStore } from "../../../../packages/workspace-engine/src/index";`;
+    const relType = `import type { VersionedTextStore } from "../../../../${LEGACY_SOURCE_DIR}src/index";`;
     expect(hasRuntimeLegacyImport(relType, "apps/desktop/src/workspaces/thing.ts")).toBe(false);
   });
 

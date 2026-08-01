@@ -1,8 +1,7 @@
 // Cross-engine parity fixture generator (R08).
 //
-// Produces byte-exact fixtures using the SAME Node crypto primitives the TS
-// oracle (`packages/workspace-engine/src/secretFileStore.ts` +
-// `secretKeyEnvelope.ts`) uses. The Rust `dohc-engine-crypto` crate decrypts
+// Produces byte-exact fixtures using the SAME Node crypto primitives used by
+// the frozen TypeScript oracle. The Rust `dohc-engine-crypto` crate decrypts
 // these and — because AES-256-GCM is deterministic given key+IV+AAD+plaintext —
 // re-encrypts with the SAME recorded IV and asserts the ciphertext+tag bytes
 // match, proving cross-engine AEAD parity against a REAL TS-produced artifact
