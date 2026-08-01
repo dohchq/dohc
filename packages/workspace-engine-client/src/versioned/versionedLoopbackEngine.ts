@@ -1999,9 +1999,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
     const targetVersionId = requiredString(params, "targetVersionId", "merge");
     const path = requiredString(params, "path", "merge");
-    // Rust merge validates the structural path floor without normalizing the
-    // lookup key. Run that check before generated ids and request replay.
-    validateRustPathFloor(path);
+    // Rust merge validates the addressable-path classification without
+    // normalizing the lookup key. Run that check before generated ids and
+    // request replay, then keep the caller's raw path below.
+    normalizedEnginePath(path, "addressable");
     const objectId = requestId !== undefined
       ? this.generatedRequestId("object", requestId, path)
       : `object-${this.nextObjectId++}`;

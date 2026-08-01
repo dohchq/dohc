@@ -1565,16 +1565,21 @@ describe("loopback moment metadata", () => {
       origin: "api",
     });
     const requestId = "merge-path-request";
-    await expect(
-      send(engine, VERSIONED_METHOD.versionsMerge, {
-        workspaceId: WORKSPACE,
-        sourceVersionId,
-        targetVersionId: "main",
-        path: "notes/../merge-path.md",
-        origin: "api",
-        requestId,
-      }),
-    ).rejects.toThrow(/invalid-path/);
+    for (const path of [
+      "notes/../merge-path.md",
+      "%2e%2e/merge-path.md",
+    ]) {
+      await expect(
+        send(engine, VERSIONED_METHOD.versionsMerge, {
+          workspaceId: WORKSPACE,
+          sourceVersionId,
+          targetVersionId: "main",
+          path,
+          origin: "api",
+          requestId,
+        }),
+      ).rejects.toThrow(/invalid-path/);
+    }
 
     const merged = await send(engine, VERSIONED_METHOD.versionsMerge, {
       workspaceId: WORKSPACE,
