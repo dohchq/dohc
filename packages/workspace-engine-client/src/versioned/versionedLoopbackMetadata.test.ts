@@ -1787,6 +1787,46 @@ describe("loopback moment metadata", () => {
     );
   });
 
+  it("keeps author extension fields in replay identity", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const params = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "author-extension.md",
+      text: "hello",
+      origin: "local-file",
+      requestId: "author-extension-replay",
+    };
+    const first = await send(engine, VERSIONED_METHOD.textWrite, {
+      ...params,
+      author: {
+        kind: "agent",
+        agentId: "agent-1",
+        onBehalfOf: "user-1",
+        context: { attempt: 1 },
+      },
+    });
+    expect((first.moment as { author?: unknown }).author).toEqual({
+      kind: "agent",
+      agentId: "agent-1",
+      onBehalfOf: "user-1",
+    });
+
+    await expect(
+      send(engine, VERSIONED_METHOD.textWrite, {
+        ...params,
+        author: {
+          kind: "agent",
+          agentId: "agent-1",
+          onBehalfOf: "user-1",
+          context: { attempt: 2 },
+        },
+      }),
+    ).rejects.toThrow("idempotency-key-reuse-mismatch");
+    // Rust fingerprints the full validated author JSON for replay identity,
+    // then returns only the recognized attribution fields in moment responses.
+  });
+
   it("canonicalizes rollback aliases, nullable fields, and request-id carriers", async () => {
     const engine = new VersionedLoopbackEngine();
     await send(engine, VERSIONED_METHOD.textWrite, {

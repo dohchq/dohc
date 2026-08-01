@@ -695,18 +695,34 @@ describe("versioned typed loopback", () => {
     ).toBe("delete");
   });
 
-  it("round-trips widened moments params/get and search.ensureIndex", async () => {
+  it("round-trips search.ensureIndex and uses the desktop cap for moment text", async () => {
     const engine = new VersionedLoopbackEngine();
+    const inbandBefore = "a".repeat(48 * 1024 + 1);
+    const inbandAfter = "b".repeat(48 * 1024 + 1);
     engine.seedTextFile({
       workspace: WORKSPACE,
-      path: "large.md",
-      text: "x".repeat(48 * 1024 + 1),
-      objectId: "large-object",
-      momentId: "large-moment",
+      path: "inband.md",
+      text: inbandBefore,
+      objectId: "inband-object",
+      momentId: "inband-before",
+    });
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      path: "inband.md",
+      text: inbandAfter,
+      objectId: "inband-object",
+      momentId: "inband-after",
+    });
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      path: "over-cap.md",
+      text: "x".repeat(128 * 1024 + 1),
+      objectId: "over-cap-object",
+      momentId: "over-cap-moment",
     });
     const listParams: MomentsListParams = {
       versionId: "main",
-      objectId: "large-object",
+      objectId: "over-cap-object",
       limit: 10,
       beforeMomentOrder: Number.MAX_SAFE_INTEGER,
     };
@@ -715,14 +731,19 @@ describe("versioned typed loopback", () => {
     );
     expect(listed.moments[0]).toMatchObject({
       afterText: null,
-      afterInbandLimitBytes: 48 * 1024,
+      afterInbandLimitBytes: 128 * 1024,
     });
-    const getParams: MomentsGetParams = { momentId: "large-moment" };
+    const getParams: MomentsGetParams = { momentId: "inband-after" };
     expect(
       decodeMomentsGetResult(
         await call(engine, 2, VERSIONED_METHOD.momentsGet, getParams),
-      )?.afterText,
-    ).toBeNull();
+      ),
+    ).toMatchObject({
+      afterText: inbandAfter,
+      afterInbandLimitBytes: null,
+      beforeText: inbandBefore,
+      beforeInbandLimitBytes: null,
+    });
     const searchParams: SearchEnsureIndexParams = {
       workspaceId: WORKSPACE,
       versionId: "main",
@@ -730,6 +751,9 @@ describe("versioned typed loopback", () => {
     expect(
       await call(engine, 3, VERSIONED_METHOD.searchEnsureIndex, searchParams),
     ).toEqual({});
+    // MUTATION: retain the transport's 48 KiB cap for moment bodies -> the
+    // in-band before/after assertions fail. Remove the 128 KiB cap -> the
+    // over-cap list assertion fails.
   });
 });
 
@@ -2142,6 +2166,72 @@ describe("loopback contract enforcement", () => {
       byteLength: text.length,
       inbandLimitBytes: 48 * 1024,
     });
+  });
+
+  it("normalizes accepted aliases in public seed helpers", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      path: "notes/./draft.md",
+      text: "draft",
+      momentId: "seed-alias-text",
+    });
+    engine.seedBinaryFile({
+      workspace: WORKSPACE,
+      path: "assets/./logo.bin",
+      bytes: [1, 2, 3],
+      momentId: "seed-alias-binary",
+    });
+    engine.seedSecretFile({
+      workspace: WORKSPACE,
+      path: "%2eenv",
+      text: "TOKEN=secret",
+      momentId: "seed-alias-secret",
+    });
+
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 1, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "notes/draft.md",
+        }),
+      )?.text,
+    ).toBe("draft");
+    expect(
+      decodeVersionedBinaryReadResult(
+        await call(engine, 2, VERSIONED_METHOD.binaryRead, {
+          versionId: "main",
+          path: "assets/logo.bin",
+        }),
+      ),
+    ).toMatchObject({ byteLength: 3 });
+    expect(
+      decodeSecretsMaterializeResult(
+        await call(engine, 3, VERSIONED_METHOD.secretsMaterialize, {
+          versionId: "main",
+          path: ".env",
+        }),
+      ),
+    ).toEqual({ text: "TOKEN=secret" });
+    expect(engine.secretValue(WORKSPACE, "main", "%2eenv")).toBe("TOKEN=secret");
+    expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe("TOKEN=secret");
+
+    const momentPaths = decodeMomentsListResult(
+      await call(engine, 4, VERSIONED_METHOD.momentsList, { versionId: "main" }),
+    ).moments.map((moment) => moment.path);
+    expect(momentPaths).toEqual(
+      expect.arrayContaining(["notes/draft.md", "assets/logo.bin"]),
+    );
+    expect(
+      decodeSecretsMomentsListResult(
+        await call(engine, 5, VERSIONED_METHOD.secretsMomentsList, {
+          workspaceId: WORKSPACE,
+          versionId: "main",
+        }),
+      ).moments[0]?.path,
+    ).toBe(".env");
+    // MUTATION: key any seeded file or moment by the raw alias -> canonical
+    // reads or history paths fail. Leave secretValue raw -> its alias lookup fails.
   });
 
   it("paginates protected secret moments without overlap", async () => {

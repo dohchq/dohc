@@ -965,6 +965,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   seedTextFile(input: SeedVersionedTextInput): void {
+    const path = normalizedEnginePath(input.path, "storable");
     const state = this.workspace(input.workspace);
     const versionId = input.versionId ?? "main";
     const version = versionId === "main"
@@ -973,7 +974,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const objectId = input.objectId ?? `object-${this.nextObjectId++}`;
     const momentId = input.momentId ?? `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
-    const before = version.files.get(input.path);
+    const before = version.files.get(path);
     const file: LoopbackFile = {
       objectId,
       contentKind: "text",
@@ -985,7 +986,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     };
     const moment = this.makeMoment(
       version,
-      input.path,
+      path,
       momentId,
       "write",
       file,
@@ -993,11 +994,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     const internal = { wire: moment, before: before && copyFile(before), after: copyFile(file) };
     file.momentLog.push(internal);
-    version.files.set(input.path, file);
+    version.files.set(path, file);
     state.moments.set(momentId, internal);
   }
 
   seedBinaryFile(input: SeedVersionedBinaryInput): void {
+    const path = normalizedEnginePath(input.path, "storable");
     const state = this.workspace(input.workspace);
     const versionId = input.versionId ?? "main";
     const version = versionId === "main"
@@ -1006,7 +1008,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const objectId = input.objectId ?? `object-${this.nextObjectId++}`;
     const momentId = input.momentId ?? `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
-    const before = version.files.get(input.path);
+    const before = version.files.get(path);
     const binarySha = sha256(input.bytes);
     const file: LoopbackFile = {
       objectId,
@@ -1020,7 +1022,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     };
     const moment = this.makeMoment(
       version,
-      input.path,
+      path,
       momentId,
       "write",
       file,
@@ -1028,13 +1030,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     const internal = { wire: moment, before: before && copyFile(before), after: copyFile(file) };
     file.momentLog.push(internal);
-    version.files.set(input.path, file);
+    version.files.set(path, file);
     state.moments.set(momentId, internal);
     state.blobs.set(binarySha, [...input.bytes]);
   }
 
   seedSecretFile(input: SeedSecretInput): void {
-    if (!isSecretClassifiedPath(input.path)) throw new Error("not-secret-path");
+    const path = normalizedSecretPath(input.path);
     const state = this.workspace(input.workspace);
     const versionId = input.versionId ?? "main";
     const version = versionId === "main"
@@ -1042,12 +1044,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
       : this.version(state, versionId);
     const momentId = input.momentId ?? `secret-moment-${this.nextMomentId++}`;
     this.assertFreshSecretMoment(state, momentId);
-    const before = version.secrets.get(input.path);
-    version.secrets.set(input.path, input.text);
+    const before = version.secrets.get(path);
+    version.secrets.set(path, input.text);
     const wire = this.makeSecretMoment(
       input.workspace,
       version.id,
-      input.path,
+      path,
       momentId,
       "write",
       input.origin ?? "local-file",
@@ -1056,7 +1058,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   secretValue(workspace: string, versionId: string, path: string): string | undefined {
-    return this.version(this.workspace(workspace), versionId).secrets.get(path);
+    return this.version(this.workspace(workspace), versionId).secrets.get(
+      normalizedSecretPath(path),
+    );
   }
 
   async sendRequest(request: Request): Promise<Response> {
@@ -2954,13 +2958,19 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private capMoment(moment: MomentRecord): MomentRecord {
     const capped = { ...moment };
-    if (moment.afterText !== null && utf8Length(moment.afterText) > INBAND_LIMIT_BYTES) {
+    if (
+      moment.afterText !== null &&
+      utf8Length(moment.afterText) > MAX_DESKTOP_CAPTURE_TEXT_BYTES
+    ) {
       capped.afterText = null;
-      capped.afterInbandLimitBytes = INBAND_LIMIT_BYTES;
+      capped.afterInbandLimitBytes = MAX_DESKTOP_CAPTURE_TEXT_BYTES;
     }
-    if (moment.beforeText !== null && utf8Length(moment.beforeText) > INBAND_LIMIT_BYTES) {
+    if (
+      moment.beforeText !== null &&
+      utf8Length(moment.beforeText) > MAX_DESKTOP_CAPTURE_TEXT_BYTES
+    ) {
       capped.beforeText = null;
-      capped.beforeInbandLimitBytes = INBAND_LIMIT_BYTES;
+      capped.beforeInbandLimitBytes = MAX_DESKTOP_CAPTURE_TEXT_BYTES;
     }
     return capped;
   }
