@@ -2169,6 +2169,11 @@ describe("loopback contract enforcement", () => {
   });
 
   it("normalizes accepted aliases in public seed helpers", async () => {
+    const refused = new VersionedLoopbackEngine();
+    expect(() => refused.secretValue("unopened", "missing", "notes.md")).toThrow(
+      "not-secret-path",
+    );
+
     const engine = new VersionedLoopbackEngine();
     engine.seedTextFile({
       workspace: WORKSPACE,
@@ -2231,7 +2236,8 @@ describe("loopback contract enforcement", () => {
       ).moments[0]?.path,
     ).toBe(".env");
     // MUTATION: key any seeded file or moment by the raw alias -> canonical
-    // reads or history paths fail. Leave secretValue raw -> its alias lookup fails.
+    // reads or history paths fail. Resolve workspace state before secretValue's
+    // path normalization -> the refusal reports version-not-found instead.
   });
 
   it("paginates protected secret moments without overlap", async () => {

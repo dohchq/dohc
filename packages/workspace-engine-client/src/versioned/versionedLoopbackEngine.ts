@@ -1058,9 +1058,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   secretValue(workspace: string, versionId: string, path: string): string | undefined {
-    return this.version(this.workspace(workspace), versionId).secrets.get(
-      normalizedSecretPath(path),
-    );
+    const normalizedPath = normalizedSecretPath(path);
+    return this.version(this.workspace(workspace), versionId).secrets.get(normalizedPath);
   }
 
   async sendRequest(request: Request): Promise<Response> {
