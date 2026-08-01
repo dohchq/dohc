@@ -97,7 +97,8 @@ function stores(root: string): {
 }
 
 // Keep the real AES-256-GCM stores injectable for the suites that inspect bytes
-// at rest. Rust sessions are still required, but these stores take precedence.
+// at rest. The colliding clock is the suite default, not only the pagination
+// case. Rust sessions are still required, but these stores take precedence.
 function capture(root: string, injected?: ReturnType<typeof stores>) {
   const selected = injected ?? stores(root);
   const engineCapture = createWorkspaceEngineCapture({

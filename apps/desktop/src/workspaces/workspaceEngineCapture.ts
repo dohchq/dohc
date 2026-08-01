@@ -829,9 +829,6 @@ export function createWorkspaceEngineCapture(
 
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
-    if (!options.rustEngineSessions) {
-      throw new Error("Rust engine workspace sessions are unavailable.");
-    }
     liveStores ??= createCaptureLiveStores(
       { workspaceId, rootPath },
       options.rustEngineSessions,

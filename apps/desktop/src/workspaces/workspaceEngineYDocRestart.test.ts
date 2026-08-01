@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   DaemonRefusalError,
-  type EngineYdocProviderSession as EngineYdocProviderSessionRust,
-  type EngineYdocProviderSessionOptions as EngineYdocProviderSessionRustOptions,
+  type EngineYdocProviderSession,
+  type EngineYdocProviderSessionOptions,
   VersionedLoopbackEngine,
   YdocLoopbackEngine,
   type EngineTransport,
@@ -62,8 +62,8 @@ async function reconnectFailureCapture(prefix: string) {
     currentClient: () => daemonClient,
   });
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     if (state.leaseActive) throw new Error("ydoc-session-busy");
     state.leaseActive = true;
     const openedGeneration = ++state.generation;
@@ -230,8 +230,8 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   const seedUpdate = Y.encodeStateAsUpdate(seededDoc);
 
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     const doc = new Y.Doc();
     Y.applyUpdate(doc, seedUpdate);
     openedDocs.push(doc);
@@ -493,8 +493,8 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
   const refusal = new Error("record-update-refused");
 
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     const openedGeneration = ++generation;
     lifecycle.push(`open-${openedGeneration}`);
     const doc = new Y.Doc();
@@ -590,8 +590,8 @@ it("releases a close-latched failed generation with settle true before the next 
   const unsettledClose = new Error("ydoc-unsettled-close");
 
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     if (leaseActive) throw new Error("ydoc-session-busy");
     leaseActive = true;
     const openedGeneration = ++generation;
@@ -719,8 +719,8 @@ it("defers a version switch behind a dead generation until release converges", a
   let generation = 0;
 
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     if (leaseActive) throw new Error("ydoc-session-busy");
     leaseActive = true;
     generation += 1;
@@ -873,8 +873,8 @@ it("treats typed session-not-found during release-first rebind as already releas
   let closeCount = 0;
 
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     const openedGeneration = ++generation;
     const doc = new Y.Doc();
     Y.applyUpdate(doc, seedUpdate);
@@ -972,8 +972,8 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
   seed.getText("plainText").insert(0, "seed");
   const seedUpdate = Y.encodeStateAsUpdate(seed);
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     const doc = new Y.Doc();
     Y.applyUpdate(doc, seedUpdate);
     return {
@@ -1073,8 +1073,8 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
   seed.getText("plainText").insert(0, "seed");
   const seedUpdate = Y.encodeStateAsUpdate(seed);
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     const doc = new Y.Doc();
     Y.applyUpdate(doc, seedUpdate);
     return {
@@ -1167,8 +1167,8 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
   let leaseActive = false;
   const refusal = new Error("permanent-record-update-refusal");
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     if (leaseActive) throw new Error("ydoc-session-busy");
     leaseActive = true;
     const openedGeneration = ++generation;
@@ -1251,8 +1251,8 @@ async function daemonDeathCapture(
   rootPath: string;
   sessions: EngineWorkspaceSessions;
   openProvider: (
-    options: EngineYdocProviderSessionRustOptions,
-  ) => Promise<EngineYdocProviderSessionRust>;
+    options: EngineYdocProviderSessionOptions,
+  ) => Promise<EngineYdocProviderSession>;
   state: {
     daemonAlive: boolean;
     generation: number;
@@ -1322,8 +1322,8 @@ async function daemonDeathCapture(
     for (const update of state.durableUpdates) Y.applyUpdate(doc, update);
   };
   const openProvider = async (
-    options: EngineYdocProviderSessionRustOptions,
-  ): Promise<EngineYdocProviderSessionRust> => {
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
     if (!state.daemonAlive) throw transportDeath();
     const openedGeneration = ++state.generation;
     const seeds = options.seedAbsentLineage !== false;

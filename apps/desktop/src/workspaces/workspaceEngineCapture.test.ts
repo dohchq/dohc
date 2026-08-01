@@ -34,8 +34,8 @@ import {
 } from "./workspaceEngineCapture";
 import { createChangeSetStore } from "@dohc/workspace-engine";
 import {
-  type EngineYdocProviderSession as EngineYdocProviderSessionRust,
-  type EngineYdocProviderSessionOptions as EngineYdocProviderSessionRustOptions,
+  type EngineYdocProviderSession,
+  type EngineYdocProviderSessionOptions,
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
   type JsonValue,
@@ -128,8 +128,8 @@ interface CaptureOptions {
   rustEngineSessions?: EngineWorkspaceSessions;
   daemonOwnsCapture?: boolean;
   openRustYDocProviderSession?: (
-    options: EngineYdocProviderSessionRustOptions,
-  ) => Promise<EngineYdocProviderSessionRust>;
+    options: EngineYdocProviderSessionOptions,
+  ) => Promise<EngineYdocProviderSession>;
 }
 
 function capture(root: string, options: CaptureOptions = {}) {
@@ -160,10 +160,11 @@ function capture(root: string, options: CaptureOptions = {}) {
     try {
       await stopCapture();
     } finally {
-      if (ownedStoresClosed) return;
-      ownedStoresClosed = true;
-      await ownedStore?.close().catch(() => undefined);
-      await ownedSecretStore?.close().catch(() => undefined);
+      if (!ownedStoresClosed) {
+        ownedStoresClosed = true;
+        await ownedStore?.close().catch(() => undefined);
+        await ownedSecretStore?.close().catch(() => undefined);
+      }
     }
   };
   return engineCapture;
@@ -1961,16 +1962,47 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     });
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
+    const writeGateState: { release: (() => void) | null } = { release: null };
+    let markWriteBlocked: (() => void) | null = null;
+    const writeGate = new Promise<void>((resolve) => {
+      writeGateState.release = resolve;
+    });
+    const writeBlocked = new Promise<void>((resolve) => {
+      markWriteBlocked = resolve;
+    });
+    let markStopStarted: (() => void) | null = null;
+    const stopStarted = new Promise<void>((resolve) => {
+      markStopStarted = resolve;
+    });
     const activity = createWorkspaceActivity(
       () => resolveRecorded?.(),
       {
         captureFor: (w) => {
           captureBuilds += 1;
-          return createWorkspaceEngineCapture({
+          const engineCapture = createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
-            rustEngineSessions: mockLiveSessions(loopback, requests),
+            rustEngineSessions: mockLiveSessions(
+              loopback,
+              requests,
+              undefined,
+              async (request) => {
+                if (
+                  request.method === VERSIONED_METHOD.textWrite &&
+                  (request.params as { path?: unknown }).path === "flushed.md"
+                ) {
+                  markWriteBlocked?.();
+                  await writeGate;
+                }
+              },
+            ),
           });
+          const stopCapture = engineCapture.stop.bind(engineCapture);
+          engineCapture.stop = async () => {
+            markStopStarted?.();
+            await stopCapture();
+          };
+          return engineCapture;
         },
       },
     );
@@ -1982,9 +2014,13 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
 
     await write(root, "flushed.md", "must survive shutdown\n");
     await recorded;
-    // stopAll joins the shutdown chain: watcher final flush, then capture
-    // drain — the last capture is recorded in the engine when it resolves.
-    await activity.stopAll();
+    await writeBlocked;
+    // Hold the text write before the mock records the wire request. stopAll
+    // must enter capture.stop and wait for that write before workspace.close.
+    const stopping = activity.stopAll();
+    await stopStarted;
+    writeGateState.release?.();
+    await stopping;
 
     const writeIndex = requests.findIndex(
       (request) =>
@@ -1997,6 +2033,9 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     );
     expect(writeIndex).toBeGreaterThanOrEqual(0);
     expect(closeIndex).toBeGreaterThan(writeIndex);
+    expect(await liveMomentPaths(loopback, workspace.workspaceId)).toContain(
+      "flushed.md",
+    );
   }, 15_000);
 
   it("registerExpectedEngineEvents reaches the open workspace's capture", async () => {
