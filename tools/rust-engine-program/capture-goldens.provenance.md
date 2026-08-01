@@ -7,9 +7,9 @@ to be told why.
 ## What they are
 
 The normalized per-path capture projection produced by the **TypeScript** capture
-pipeline in `packages/workspace-engine`, driven through
-`capture-fixtures.json` by
-`apps/desktop/src/workspaces/captureOracleGoldens.test.ts`.
+pipeline in `packages/workspace-engine`. The retired
+`apps/desktop/src/workspaces/captureOracleGoldens.test.ts` drove
+`capture-fixtures.json` through that pipeline when this record was frozen.
 
 `crates/dohc-workspace-engine/tests/capture_differential.rs` replays the same
 fixtures against the Rust daemon and compares against the same file. That is what
