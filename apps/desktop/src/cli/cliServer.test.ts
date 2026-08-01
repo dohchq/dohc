@@ -7,7 +7,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import {
   CLI_PROTOCOL_VERSION,
@@ -18,16 +17,21 @@ import {
   type CliTransportResponse,
   type CliVerb,
 } from "@dohc/cli/protocol";
+import type {
+  LinkedChatStore,
+  VersionedTextMoment,
+  VersionedTextMomentSummary,
+} from "@dohc/workspace-contracts/engine";
 import {
-  LINKED_CHAT_STORE_RELATIVE_PATH,
-  createAgentDispatchStore,
-  createLinkedChatStore,
-  type AgentDispatchStore,
-  type LinkedChatStore,
-  type VersionedTextMoment,
-  type VersionedTextMomentSummary,
-} from "@dohc/workspace-engine";
+  CHATS_METHOD,
+  ChatsLoopbackEngine,
+  type Request,
+} from "@dohc/workspace-engine-client";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
+import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
+import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import { nativeTmpdir } from "../workspaces/testTemp";
 import {
   CLI_ENDPOINT_FILE,
@@ -46,11 +50,6 @@ import {
 
 const WORKSPACE_ID = "workspace-cli-server";
 const SERVER_NOW_MS = Date.parse("2026-07-10T04:05:06.000Z");
-const requireModule = createRequire(import.meta.url);
-type DispatchDb = Parameters<typeof createAgentDispatchStore>[0];
-const { DatabaseSync } = requireModule("node:sqlite") as {
-  DatabaseSync: new (path: string) => DispatchDb;
-};
 
 type ArgsFor<Verb extends CliVerb> = Extract<CliRequest, { verb: Verb }>["args"];
 
@@ -167,8 +166,16 @@ describe("CLI socket server", () => {
   let workspaceRoot: string;
   let stateDir: string;
   let store: LinkedChatStore | null;
-  let dispatchDb: DispatchDb | null;
-  let dispatchStore: AgentDispatchStore;
+  let storeForWorkspace: (
+    workspaceId: string,
+    rootPath: string,
+  ) => LinkedChatStore;
+  let dispatchStore: AwaitableAgentDispatchStore;
+  let sessions: EngineWorkspaceSessions | null;
+  let seedDispatchThread: (threadId: string) => Promise<void>;
+  let listUnreadFileThreads: NonNullable<
+    CliWorkspaceContext["daemonReads"]
+  >["listUnreadFileThreads"];
   let server: CliServerHandle | null;
   let token: string;
   let calls: CallCounts;
@@ -244,19 +251,94 @@ describe("CLI socket server", () => {
 
     const idCounters = { channel: 0, message: 0, thread: 0 };
     let storeNowMs = SERVER_NOW_MS;
-    store = createLinkedChatStore(workspaceRoot, {
-      nowMs: () => {
-        storeNowMs += 1_000;
-        return storeNowMs;
+    let nextRunId = 0;
+    let nextSeedRequestId = 1_000_000;
+    const loopback = new ChatsLoopbackEngine();
+    const client = {
+      close: () => undefined,
+      onEvent: () => () => undefined,
+      async sendRequest(request: Request) {
+        if (request.method === "workspace.open") {
+          const params = request.params as { workspaceId?: unknown };
+          return {
+            id: request.id,
+            result: {
+              workspace: typeof params.workspaceId === "string"
+                ? params.workspaceId
+                : WORKSPACE_ID,
+            },
+          };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        const params = { ...(request.params as Record<string, unknown>) };
+        if (
+          request.method === CHATS_METHOD.channelCreate ||
+          request.method === CHATS_METHOD.channelEnsureAgent ||
+          request.method === CHATS_METHOD.channelEnsureGeneral
+        ) {
+          params.channelId = `channel_${++idCounters.channel}`;
+          params.nowMs = (storeNowMs += 1_000);
+        } else if (request.method === CHATS_METHOD.threadCreate) {
+          params.threadId = `thread_${++idCounters.thread}`;
+          params.nowMs = (storeNowMs += 1_000);
+        } else if (request.method === CHATS_METHOD.threadStart) {
+          params.threadId = `thread_${++idCounters.thread}`;
+          params.messageId = `message_${++idCounters.message}`;
+          params.nowMs = (storeNowMs += 1_000);
+        } else if (request.method === CHATS_METHOD.messageSend) {
+          params.messageId = `message_${++idCounters.message}`;
+          params.nowMs = (storeNowMs += 1_000);
+        }
+        return await loopback.sendRequest({
+          ...request,
+          params: params as Request["params"],
+        });
       },
-      createId: (kind) => {
-        idCounters[kind] += 1;
-        return `${kind}_${idCounters[kind]}`;
-      },
-    });
+    };
+    sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    storeForWorkspace = (workspaceId, rootPath) =>
+      createLiveLinkedChatStore({ workspaceId, rootPath }, sessions!);
+    store = storeForWorkspace(WORKSPACE_ID, workspaceRoot);
+    const wireRequest = async (
+      workspace: string,
+      method: string,
+      params: Request["params"],
+    ) => {
+      const id = nextSeedRequestId++;
+      return (await loopback.sendRequest({
+        id,
+        method,
+        workspace,
+        idempotencyKey: `cli-fixture-${id}`,
+        params,
+      })).result;
+    };
+    seedDispatchThread = async (threadId) => {
+      await wireRequest(WORKSPACE_ID, CHATS_METHOD.threadCreate, {
+        threadId,
+        title: "Dispatch fixture thread",
+        linkedFile: { objectId: `object_${threadId}` },
+        nowMs: (storeNowMs += 1_000),
+      });
+    };
+    listUnreadFileThreads = async (input) =>
+      await wireRequest(
+        WORKSPACE_ID,
+        CHATS_METHOD.readStateListUnreadFileThreads,
+        input,
+      ) as Array<{
+        threadId: string;
+        messageCount: number;
+        lastReadSequence: number;
+      }>;
+    dispatchStore = createLiveAgentDispatchStore(
+      { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot },
+      sessions,
+      { createRunId: () => `run_${++nextRunId}` },
+    ).store;
     await store.listChannels({ workspaceId: WORKSPACE_ID });
-    dispatchDb = new DatabaseSync(join(workspaceRoot, LINKED_CHAT_STORE_RELATIVE_PATH));
-    dispatchStore = createAgentDispatchStore(dispatchDb);
     registryWorkspace = { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot };
     calls = {
       listWorkspaces: 0,
@@ -346,9 +428,8 @@ describe("CLI socket server", () => {
     await server?.close();
     server = null;
     disposeCliServerRuntime(serverOptions);
-    dispatchDb?.close();
-    dispatchDb = null;
-    await store?.close();
+    await sessions?.closeAll();
+    sessions = null;
     store = null;
     await rm(tempRoot, { recursive: true, force: true });
   });
@@ -632,17 +713,18 @@ describe("CLI socket server", () => {
       author: { kind: "human", displayName: "Primary" },
       body: "Must not leak",
     });
-    const scopedGeneral = await store.ensureGeneralChannel({
+    const scopedStore = storeForWorkspace(scopedWorkspaceId, scopedRoot);
+    const scopedGeneral = await scopedStore.ensureGeneralChannel({
       workspaceId: scopedWorkspaceId,
     });
-    const scopedChannelChat = await store.startChannelThread({
+    const scopedChannelChat = await scopedStore.startChannelThread({
       workspaceId: scopedWorkspaceId,
       channelId: scopedGeneral.id,
       title: "Scoped channel chat",
       author: { kind: "human", displayName: "Scoped" },
       body: "Visible only in scoped workspace",
     });
-    const scopedFileThread = await store.createThread({
+    const scopedFileThread = await scopedStore.createThread({
       workspaceId: scopedWorkspaceId,
       title: "Scoped file chat",
       linkedFile: {
@@ -650,7 +732,7 @@ describe("CLI socket server", () => {
         pathHint: "scoped.md",
       },
     });
-    await store.sendMessage({
+    await scopedStore.sendMessage({
       workspaceId: scopedWorkspaceId,
       threadId: scopedFileThread.id,
       author: { kind: "human", displayName: "Scoped" },
@@ -664,6 +746,7 @@ describe("CLI socket server", () => {
     const scopedContext: CliWorkspaceContext = {
       ...context,
       ...scopedWorkspace,
+      store: scopedStore,
       async fileObjectIdForPath(path) {
         return path === "scoped.md" ? "object_scoped" : null;
       },
@@ -758,7 +841,7 @@ describe("CLI socket server", () => {
       (await store.listThreads({ workspaceId: WORKSPACE_ID }))
         .map((thread) => thread.id),
     ).not.toContain(started.thread.id);
-    expect(await store.listMessages({
+    expect(await scopedStore.listMessages({
       workspaceId: scopedWorkspaceId,
       threadId: started.thread.id,
     })).toHaveLength(2);
@@ -1109,7 +1192,11 @@ describe("CLI socket server", () => {
       rootPath: sharedRoot,
       readOnly: true,
     };
-    await store.ensureGeneralChannel({
+    const sharedStore = storeForWorkspace(
+      sharedWorkspace.workspaceId,
+      sharedRoot,
+    );
+    await sharedStore.ensureGeneralChannel({
       workspaceId: sharedWorkspace.workspaceId,
     });
     serverOptions.listWorkspaces = () => [registryWorkspace, sharedWorkspace];
@@ -1120,6 +1207,7 @@ describe("CLI socket server", () => {
       return {
         ...context,
         ...sharedWorkspace,
+        store: sharedStore,
         readOnly: true,
       };
     };
@@ -1273,12 +1361,13 @@ describe("CLI socket server", () => {
   });
 
   it("links only agent-authored messages carrying a valid local run id", async () => {
-    dispatchStore.recordTrigger({
+    await seedDispatchThread("thread_dispatch");
+    await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message_dispatch_trigger",
       threadId: "thread_dispatch",
     });
-    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for CLI linkage.");
@@ -1326,19 +1415,21 @@ describe("CLI socket server", () => {
 
     const engineMessageId = (id: string) =>
       id.startsWith("msg_") ? `message_${id.slice("msg_".length)}` : id;
-    expect(dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([
+    expect(
+      await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId),
+    ).toEqual([
       engineMessageId(opened.messageId),
       engineMessageId(replied.messageId),
     ]);
-    expect(dispatchStore.runIdForMessage(
+    expect(await dispatchStore.runIdForMessage(
       WORKSPACE_ID,
       engineMessageId(human.messageId),
     )).toBeNull();
-    expect(dispatchStore.runIdForMessage(
+    expect(await dispatchStore.runIdForMessage(
       WORKSPACE_ID,
       engineMessageId(unknown.messageId),
     )).toBeNull();
-    expect(dispatchStore.runIdForMessage(
+    expect(await dispatchStore.runIdForMessage(
       WORKSPACE_ID,
       engineMessageId(invalid.messageId),
     )).toBeNull();
@@ -1348,12 +1439,13 @@ describe("CLI socket server", () => {
   it("retries transient run-message provenance failures until the link persists", async () => {
     // MUTATION: restore the single best-effort attempt -> no provenance row is
     // stored after the first transient daemon failure.
-    dispatchStore.recordTrigger({
+    await seedDispatchThread("thread_retry");
+    await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message_retry_trigger",
       threadId: "thread_retry",
     });
-    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for retry linkage.");
@@ -1383,7 +1475,7 @@ describe("CLI socket server", () => {
     expect(attempts).toBe(3);
     expect(result.warning).toBeUndefined();
     expect(
-      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
+      await originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
     ).toBe(claim.run.runId);
     expect(errors).toEqual([]);
   });
@@ -1391,12 +1483,13 @@ describe("CLI socket server", () => {
   it("keeps retrying an exhausted provenance link until the posted reply is linked", async () => {
     // MUTATION: remove the recovery enqueue after the third foreground failure
     // -> the durable chat reply remains permanently absent from the run ledger.
-    dispatchStore.recordTrigger({
+    await seedDispatchThread("thread_recovery");
+    await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message_recovery_trigger",
       threadId: "thread_recovery",
     });
-    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for recovery linkage.");
@@ -1436,19 +1529,20 @@ describe("CLI socket server", () => {
     expect(pending).toEqual([engineMessageId]);
     expect(settled).toEqual([engineMessageId]);
     expect(
-      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
+      await originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
     ).toBe(claim.run.runId);
   });
 
   it("persists pending provenance across shutdown without reporting it settled", async () => {
     // MUTATION: clear the queue and call onRunMessageLinkSettled from close()
     // -> the durable file is absent and shutdown falsely reports recovery.
-    dispatchStore.recordTrigger({
+    await seedDispatchThread("thread_restart_recovery");
+    await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message_restart_recovery_trigger",
       threadId: "thread_restart_recovery",
     });
-    const claim = dispatchStore.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
     const originalDispatch = dispatchStore;
     const pending: string[] = [];
@@ -1503,19 +1597,22 @@ describe("CLI socket server", () => {
     };
     serverOptions = restoredOptions;
     await restoreCliServerRuntime(restoredOptions);
-    for (
-      let index = 0;
-      index < 50 &&
-      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId) === null;
-      index += 1
-    ) {
+    for (let index = 0; index < 50; index += 1) {
+      if (
+        (await originalDispatch.runIdForMessage(
+          WORKSPACE_ID,
+          engineMessageId,
+        )) !== null
+      ) {
+        break;
+      }
       await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
     }
 
     expect(pending).toEqual([engineMessageId, engineMessageId]);
     expect(settled).toEqual([engineMessageId]);
     expect(
-      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
+      await originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
     ).toBe(claim.run.runId);
     await expect(
       stat(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE)),
@@ -1531,12 +1628,13 @@ describe("CLI socket server", () => {
       body: "This message will receive restored provenance.",
     });
     const engineMessageId = posted.messageId.replace(/^msg_/u, "message_");
-    dispatchStore.recordTrigger({
+    await seedDispatchThread("thread_mixed_restore");
+    await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message_mixed_restore_trigger",
       threadId: "thread_mixed_restore",
     });
-    const claim = dispatchStore.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a run for mixed restore.");
     const unavailable = {
       workspaceId: "workspace-not-registered",
@@ -1565,12 +1663,15 @@ describe("CLI socket server", () => {
     };
     serverOptions = restoredOptions;
     await restoreCliServerRuntime(restoredOptions);
-    for (
-      let index = 0;
-      index < 50 &&
-      dispatchStore.runIdForMessage(WORKSPACE_ID, engineMessageId) === null;
-      index += 1
-    ) {
+    for (let index = 0; index < 50; index += 1) {
+      if (
+        (await dispatchStore.runIdForMessage(
+          WORKSPACE_ID,
+          engineMessageId,
+        )) !== null
+      ) {
+        break;
+      }
       await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
     }
     for (let index = 0; index < 50; index += 1) {
@@ -1585,7 +1686,7 @@ describe("CLI socket server", () => {
     }
 
     expect(
-      dispatchStore.runIdForMessage(WORKSPACE_ID, engineMessageId),
+      await dispatchStore.runIdForMessage(WORKSPACE_ID, engineMessageId),
     ).toBe(claim.run.runId);
     expect(
       JSON.parse(
@@ -1627,14 +1728,15 @@ describe("CLI socket server", () => {
 
     const runIds: string[] = [];
     for (const suffix of ["a", "b"]) {
-      dispatchStore.recordTrigger({
+      await seedDispatchThread(`thread_bounded_${suffix}`);
+      await dispatchStore.recordTrigger({
         workspaceId: WORKSPACE_ID,
         triggerMessageId: `message_bounded_${suffix}`,
         threadId: `thread_bounded_${suffix}`,
       });
-      const claim = dispatchStore.claimNextPending(WORKSPACE_ID);
+      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
       if (!claim) throw new Error("Expected a bounded-queue run.");
-      dispatchStore.failRun({
+      await dispatchStore.failRun({
         runId: claim.run.runId,
         reason: "seed next run",
       });
@@ -1677,12 +1779,13 @@ describe("CLI socket server", () => {
   it("caps all foreground provenance work with one wall-clock budget", async () => {
     // MUTATION: give every RPC its own full deadline -> all three attempts use
     // the same timeout instead of shrinking to the shared foreground budget.
-    dispatchStore.recordTrigger({
+    await seedDispatchThread("thread_foreground_budget");
+    await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message_foreground_budget_trigger",
       threadId: "thread_foreground_budget",
     });
-    const claim = dispatchStore.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
     const deadlines: number[] = [];
     context = {
@@ -1720,12 +1823,13 @@ describe("CLI socket server", () => {
   it("returns a visible warning when run-message provenance retries are exhausted", async () => {
     // MUTATION: swallow the final failure -> the successful CLI result has no
     // warning and the desktop error channel remains empty.
-    dispatchStore.recordTrigger({
+    await seedDispatchThread("thread_permanent");
+    await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message_permanent_trigger",
       threadId: "thread_permanent",
     });
-    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for failed linkage.");
@@ -1760,17 +1864,18 @@ describe("CLI socket server", () => {
       }),
     ]);
     expect(
-      originalDispatch.listRunMessages(WORKSPACE_ID, claim.run.runId),
+      await originalDispatch.listRunMessages(WORKSPACE_ID, claim.run.runId),
     ).toEqual([]);
   });
 
   it("forwards a deadline to every provenance RPC attempt", async () => {
-    dispatchStore.recordTrigger({
+    await seedDispatchThread("thread_deadline");
+    await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message_deadline_trigger",
       threadId: "thread_deadline",
     });
-    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for deadline linkage.");
@@ -1965,6 +2070,12 @@ describe("CLI socket server", () => {
   });
 
   it("returns unread agent DMs, agent mentions, and human unread threads", async () => {
+    context.daemonReads = {
+      async queryChatMessagesGranular() {
+        return { results: [], saturated: true };
+      },
+      listUnreadFileThreads,
+    };
     const agentDm = await post({
       actor: "human",
       channel: "my-agent",
