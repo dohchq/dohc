@@ -1,4 +1,5 @@
 use dohc_engine_protocol::{
+    error::ErrorCode,
     limits::WireLimits,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Envelope, Request, Response, WorkspaceHandle, encode_control},
@@ -160,6 +161,128 @@ async fn open_conflict(
         .await
         .unwrap_or_else(|error| panic!("seed conflict {index}: {error:?}"));
     assert_eq!(opened.result["inserted"], true);
+}
+
+async fn open_workspace(
+    transport: &InProcessTransport<EngineService>,
+    scratch: &ScratchDir,
+    workspace_id: &str,
+    request_id: u64,
+) -> WorkspaceHandle {
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                request_id,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                request_id + 1,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "bootstrap.md",
+                    "text": "bootstrap",
+                    "origin": "api",
+                    "requestId": format!("{workspace_id}-bootstrap"),
+                }),
+            ),
+        )
+        .await
+        .expect("bootstrap versioned workspace");
+    handle
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conflict_list_and_resolve_are_isolated_by_workspace() {
+    let scratch_a = ScratchDir::new().expect("workspace A scratch");
+    let scratch_b = ScratchDir::new().expect("workspace B scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_a_id = "ws-conflicts-isolation-a";
+    let workspace_b_id = "ws-conflicts-isolation-b";
+    let handle_a = open_workspace(&transport, &scratch_a, workspace_a_id, 1).await;
+    let handle_b = open_workspace(&transport, &scratch_b, workspace_b_id, 10).await;
+
+    open_conflict(&transport, &handle_a, workspace_a_id, 0, "workspace A").await;
+
+    let workspace_b_conflicts = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                20,
+                "conflicts.list",
+                Some(handle_b.clone()),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("list workspace B conflicts");
+    assert_eq!(workspace_b_conflicts.result["conflicts"], json!([]));
+
+    let wrong_workspace_resolve = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                21,
+                "conflicts.resolve",
+                Some(handle_b),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "keep-current",
+                    "objectId": "wrong-workspace-object",
+                    "writeMomentId": "wrong-workspace-write",
+                    "deleteMomentId": "wrong-workspace-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 100,
+                }}),
+            ),
+        )
+        .await
+        .expect_err("workspace B must not resolve workspace A's conflict");
+    assert_eq!(wrong_workspace_resolve.code, ErrorCode::InvalidParams);
+
+    let workspace_a_conflicts = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                22,
+                "conflicts.list",
+                Some(handle_a),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("list workspace A conflicts after refused resolve");
+    assert_eq!(
+        workspace_a_conflicts.result["conflicts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        workspace_a_conflicts.result["conflicts"][0]["id"],
+        "conflict-000"
+    );
+    assert_eq!(
+        workspace_a_conflicts.result["conflicts"][0]["status"],
+        "open"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

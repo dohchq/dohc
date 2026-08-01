@@ -2058,8 +2058,8 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
   }, 15_000);
 });
 
-describe("workspaceEngineCapture performance evidence (PR 0M-3)", () => {
-  it("measures 100-file burst capture latency", async () => {
+describe("workspaceEngineCapture loopback scale coverage (PR 0M-3)", () => {
+  it("processes a 100-file burst through the loopback adapter", async () => {
     const root = await tempRoot();
     const events = [] as Array<{ path: string; operation: "update" }>;
     for (let index = 0; index < 100; index += 1) {
@@ -2078,13 +2078,13 @@ describe("workspaceEngineCapture performance evidence (PR 0M-3)", () => {
 
     expect(momentCount).toBe(100);
     console.log(
-      `[perf] watcher-batch engine capture, 100-file burst: ${elapsedMs.toFixed(1)}ms ` +
+      `[scale] loopback watcher-batch fixture, 100-file burst completed in ${elapsedMs.toFixed(1)}ms ` +
         `(${(elapsedMs / 100).toFixed(2)}ms/file) on ${cpus()[0]?.model ?? "unknown CPU"}, ` +
         `node ${process.version}, ${process.platform}`,
     );
   }, 60_000);
 
-  it("measures startup reconciliation for 1,000 files with 10 changed", async () => {
+  it("reconciles a 1,000-file loopback fixture with 10 changes", async () => {
     const root = await tempRoot();
     const paths: string[] = [];
     for (let index = 0; index < 1000; index += 1) {
@@ -2112,7 +2112,7 @@ describe("workspaceEngineCapture performance evidence (PR 0M-3)", () => {
 
     expect(await liveMomentPaths(loopback)).toHaveLength(1010);
     console.log(
-      `[perf] startup reconciliation, 1,000 files / 10 changed: ${elapsedMs.toFixed(1)}ms ` +
+      `[scale] loopback startup fixture, 1,000 files / 10 changed completed in ${elapsedMs.toFixed(1)}ms ` +
         `on ${cpus()[0]?.model ?? "unknown CPU"}, node ${process.version}, ${process.platform}`,
     );
   }, 120_000);

@@ -979,7 +979,7 @@ describe("mergeVersionIntoMain", () => {
     await engine.stop();
   });
 
-  it("scopes conflict list and resolution to the request workspace", async () => {
+  it("keeps the desktop loopback adapter's conflict ledger workspace-scoped", async () => {
     const { loopback, engine, conflict } = await openDivergedTextConflict();
     const foreign = await loopback.sendRequest({
       id: -1000,
@@ -1071,7 +1071,7 @@ describe("restoreFileToBeforeMoment", () => {
 });
 
 describe("switch scale coverage (PR 0M-4)", () => {
-  it("measures switch latency for a 200-file workspace with 20 differing files", async () => {
+  it("switches a 200-file loopback fixture with 20 differing files", async () => {
     const root = await tempRoot();
     for (let index = 0; index < 200; index += 1) {
       await write(
@@ -1108,7 +1108,7 @@ describe("switch scale coverage (PR 0M-4)", () => {
     await engine.stop();
 
     console.log(
-      `[perf] loopback version switch, 200 files / 20 differing: ${elapsedMs.toFixed(1)}ms ` +
+      `[scale] loopback version-switch fixture, 200 files / 20 differing completed in ${elapsedMs.toFixed(1)}ms ` +
         `on ${cpus()[0]?.model ?? "unknown CPU"}, node ${process.version}, ${process.platform}`,
     );
   }, 120_000);

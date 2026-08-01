@@ -4,6 +4,7 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import type { SecretFileStore } from "@dohc/workspace-contracts/engine";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +12,6 @@ import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
-  type WorkspaceEngineMomentSummary,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 
@@ -55,11 +55,13 @@ function daemonCapture(
   root: string,
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
+  secretStore?: SecretFileStore,
 ): WorkspaceEngineCapture {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-secret-test",
     rootPath: root,
     rustEngineSessions: mockLiveSessions(loopback, requests),
+    ...(secretStore === undefined ? {} : { secretStore }),
   });
 }
 
@@ -75,15 +77,15 @@ class SecretMergeLoopbackEngine extends VersionedLoopbackEngine {
   }
 }
 
-function momentSummary(
+function secretMoment(
   id: string,
   recordedAtMs: number,
-  protectedMoment: boolean,
-): WorkspaceEngineMomentSummary {
+): Awaited<ReturnType<SecretFileStore["listSecretMoments"]>>[number] {
   return {
     id,
+    workspaceId: "engine-secret-test",
     versionId: "main",
-    path: protectedMoment ? ".env" : "doc.md",
+    path: ".env",
     recordedAtMs,
     operation: "write",
     metadata: {
@@ -92,22 +94,8 @@ function momentSummary(
       correlationId: id,
     },
     momentOrder: recordedAtMs,
-    protected: protectedMoment,
+    protected: true,
   };
-}
-
-function fuseMomentPage(
-  textMoments: WorkspaceEngineMomentSummary[],
-  protectedMoments: WorkspaceEngineMomentSummary[],
-  window: { lowerMs: number; upperMs: number },
-): WorkspaceEngineMomentSummary[] {
-  const protectedInWindow = protectedMoments.filter(
-    (moment) =>
-      moment.recordedAtMs >= window.lowerMs && moment.recordedAtMs < window.upperMs,
-  );
-  return [...textMoments, ...protectedInWindow].sort(
-    (a, b) => b.recordedAtMs - a.recordedAtMs,
-  );
 }
 
 describe("secret capture through the desktop pipeline (daemon path)", () => {
@@ -293,42 +281,69 @@ describe("secret version operations through the desktop daemon path", () => {
   });
 });
 
-describe("fuseMomentPage", () => {
-  it("assigns tied protected moments to one half-open page window", () => {
+describe("listMoments protected pagination", () => {
+  it("assigns tied protected moments to one half-open production page window", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    await loopback.sendRequest({
+      id: 1,
+      method: VERSIONED_METHOD.versionsEnsureMain,
+      workspace: "engine-secret-test",
+      params: { workspaceId: "engine-secret-test" },
+    });
+    for (const recordedAtMs of [10, 20, 30, 40, 50, 60]) {
+      await loopback.sendRequest({
+        id: recordedAtMs,
+        method: VERSIONED_METHOD.textWrite,
+        workspace: "engine-secret-test",
+        params: {
+          workspaceId: "engine-secret-test",
+          versionId: "main",
+          path: `text-${recordedAtMs}.md`,
+          text: String(recordedAtMs),
+          origin: "api",
+          momentId: `text-${recordedAtMs}`,
+          nowMs: recordedAtMs,
+        },
+      });
+    }
     const protectedMoments = [
-      momentSummary("protected-upper", 30, true),
-      momentSummary("protected-middle", 25, true),
-      momentSummary("protected-lower", 20, true),
+      secretMoment("protected-upper", 50),
+      secretMoment("protected-middle", 35),
+      secretMoment("protected-lower", 20),
     ];
-    const newest = fuseMomentPage(
-      [momentSummary("text-newest", 40, false), momentSummary("text-upper", 30, false)],
-      protectedMoments,
-      { lowerMs: 30, upperMs: Number.POSITIVE_INFINITY },
-    );
-    const middle = fuseMomentPage(
-      [momentSummary("text-lower", 20, false)],
-      protectedMoments,
-      { lowerMs: 20, upperMs: 30 },
-    );
-    const oldest = fuseMomentPage(
-      [momentSummary("text-oldest", 10, false)],
-      protectedMoments,
-      { lowerMs: Number.NEGATIVE_INFINITY, upperMs: 20 },
-    );
+    const secretStore = {
+      listSecretMoments: vi.fn(async () => protectedMoments),
+    } as unknown as SecretFileStore;
+    const engine = daemonCapture(root, loopback, undefined, secretStore);
 
-    expect(newest.map((moment) => moment.id)).toEqual([
-      "text-newest",
-      "text-upper",
+    const newest = await engine.listMoments({ limit: 2 });
+    const middle = await engine.listMoments({
+      limit: 2,
+      beforeMomentOrder: newest.nextBeforeMomentOrder ?? undefined,
+    });
+    const oldest = await engine.listMoments({
+      limit: 2,
+      beforeMomentOrder: middle.nextBeforeMomentOrder ?? undefined,
+    });
+
+    expect(newest.moments.map((moment) => moment.id)).toEqual([
+      "text-60",
+      "text-50",
       "protected-upper",
     ]);
-    expect(middle.map((moment) => moment.id)).toEqual([
+    expect(middle.moments.map((moment) => moment.id)).toEqual([
+      "text-40",
       "protected-middle",
-      "text-lower",
-      "protected-lower",
+      "text-30",
     ]);
-    expect(oldest.map((moment) => moment.id)).toEqual(["text-oldest"]);
+    expect(oldest.moments.map((moment) => moment.id)).toEqual([
+      "text-20",
+      "protected-lower",
+      "text-10",
+    ]);
 
-    const protectedIds = [...newest, ...middle, ...oldest]
+    const protectedIds = [...newest.moments, ...middle.moments, ...oldest.moments]
       .filter((moment) => moment.protected)
       .map((moment) => moment.id);
     expect(protectedIds).toEqual([
@@ -337,5 +352,7 @@ describe("fuseMomentPage", () => {
       "protected-lower",
     ]);
     expect(new Set(protectedIds).size).toBe(protectedMoments.length);
+    expect(secretStore.listSecretMoments).toHaveBeenCalledTimes(3);
+    await engine.stop();
   });
 });
