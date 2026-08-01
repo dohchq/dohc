@@ -977,7 +977,7 @@ describe("mergeVersionIntoMain", () => {
     await expect(
       engine.resolveConflict(conflict.id, {
         kind: "apply-merged",
-        text: "x".repeat(48 * 1024 + 1),
+        text: "x".repeat(128 * 1024 + 1),
       }),
     ).rejects.toThrow(/content-exceeds-inband-cap/);
     expect(await readText(root, "plan.md")).toBe("current\n");
