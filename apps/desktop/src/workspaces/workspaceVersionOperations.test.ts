@@ -1,24 +1,18 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  type SecretFileStore,
-  type VersionedTextStore,
-} from "@dohc/workspace-contracts/engine";
-import {
-  createSecretFileStore,
-  createVersionedTextStore,
-} from "@dohc/workspace-engine";
-import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
-import {
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
+  type ConflictRecord,
+  type JsonObject,
+  type JsonValue,
   type MomentRecord,
   type Request,
+  type Response,
 } from "@dohc/workspace-engine-client";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
@@ -38,26 +32,11 @@ import {
 // mid-switch failure recovery), merge into Main (clean + conflict + each
 // resolution kind), and compare.
 //
-// Most tests here run on the DAEMON capture path: `rustEngineSessions` selects
+// These tests run on the DAEMON capture path: `rustEngineSessions` selects
 // the Rust engine, and the loopback behind it holds real state and real sha256,
-// so what these tests read back is recorded state rather than a canned
-// responder. The exceptions are named at their describe blocks — the merge and
-// conflict family, which needs `conflicts.*` RPCs the loopback does not
-// implement, and the switch-latency evidence, which is only evidence when it is
-// measured against the real store.
+// so what these tests read back is recorded state rather than a canned responder.
 
 const WORKSPACE_ID = "version-ops-test";
-
-const requireModule = createRequire(import.meta.url);
-const { DatabaseSync } = requireModule("node:sqlite") as {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => {
-    prepare(sql: string): { all(...params: unknown[]): Array<Record<string, unknown>> };
-    close(): void;
-  };
-};
 
 const roots: string[] = [];
 
@@ -68,9 +47,6 @@ async function tempRoot(): Promise<string> {
 }
 
 afterEach(async () => {
-  // Windows cannot unlink engine.db* files with open sqlite handles (EBUSY),
-  // so release every tracked engine handle before removing the temp roots.
-  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -80,24 +56,6 @@ interface EngineMomentRow {
   operation: string;
   text: string;
   summary: string | null;
-}
-
-function readEngineMoments(rootPath: string): EngineMomentRow[] {
-  const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
-    readOnly: true,
-  });
-  try {
-    return db
-      .prepare(
-        `SELECT m.version_id AS versionId, m.path AS path, m.operation AS operation,
-                b.text AS text, m.metadata_summary AS summary
-         FROM moments m JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
-         ORDER BY m.moment_order`,
-      )
-      .all() as unknown as EngineMomentRow[];
-  } finally {
-    db.close();
-  }
 }
 
 let momentQueryId = 1;
@@ -147,6 +105,249 @@ async function readDaemonMoments(
     }));
 }
 
+function conflictState(
+  path: string,
+  value: JsonValue | undefined,
+): ConflictRecord["base"] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      path,
+      contentKind: "text",
+      snapshot: null,
+      binarySha256: null,
+      binaryByteLength: null,
+      binaryObjectId: null,
+      binaryLatestMomentId: null,
+      metadataSummary: null,
+      metadataCorrelationId: null,
+    };
+  }
+  const snapshot = {
+    ...value,
+    metadataSummary: value.metadataSummary ?? null,
+    metadataCorrelationId: value.metadataCorrelationId ?? null,
+  } as NonNullable<ConflictRecord["base"]["snapshot"]>;
+  return {
+    path,
+    contentKind: "text",
+    snapshot,
+    binarySha256: null,
+    binaryByteLength: null,
+    binaryObjectId: null,
+    binaryLatestMomentId: null,
+    metadataSummary: null,
+    metadataCorrelationId: null,
+  };
+}
+
+function liveTextStateMatches(
+  live: JsonValue,
+  recorded: ConflictRecord["current"],
+  targetPath: string,
+): boolean {
+  if (recorded.contentKind !== "text") return false;
+  if (recorded.snapshot === null) {
+    return live === null && targetPath === recorded.path;
+  }
+  if (live === null || typeof live !== "object" || Array.isArray(live)) {
+    return false;
+  }
+  return (
+    live.contentKind === "text" &&
+    live.path === recorded.path &&
+    live.objectId === recorded.snapshot.objectId &&
+    live.latestMomentId === recorded.snapshot.latestMomentId &&
+    live.text === recorded.snapshot.text
+  );
+}
+
+// VersionedLoopbackEngine decides every merge outcome. This bridge only models
+// the workspace-scoped conflict ledger that surrounds the versioned contract.
+class ConflictLoopbackEngine extends VersionedLoopbackEngine {
+  private readonly conflicts = new Map<string, ConflictRecord>();
+  private conflictClock = 1;
+  private internalRequestId = -1;
+
+  private conflictKey(workspace: string, conflictId: string): string {
+    return `${workspace}\u0000${conflictId}`;
+  }
+
+  private requiredWorkspace(request: Request): string {
+    if (typeof request.workspace !== "string" || request.workspace.length === 0) {
+      throw new Error("workspace-not-open");
+    }
+    return request.workspace;
+  }
+
+  override async sendRequest(request: Request): Promise<Response> {
+    if (request.method === "conflicts.list") {
+      this.requests.push(request);
+      const workspace = this.requiredWorkspace(request);
+      const params = request.params as JsonObject;
+      const status = params.status;
+      const afterConflictId = params.afterConflictId;
+      let conflicts = [...this.conflicts.values()]
+        .filter(
+          (conflict) =>
+            conflict.workspaceId === workspace &&
+            (status === undefined || conflict.status === status),
+        )
+        .sort((left, right) => left.id.localeCompare(right.id));
+      if (typeof afterConflictId === "string") {
+        const index = conflicts.findIndex((conflict) => conflict.id === afterConflictId);
+        conflicts = index < 0 ? conflicts : conflicts.slice(index + 1);
+      }
+      return {
+        id: request.id,
+        result: { conflicts, nextAfterConflictId: null },
+      };
+    }
+
+    if (request.method === "conflicts.resolve") {
+      this.requests.push(request);
+      const workspace = this.requiredWorkspace(request);
+      const params = request.params as JsonObject;
+      const local = params.local as JsonObject;
+      const conflictId = String(local.conflictId);
+      const key = this.conflictKey(workspace, conflictId);
+      const existing = this.conflicts.get(key);
+      if (!existing) throw new Error("conflict-not-found");
+      const live = await super.sendRequest({
+        id: this.internalRequestId--,
+        method: VERSIONED_METHOD.textRead,
+        workspace,
+        params: {
+          workspaceId: workspace,
+          versionId: existing.targetVersionId,
+          path: existing.path,
+        },
+      });
+      if (!liveTextStateMatches(live.result, existing.current, existing.path)) {
+        throw new Error("conflict-stale-target");
+      }
+      const resolution = String(local.resolution);
+      const resolutionName =
+        resolution === "keep-current"
+          ? "kept-current"
+          : resolution === "apply-incoming"
+            ? "applied-incoming"
+            : "applied-merged";
+      const chosenFrom =
+        resolution === "keep-current"
+          ? "current"
+          : resolution === "apply-incoming"
+            ? "incoming"
+            : "merged";
+      const resolved: ConflictRecord = {
+        ...existing,
+        status: "resolved",
+        chosenFrom,
+        resolution: resolutionName,
+        updatedAtMs: this.conflictClock++,
+      };
+      if (resolution === "keep-current") {
+        this.conflicts.set(key, resolved);
+        return {
+          id: request.id,
+          result: { conflict: resolved, write: null, delete: null },
+        };
+      }
+
+      if (resolution === "apply-incoming" && existing.incoming.snapshot === null) {
+        const deletion = existing.current.snapshot === null
+          ? null
+          : await super.sendRequest({
+              id: request.id,
+              idempotencyKey: String(local.deleteMomentId),
+              method: VERSIONED_METHOD.textDelete,
+              workspace,
+              params: {
+                workspaceId: workspace,
+                versionId: existing.targetVersionId,
+                path: existing.path,
+                origin: String(local.metadataOrigin),
+                ...(typeof local.metadataSummary === "string"
+                  ? { summary: local.metadataSummary }
+                  : {}),
+                ...(typeof local.metadataCorrelationId === "string"
+                  ? { correlationId: local.metadataCorrelationId }
+                  : {}),
+              },
+            });
+        this.conflicts.set(key, resolved);
+        return {
+          id: request.id,
+          result: { conflict: resolved, write: null, delete: deletion?.result ?? null },
+        };
+      }
+
+      const text = resolution === "apply-incoming"
+        ? existing.incoming.snapshot!.text
+        : String(local.mergedText);
+      const write = await super.sendRequest({
+        id: request.id,
+        method: VERSIONED_METHOD.textWrite,
+        workspace,
+        params: {
+          workspaceId: workspace,
+          versionId: existing.targetVersionId,
+          path: existing.path,
+          text,
+          objectId: String(local.objectId),
+          momentId: String(local.writeMomentId),
+          origin: String(local.metadataOrigin),
+          ...(typeof local.metadataSummary === "string"
+            ? { summary: local.metadataSummary }
+            : {}),
+          ...(typeof local.metadataCorrelationId === "string"
+            ? { correlationId: local.metadataCorrelationId }
+            : {}),
+        },
+      });
+      this.conflicts.set(key, resolved);
+      return {
+        id: request.id,
+        result: { conflict: resolved, write: write.result, delete: null },
+      };
+    }
+
+    const response = await super.sendRequest(request);
+    if (request.method !== VERSIONED_METHOD.versionsMerge) return response;
+    const result = response.result as JsonObject;
+    if (result.status !== "conflict") return response;
+    const workspace = this.requiredWorkspace(request);
+    const conflictId = String(result.conflictId);
+    const key = this.conflictKey(workspace, conflictId);
+    if (this.conflicts.has(key)) return response;
+    const params = request.params as JsonObject;
+    const comparison = result.comparison as JsonObject;
+    const path = String(params.path);
+    const recordedAtMs = this.conflictClock++;
+    this.conflicts.set(key, {
+      id: conflictId,
+      workspaceId: workspace,
+      path,
+      targetVersionId: String(params.targetVersionId),
+      sourceVersionId: String(params.sourceVersionId),
+      createdAtMs: recordedAtMs,
+      updatedAtMs: recordedAtMs,
+      status: "open",
+      chosenFrom: "current",
+      resolution: null,
+      metadata: {
+        origin: String(params.origin),
+        summary: typeof params.summary === "string" ? params.summary : null,
+        correlationId:
+          typeof params.correlationId === "string" ? params.correlationId : null,
+      },
+      base: conflictState(path, comparison.base),
+      current: conflictState(path, comparison.current),
+      incoming: conflictState(path, comparison.incoming),
+    });
+    return response;
+  }
+}
+
 async function write(root: string, path: string, contents: string) {
   const absolute = join(root, path);
   await mkdir(dirname(absolute), { recursive: true });
@@ -170,45 +371,17 @@ function sha256Utf8(text: string): string {
 function capture(root: string, options: {
   onError?: (context: string, error: unknown) => void;
   diskWriter?: EngineDiskWriter;
-  store?: VersionedTextStore;
-  secretStore?: SecretFileStore;
+  store?: CaptureVersionedTextStore;
   rustEngineSessions?: EngineWorkspaceSessions;
 } = {}): WorkspaceEngineCapture {
-  const { rustEngineSessions, store, secretStore, ...rest } = options;
-  const usesLegacyFixture = rustEngineSessions === undefined;
-  const ownedStore = !store && usesLegacyFixture
-    ? createVersionedTextStore(root)
-    : undefined;
-  const ownedSecretStore = !secretStore && usesLegacyFixture
-    ? createSecretFileStore(root)
-    : undefined;
-  const engineCapture = createWorkspaceEngineCapture({
+  const { rustEngineSessions, ...rest } = options;
+  return createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
     rustEngineSessions:
       rustEngineSessions ?? mockLiveSessions(new VersionedLoopbackEngine()),
-    ...((store ?? ownedStore) ? { store: store ?? ownedStore } : {}),
-    ...((secretStore ?? ownedSecretStore)
-      ? { secretStore: secretStore ?? ownedSecretStore }
-      : {}),
     ...rest,
   });
-  if (!ownedStore && !ownedSecretStore) return engineCapture;
-
-  const stopCapture = engineCapture.stop.bind(engineCapture);
-  let ownedStoresClosed = false;
-  engineCapture.stop = async () => {
-    try {
-      await stopCapture();
-    } finally {
-      if (!ownedStoresClosed) {
-        ownedStoresClosed = true;
-        await ownedStore?.close().catch(() => undefined);
-        await ownedSecretStore?.close().catch(() => undefined);
-      }
-    }
-  };
-  return engineCapture;
 }
 
 // The daemon-path capture. `requests` collects every wire request when
@@ -230,6 +403,35 @@ async function versionIdByName(
   const version = versions.find((entry) => entry.name === name);
   if (!version) throw new Error(`No version named ${name}`);
   return version.id;
+}
+
+async function openDivergedTextConflict(incomingText: string | null = "draft\n") {
+  const root = await tempRoot();
+  await write(root, "plan.md", "base\n");
+  const loopback = new ConflictLoopbackEngine();
+  const engine = daemonCapture(root, loopback);
+  engine.start();
+  await engine.flush();
+  await engine.createVersion("Draft");
+  if (incomingText === null) {
+    await rm(join(root, "plan.md"));
+    engine.captureBatch([{ path: "plan.md", operation: "delete" }]);
+  } else {
+    await write(root, "plan.md", incomingText);
+    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+  }
+  await engine.flush();
+  await engine.switchVersion("main");
+  await write(root, "plan.md", "current\n");
+  engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+  await engine.flush();
+
+  const draftId = await versionIdByName(engine, "Draft");
+  const merge = await engine.mergeVersionIntoMain(draftId);
+  if (merge.conflicts.length !== 1) {
+    throw new Error(`Expected one conflict, received ${merge.conflicts.length}.`);
+  }
+  return { root, loopback, engine, conflict: merge.conflicts[0] };
 }
 
 describe("active-version capture routing", () => {
@@ -572,19 +774,12 @@ describe("compareVersions", () => {
   });
 });
 
-// LEGACY FIXTURE for every test that reaches a conflict record. `mergeVersionIntoMain`
-// resumes open conflicts, so it calls `listTextConflicts` on every run, and that
-// is a `conflicts.list` RPC the loopback does not implement ("Unsupported
-// loopback method: conflicts.list") — nor do `conflicts.open` / `conflicts.resolve`
-// exist there. Answering them inside the shared harness would be a hand-written
-// responder deciding merge outcomes, which is exactly what the harness exists to
-// avoid. The one merge test that refuses BEFORE reaching conflicts runs on the
-// daemon.
 describe("mergeVersionIntoMain", () => {
   it("merges a clean version into Main and materializes when Main is active", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    const engine = capture(root);
+    const loopback = new ConflictLoopbackEngine();
+    const engine = daemonCapture(root, loopback);
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -600,16 +795,17 @@ describe("mergeVersionIntoMain", () => {
     expect(await readText(root, "plan.md")).toBe("draft text\n");
 
     // The merge's own disk write must not re-capture.
-    const momentsBefore = readEngineMoments(root).length;
+    const momentsBefore = (await readDaemonMoments(loopback)).length;
     engine.captureBatch([{ path: "plan.md", operation: "update" }]);
     await engine.stop();
-    expect(readEngineMoments(root)).toHaveLength(momentsBefore);
+    expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
   });
 
   it("does not touch the disk when a named version is active", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    const engine = capture(root);
+    const loopback = new ConflictLoopbackEngine();
+    const engine = daemonCapture(root, loopback);
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -625,14 +821,15 @@ describe("mergeVersionIntoMain", () => {
     // Disk still shows the ACTIVE version (Other), not Main's merged state.
     expect(await readText(root, "plan.md")).toBe("other text\n");
     // ...but Main's engine state has the merge.
-    const mainTip = readEngineMoments(root)
+    const moments = await readDaemonMoments(loopback);
+    const mainTip = moments
       .filter((moment) => moment.versionId === "main" && moment.path === "plan.md")
       .at(-1);
     expect(mainTip?.text).toBe("draft text\n");
     // Data durability: the merge captured Other's UNSETTLED edit into
     // Other's own tip first — a later switch away can't lose "other text".
     const otherId = await versionIdByName(engine, "Other");
-    const otherTip = readEngineMoments(root)
+    const otherTip = moments
       .filter((moment) => moment.versionId === otherId && moment.path === "plan.md")
       .at(-1);
     expect(otherTip?.text).toBe("other text\n");
@@ -647,7 +844,7 @@ describe("mergeVersionIntoMain", () => {
   it("records a conflict preserving both sides when both versions changed", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "base line\n");
-    const engine = capture(root);
+    const engine = daemonCapture(root, new ConflictLoopbackEngine());
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -677,7 +874,8 @@ describe("mergeVersionIntoMain", () => {
     await write(root, "a.md", "base a\n");
     await write(root, "b.md", "base b\n");
     await write(root, "c.md", "base c\n");
-    const engine = capture(root);
+    const loopback = new ConflictLoopbackEngine();
+    const engine = daemonCapture(root, loopback);
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -724,19 +922,94 @@ describe("mergeVersionIntoMain", () => {
     expect(await engine.listOpenConflicts()).toHaveLength(0);
 
     // Resolution disk writes never re-capture.
-    const momentsBefore = readEngineMoments(root).length;
+    const momentsBefore = (await readDaemonMoments(loopback)).length;
     engine.captureBatch([
       { path: "b.md", operation: "update" },
       { path: "c.md", operation: "update" },
     ]);
     await engine.stop();
-    expect(readEngineMoments(root)).toHaveLength(momentsBefore);
+    expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
+  });
+
+  it("applies an absent incoming side as a delete", async () => {
+    const { root, loopback, engine, conflict } =
+      await openDivergedTextConflict(null);
+
+    const resolved = await engine.resolveConflict(conflict.id, {
+      kind: "apply-incoming",
+    });
+
+    expect(resolved.conflict.resolution).toBe("applied-incoming");
+    expect(existsSync(join(root, "plan.md"))).toBe(false);
+    expect(
+      loopback.requests.some(
+        (request) =>
+          request.method === VERSIONED_METHOD.textDelete &&
+          (request.params as JsonObject).path === "plan.md",
+      ),
+    ).toBe(true);
+    await engine.stop();
+  });
+
+  it("rejects a stale target and keeps its conflict open", async () => {
+    const { root, engine, conflict } = await openDivergedTextConflict();
+    await write(root, "plan.md", "newer current\n");
+    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    await engine.flush();
+
+    await expect(
+      engine.resolveConflict(conflict.id, { kind: "apply-incoming" }),
+    ).rejects.toThrow(/conflict-stale-target/);
+    expect(await readText(root, "plan.md")).toBe("newer current\n");
+    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    await engine.stop();
+  });
+
+  it("keeps a conflict open when its delegated write fails", async () => {
+    const { root, engine, conflict } = await openDivergedTextConflict();
+
+    await expect(
+      engine.resolveConflict(conflict.id, {
+        kind: "apply-merged",
+        text: "x".repeat(48 * 1024 + 1),
+      }),
+    ).rejects.toThrow(/content-exceeds-inband-cap/);
+    expect(await readText(root, "plan.md")).toBe("current\n");
+    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    await engine.stop();
+  });
+
+  it("scopes conflict list and resolution to the request workspace", async () => {
+    const { loopback, engine, conflict } = await openDivergedTextConflict();
+    const foreign = await loopback.sendRequest({
+      id: -1000,
+      method: "conflicts.list",
+      workspace: "other-workspace",
+      params: { status: "open" },
+    });
+
+    expect((foreign.result as JsonObject).conflicts).toEqual([]);
+    await expect(
+      loopback.sendRequest({
+        id: -1001,
+        method: "conflicts.resolve",
+        workspace: "other-workspace",
+        params: {
+          local: {
+            conflictId: conflict.id,
+            resolution: "keep-current",
+          },
+        },
+      }),
+    ).rejects.toThrow(/conflict-not-found/);
+    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    await engine.stop();
   });
 
   it("re-running a merge resumes open conflicts instead of duplicating them", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "base\n");
-    const engine = capture(root);
+    const engine = daemonCapture(root, new ConflictLoopbackEngine());
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -759,8 +1032,6 @@ describe("mergeVersionIntoMain", () => {
     await engine.stop();
   });
 
-  // On the daemon: this refusal happens on the version list, before the merge
-  // reaches any conflict RPC.
   it("rejects merging Main into Main", async () => {
     const root = await tempRoot();
     const engine = daemonCapture(root, new VersionedLoopbackEngine());
@@ -799,11 +1070,7 @@ describe("restoreFileToBeforeMoment", () => {
   });
 });
 
-// LEGACY FIXTURE on purpose. The number this logs is evidence only while it is
-// measured against the real store on real disk; the same measurement over an
-// in-memory loopback would be a latency figure for a fixture, published under a
-// heading that claims to describe the product.
-describe("switch performance evidence (PR 0M-4)", () => {
+describe("switch scale coverage (PR 0M-4)", () => {
   it("measures switch latency for a 200-file workspace with 20 differing files", async () => {
     const root = await tempRoot();
     for (let index = 0; index < 200; index += 1) {
@@ -813,7 +1080,7 @@ describe("switch performance evidence (PR 0M-4)", () => {
         `# Doc ${index}\n\nbody ${index}\n`,
       );
     }
-    const engine = capture(root);
+    const engine = daemonCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -841,7 +1108,7 @@ describe("switch performance evidence (PR 0M-4)", () => {
     await engine.stop();
 
     console.log(
-      `[perf] version switch, 200 files / 20 differing: ${elapsedMs.toFixed(1)}ms ` +
+      `[perf] loopback version switch, 200 files / 20 differing: ${elapsedMs.toFixed(1)}ms ` +
         `on ${cpus()[0]?.model ?? "unknown CPU"}, node ${process.version}, ${process.platform}`,
     );
   }, 120_000);
