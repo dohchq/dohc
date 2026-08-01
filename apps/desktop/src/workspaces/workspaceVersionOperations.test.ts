@@ -971,7 +971,7 @@ describe("mergeVersionIntoMain", () => {
     await engine.stop();
   });
 
-  it("keeps a conflict open when its delegated write fails", async () => {
+  it("keeps a conflict open when merged text exceeds the daemon limit", async () => {
     const { root, engine, conflict } = await openDivergedTextConflict();
 
     await expect(
