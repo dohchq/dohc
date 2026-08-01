@@ -303,6 +303,7 @@ import type { JoinedSharedChannel } from "./workspaces/registryStore";
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
+  endJoinedChannel,
   mergeJoinedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
@@ -4291,14 +4292,15 @@ function registerIpcHandlers(
   });
 
   // Member-initiated leave: purely local — the channel stops syncing and its
-  // rows stay readable. (Only the granter can revoke the grant itself.)
+  // rows stay readable. Keep an ended tombstone so participant provenance and
+  // the read-only write gate survive after live grant data is gone.
   ipcMain.handle(CHANNELS.leaveSharedChannel, async (event, payload) => {
     assertTrustedSender(event);
     const input = LeaveSharedChannelPayload.parse(payload);
     const entry = requireWorkspace(input.workspaceId);
     setWorkspaceSharedChannels(
       input.workspaceId,
-      (entry.sharedChannels ?? []).filter((channel) => channel.shareId !== input.shareId),
+      endJoinedChannel(entry.sharedChannels ?? [], input.shareId),
     );
     return undefined;
   });
