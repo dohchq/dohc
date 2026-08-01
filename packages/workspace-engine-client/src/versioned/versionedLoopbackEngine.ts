@@ -806,6 +806,19 @@ function validateSecretMomentId(momentId: string): void {
   if (momentId.length === 0) throw new Error("invalid-input");
 }
 
+function stableJsonStringify(value: JsonValue): string {
+  const stableValue = (candidate: JsonValue): JsonValue => {
+    if (Array.isArray(candidate)) return candidate.map(stableValue);
+    if (typeof candidate !== "object" || candidate === null) return candidate;
+    return Object.fromEntries(
+      Object.keys(candidate)
+        .sort()
+        .map((key) => [key, stableValue(candidate[key]!)]),
+    ) as JsonObject;
+  };
+  return JSON.stringify(stableValue(value));
+}
+
 function sha256(value: string | number[]): string {
   return createHash("sha256")
     .update(typeof value === "string" ? value : Uint8Array.from(value))
@@ -1117,7 +1130,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       case VERSIONED_METHOD.textDelete:
         return this.textDelete(state, workspace, params, parsedTextDelete!);
       case VERSIONED_METHOD.textRollback:
-        return this.textRollback(state, params, request);
+        return this.textRollback(state, workspace, params, request);
       case VERSIONED_METHOD.textList:
         return this.textList(state, params);
       case VERSIONED_METHOD.binaryRead:
@@ -1209,11 +1222,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const requestId = parsed.requestId;
     const objectId = parsed.objectId ??
       (requestId !== undefined
-        ? this.generatedWriteId("object", requestId, path)
+        ? this.generatedWriteId("object", requestId, parsed.path)
         : version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
     const momentId = parsed.momentId ??
       (requestId !== undefined
-        ? this.generatedWriteId("moment", requestId, path)
+        ? this.generatedWriteId("moment", requestId, parsed.path)
         : `moment-${this.nextMomentId++}`);
     const replayFingerprint = this.textWriteFingerprint(
       { ...params, path },
@@ -1388,11 +1401,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const requestId = parsed.requestId;
     const objectId = parsed.objectId ??
       (requestId !== undefined
-        ? this.generatedWriteId("object", requestId, path)
+        ? this.generatedWriteId("object", requestId, parsed.path)
         : version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
     const momentId = parsed.momentId ??
       (requestId !== undefined
-        ? this.generatedWriteId("moment", requestId, path)
+        ? this.generatedWriteId("moment", requestId, parsed.path)
         : `moment-${this.nextMomentId++}`);
     const replayFingerprint = this.binaryWriteFingerprint(
       workspace,
@@ -1554,7 +1567,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const toPath = normalizedEnginePath(toAddressablePath, "storable");
     const version = this.version(state, versionId);
     const momentId = requestId !== undefined
-      ? this.generatedRequestId("moment", requestId, toPath)
+      ? this.generatedRequestId("moment", requestId, parsed.toPath)
       : `moment-${this.nextMomentId++}`;
     const fingerprint = this.renameFingerprint(
       workspace,
@@ -1621,7 +1634,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = normalizedEnginePath(parsed.path, "addressable");
     const version = this.version(state, versionId);
     const momentId = requestId !== undefined
-      ? this.generatedRequestId("moment", requestId, path)
+      ? this.generatedRequestId("moment", requestId, parsed.path)
       : `moment-${this.nextMomentId++}`;
     const fingerprint = this.deleteFingerprint(
       workspace,
@@ -1665,16 +1678,29 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return result;
   }
 
-  private textRollback(state: WorkspaceState, params: JsonObject, request: Request): JsonValue {
+  private textRollback(
+    state: WorkspaceState,
+    workspace: string,
+    params: JsonObject,
+    request: Request,
+  ): JsonValue {
     const path = normalizedEnginePath(
       requiredString(params, "path", "rollback"),
       "addressable",
     );
-    requiredOrigin(params);
-    this.validatedAuthorValue(params);
+    const origin = requiredOrigin(params);
+    const authorJson = this.writeAuthorFingerprint(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
-    const normalizedParams = { ...params, path };
-    const replay = this.replay(state, requestId, normalizedParams);
+    const fingerprint = JSON.stringify({
+      workspaceId: workspace,
+      versionId: params.versionId,
+      path,
+      mutationMomentId: params.mutationMomentId,
+      legacyBeforeText: params.legacyBeforeText ?? null,
+      metadataOrigin: origin,
+      authorJson,
+    });
+    const replay = this.replay(state, requestId, params, fingerprint);
     if (replay) {
       return {
         ...replay,
@@ -1737,7 +1763,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       materialized: materializeEnqueued,
       materializeOutcome: materializeEnqueued ? "applied" : "skipped",
     };
-    this.recordReplay(state, requestId, normalizedParams, result);
+    this.recordReplay(state, requestId, params, result, fingerprint);
     return result;
   }
 
@@ -2306,16 +2332,17 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretApply(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const path = normalizedSecretPath(requiredString(params, "path", "secret apply"));
+    const rawPath = requiredString(params, "path", "secret apply");
     const momentId = requiredString(params, "momentId", "secret apply");
     const origin = requiredOrigin(params);
     // Above both version lookups, which is safe here because `state.versions.get`
     // only reads — the #439 handlers use `mutationVersion`, which creates.
     const { summary, correlationId } = this.secretMomentMetadata(params);
-    validateSecretMomentId(momentId);
     const source = state.versions.get(requiredString(params, "sourceVersionId", "secret apply"));
     const target = state.versions.get(requiredString(params, "targetVersionId", "secret apply"));
     if (!source || !target) throw new Error("invalid-version");
+    validateSecretMomentId(momentId);
+    const path = normalizedSecretPath(rawPath);
     const before = target.secrets.get(path);
     const after = source.secrets.get(path);
     const base = source.secretForkBase.get(path);
@@ -2680,13 +2707,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private writeAuthorFingerprint(params: JsonObject): string | null {
+    this.validatedAuthorValue(params);
     if (params.author !== undefined && params.author !== null) {
-      return JSON.stringify(params.author);
+      return stableJsonStringify(params.author);
     }
     const legacy = params.authorJson;
     if (typeof legacy !== "string") return null;
     try {
-      return JSON.stringify(JSON.parse(legacy));
+      return stableJsonStringify(JSON.parse(legacy) as JsonValue);
     } catch {
       return legacy;
     }
