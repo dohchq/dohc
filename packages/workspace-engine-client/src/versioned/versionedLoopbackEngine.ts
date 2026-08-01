@@ -307,8 +307,16 @@ function isSerdeI64(value: unknown): value is number {
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
     return false;
   }
-  const integer = BigInt(value);
-  return integer >= I64_MIN && integer <= I64_MAX;
+  // The daemon sees JSON text, not the in-memory IEEE-754 value. At the
+  // negative boundary, `-(2 ** 63)` is represented internally as i64::MIN but
+  // serializes as -9223372036854776000, which serde correctly rejects as below
+  // i64::MIN. Compare the same decimal spelling that crosses the wire.
+  try {
+    const integer = BigInt(JSON.stringify(value));
+    return integer >= I64_MIN && integer <= I64_MAX;
+  } catch {
+    return false;
+  }
 }
 
 function serdeOptionalParamNumber(object: JsonObject, key: string): number | undefined {
@@ -868,7 +876,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private handleRequest(request: Request): JsonValue {
-    const workspace = this.requireWorkspaceHandle(request);
     const params = asObject(request.params, `${request.method} params`);
     let parsedTextWrite: ParsedTextWriteFields | undefined;
     let parsedBinaryWrite: ParsedBinaryWriteFields | undefined;
@@ -903,6 +910,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
         parseWorkspaceOnlyFields(params);
         break;
     }
+    // Rust deserializes method params before it opens the workspace handle.
+    // Keep combined-invalid requests on that same refusal boundary.
+    const workspace = this.requireWorkspaceHandle(request);
     this.validateWorkspaceParam(
       params,
       workspace,
@@ -1008,6 +1018,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const addressablePath = normalizedEnginePath(parsed.path, "addressable");
     if (parsed.momentId !== undefined) validateTextMomentId(parsed.momentId);
     const path = normalizedEnginePath(addressablePath, "storable");
+    const knownVersion = state.versions.get(versionId);
+    // Text writes ignore the supplied object id for an existing head. A new
+    // path must reject an empty id before `mutationVersion` can create `main`.
+    if (
+      parsed.objectId === "" &&
+      (knownVersion !== undefined || versionId === "main") &&
+      !knownVersion?.files.has(path)
+    ) {
+      throw new Error("invalid-input");
+    }
     const version = this.mutationVersion(state, workspace, versionId);
     const requestId = parsed.requestId;
     const objectId = parsed.objectId ??
@@ -1182,6 +1202,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const addressablePath = normalizedEnginePath(parsed.path, "addressable");
     if (parsed.momentId !== undefined) validateTextMomentId(parsed.momentId);
     const path = normalizedEnginePath(addressablePath, "storable");
+    // The binary store rejects an empty object id even for an existing head.
+    if (
+      parsed.objectId === "" &&
+      (state.versions.has(versionId) || versionId === "main")
+    ) {
+      throw new Error("invalid-input");
+    }
     const version = this.mutationVersion(state, workspace, versionId);
     const requestId = parsed.requestId;
     const objectId = parsed.objectId ??
