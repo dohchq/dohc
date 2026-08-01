@@ -346,6 +346,80 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("flushes daemon capture before reading versions for a merge", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests),
+      daemonOwnsCapture: true,
+    });
+
+    const outcome = await engine
+      .mergeVersionIntoMain("missing-version")
+      .catch((error: unknown) => error);
+    expect(outcome).toBeInstanceOf(Error);
+    const relevant = requests
+      .map((request) => request.method)
+      .filter(
+        (method) =>
+          method === "capture.flush" || method === VERSIONED_METHOD.versionsList,
+      );
+
+    // MUTATION: remove mergeVersionIntoMain's daemon flush. The versions read
+    // remains, making this order assertion fail on the missing first entry.
+    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.versionsList]);
+    await engine.stop();
+  });
+
+  it("flushes daemon capture before resolving a conflict", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests),
+      daemonOwnsCapture: true,
+    });
+
+    const outcome = await engine
+      .resolveConflict("missing-conflict", { kind: "keep-current" })
+      .catch((error: unknown) => error);
+    expect(outcome).toBeInstanceOf(Error);
+    const relevant = requests
+      .map((request) => request.method)
+      .filter(
+        (method) => method === "capture.flush" || method === "conflicts.resolve",
+      );
+
+    // MUTATION: remove resolveConflict's daemon flush. The resolution request
+    // remains, making this order assertion fail on the missing first entry.
+    expect(relevant).toEqual(["capture.flush", "conflicts.resolve"]);
+    await engine.stop();
+  });
+
+  it("flushes daemon capture before reading a moment for restore", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests),
+      daemonOwnsCapture: true,
+    });
+
+    const outcome = await engine
+      .restoreFileToBeforeMoment("missing-moment")
+      .catch((error: unknown) => error);
+    expect(outcome).toBeInstanceOf(Error);
+    const relevant = requests
+      .map((request) => request.method)
+      .filter(
+        (method) =>
+          method === "capture.flush" || method === VERSIONED_METHOD.momentsGet,
+      );
+
+    // MUTATION: remove restoreFileToBeforeMoment's daemon flush. The moment
+    // read remains, making this order assertion fail on the missing first entry.
+    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.momentsGet]);
+    await engine.stop();
+  });
+
   it("closes both daemon stores when the final capture flush rejects", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();

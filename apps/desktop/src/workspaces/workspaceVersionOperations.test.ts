@@ -27,14 +27,12 @@ import {
   type CaptureVersionedTextStore,
 } from "./workspaceEngineCaptureLiveStore";
 
-// PR 0M-4 named-version operations: active-version capture routing, the
-// switch flow (disk swap, loss-free capture, expected-event suppression,
-// mid-switch failure recovery), merge into Main (clean + conflict + each
-// resolution kind), and compare.
-//
-// These tests run on the DAEMON capture path: `rustEngineSessions` selects
-// the Rust engine, and the loopback behind it holds real state and real sha256,
-// so what these tests read back is recorded state rather than a canned responder.
+// PR 0M-4 named-version desktop orchestration: active-version capture routing,
+// switch recovery, merge/conflict handling, restore, and scale. The stateful
+// loopback uses the daemon RPC adapters and real sha256 values, but capture and
+// materialization stay desktop-owned because the loopback has no filesystem
+// watcher. Production daemon-owned capture and materialization run through the
+// Rust and desktop end-to-end suites.
 
 const WORKSPACE_ID = "version-ops-test";
 
@@ -374,7 +372,7 @@ function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-function capture(root: string, options: {
+function desktopOwnedLoopbackCapture(root: string, options: {
   onError?: (context: string, error: unknown) => void;
   diskWriter?: EngineDiskWriter;
   store?: CaptureVersionedTextStore;
@@ -390,15 +388,16 @@ function capture(root: string, options: {
   });
 }
 
-// The daemon-path capture. `requests` collects every wire request when
-// supplied, which is how a test proves the path it took instead of inferring it
-// from the result.
-function daemonCapture(
+// The daemon-adapter loopback. `requests` proves that operations cross the wire,
+// while capture and disk materialization remain desktop-owned.
+function desktopOwnedVersionLoopbackCapture(
   root: string,
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
 ): WorkspaceEngineCapture {
-  return capture(root, { rustEngineSessions: mockLiveSessions(loopback, requests) });
+  return desktopOwnedLoopbackCapture(root, {
+    rustEngineSessions: mockLiveSessions(loopback, requests),
+  });
 }
 
 async function versionIdByName(
@@ -415,7 +414,7 @@ async function openDivergedTextConflict(incomingText: string | null = "draft\n")
   const root = await tempRoot();
   await write(root, "plan.md", "base\n");
   const loopback = new ConflictLoopbackEngine();
-  const engine = daemonCapture(root, loopback);
+  const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
   engine.start();
   await engine.flush();
   await engine.createVersion("Draft");
@@ -446,7 +445,7 @@ describe("active-version capture routing", () => {
     await write(root, "plan.md", "v1 text\n");
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
-    const engine = daemonCapture(root, loopback, requests);
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
 
@@ -476,7 +475,7 @@ describe("active-version capture routing", () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
     const loopback = new VersionedLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
     engine.start();
     const created = await engine.createVersion("Draft");
 
@@ -502,7 +501,7 @@ describe("createVersion", () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
     const loopback = new VersionedLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
     engine.start();
     await engine.flush();
 
@@ -529,7 +528,7 @@ describe("createVersion", () => {
 
   it("rejects duplicate names without changing the active version", async () => {
     const root = await tempRoot();
-    const engine = daemonCapture(root, new VersionedLoopbackEngine());
+    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     await engine.createVersion("Draft");
     await expect(engine.createVersion("Draft")).rejects.toMatchObject({
       code: "version-name-conflict",
@@ -547,7 +546,7 @@ describe("switchVersion", () => {
     await write(root, "plan.md", "v1 text\n");
     const logoBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
     await writeBytes(root, "logo.png", logoBytes);
-    const engine = daemonCapture(root, new VersionedLoopbackEngine());
+    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
 
@@ -603,7 +602,7 @@ describe("switchVersion", () => {
         return store.readTextFile(input);
       },
     };
-    const engine = capture(root, {
+    const engine = desktopOwnedLoopbackCapture(root, {
       store: countingStore,
       rustEngineSessions: sessions,
     });
@@ -634,7 +633,7 @@ describe("switchVersion", () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
     const loopback = new VersionedLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
     engine.start();
     await engine.flush();
     const before = (await readDaemonMoments(loopback)).length;
@@ -650,7 +649,7 @@ describe("switchVersion", () => {
   it("fails closed on an unknown version id without touching disk or active version", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    const engine = daemonCapture(root, new VersionedLoopbackEngine());
+    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await expect(engine.switchVersion("no-such-version")).rejects.toMatchObject({
@@ -687,7 +686,7 @@ describe("switchVersion", () => {
       },
     };
     const loopback = new VersionedLoopbackEngine();
-    const engine = capture(root, {
+    const engine = desktopOwnedLoopbackCapture(root, {
       diskWriter,
       rustEngineSessions: mockLiveSessions(loopback),
       onError: (context) => {
@@ -753,7 +752,7 @@ describe("compareVersions", () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
     await write(root, "keep.md", "same\n");
-    const engine = daemonCapture(root, new VersionedLoopbackEngine());
+    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -785,7 +784,7 @@ describe("mergeVersionIntoMain", () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
     const loopback = new ConflictLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -811,7 +810,7 @@ describe("mergeVersionIntoMain", () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
     const loopback = new ConflictLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -850,7 +849,7 @@ describe("mergeVersionIntoMain", () => {
   it("records a conflict preserving both sides when both versions changed", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "base line\n");
-    const engine = daemonCapture(root, new ConflictLoopbackEngine());
+    const engine = desktopOwnedVersionLoopbackCapture(root, new ConflictLoopbackEngine());
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -881,7 +880,7 @@ describe("mergeVersionIntoMain", () => {
     await write(root, "b.md", "base b\n");
     await write(root, "c.md", "base c\n");
     const loopback = new ConflictLoopbackEngine();
-    const engine = daemonCapture(root, loopback);
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -1015,7 +1014,7 @@ describe("mergeVersionIntoMain", () => {
   it("re-running a merge resumes open conflicts instead of duplicating them", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "base\n");
-    const engine = daemonCapture(root, new ConflictLoopbackEngine());
+    const engine = desktopOwnedVersionLoopbackCapture(root, new ConflictLoopbackEngine());
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -1040,7 +1039,7 @@ describe("mergeVersionIntoMain", () => {
 
   it("rejects merging Main into Main", async () => {
     const root = await tempRoot();
-    const engine = daemonCapture(root, new VersionedLoopbackEngine());
+    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await expect(engine.mergeVersionIntoMain("main")).rejects.toThrow(
@@ -1056,7 +1055,7 @@ describe("restoreFileToBeforeMoment", () => {
     const before = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
     const after = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
     await writeBytes(root, "logo.png", before);
-    const engine = daemonCapture(root, new VersionedLoopbackEngine());
+    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await writeBytes(root, "logo.png", after);
@@ -1086,7 +1085,7 @@ describe("switch scale coverage (PR 0M-4)", () => {
         `# Doc ${index}\n\nbody ${index}\n`,
       );
     }
-    const engine = daemonCapture(root, new VersionedLoopbackEngine());
+    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
