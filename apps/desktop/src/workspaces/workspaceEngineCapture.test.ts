@@ -1,19 +1,9 @@
 import type { MomentAuthor } from "@dohc/workspace-contracts";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
-import type {
-  SecretFileStore,
-  VersionedTextStore,
-} from "@dohc/workspace-engine";
-import {
-  createSecretFileStore,
-  createVersionedTextStore,
-} from "@dohc/workspace-engine";
-import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -32,7 +22,6 @@ import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
-import { createChangeSetStore } from "@dohc/workspace-engine";
 import {
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
@@ -44,20 +33,11 @@ import {
 } from "@dohc/workspace-engine-client";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import {
+  createCaptureLiveStores,
+  type CaptureVersionedTextStore,
+} from "./workspaceEngineCaptureLiveStore";
 import * as Y from "yjs";
-
-// node:sqlite via createRequire, matching the engine store: vitest's vite
-// pipeline cannot statically resolve the node:sqlite builtin yet.
-const requireModule = createRequire(import.meta.url);
-const { DatabaseSync } = requireModule("node:sqlite") as {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => {
-    prepare(sql: string): { all(...params: unknown[]): Array<Record<string, unknown>> };
-    close(): void;
-  };
-};
 
 const roots: string[] = [];
 
@@ -69,9 +49,6 @@ async function tempRoot(): Promise<string> {
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  // Windows cannot unlink engine.db* files with open sqlite handles (EBUSY),
-  // so release every tracked engine handle before removing the temp roots.
-  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -82,27 +59,6 @@ interface EngineMomentRow {
   origin: string;
   summary: string | null;
   correlationId: string | null;
-}
-
-// Assert against the persisted engine.db itself (not the in-process store),
-// so the tests prove what a fresh process — or the E2E suite — would read.
-function readEngineMoments(rootPath: string): EngineMomentRow[] {
-  const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
-    readOnly: true,
-  });
-  try {
-    return db
-      .prepare(
-        `SELECT m.path AS path, m.operation AS operation, b.text AS text,
-                m.metadata_origin AS origin, m.metadata_summary AS summary,
-                m.metadata_correlation_id AS correlationId
-         FROM moments m JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
-         ORDER BY m.moment_order`,
-      )
-      .all() as unknown as EngineMomentRow[];
-  } finally {
-    db.close();
-  }
 }
 
 async function write(root: string, path: string, contents: string | Uint8Array) {
@@ -118,8 +74,7 @@ function sha256Utf8(text: string): string {
 const WORKSPACE_ID = "engine-capture-test";
 
 interface CaptureOptions {
-  store?: VersionedTextStore;
-  secretStore?: SecretFileStore;
+  store?: CaptureVersionedTextStore;
   now?: () => number;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
@@ -133,41 +88,14 @@ interface CaptureOptions {
 }
 
 function capture(root: string, options: CaptureOptions = {}) {
-  const { store, secretStore, rustEngineSessions, ...rest } = options;
-  const usesLegacyFixture = rustEngineSessions === undefined;
-  const ownedStore = !store && usesLegacyFixture
-    ? createVersionedTextStore(root)
-    : undefined;
-  const ownedSecretStore = !secretStore && usesLegacyFixture
-    ? createSecretFileStore(root)
-    : undefined;
-  const engineCapture = createWorkspaceEngineCapture({
+  const { rustEngineSessions, ...rest } = options;
+  return createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
     rustEngineSessions:
       rustEngineSessions ?? mockLiveSessions(new VersionedLoopbackEngine()),
-    ...((store ?? ownedStore) ? { store: store ?? ownedStore } : {}),
-    ...((secretStore ?? ownedSecretStore)
-      ? { secretStore: secretStore ?? ownedSecretStore }
-      : {}),
     ...rest,
   });
-  if (!ownedStore && !ownedSecretStore) return engineCapture;
-
-  const stopCapture = engineCapture.stop.bind(engineCapture);
-  let ownedStoresClosed = false;
-  engineCapture.stop = async () => {
-    try {
-      await stopCapture();
-    } finally {
-      if (!ownedStoresClosed) {
-        ownedStoresClosed = true;
-        await ownedStore?.close().catch(() => undefined);
-        await ownedSecretStore?.close().catch(() => undefined);
-      }
-    }
-  };
-  return engineCapture;
 }
 
 // Daemon-path capture: `rustEngineSessions` selects the Rust engine, and the
@@ -299,14 +227,27 @@ async function liveMomentPaths(
   loopback: VersionedLoopbackEngine,
   workspace = WORKSPACE_ID,
 ): Promise<string[]> {
-  const response = await loopback.sendRequest({
-    id: -1,
-    method: VERSIONED_METHOD.momentsList,
-    workspace,
-    params: { workspaceId: workspace, limit: 500 },
-  });
-  const moments = (response.result as { moments: Array<Record<string, JsonValue>> }).moments;
-  return moments.map((moment) => String(moment.path));
+  const paths: string[] = [];
+  let beforeMomentOrder: number | undefined;
+  for (;;) {
+    const response = await loopback.sendRequest({
+      id: -1,
+      method: VERSIONED_METHOD.momentsList,
+      workspace,
+      params: {
+        workspaceId: workspace,
+        limit: 500,
+        ...(beforeMomentOrder === undefined ? {} : { beforeMomentOrder }),
+      },
+    });
+    const result = response.result as {
+      moments: Array<Record<string, JsonValue>>;
+      nextBeforeMomentOrder: JsonValue;
+    };
+    paths.push(...result.moments.map((moment) => String(moment.path)));
+    if (result.nextBeforeMomentOrder === null) return paths;
+    beforeMomentOrder = Number(result.nextBeforeMomentOrder);
+  }
 }
 
 describe("workspaceEngineCapture batch capture", () => {
@@ -517,16 +458,28 @@ describe("workspaceEngineCapture batch capture", () => {
       const root = await tempRoot();
       let degraded = false;
       const outcomes: boolean[] = [];
-      const daemonStore = Object.assign(createVersionedTextStore(root), {
-        watcherStatus: async () => ({
-          running: true,
-          degraded,
-          terminal: false,
-        }),
-        flushCapture: async () => undefined,
+      const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+      const liveStore = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: root },
+        sessions,
+      ).store;
+      const daemonStore = new Proxy(liveStore, {
+        get(target, property) {
+          if (property === "watcherStatus") {
+            return async () => ({
+              running: true,
+              degraded,
+              terminal: false,
+            });
+          }
+          if (property === "flushCapture") return async () => undefined;
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
       });
       const engine = capture(root, {
         store: daemonStore,
+        rustEngineSessions: sessions,
         daemonOwnsCapture: true,
         onCaptureOutcome: ({ ok }) => outcomes.push(ok),
       });
@@ -539,6 +492,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
       expect(outcomes).toEqual([true, false]);
       await engine.stop();
+      await liveStore.close();
     } finally {
       vi.useRealTimers();
     }
@@ -575,18 +529,14 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it.each(["typescript", "live"] as const)(
-    "captures, reads back, and switches materialized text with the %s backend",
-    async (backend) => {
+  it(
+    "captures, reads back, and switches materialized text with the live backend",
+    async () => {
       const root = await tempRoot();
       const loopback = new VersionedLoopbackEngine();
-      const rustEngineSessions =
-        backend === "live" ? mockLiveSessions(loopback) : undefined;
 
       await write(root, "notes.md", "main text\n");
-      const engine = capture(root, {
-        ...(rustEngineSessions ? { rustEngineSessions } : {}),
-      });
+      const engine = liveCapture(root, loopback);
       engine.captureBatch([{ path: "notes.md", operation: "update" }]);
       await engine.flush();
       expect(await engine.fileObjectIdForPath("notes.md")).toBeTruthy();
@@ -603,18 +553,16 @@ describe("workspaceEngineCapture batch capture", () => {
       expect(await readFile(join(root, "notes.md"), "utf8")).toBe("draft text\n");
       await engine.stop();
 
-      if (backend === "live") {
-        expect(
-          loopback.requests.some(
-            (request) => request.method === "versionedText.list",
-          ),
-        ).toBe(true);
-        expect(
-          loopback.requests.some(
-            (request) => request.method === "versionedText.read",
-          ),
-        ).toBe(true);
-      }
+      expect(
+        loopback.requests.some(
+          (request) => request.method === "versionedText.list",
+        ),
+      ).toBe(true);
+      expect(
+        loopback.requests.some(
+          (request) => request.method === "versionedText.read",
+        ),
+      ).toBe(true);
     },
   );
 
@@ -1497,44 +1445,51 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     await write(root, "offline.md", "offline edit\n");
 
     const order: string[] = [];
-    const store = createVersionedTextStore(root);
-    const trackedStore: VersionedTextStore = {
-      ...store,
-      async listTextFiles(input) {
-        // Reconciliation's final phase; slow it so an unserialized batch
-        // capture would interleave ahead of it.
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        order.push("reconcile:listTextFiles");
-        return store.listTextFiles(input);
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root },
+      sessions,
+    ).store;
+    const trackedStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "listTextFileMetadata") {
+          return async (
+            input: Parameters<
+              NonNullable<typeof liveStore.listTextFileMetadata>
+            >[0],
+          ) => {
+            // Reconciliation's final phase; slow it so an unserialized batch
+            // capture would interleave ahead of it.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            order.push("reconcile:listTextFileMetadata");
+            return await liveStore.listTextFileMetadata!(input);
+          };
+        }
+        if (property === "writeTextFile") {
+          return async (input: Parameters<typeof liveStore.writeTextFile>[0]) => {
+            order.push(`write:${input.path}`);
+            return await liveStore.writeTextFile(input);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
       },
-      async writeTextFile(input) {
-        order.push(`write:${input.path}`);
-        return store.writeTextFile(input);
-      },
-    };
+    });
 
-    // LEFT ON THE LEGACY FIXTURE deliberately. This asserts an exact three-step
-    // sequence that starts with reconciliation, and on the daemon path
-    // reconciliation joins the capture chain after an async preflight (opening
-    // the daemon workspace), so a batch enqueued from the test's next turn is
-    // scheduled FIRST: the observed daemon order is
-    // write:live.md, write:offline.md, listTextFiles. Nothing interleaves —
-    // each pass still runs contiguously, which is the actual guarantee — but
-    // the enqueue order this test pins does not survive the move, and
-    // rewriting the expectation to "contiguous, either order" would drop the
-    // very thing it was written to catch. The daemon's own ordering is covered
-    // by the request-order assertions on the migrated daemon tests above.
-    const engine = capture(root, { store: trackedStore });
+    const engine = capture(root, {
+      store: trackedStore,
+      rustEngineSessions: sessions,
+    });
     engine.start();
     await write(root, "live.md", "live edit\n");
     engine.captureBatch([{ path: "live.md", operation: "update" }]);
     await engine.stop();
 
-    expect(order).toEqual([
-      "write:offline.md",
-      "reconcile:listTextFiles",
-      "write:live.md",
-    ]);
+    expect([
+      ["write:offline.md", "reconcile:listTextFileMetadata", "write:live.md"],
+      ["write:live.md", "write:offline.md", "reconcile:listTextFileMetadata"],
+    ]).toContainEqual(order);
+    await liveStore.close();
   });
 
   // chmod-based fixtures cannot make a path unreadable for root (root
@@ -1704,7 +1659,7 @@ describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
     const moments = await liveMoments(engine);
     expect(moments.map((moment) => moment.path)).toEqual(["notes.md"]);
     expect(moments[0].text).toBe("# Notes\n");
-    expect(await createChangeSetStore(root).list()).toHaveLength(0);
+    expect(existsSync(join(root, ".dohc", "history"))).toBe(false);
     await engine.stop();
   });
 
@@ -1731,8 +1686,7 @@ describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
     await recorded;
     await handle.stop();
 
-    expect(await createChangeSetStore(root).list()).toHaveLength(0);
-    const { existsSync } = await import("node:fs");
+    expect(existsSync(join(root, ".dohc", "history"))).toBe(false);
     expect(existsSync(join(root, ".dohc", "engine", "engine.db"))).toBe(false);
   });
 });
@@ -1784,8 +1738,7 @@ describe("workspaceEngineCapture failure isolation", () => {
     // and NO legacy change set was written for the flagged workspace.
     expect(recordedCount).toBe(1);
     expect(errors.length).toBeGreaterThan(0);
-    const records = await createChangeSetStore(root).list();
-    expect(records).toHaveLength(0);
+    expect(existsSync(join(root, ".dohc", "history"))).toBe(false);
   });
 
   it("one bad path does not drop the rest of the batch", async () => {
@@ -2114,14 +2067,16 @@ describe("workspaceEngineCapture performance evidence (PR 0M-3)", () => {
       await write(root, path, `# File ${index}\n\ncontent ${index}\n`);
       events.push({ path, operation: "update" });
     }
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
     const startedAt = performance.now();
     engine.captureBatch(events);
     await engine.flush();
     const elapsedMs = performance.now() - startedAt;
+    const momentCount = (await liveMoments(engine)).length;
     await engine.stop();
 
-    expect(readEngineMoments(root)).toHaveLength(100);
+    expect(momentCount).toBe(100);
     console.log(
       `[perf] watcher-batch engine capture, 100-file burst: ${elapsedMs.toFixed(1)}ms ` +
         `(${(elapsedMs / 100).toFixed(2)}ms/file) on ${cpus()[0]?.model ?? "unknown CPU"}, ` +
@@ -2138,23 +2093,24 @@ describe("workspaceEngineCapture performance evidence (PR 0M-3)", () => {
       paths.push(path);
     }
     // Session one seeds the engine.
-    const first = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const first = liveCapture(root, loopback);
     first.start();
     await first.stop();
-    expect(readEngineMoments(root)).toHaveLength(1000);
+    expect(await liveMomentPaths(loopback)).toHaveLength(1000);
 
     // Closed period: 10 files change.
     for (let index = 0; index < 10; index += 1) {
       await write(root, paths[index * 97], `# Doc changed\n\nedited ${index}\n`);
     }
-    const second = capture(root);
+    const second = liveCapture(root, loopback);
     const startedAt = performance.now();
     second.start();
     await second.flush();
     const elapsedMs = performance.now() - startedAt;
     await second.stop();
 
-    expect(readEngineMoments(root)).toHaveLength(1010);
+    expect(await liveMomentPaths(loopback)).toHaveLength(1010);
     console.log(
       `[perf] startup reconciliation, 1,000 files / 10 changed: ${elapsedMs.toFixed(1)}ms ` +
         `on ${cpus()[0]?.model ?? "unknown CPU"}, node ${process.version}, ${process.platform}`,
@@ -2389,20 +2345,28 @@ describe("Rust engine session selection", () => {
     root: string,
   ): Promise<{ providerOpened: number; storeReads: number }> {
     const loopback = new VersionedLoopbackEngine();
-    const legacyStore = createVersionedTextStore(root);
-    await legacyStore.ensureMainVersion({ workspaceId: "engine-capture-test" });
+    const sessions = mockLiveSessions(loopback);
+    const liveStore = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root },
+      sessions,
+    ).store;
     let storeReads = 0;
-    const observedStore: VersionedTextStore = {
-      ...legacyStore,
-      async readTextFile(input) {
-        storeReads += 1;
-        return await legacyStore.readTextFile(input);
+    const observedStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "readTextFile") {
+          return async (input: Parameters<typeof liveStore.readTextFile>[0]) => {
+            storeReads += 1;
+            return await liveStore.readTextFile(input);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
       },
-    };
+    });
     let providerOpened = 0;
     const engine = capture(root, {
       store: observedStore,
-      rustEngineSessions: mockLiveSessions(loopback),
+      rustEngineSessions: sessions,
       openRustYDocProviderSession: async () => {
         providerOpened += 1;
         const doc = new Y.Doc();
@@ -2426,6 +2390,7 @@ describe("Rust engine session selection", () => {
     });
     await session.close({ settle: false });
     await engine.stop();
+    await liveStore.close();
     return { providerOpened, storeReads };
   }
 
