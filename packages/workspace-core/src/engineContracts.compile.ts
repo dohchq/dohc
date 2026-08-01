@@ -3,11 +3,8 @@ import type {
   VersionedFileWriteResult,
 } from "@dohc/workspace-contracts/engine";
 import type {
-  BoundaryCrossing,
   ChangeAuthor,
-  ChangeProvenance,
-  ChangeSetKind,
-  FileChange,
+  ChangeSet,
 } from "./changeSet";
 
 type IsSame<A, B> =
@@ -19,21 +16,21 @@ type IsSame<A, B> =
 
 type AssertSame<A, B> = IsSame<A, B>;
 
+type SharedHistoryField =
+  | "kind"
+  | "author"
+  | "files"
+  | "boundaryCrossings"
+  | "provenance";
+
 type HistoryDriftChecks = [
-  AssertSame<VersionedFileWriteResult["history"]["kind"], ChangeSetKind>,
-  AssertSame<VersionedFileWriteResult["history"]["author"], ChangeAuthor>,
-  AssertSame<VersionedFileWriteResult["history"]["files"], FileChange[]>,
   AssertSame<
-    VersionedFileWriteResult["history"]["boundaryCrossings"],
-    BoundaryCrossing[]
+    Pick<VersionedFileWriteResult["history"], SharedHistoryField>,
+    Pick<ChangeSet, SharedHistoryField>
   >,
   AssertSame<
-    VersionedFileWriteResult["history"]["provenance"],
-    ChangeProvenance | undefined
-  >,
-  AssertSame<
-    VersionedFileWorkspaceOptions["author"],
-    ChangeAuthor | undefined
+    Pick<VersionedFileWorkspaceOptions, "author">,
+    { author?: ChangeAuthor }
   >,
 ];
 
