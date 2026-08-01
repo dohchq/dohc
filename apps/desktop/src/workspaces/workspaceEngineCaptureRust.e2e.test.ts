@@ -2,11 +2,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
+import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import {
   EngineDaemonLifecycle,
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
+import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import { createWorkspaceActivity } from "./workspaceActivity";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { nativeTmpdir } from "./testTemp";
 
@@ -133,6 +136,83 @@ it.skipIf(engine.missing)(
       await capture.stop();
       await sessions.closeAll();
       await lifecycle.stop();
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing)(
+  "persists the final watcher capture across stopAll and a new daemon process",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-stop-"));
+    roots.push(root);
+    const workspace: CreatedWorkspace = {
+      workspaceId: "capture-rust-stop",
+      rootPath: root,
+      kind: "personal",
+      mode: defaultWorkspaceMode("personal"),
+    };
+    const firstLifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await firstLifecycle.start();
+    const firstSessions = new EngineWorkspaceSessions(firstLifecycle);
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: (opened) =>
+        createWorkspaceEngineCapture({
+          workspaceId: opened.workspaceId,
+          rootPath: opened.rootPath,
+          rustEngineSessions: firstSessions,
+          daemonOwnsCapture: true,
+        }),
+    });
+
+    try {
+      await activity.open(workspace);
+      const finalText = "must survive shutdown\n";
+      await writeFile(join(root, "final.md"), finalText, "utf8");
+
+      // stopAll must stop the watcher first, then drain and close capture. The
+      // write above deliberately gets no explicit capture flush before this.
+      await activity.stopAll();
+      await firstSessions.closeAll();
+      await firstLifecycle.stop();
+
+      // Remove the disk source while no daemon is running. A later scan can
+      // record a delete, but it cannot recreate the persisted write moment.
+      await rm(join(root, "final.md"));
+
+      const secondLifecycle = new EngineDaemonLifecycle({
+        command: engine.require(),
+        maxRestarts: 0,
+      });
+      await secondLifecycle.start();
+      const secondSessions = new EngineWorkspaceSessions(secondLifecycle);
+      const reopened = createWorkspaceEngineCapture({
+        workspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+        rustEngineSessions: secondSessions,
+        daemonOwnsCapture: true,
+      });
+      try {
+        const moments = await waitForPathMoments(reopened, "final.md", 1);
+        const persistedWrite = moments.find(
+          (moment) => moment.operation === "write",
+        );
+        expect(persistedWrite).toBeTruthy();
+        const detail = await reopened.readMoment(persistedWrite!.id);
+        const payload = detail?.protected === false ? detail.moment.payload : undefined;
+        expect(payload?.after.text).toBe(finalText);
+      } finally {
+        await reopened.stop().catch(() => undefined);
+        await secondSessions.closeAll().catch(() => undefined);
+        await secondLifecycle.stop().catch(() => undefined);
+      }
+    } finally {
+      await activity.stopAll().catch(() => undefined);
+      await firstSessions.closeAll().catch(() => undefined);
+      await firstLifecycle.stop().catch(() => undefined);
     }
   },
   60_000,

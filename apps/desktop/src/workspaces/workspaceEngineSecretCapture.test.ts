@@ -96,15 +96,16 @@ function stores(root: string): {
   };
 }
 
-// The LEGACY in-process engine (no `rustEngineSessions` ⇒ `useRustEngine` is
-// false), on the real AES-256-GCM secret store. Only the suites below that
-// prove something about bytes at rest still use it — see the comment on
-// "secret encryption at rest".
+// Keep the real AES-256-GCM stores injectable for the suites that inspect bytes
+// at rest. Rust sessions are still required, but these stores take precedence.
 function capture(root: string, injected?: ReturnType<typeof stores>) {
+  const selected = injected ?? stores(root);
   return createWorkspaceEngineCapture({
     workspaceId: "engine-secret-test",
     rootPath: root,
-    ...(injected ? { store: injected.store, secretStore: injected.secretStore } : {}),
+    store: selected.store,
+    secretStore: selected.secretStore,
+    rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
   });
 }
 
