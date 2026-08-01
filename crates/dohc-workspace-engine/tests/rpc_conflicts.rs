@@ -408,6 +408,107 @@ async fn resolve_refuses_a_stale_target_without_clobbering_the_newer_head() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_merged_resolution_keeps_target_and_conflict_open() {
+    let (_scratch, transport, handle, workspace_id) = fixture("oversized-merged").await;
+    let path = "conflict-000.md";
+    let current = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "oversized-object",
+                    "path": path,
+                    "text": "recorded current",
+                    "momentId": "oversized-recorded",
+                    "origin": "api",
+                    "nowMs": 10,
+                    "requestId": "seed-oversized-current",
+                }),
+            ),
+        )
+        .await
+        .expect("seed current head");
+    let snapshot = &current.result["snapshot"];
+    let mut payload = conflict_payload(&workspace_id, 0, "incoming");
+    payload["conflict"]["current"]["snapshot"] = json!({
+        "workspaceId": snapshot["workspaceId"],
+        "versionId": snapshot["versionId"],
+        "objectId": snapshot["objectId"],
+        "path": snapshot["path"],
+        "text": snapshot["text"],
+        "blobSha256": snapshot["blobSha256"],
+        "updatedAtMs": snapshot["updatedAtMs"],
+        "latestMomentId": snapshot["latestMomentId"],
+        "metadataOrigin": snapshot["metadataOrigin"],
+    });
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(11, "conflicts.open", Some(handle.clone()), payload),
+        )
+        .await
+        .expect("open conflict against current head");
+
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": "x".repeat(128 * 1024 + 1),
+                    "objectId": "oversized-resolution-object",
+                    "writeMomentId": "oversized-resolution-write",
+                    "deleteMomentId": "oversized-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect_err("oversized merged text must be refused");
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+    assert_eq!(refused.message, "content-exceeds-inband-cap");
+
+    let unchanged = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "versionedText.read",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await
+        .expect("read target after refused resolve");
+    assert_eq!(unchanged.result["text"], "recorded current");
+
+    let conflicts = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                14,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("list conflict after refused resolve");
+    assert_eq!(conflicts.result["conflicts"].as_array().unwrap().len(), 1);
+    assert_eq!(conflicts.result["conflicts"][0]["id"], "conflict-000");
+    assert_eq!(conflicts.result["conflicts"][0]["status"], "open");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_conflict_inventory_is_wire_safe_across_pages_and_session_survives() {
     // Fourteen rows serialize beyond the 8 MiB frame as one legacy array,
     // while each row remains under the hard single-row cap.
