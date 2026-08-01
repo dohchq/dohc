@@ -572,10 +572,12 @@ describe("listDmRecords", () => {
   it("keeps a PARTICIPANT DM with no thread yet visible (a real pending conversation)", async () => {
     const { store, loopback } = await makeStore();
     // A replayed DM whose owner granted before sending — channel.create only,
-    // no thread.create yet. It must remain visible (not treated as an orphan).
+    // no thread.create yet. Rust preserves the owner's channel id on import, so
+    // participant role must come from the joined-share registry, not id inequality.
+    // The pending DM must remain visible instead of looking like an owner orphan.
     loopback.seedChannel({
       workspace: WS,
-      channelId: "participant-channel-1",
+      channelId: "owner-channel-1",
       wireId: "owner-channel-1",
       name: "bob@x.com",
       kind: "dm",
@@ -594,11 +596,12 @@ describe("listDmRecords", () => {
 
   it("derives participant role from a replayed channel and labels it by the GRANTER, not the replicated name", async () => {
     const { store, loopback, seed } = await makeStore();
-    // A replayed DM: the wire id is the OWNER's channel id; the local channel
-    // id differs from the wire id, as it does for a joined channel.
+    // A replayed DM with the active Rust import shape: the receiver preserves
+    // the owner's channel id, so local id and wire id are equal. Joined-share
+    // state must still classify it as participant and select the granter label.
     loopback.seedChannel({
       workspace: WS,
-      channelId: "participant-channel-1",
+      channelId: "owner-channel-1",
       wireId: "owner-channel-1",
       // The owner's recipient list — i.e. THIS participant's own address.
       name: "bob@x.com",
@@ -609,7 +612,7 @@ describe("listDmRecords", () => {
       method: CHATS_METHOD.threadStart,
       idempotencyKey: "thread-dm:message-dm",
       params: {
-        channelId: "participant-channel-1",
+        channelId: "owner-channel-1",
         threadId: "thread-dm",
         messageId: "message-dm",
         authorKind: "human",
