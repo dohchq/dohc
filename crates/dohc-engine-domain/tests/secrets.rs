@@ -388,6 +388,11 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
         .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM secret_files", [], |r| r.get(0)))
         .unwrap();
     assert_eq!(ct_present, 1, "the encrypted tip must be stored");
+    assert_eq!(
+        store.table_row_count("snapshots").unwrap(),
+        0,
+        "a secret write must not create a plaintext snapshot row"
+    );
     drop(keeper);
 }
 
