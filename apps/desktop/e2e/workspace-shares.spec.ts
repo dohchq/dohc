@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createVersionedTextStore, pushWorkspaceToRelay } from "@dohc/workspace-engine";
+import { RelayFilePeer } from "../src/testing/relayFilePeer";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -22,7 +22,7 @@ import {
 // PR 18 — external shares on the rebuilt cloud. Two REAL relay accounts
 // (the test-auth seam mints identity from the bearer token, and resolves
 // "<user>@dohc.test" emails to "<user>"), one real Electron app, and a
-// headless engine store as the other party — the 0P-C harness pattern.
+// test-only relay protocol peer as the other party.
 //
 // Spec 1 (grant side): the app user shares a file by email from the
 //   explorer context menu, gets a copyable share code, manages it under
@@ -35,10 +35,6 @@ import {
 const GRANTER_TOKEN = "test:e2e-granter";
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
-
-function granterConnection(baseUrl: string) {
-  return { baseUrl, token: GRANTER_TOKEN };
-}
 
 test("grant side: share a file by email from the explorer, copy the code, and end it from Settings", async () => {
   test.setTimeout(240_000);
@@ -158,39 +154,24 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-loop-e2e";
-  const granterDir = join(temp.baseDir, "granter-machine");
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
-  async function granterWrite(path: string, text: string): Promise<void> {
-    const store = createVersionedTextStore(granterDir);
-    try {
-      await store.ensureMainVersion({ workspaceId });
-      await store.writeTextFile({
-        workspaceId,
-        versionId: "main",
-        path,
-        text,
-        metadata: { origin: "local-file" },
-      });
-    } finally {
-      await store.close();
-    }
-  }
-
   try {
-    // The granter (headless): shared and unshared content, pushed to the
-    // relay under the granter account.
+    // A test-only remote peer seeds shared and unshared content through the
+    // relay protocol under the granter account.
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
-    await granterWrite("docs/shared.md", "# Shared\n\nThe comet-tail draft.\n");
-    await granterWrite("docs/nested/deep.md", "Deep shared body.\n");
-    await granterWrite("private/hidden.md", "The kraken ledger stays private.\n");
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
-    await pushWorkspaceToRelay({
-      rootDir: granterDir,
+    const granter = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
       workspaceId,
-      relay: granterConnection(relay.baseUrl),
     });
+    await granter.writeTextFiles([
+      { path: "docs/shared.md", text: "# Shared\n\nThe comet-tail draft.\n" },
+      { path: "docs/nested/deep.md", text: "Deep shared body.\n" },
+      { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
+    ]);
 
     // The grant: docs/ (folder selector), addressed to the recipient email.
     const create = await relayJson(
@@ -357,12 +338,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     expect(await readFile(sharedFilePath, "utf8")).toBe(originalSharedContents);
 
     // The granter keeps working; the recipient refreshes and sees it.
-    await granterWrite("docs/shared.md", "# Shared\n\nThe comet-tail draft, round two.\n");
-    await pushWorkspaceToRelay({
-      rootDir: granterDir,
-      workspaceId,
-      relay: granterConnection(relay.baseUrl),
-    });
+    await granter.writeText("docs/shared.md", "# Shared\n\nThe comet-tail draft, round two.\n");
     await page.getByTestId("shared-view-refresh").click();
     await expect(page.getByText("The comet-tail draft, round two.")).toBeVisible();
 
@@ -394,41 +370,26 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
   const temp = await createTempWorkspace();
   const hostWorkspaceId = "share-mount-host-e2e";
   const granterWorkspaceId = "share-mount-granter-e2e";
-  const granterDir = join(temp.baseDir, "granter-machine");
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
-  async function granterWrite(path: string, text: string): Promise<void> {
-    const store = createVersionedTextStore(granterDir);
-    try {
-      await store.ensureMainVersion({ workspaceId: granterWorkspaceId });
-      await store.writeTextFile({
-        workspaceId: granterWorkspaceId,
-        versionId: "main",
-        path,
-        text,
-        metadata: { origin: "local-file" },
-      });
-    } finally {
-      await store.close();
-    }
-  }
-
   try {
-    // The granter (headless): shared and unshared content on the relay.
+    // A test-only remote peer seeds shared and unshared content on the relay.
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
-    await granterWrite("docs/brief.md", "# Brief\n\nThe lighthouse memo.\n");
-    await granterWrite("private/hidden.md", "The kraken ledger stays private.\n");
     await claimRelayWorkspace({
       baseUrl: relay.baseUrl,
       token: GRANTER_TOKEN,
       workspaceId: granterWorkspaceId,
     });
-    await pushWorkspaceToRelay({
-      rootDir: granterDir,
+    const granter = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
       workspaceId: granterWorkspaceId,
-      relay: granterConnection(relay.baseUrl),
     });
+    await granter.writeTextFiles([
+      { path: "docs/brief.md", text: "# Brief\n\nThe lighthouse memo.\n" },
+      { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
+    ]);
     const create = await relayJson(
       relay.baseUrl,
       GRANTER_TOKEN,
@@ -539,12 +500,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
 
     // The granter keeps working; a refresh pass pulls the update into the
     // mounted folder.
-    await granterWrite("docs/brief.md", "# Brief\n\nThe lighthouse memo, round two.\n");
-    await pushWorkspaceToRelay({
-      rootDir: granterDir,
-      workspaceId: granterWorkspaceId,
-      relay: granterConnection(relay.baseUrl),
-    });
+    await granter.writeText("docs/brief.md", "# Brief\n\nThe lighthouse memo, round two.\n");
     const refreshOutcome = await page.evaluate(async () => {
       const api = (window as unknown as {
         dohcDesktop: {
