@@ -971,6 +971,61 @@ describe("B2 chats wire contract and loopback", () => {
     ).toBe("next-trigger");
   });
 
+  it("reclaims running dispatches with the daemon's attempt threshold", async () => {
+    const engine = new ChatsLoopbackEngine();
+    for (const [triggerMessageId, runId, attemptCount, createdAtMs] of [
+      ["requeue-trigger", "requeue-run", 1, 10],
+      ["exhausted-trigger", "exhausted-run", 2, 20],
+    ] as const) {
+      engine.seedDispatch({
+        workspaceId: WORKSPACE,
+        triggerMessageId,
+        threadId: `${triggerMessageId}-thread`,
+        state: "running",
+        runId,
+        attemptCount,
+        createdAtMs,
+        updatedAtMs: createdAtMs,
+      });
+      engine.seedRun({
+        workspaceId: WORKSPACE,
+        runId,
+        threadId: `${triggerMessageId}-thread`,
+        triggerMessageId,
+        command: "agent",
+        startedAtMs: createdAtMs,
+      });
+    }
+
+    expect(engine.reclaimRunningDispatches(WORKSPACE, 100)).toEqual([
+      "requeue-trigger",
+    ]);
+    expect(engine.readDispatch(WORKSPACE, "requeue-trigger")).toMatchObject({
+      state: "pending",
+      attemptCount: 1,
+      updatedAtMs: 100,
+    });
+    expect(engine.readDispatch(WORKSPACE, "requeue-trigger")).not.toHaveProperty(
+      "runId",
+    );
+    expect(engine.readDispatch(WORKSPACE, "exhausted-trigger")).toMatchObject({
+      state: "failed",
+      runId: "exhausted-run",
+      attemptCount: 2,
+      failureReason: "reclaim-exhausted",
+      updatedAtMs: 100,
+    });
+    for (const runId of ["requeue-run", "exhausted-run"]) {
+      expect(
+        await call(engine, 1, CHATS_METHOD.dispatchGetRunRecord, { runId }),
+      ).toMatchObject({
+        endedAtMs: 100,
+        exitCode: -1,
+        failureReason: "reclaimed-crashed",
+      });
+    }
+  });
+
   it("keeps app-quit and restart failures recoverable after posting a note", async () => {
     const engine = new ChatsLoopbackEngine();
     engine.seedDispatch({
