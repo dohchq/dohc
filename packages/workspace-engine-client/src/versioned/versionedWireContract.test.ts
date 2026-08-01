@@ -1825,6 +1825,26 @@ describe("loopback contract enforcement", () => {
     ).toBe("main");
   });
 
+  it("rejects invalid read paths before missing versions", async () => {
+    const engine = new VersionedLoopbackEngine();
+    for (const method of [
+      VERSIONED_METHOD.textRead,
+      VERSIONED_METHOD.binaryRead,
+    ] as const) {
+      await expect(
+        call(engine, 0, method, {
+          versionId: "missing",
+          path: "../escape.md",
+        }),
+      ).rejects.toThrow("invalid-path");
+    }
+    expect(
+      decodeVersionsListResult(
+        await call(engine, 1, VERSIONED_METHOD.versionsList, {}),
+      ).versions,
+    ).toEqual([]);
+  });
+
   it("returns null when a binary read points at a text head", async () => {
     const engine = new VersionedLoopbackEngine();
     engine.seedTextFile({ workspace: WORKSPACE, path: "text.md", text: "text" });

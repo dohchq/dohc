@@ -1322,11 +1322,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private textRead(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const version = this.version(state, requiredString(params, "versionId", "text read"));
     const path = normalizedEnginePath(
       requiredString(params, "path", "text read"),
       "addressable",
     );
+    const version = this.version(state, requiredString(params, "versionId", "text read"));
     const file = version.files.get(path);
     if (!file) return null;
 
@@ -1816,11 +1816,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private binaryRead(state: WorkspaceState, params: JsonObject): JsonValue {
-    const version = this.version(state, requiredString(params, "versionId", "binary read"));
     const path = normalizedEnginePath(
       requiredString(params, "path", "binary read"),
       "addressable",
     );
+    const version = this.version(state, requiredString(params, "versionId", "binary read"));
     const file = version.files.get(path);
     if (!file) return null;
     if (file.contentKind !== "binary" || !file.bytes || !file.binarySha) {
