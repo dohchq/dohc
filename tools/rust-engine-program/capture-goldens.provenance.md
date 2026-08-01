@@ -33,7 +33,7 @@ change the expected answers and report success.
 | Produced by | the TypeScript capture oracle in `packages/workspace-engine` |
 | Frozen at commit | `aa2f2a0fb7c79ff4a13886d169ae81dde9568b3f` |
 | SHA-256 of `capture-goldens.json` | `246655d8e2f697d069d121c50faec04222f7f45eecc970f1af4e0b4ee64e5292` |
-| SHA-256 of `capture-fixtures.json` | `2a8649c9b2a7e513e6f7a480569c7ac995b31309bfab48b1bda2cf02fbe92304` |
+| SHA-256 of `capture-fixtures.json` | `ecf8710b19870fab090abfc2c6b78e80a050d245d60c42c21cc6eb62962122d7` |
 | Scenarios | 10 |
 | **Enforced by** | `crates/dohc-workspace-engine/tests/capture_differential.rs` |
 
