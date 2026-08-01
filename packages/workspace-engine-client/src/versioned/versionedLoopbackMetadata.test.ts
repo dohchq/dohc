@@ -721,13 +721,9 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid-input/);
   });
 
-  it("refuses bad BYTES before bad metadata, in the daemon's order", async () => {
-    // Hoisting the metadata parse to fix the dedup hole first put it above the
-    // byte decode, which inverted the refusal precedence: a request with both
-    // bad bytes and an over-cap field answered `invalid-metadata` where the
-    // daemon answers `invalid-input`. The daemon's order is decode, inband cap,
-    // origin, metadata, author (lib.rs versionedBinary.write), so a request that
-    // is wrong in two ways must fail on the FIRST one.
+  it("deserializes byte arrays and decodes base64 before metadata", async () => {
+    // Vec<u8> rejects a bad array while Rust deserializes the params. Base64 is
+    // a string field, so the handler rejects its content during the decode.
     const engine = new VersionedLoopbackEngine();
     const versionId = await openWorkspace(engine);
     const overCap = "s".repeat(16 * 1024 + 1);
@@ -740,7 +736,7 @@ describe("loopback moment metadata", () => {
         origin: "local-file",
         summary: overCap,
       }),
-    ).rejects.toThrow(/invalid-input/);
+    ).rejects.toThrow(/invalid parameters/);
 
     // Neither spelling of the bytes is a second chance to skip the check.
     await expect(
@@ -997,7 +993,7 @@ describe("loopback moment metadata", () => {
           bytes: [256],
           origin: "local-file",
         },
-        error: /invalid-input/,
+        error: /invalid parameters/,
       },
       {
         name: "binaryWriteBlob digest validation",
@@ -1156,29 +1152,29 @@ describe("loopback moment metadata", () => {
         },
       },
     ];
-    const malformedFields: Array<[string, unknown, RegExp]> = [
-      ["objectId", 1, /objectId is invalid/],
-      ["momentId", 1, /momentId is invalid/],
-      ["requestId", 1, /requestId is invalid/],
-      ["nowMs", "now", /nowMs is invalid/],
-      ["metadataOrigin", 1, /metadataOrigin is invalid/],
-      ["authorJson", 1, /authorJson is invalid/],
+    const malformedFields: Array<[string, unknown]> = [
+      ["objectId", 1],
+      ["momentId", 1],
+      ["requestId", 1],
+      ["nowMs", "now"],
+      ["metadataOrigin", 1],
+      ["authorJson", 1],
     ];
 
     for (const handler of handlers) {
-      for (const [field, value, error] of malformedFields) {
+      for (const [field, value] of malformedFields) {
         await expectRefusalWithoutVersion(
           `${handler.name}: malformed ${field}`,
           handler.method,
           { ...handler.params, [field]: value },
-          error,
+          /invalid parameters/,
         );
       }
       await expectRefusalWithoutVersion(
         `${handler.name}: malformed idempotencyKey`,
         handler.method,
         handler.params,
-        /idempotencyKey is invalid/,
+        /invalid parameters/,
         { idempotencyKey: 1 },
       );
     }
@@ -1223,7 +1219,7 @@ describe("loopback moment metadata", () => {
         `${handler.name}: malformed idempotencyKey`,
         handler.method,
         handler.params,
-        /idempotencyKey is invalid/,
+        /invalid parameters/,
         { idempotencyKey: 1 },
       );
     }
@@ -1290,6 +1286,358 @@ describe("loopback moment metadata", () => {
       });
       expect((result.snapshot as { byteLength: number }).byteLength).toBe(1);
     }
+  });
+
+  it("treats null workspaceId as absent on optional write requests", async () => {
+    const blobBytes = Buffer.from([1, 2, 3]);
+    const cases = [
+      {
+        name: "textWrite",
+        method: VERSIONED_METHOD.textWrite,
+        params: { path: "notes.md", text: "hello", origin: "local-file" },
+      },
+      {
+        name: "binaryWrite",
+        method: VERSIONED_METHOD.binaryWrite,
+        params: { path: "logo.png", bytes: [1, 2, 3], origin: "local-file" },
+      },
+      {
+        name: "binaryWriteBlob",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: {
+          path: "logo.png",
+          sha256: createHash("sha256").update(blobBytes).digest("hex"),
+          bytesBase64: blobBytes.toString("base64"),
+          origin: "local-file",
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const engine = new VersionedLoopbackEngine();
+      await expect(
+        send(engine, testCase.method, {
+          workspaceId: null,
+          versionId: "main",
+          ...testCase.params,
+        }),
+        testCase.name,
+      ).resolves.toMatchObject({ deduped: false });
+      const listed = await send(engine, VERSIONED_METHOD.versionsList, {
+        workspaceId: WORKSPACE,
+      });
+      expect(listed.versions, testCase.name).toHaveLength(1);
+    }
+
+    const engine = new VersionedLoopbackEngine();
+    await expect(
+      send(engine, VERSIONED_METHOD.versionsEnsureMain, { workspaceId: null }),
+    ).resolves.toMatchObject({ id: "main" });
+  });
+
+  it("deserializes unknown fields before workspace validation", async () => {
+    const blobBytes = Buffer.from([1, 2, 3]);
+    const cases = [
+      {
+        name: "textWrite",
+        method: VERSIONED_METHOD.textWrite,
+        params: { path: "notes.md", text: "hello", origin: "local-file" },
+      },
+      {
+        name: "binaryWrite",
+        method: VERSIONED_METHOD.binaryWrite,
+        params: { path: "logo.png", bytes: [1], origin: "local-file" },
+      },
+      {
+        name: "binaryWriteBlob",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: {
+          path: "logo.png",
+          sha256: createHash("sha256").update(blobBytes).digest("hex"),
+          bytesBase64: blobBytes.toString("base64"),
+          origin: "local-file",
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const engine = new VersionedLoopbackEngine();
+      await expect(
+        send(engine, testCase.method, {
+          workspaceId: "another-workspace",
+          versionId: "main",
+          ...testCase.params,
+          stray: true,
+        }),
+        testCase.name,
+      ).rejects.toThrow(/invalid parameters/);
+      const listed = await send(engine, VERSIONED_METHOD.versionsList, {
+        workspaceId: WORKSPACE,
+      });
+      expect(listed.versions, testCase.name).toEqual([]);
+    }
+
+    const engine = new VersionedLoopbackEngine();
+    await expect(
+      send(engine, VERSIONED_METHOD.versionsEnsureMain, {
+        workspaceId: "another-workspace",
+        stray: true,
+      }),
+    ).rejects.toThrow(/invalid parameters/);
+  });
+
+  it("rejects non-addressable and non-storable paths before version lookup", async () => {
+    const blobBytes = Buffer.from([1, 2, 3]);
+    const cases = [
+      {
+        name: "textWrite reserved path",
+        method: VERSIONED_METHOD.textWrite,
+        params: {
+          versionId: "main",
+          path: ".dohc/config",
+          text: "x",
+          origin: "local-file",
+        },
+      },
+      {
+        name: "binaryWrite traversal",
+        method: VERSIONED_METHOD.binaryWrite,
+        params: {
+          versionId: "main",
+          path: "notes/../logo.png",
+          bytes: [1],
+          origin: "local-file",
+        },
+      },
+      {
+        name: "textWrite raw backslash",
+        method: VERSIONED_METHOD.textWrite,
+        params: {
+          versionId: "main",
+          path: "notes\\draft.md",
+          text: "x",
+          origin: "local-file",
+        },
+      },
+      {
+        name: "binaryWrite double-dot substring",
+        method: VERSIONED_METHOD.binaryWrite,
+        params: {
+          versionId: "main",
+          path: "notes/v1..draft.png",
+          bytes: [1],
+          origin: "local-file",
+        },
+      },
+      {
+        name: "binaryWriteBlob reserved path",
+        method: VERSIONED_METHOD.binaryWriteBlob,
+        params: {
+          versionId: "main",
+          path: ".dohc/logo.png",
+          sha256: createHash("sha256").update(blobBytes).digest("hex"),
+          bytesBase64: blobBytes.toString("base64"),
+          origin: "local-file",
+        },
+      },
+      {
+        name: "textRename reserved source",
+        method: VERSIONED_METHOD.textRename,
+        params: {
+          versionId: "main",
+          fromPath: ".dohc/before.md",
+          toPath: "after.md",
+          origin: "local-file",
+        },
+      },
+      {
+        name: "textRename secret destination",
+        method: VERSIONED_METHOD.textRename,
+        params: {
+          versionId: "main",
+          fromPath: "before.md",
+          toPath: ".env",
+          origin: "local-file",
+        },
+      },
+      {
+        name: "textDelete reserved path",
+        method: VERSIONED_METHOD.textDelete,
+        params: {
+          versionId: "main",
+          path: ".dohc/before.md",
+          origin: "local-file",
+        },
+      },
+      {
+        name: "secretWrite structurally invalid path",
+        method: VERSIONED_METHOD.secretsWrite,
+        params: {
+          versionId: "main",
+          path: ".env\\production",
+          text: "API_KEY=value\n",
+          origin: "local-file",
+          momentId: "secret-raw-backslash",
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      await expectRefusalWithoutVersion(
+        testCase.name,
+        testCase.method,
+        testCase.params,
+        /invalid-path/,
+      );
+    }
+  });
+
+  it("normalizes accepted write and rename paths before storing them", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const written = await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "notes/./draft.md",
+      text: "hello",
+      origin: "local-file",
+    });
+    expect((written.snapshot as { path?: unknown }).path).toBe("notes/draft.md");
+
+    const renamed = await send(engine, VERSIONED_METHOD.textRename, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      fromPath: "notes/./draft.md",
+      toPath: "notes//final.md",
+      origin: "local-file",
+    });
+    expect((renamed.after as { path?: unknown }).path).toBe("notes/final.md");
+  });
+
+  it("normalizes author null and omission to the same replay identity", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const params = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "notes.md",
+      text: "hello",
+      origin: "local-file",
+      requestId: "nullable-author-replay",
+    };
+    const first = await send(engine, VERSIONED_METHOD.textWrite, {
+      ...params,
+      author: null,
+    });
+    const replayed = await send(engine, VERSIONED_METHOD.textWrite, params);
+    expect(replayed.deduped).toBe(true);
+    expect((replayed.moment as { momentId?: unknown }).momentId).toBe(
+      (first.moment as { momentId?: unknown }).momentId,
+    );
+  });
+
+  it("preserves empty request and envelope idempotency keys", async () => {
+    for (const [name, paramsExtra, requestExtra] of [
+      ["requestId", { requestId: "" }, {}],
+      ["idempotencyKey", {}, { idempotencyKey: "" }],
+    ] as const) {
+      const engine = new VersionedLoopbackEngine();
+      const params = {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "notes.md",
+        text: "hello",
+        origin: "local-file",
+        ...paramsExtra,
+      };
+      const first = await send(engine, VERSIONED_METHOD.textWrite, params, requestExtra);
+      const replayed = await send(engine, VERSIONED_METHOD.textWrite, params, requestExtra);
+      expect(replayed.deduped, name).toBe(true);
+      expect((replayed.moment as { momentId?: unknown }).momentId, name).toBe(
+        (first.moment as { momentId?: unknown }).momentId,
+      );
+    }
+  });
+
+  it("rejects invalid explicit moment ids without changing state", async () => {
+    for (const [name, method, params] of [
+      [
+        "textWrite empty",
+        VERSIONED_METHOD.textWrite,
+        { versionId: "main", path: "notes.md", text: "x", origin: "local-file", momentId: "" },
+      ],
+      [
+        "textWrite reserved character",
+        VERSIONED_METHOD.textWrite,
+        {
+          versionId: "main",
+          path: "notes.md",
+          text: "x",
+          origin: "local-file",
+          momentId: "bad\u001fid",
+        },
+      ],
+      [
+        "binaryWrite empty",
+        VERSIONED_METHOD.binaryWrite,
+        { versionId: "main", path: "logo.png", bytes: [1], origin: "local-file", momentId: "" },
+      ],
+      [
+        "textWrite empty before secret-path refusal",
+        VERSIONED_METHOD.textWrite,
+        { versionId: "main", path: ".env", text: "x", origin: "local-file", momentId: "" },
+      ],
+      [
+        "binaryWrite empty before secret-path refusal",
+        VERSIONED_METHOD.binaryWrite,
+        { versionId: "main", path: ".env", bytes: [1], origin: "local-file", momentId: "" },
+      ],
+    ] as const) {
+      await expectRefusalWithoutVersion(name, method, params, /invalid-input/);
+    }
+
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId,
+        path: ".env",
+        text: "API_KEY=value\n",
+        origin: "local-file",
+        momentId: "",
+      }),
+    ).rejects.toThrow(/invalid-input/);
+    const listed = await send(engine, VERSIONED_METHOD.secretsList, {
+      workspaceId: WORKSPACE,
+      versionId,
+    });
+    expect(listed.secrets).toEqual([]);
+  });
+
+  it("accepts the full serde i64 range represented by JavaScript numbers", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const accepted = 2 ** 53;
+    const result = await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "notes.md",
+      text: "hello",
+      origin: "local-file",
+      nowMs: accepted,
+    });
+    expect((result.snapshot as { updatedAtMs?: unknown }).updatedAtMs).toBe(accepted);
+
+    await expectRefusalWithoutVersion(
+      "nowMs above i64",
+      VERSIONED_METHOD.textWrite,
+      {
+        versionId: "main",
+        path: "notes.md",
+        text: "hello",
+        origin: "local-file",
+        nowMs: 2 ** 63,
+      },
+      /invalid parameters/,
+    );
   });
 
   it("rejects unknown fields before creating main", async () => {

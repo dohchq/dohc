@@ -489,9 +489,15 @@ importers:
 
   packages/workspace-engine-client:
     dependencies:
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../security-contract
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../workspace-contracts
+      '@dohc/workspace-core':
+        specifier: workspace:*
+        version: link:../workspace-core
       '@dohc/ydoc-projection':
         specifier: workspace:*
         version: link:../ydoc-projection
