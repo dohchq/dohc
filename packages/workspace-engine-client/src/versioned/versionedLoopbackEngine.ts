@@ -15,6 +15,7 @@ import {
   type SecretMomentRecord,
   type VersionChangeStatus,
   type VersionedContentKind,
+  type VersionedMethod,
   type VersionedOrigin,
 } from "./versionedWireContract";
 
@@ -60,79 +61,191 @@ const ACCEPTED_ORIGINS = new Set<string>([
   "unknown",
 ]);
 
-const WRITE_PARAM_FIELDS = [
+interface SerdeParamShape {
+  requiredStrings?: readonly string[];
+  optionalStrings?: readonly string[];
+  optionalI64?: readonly string[];
+  optionalUsize?: readonly string[];
+  optionalBytes?: readonly string[];
+  optionalJson?: readonly string[];
+}
+
+const MUTATION_OPTIONAL_STRINGS = [
   "workspaceId",
-  "versionId",
-  "objectId",
-  "path",
   "origin",
   "metadataOrigin",
   "summary",
   "correlationId",
-  "author",
   "authorJson",
-  "momentId",
   "requestId",
-  "nowMs",
 ] as const;
-const TEXT_WRITE_PARAM_FIELDS = new Set<string>([...WRITE_PARAM_FIELDS, "text"]);
-const BINARY_WRITE_PARAM_FIELDS = new Set<string>([
-  ...WRITE_PARAM_FIELDS,
-  "bytes",
-  "bytesBase64",
-]);
-const BINARY_BLOB_WRITE_PARAM_FIELDS = new Set<string>([
-  ...WRITE_PARAM_FIELDS,
-  "sha256",
-  "bytesBase64",
-]);
-const TEXT_RENAME_PARAM_FIELDS = new Set<string>([
-  "workspaceId",
-  "versionId",
-  "fromPath",
-  "toPath",
-  "origin",
-  "metadataOrigin",
-  "summary",
-  "correlationId",
-  "author",
-  "authorJson",
-  "requestId",
-  "nowMs",
-]);
-const TEXT_DELETE_PARAM_FIELDS = new Set<string>([
-  "workspaceId",
-  "versionId",
-  "path",
-  "origin",
-  "metadataOrigin",
-  "summary",
-  "correlationId",
-  "author",
-  "authorJson",
-  "requestId",
-  "nowMs",
-]);
-const SECRET_WRITE_PARAM_FIELDS = new Set<string>([
-  "workspaceId",
-  "versionId",
-  "path",
-  "text",
-  "origin",
+const WRITE_OPTIONAL_STRINGS = [
+  ...MUTATION_OPTIONAL_STRINGS,
+  "objectId",
   "momentId",
-  "summary",
-  "correlationId",
-]);
-const SECRET_DELETE_PARAM_FIELDS = new Set<string>([
-  "workspaceId",
-  "versionId",
-  "path",
-  "origin",
-  "momentId",
-  "summary",
-  "correlationId",
-]);
-const WORKSPACE_ONLY_PARAM_FIELDS = new Set<string>(["workspaceId"]);
+] as const;
+const REQUIRED_SECRET_METADATA = ["workspaceId", "origin"] as const;
+const OPTIONAL_SECRET_METADATA = ["summary", "correlationId"] as const;
+
+// One executable inventory of every method this loopback dispatches. Rust
+// deserializes these deny_unknown_fields structs before it resolves a workspace
+// handle; keeping the inventory exhaustive makes a new method fail typecheck
+// until its wire shape is stated here too.
+const VERSIONED_PARAM_SHAPES = {
+  [VERSIONED_METHOD.textWrite]: {
+    requiredStrings: ["versionId", "path", "text"],
+    optionalStrings: WRITE_OPTIONAL_STRINGS,
+    optionalI64: ["nowMs"],
+    optionalJson: ["author"],
+  },
+  [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
+  [VERSIONED_METHOD.textReadBlob]: {
+    requiredStrings: ["workspaceId", "sha256"],
+  },
+  [VERSIONED_METHOD.textRename]: {
+    requiredStrings: ["versionId", "fromPath", "toPath"],
+    optionalStrings: MUTATION_OPTIONAL_STRINGS,
+    optionalI64: ["nowMs"],
+    optionalJson: ["author"],
+  },
+  [VERSIONED_METHOD.textDelete]: {
+    requiredStrings: ["versionId", "path"],
+    optionalStrings: MUTATION_OPTIONAL_STRINGS,
+    optionalI64: ["nowMs"],
+    optionalJson: ["author"],
+  },
+  [VERSIONED_METHOD.textRollback]: {
+    requiredStrings: ["versionId", "path", "mutationMomentId"],
+    optionalStrings: [
+      "workspaceId",
+      "origin",
+      "metadataOrigin",
+      "authorJson",
+      "requestId",
+      "legacyBeforeText",
+    ],
+    optionalJson: ["author"],
+  },
+  [VERSIONED_METHOD.textList]: {
+    requiredStrings: ["versionId"],
+    optionalStrings: ["afterPath"],
+    optionalUsize: ["limit"],
+  },
+  [VERSIONED_METHOD.binaryWrite]: {
+    requiredStrings: ["versionId", "path"],
+    optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
+    optionalI64: ["nowMs"],
+    optionalBytes: ["bytes"],
+    optionalJson: ["author"],
+  },
+  [VERSIONED_METHOD.binaryWriteBlob]: {
+    requiredStrings: ["versionId", "path", "sha256"],
+    optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
+    optionalI64: ["nowMs"],
+    optionalJson: ["author"],
+  },
+  [VERSIONED_METHOD.binaryRead]: { requiredStrings: ["versionId", "path"] },
+  [VERSIONED_METHOD.binaryReadBlob]: {
+    requiredStrings: ["workspaceId", "sha256"],
+  },
+  [VERSIONED_METHOD.versionsCreateNamed]: {
+    requiredStrings: ["workspaceId", "name", "fromVersionId"],
+  },
+  [VERSIONED_METHOD.versionsList]: { optionalStrings: ["afterVersionId"] },
+  [VERSIONED_METHOD.versionsSetActive]: {
+    requiredStrings: ["versionId"],
+    optionalStrings: ["workspaceId"],
+  },
+  [VERSIONED_METHOD.versionsEnsureMain]: { optionalStrings: ["workspaceId"] },
+  [VERSIONED_METHOD.versionsActive]: { optionalStrings: ["workspaceId"] },
+  [VERSIONED_METHOD.versionsMerge]: {
+    requiredStrings: ["path", "sourceVersionId", "targetVersionId"],
+    optionalStrings: MUTATION_OPTIONAL_STRINGS,
+    optionalI64: ["nowMs"],
+    optionalJson: ["author"],
+  },
+  [VERSIONED_METHOD.versionsCompare]: {
+    requiredStrings: ["path", "sourceVersionId", "targetVersionId"],
+    optionalStrings: ["workspaceId"],
+  },
+  [VERSIONED_METHOD.versionsCompareFiles]: {
+    requiredStrings: ["sourceVersionId", "targetVersionId"],
+    optionalStrings: ["workspaceId", "afterPath"],
+    optionalUsize: ["byteBudget"],
+  },
+  [VERSIONED_METHOD.secretsWrite]: {
+    requiredStrings: [
+      ...REQUIRED_SECRET_METADATA,
+      "versionId",
+      "path",
+      "text",
+      "momentId",
+    ],
+    optionalStrings: OPTIONAL_SECRET_METADATA,
+  },
+  [VERSIONED_METHOD.secretsList]: {
+    requiredStrings: ["versionId"],
+    optionalStrings: ["afterPath"],
+    optionalUsize: ["limit"],
+  },
+  [VERSIONED_METHOD.secretsStateExists]: { optionalStrings: ["workspaceId"] },
+  [VERSIONED_METHOD.secretsMaterialize]: {
+    requiredStrings: ["versionId", "path"],
+  },
+  [VERSIONED_METHOD.secretsDelete]: {
+    requiredStrings: [
+      ...REQUIRED_SECRET_METADATA,
+      "versionId",
+      "path",
+      "momentId",
+    ],
+    optionalStrings: OPTIONAL_SECRET_METADATA,
+  },
+  [VERSIONED_METHOD.secretsFork]: {
+    requiredStrings: ["workspaceId", "fromVersionId", "toVersionId"],
+  },
+  [VERSIONED_METHOD.secretsCompare]: {
+    requiredStrings: ["workspaceId", "sourceVersionId", "targetVersionId"],
+    optionalStrings: ["afterPath"],
+    optionalUsize: ["limit"],
+  },
+  [VERSIONED_METHOD.secretsApply]: {
+    requiredStrings: [
+      ...REQUIRED_SECRET_METADATA,
+      "path",
+      "sourceVersionId",
+      "targetVersionId",
+      "momentId",
+    ],
+    optionalStrings: OPTIONAL_SECRET_METADATA,
+  },
+  [VERSIONED_METHOD.secretsRestore]: {
+    requiredStrings: [
+      ...REQUIRED_SECRET_METADATA,
+      "path",
+      "beforeMomentId",
+      "momentId",
+    ],
+    optionalStrings: OPTIONAL_SECRET_METADATA,
+  },
+  [VERSIONED_METHOD.secretsMomentsList]: {
+    requiredStrings: ["workspaceId"],
+    optionalStrings: ["versionId", "path"],
+    optionalI64: ["beforeMomentOrder"],
+    optionalUsize: ["limit"],
+  },
+  [VERSIONED_METHOD.secretsMomentsGet]: {
+    requiredStrings: ["workspaceId", "momentId"],
+  },
+  [VERSIONED_METHOD.momentsList]: {
+    optionalStrings: ["versionId", "objectId"],
+    optionalI64: ["limit", "beforeMomentOrder"],
+  },
+  [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
+  [VERSIONED_METHOD.searchEnsureIndex]: {
+    requiredStrings: ["workspaceId", "versionId"],
+  },
+} satisfies Record<VersionedMethod, SerdeParamShape>;
 
 interface LoopbackFile {
   objectId: string;
@@ -302,6 +415,7 @@ function serdeOptionalParamString(object: JsonObject, key: string): string | und
 
 const I64_MIN = -(1n << 63n);
 const I64_MAX = (1n << 63n) - 1n;
+const USIZE_MAX = (1n << 64n) - 1n;
 
 function isSerdeI64(value: unknown): value is number {
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
@@ -328,6 +442,25 @@ function serdeOptionalParamNumber(object: JsonObject, key: string): number | und
   return value;
 }
 
+function isSerdeUsize(value: unknown): value is number {
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
+    return false;
+  }
+  try {
+    const integer = BigInt(JSON.stringify(value));
+    return integer >= 0n && integer <= USIZE_MAX;
+  } catch {
+    return false;
+  }
+}
+
+function serdeOptionalParamUsize(object: JsonObject, key: string): number | undefined {
+  const value = object[key];
+  if (value === undefined || value === null) return undefined;
+  if (!isSerdeUsize(value)) throw new Error("invalid parameters");
+  return value;
+}
+
 function serdeOptionalParamBytes(object: JsonObject, key: string): number[] | undefined {
   const value = object[key];
   if (value === undefined || value === null) return undefined;
@@ -346,6 +479,72 @@ function serdeOptionalParamBytes(object: JsonObject, key: string): number[] | un
   return value as number[];
 }
 
+function versionedParamFields(shape: SerdeParamShape): ReadonlySet<string> {
+  return new Set([
+    ...(shape.requiredStrings ?? []),
+    ...(shape.optionalStrings ?? []),
+    ...(shape.optionalI64 ?? []),
+    ...(shape.optionalUsize ?? []),
+    ...(shape.optionalBytes ?? []),
+    ...(shape.optionalJson ?? []),
+  ]);
+}
+
+function validateVersionedParams(
+  method: string,
+  params: JsonObject,
+  request: Request,
+): void {
+  const shape: SerdeParamShape | undefined =
+    VERSIONED_PARAM_SHAPES[method as VersionedMethod];
+  if (shape === undefined) return;
+  rejectUnknownFields(params, versionedParamFields(shape));
+  requestIdempotencyKey(request);
+  for (const key of shape.requiredStrings ?? []) serdeRequiredParamString(params, key);
+  for (const key of shape.optionalStrings ?? []) serdeOptionalParamString(params, key);
+  for (const key of shape.optionalI64 ?? []) serdeOptionalParamNumber(params, key);
+  for (const key of shape.optionalUsize ?? []) serdeOptionalParamUsize(params, key);
+  for (const key of shape.optionalBytes ?? []) serdeOptionalParamBytes(params, key);
+}
+
+function validatePreWorkspaceSemantics(method: string, params: JsonObject): void {
+  switch (method) {
+    case VERSIONED_METHOD.versionsSetActive: {
+      const versionId = serdeRequiredParamString(params, "versionId");
+      if (versionId.length === 0 || versionId.trim() !== versionId) {
+        throw new Error("invalid-version");
+      }
+      break;
+    }
+    case VERSIONED_METHOD.textReadBlob:
+    case VERSIONED_METHOD.binaryReadBlob: {
+      const digest = serdeRequiredParamString(params, "sha256").toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error("invalid-input");
+      break;
+    }
+    case VERSIONED_METHOD.momentsList:
+      if (serdeOptionalParamString(params, "objectId") === "") {
+        throw new Error("objectId must not be empty");
+      }
+      break;
+    case VERSIONED_METHOD.momentsGet:
+      if (serdeRequiredParamString(params, "momentId") === "") {
+        throw new Error("momentId must not be empty");
+      }
+      break;
+    case VERSIONED_METHOD.secretsApply:
+      if (!isSecretClassifiedPath(serdeRequiredParamString(params, "path"))) {
+        throw new Error("not-secret-path");
+      }
+      break;
+    case VERSIONED_METHOD.secretsMaterialize:
+      if (!isSecretClassifiedPath(serdeRequiredParamString(params, "path"))) {
+        throw new Error("not a secret path");
+      }
+      break;
+  }
+}
+
 function optionalString(object: JsonObject, key: string): string | undefined {
   const value = object[key];
   if (value === undefined) return undefined;
@@ -359,17 +558,10 @@ function serdeOptionalString(object: JsonObject, key: string): string | undefine
 
 function optionalNumber(object: JsonObject, key: string): number | undefined {
   const value = object[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
     throw new Error(`${key} is invalid.`);
   }
-  return value;
-}
-
-function serdeOptionalNumber(object: JsonObject, key: string): number | undefined {
-  const value = object[key];
-  if (value === undefined || value === null) return undefined;
-  if (!isSerdeI64(value)) throw new Error(`${key} is invalid.`);
   return value;
 }
 
@@ -397,7 +589,6 @@ function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFiel
 }
 
 function parseTextWriteFields(params: JsonObject, request: Request): ParsedTextWriteFields {
-  rejectUnknownFields(params, TEXT_WRITE_PARAM_FIELDS);
   return {
     ...parseWriteFields(params, request),
     versionId: serdeRequiredParamString(params, "versionId"),
@@ -407,7 +598,6 @@ function parseTextWriteFields(params: JsonObject, request: Request): ParsedTextW
 }
 
 function parseBinaryWriteFields(params: JsonObject, request: Request): ParsedBinaryWriteFields {
-  rejectUnknownFields(params, BINARY_WRITE_PARAM_FIELDS);
   return {
     ...parseWriteFields(params, request),
     versionId: serdeRequiredParamString(params, "versionId"),
@@ -421,7 +611,6 @@ function parseBinaryBlobWriteFields(
   params: JsonObject,
   request: Request,
 ): ParsedBinaryBlobWriteFields {
-  rejectUnknownFields(params, BINARY_BLOB_WRITE_PARAM_FIELDS);
   return {
     ...parseWriteFields(params, request),
     versionId: serdeRequiredParamString(params, "versionId"),
@@ -432,7 +621,6 @@ function parseBinaryBlobWriteFields(
 }
 
 function parseWorkspaceOnlyFields(params: JsonObject): void {
-  rejectUnknownFields(params, WORKSPACE_ONLY_PARAM_FIELDS);
   serdeOptionalParamString(params, "workspaceId");
 }
 
@@ -440,7 +628,6 @@ function parseTextRenameFields(
   params: JsonObject,
   request: Request,
 ): ParsedTextRenameFields {
-  rejectUnknownFields(params, TEXT_RENAME_PARAM_FIELDS);
   const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
@@ -461,7 +648,6 @@ function parseTextDeleteFields(
   params: JsonObject,
   request: Request,
 ): ParsedTextDeleteFields {
-  rejectUnknownFields(params, TEXT_DELETE_PARAM_FIELDS);
   const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
@@ -478,7 +664,6 @@ function parseTextDeleteFields(
 }
 
 function parseSecretWriteFields(params: JsonObject, request: Request): ParsedSecretWriteFields {
-  rejectUnknownFields(params, SECRET_WRITE_PARAM_FIELDS);
   requestIdempotencyKey(request);
   serdeRequiredParamString(params, "workspaceId");
   serdeRequiredParamString(params, "origin");
@@ -493,7 +678,6 @@ function parseSecretWriteFields(params: JsonObject, request: Request): ParsedSec
 }
 
 function parseSecretDeleteFields(params: JsonObject, request: Request): ParsedSecretDeleteFields {
-  rejectUnknownFields(params, SECRET_DELETE_PARAM_FIELDS);
   requestIdempotencyKey(request);
   serdeRequiredParamString(params, "workspaceId");
   serdeRequiredParamString(params, "origin");
@@ -877,6 +1061,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private handleRequest(request: Request): JsonValue {
     const params = asObject(request.params, `${request.method} params`);
+    validateVersionedParams(request.method, params, request);
+    validatePreWorkspaceSemantics(request.method, params);
     let parsedTextWrite: ParsedTextWriteFields | undefined;
     let parsedBinaryWrite: ParsedBinaryWriteFields | undefined;
     let parsedBinaryBlobWrite: ParsedBinaryBlobWriteFields | undefined;
@@ -913,16 +1099,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // Rust deserializes method params before it opens the workspace handle.
     // Keep combined-invalid requests on that same refusal boundary.
     const workspace = this.requireWorkspaceHandle(request);
-    this.validateWorkspaceParam(
-      params,
-      workspace,
-      request.method === VERSIONED_METHOD.textWrite ||
-        request.method === VERSIONED_METHOD.binaryWrite ||
-        request.method === VERSIONED_METHOD.binaryWriteBlob ||
-        request.method === VERSIONED_METHOD.textRename ||
-        request.method === VERSIONED_METHOD.textDelete ||
-        request.method === VERSIONED_METHOD.versionsEnsureMain,
-    );
+    this.validateWorkspaceParam(params, workspace);
     const state = this.workspace(workspace);
     switch (request.method) {
       case VERSIONED_METHOD.textWrite:
@@ -1202,11 +1379,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const addressablePath = normalizedEnginePath(parsed.path, "addressable");
     if (parsed.momentId !== undefined) validateTextMomentId(parsed.momentId);
     const path = normalizedEnginePath(addressablePath, "storable");
-    // The binary store rejects an empty object id even for an existing head.
-    if (
-      parsed.objectId === "" &&
-      (state.versions.has(versionId) || versionId === "main")
-    ) {
+    // A refused fresh-main write must not create main. Existing equal binary
+    // heads dedupe before Rust reaches the empty-object validation below.
+    if (parsed.objectId === "" && versionId === "main" && !state.versions.has(versionId)) {
       throw new Error("invalid-input");
     }
     const version = this.mutationVersion(state, workspace, versionId);
@@ -1267,6 +1442,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       this.recordReplay(state, requestId, params, result, replayFingerprint);
       return result;
     }
+    if (parsed.objectId === "") throw new Error("invalid-input");
     this.assertFreshMoment(state, momentId);
     // Daemon parity: an existing head keeps its object identity.
     const effectiveObjectId = before?.objectId ?? objectId;
@@ -2343,11 +2519,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   private validateWorkspaceParam(
     params: JsonObject,
     workspace: string,
-    nullIsAbsent = false,
   ): void {
-    const candidate = nullIsAbsent
-      ? serdeOptionalString(params, "workspaceId")
-      : optionalString(params, "workspaceId");
+    const candidate = serdeOptionalString(params, "workspaceId");
     if (candidate !== undefined && candidate !== workspace) throw new Error("invalid-workspace");
   }
 
