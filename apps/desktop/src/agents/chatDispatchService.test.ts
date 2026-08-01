@@ -257,6 +257,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     };
 
     if (request.method === "workspace.open") {
+      if (params.recoverRunningDispatches !== false) {
+        engine.reclaimRunningDispatches(WORKSPACE_ID, now.value);
+      }
       return { id: request.id, result: { workspace: WORKSPACE_ID } };
     }
     if (request.method === "workspace.close") {
@@ -2137,8 +2140,13 @@ describe("chatDispatchService", () => {
     const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
     });
-    if (!interrupted) throw new Error("Expected an interrupted live run.");
+    if (!interrupted || !fixture.restartDaemon) {
+      throw new Error("Expected an interrupted live run and restartable daemon.");
+    }
 
+    // Rebind after the running row exists. A real fresh actor defaults to
+    // reclaiming it unless EngineWorkspaceSessions explicitly opts out.
+    fixture.restartDaemon();
     await activate(fixture);
 
     const messages = await fixture.chat.listMessages({
