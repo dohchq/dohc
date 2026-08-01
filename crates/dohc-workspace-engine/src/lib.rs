@@ -7572,10 +7572,7 @@ impl EngineService {
                     .merged_text
                     .ok_or_else(|| wire(ErrorCode::InvalidParams, "missing merged text"))?;
                 if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
-                    return Err(wire(
-                        ErrorCode::InvalidParams,
-                        "content-exceeds-inband-cap",
-                    ));
+                    return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
                 }
                 ResolveConflictKind::ApplyMerged { text }
             }
