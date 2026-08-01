@@ -18,4 +18,5 @@ are canonically owned by this package and re-exported by
 `VersionedFileWorkspace` surface are structural copies (this package cannot
 depend on `@dohc/workspace-core` without a cycle). Exact-identity compile checks
 in `packages/workspace-core/src/engineContracts.compile.ts` pin their core-owned
-fields to the corresponding core types.
+fields to the corresponding core types. The legacy engine's broader guard
+remains until that package is deleted.

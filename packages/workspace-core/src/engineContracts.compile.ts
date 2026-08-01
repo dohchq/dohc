@@ -21,16 +21,20 @@ type AssertSame<A, B> = IsSame<A, B>;
 
 type HistoryDriftChecks = [
   AssertSame<VersionedFileWriteResult["history"]["kind"], ChangeSetKind>,
-  AssertSame<VersionedFileWriteResult["history"]["files"][number], FileChange>,
+  AssertSame<VersionedFileWriteResult["history"]["author"], ChangeAuthor>,
+  AssertSame<VersionedFileWriteResult["history"]["files"], FileChange[]>,
   AssertSame<
-    VersionedFileWriteResult["history"]["boundaryCrossings"][number],
-    BoundaryCrossing
+    VersionedFileWriteResult["history"]["boundaryCrossings"],
+    BoundaryCrossing[]
   >,
   AssertSame<
-    NonNullable<VersionedFileWriteResult["history"]["provenance"]>,
-    ChangeProvenance
+    VersionedFileWriteResult["history"]["provenance"],
+    ChangeProvenance | undefined
   >,
-  AssertSame<NonNullable<VersionedFileWorkspaceOptions["author"]>, ChangeAuthor>,
+  AssertSame<
+    VersionedFileWorkspaceOptions["author"],
+    ChangeAuthor | undefined
+  >,
 ];
 
 type AssertAllSame<T extends readonly true[]> = T;
