@@ -572,12 +572,12 @@ describe("listDmRecords", () => {
   it("keeps a PARTICIPANT DM with no thread yet visible (a real pending conversation)", async () => {
     const { store, loopback } = await makeStore();
     // A replayed DM whose owner granted before sending — channel.create only,
-    // no thread.create yet. Rust maps the owner's wire id to a stable receiver-
-    // local channel id, so participant provenance survives a later share leave.
+    // no thread.create yet. Current Rust replay preserves the owner's channel
+    // id, so the durable joined-share row is the participant provenance.
     // The pending DM must remain visible instead of looking like an owner orphan.
     loopback.seedChannel({
       workspace: WS,
-      channelId: "participant-channel-1",
+      channelId: "owner-channel-1",
       wireId: "owner-channel-1",
       name: "bob@x.com",
       kind: "dm",
@@ -596,12 +596,11 @@ describe("listDmRecords", () => {
 
   it("derives participant role from a replayed channel and labels it by the GRANTER, not the replicated name", async () => {
     const { store, loopback, seed } = await makeStore();
-    // A replayed DM with the active Rust import shape: the owner's wire id
-    // maps to a stable receiver-local channel id. The id distinction preserves
-    // participant role after leave; joined state supplies the granter label.
+    // A replayed DM with the active Rust import shape: local id and wire id
+    // are equal. The joined row supplies participant role and granter label.
     loopback.seedChannel({
       workspace: WS,
-      channelId: "participant-channel-1",
+      channelId: "owner-channel-1",
       wireId: "owner-channel-1",
       // The owner's recipient list — i.e. THIS participant's own address.
       name: "bob@x.com",
@@ -612,7 +611,7 @@ describe("listDmRecords", () => {
       method: CHATS_METHOD.threadStart,
       idempotencyKey: "thread-dm:message-dm",
       params: {
-        channelId: "participant-channel-1",
+        channelId: "owner-channel-1",
         threadId: "thread-dm",
         messageId: "message-dm",
         authorKind: "human",
@@ -644,12 +643,12 @@ describe("listDmRecords", () => {
     });
     expect(ended[0]).toMatchObject({ role: "participant", connected: false });
 
-    // No matching grant at all (the honest end-of-share): still a participant,
-    // still readable, disconnected — and the replicated name is the fallback.
-    const orphaned = await listDmRecords({ workspaceId: WS, store, sharedChannels: [] });
-    expect(orphaned[0]).toMatchObject({
-      role: "participant",
-      connected: false,
+    // No joined provenance models a normal owner-workspace replay. Equal ids
+    // remain owner-owned and writable; member leave keeps an ended row instead.
+    const ownerReplay = await listDmRecords({ workspaceId: WS, store, sharedChannels: [] });
+    expect(ownerReplay[0]).toMatchObject({
+      role: "owner",
+      connected: true,
       shareId: null,
       peerLabel: "bob@x.com",
     });
