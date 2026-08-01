@@ -1745,6 +1745,124 @@ describe("loopback moment metadata", () => {
     expect(replayed.deduped).toBe(true);
   });
 
+  it("uses envelope request ids when rollback and merge requestId is null", async () => {
+    const rollbackEngine = new VersionedLoopbackEngine();
+    await send(rollbackEngine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "rollback-null.md",
+      text: "remove me",
+      origin: "local-file",
+      momentId: "rollback-null-mutation",
+    });
+    const rollbackParams = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "rollback-null.md",
+      mutationMomentId: "rollback-null-mutation",
+      origin: "restore",
+      requestId: null,
+    };
+    const firstRollback = await send(
+      rollbackEngine,
+      VERSIONED_METHOD.textRollback,
+      rollbackParams,
+      { idempotencyKey: "rollback-null-envelope" },
+    );
+    const replayedRollback = await send(
+      rollbackEngine,
+      VERSIONED_METHOD.textRollback,
+      rollbackParams,
+      { idempotencyKey: "rollback-null-envelope" },
+    );
+    expect(firstRollback.deduped).toBe(false);
+    expect(replayedRollback.deduped).toBe(true);
+
+    const mergeEngine = new VersionedLoopbackEngine();
+    mergeEngine.seedTextFile({
+      workspace: WORKSPACE,
+      versionId: "main",
+      path: "merge-null.md",
+      text: "base",
+    });
+    const named = await send(mergeEngine, VERSIONED_METHOD.versionsCreateNamed, {
+      workspaceId: WORKSPACE,
+      name: "null-request-id",
+      fromVersionId: "main",
+    });
+    const sourceVersionId = String(named.id);
+    await send(mergeEngine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: sourceVersionId,
+      path: "merge-null.md",
+      text: "incoming",
+      origin: "api",
+    });
+    const mergeParams = {
+      workspaceId: WORKSPACE,
+      sourceVersionId,
+      targetVersionId: "main",
+      path: "merge-null.md",
+      origin: "api",
+      requestId: null,
+    };
+    const firstMerge = await send(
+      mergeEngine,
+      VERSIONED_METHOD.versionsMerge,
+      mergeParams,
+      { idempotencyKey: "merge-null-envelope" },
+    );
+    const replayedMerge = await send(
+      mergeEngine,
+      VERSIONED_METHOD.versionsMerge,
+      mergeParams,
+      { idempotencyKey: "merge-null-envelope" },
+    );
+    expect(firstMerge.deduped).toBe(false);
+    expect(replayedMerge.deduped).toBe(true);
+  });
+
+  it("accepts null rollback and merge request ids without opening missing versions", async () => {
+    for (const [name, method, params] of [
+      [
+        "rollback",
+        VERSIONED_METHOD.textRollback,
+        {
+          versionId: "no-such-version",
+          path: "missing.md",
+          mutationMomentId: "missing-mutation",
+          origin: "restore",
+          requestId: null,
+        },
+      ],
+      [
+        "merge",
+        VERSIONED_METHOD.versionsMerge,
+        {
+          sourceVersionId: "no-such-source",
+          targetVersionId: "no-such-target",
+          path: "missing.md",
+          origin: "api",
+          requestId: null,
+        },
+      ],
+    ] as const) {
+      const engine = new VersionedLoopbackEngine();
+      await expect(send(engine, method, params), name).rejects.toThrow(
+        /version-not-found|invalid-version/,
+      );
+      const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
+      expect(listed.versions, name).toEqual([]);
+      await expectRefusalWithoutVersion(
+        `${name}: malformed envelope request id`,
+        method,
+        params,
+        /invalid parameters/,
+        { idempotencyKey: 1 },
+      );
+    }
+  });
+
   it("checks apply versions before rejecting an empty moment id without changing state", async () => {
     const engine = new VersionedLoopbackEngine();
     await expect(
@@ -1902,6 +2020,69 @@ describe("loopback moment metadata", () => {
     expect((rewritten.object as { id?: unknown }).id).toBe(
       (first.object as { id?: unknown }).id,
     );
+  });
+
+  it("reconstructs empty-object text retries after rename and delete", async () => {
+    const requestEngine = new VersionedLoopbackEngine();
+    await send(requestEngine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "request-replay.md",
+      text: "first",
+      origin: "local-file",
+    });
+    const requestParams = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      objectId: "",
+      path: "request-replay.md",
+      text: "recorded",
+      origin: "local-file",
+      requestId: "empty-object-request-replay",
+    };
+    const requestWrite = await send(
+      requestEngine,
+      VERSIONED_METHOD.textWrite,
+      requestParams,
+    );
+    await send(requestEngine, VERSIONED_METHOD.textRename, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      fromPath: "request-replay.md",
+      toPath: "request-replay-moved.md",
+      origin: "local-file",
+    });
+    expect(
+      await send(requestEngine, VERSIONED_METHOD.textWrite, requestParams),
+    ).toEqual({ ...requestWrite, deduped: true });
+
+    const momentEngine = new VersionedLoopbackEngine();
+    await send(momentEngine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "moment-replay.md",
+      text: "first",
+      origin: "local-file",
+    });
+    const momentParams = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      objectId: "",
+      path: "moment-replay.md",
+      text: "recorded",
+      origin: "local-file",
+      momentId: "empty-object-fixed-moment",
+    };
+    const momentWrite = await send(momentEngine, VERSIONED_METHOD.textWrite, momentParams);
+    await send(momentEngine, VERSIONED_METHOD.textDelete, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "moment-replay.md",
+      origin: "local-file",
+    });
+    expect(
+      await send(momentEngine, VERSIONED_METHOD.textWrite, momentParams),
+    ).toEqual({ ...momentWrite, deduped: true });
   });
 
   it("accepts wire-representable serde i64 values and rejects both rounded boundaries", async () => {

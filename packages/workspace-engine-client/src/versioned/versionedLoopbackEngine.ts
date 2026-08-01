@@ -1209,38 +1209,34 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (parsed.momentId !== undefined) validateTextMomentId(parsed.momentId);
     const path = normalizedEnginePath(addressablePath, "storable");
     const knownVersion = state.versions.get(versionId);
-    // Text writes ignore the supplied object id for an existing head. A new
-    // path must reject an empty id before `mutationVersion` can create `main`.
-    if (
-      parsed.objectId === "" &&
-      (knownVersion !== undefined || versionId === "main") &&
-      !knownVersion?.files.has(path)
-    ) {
-      throw new Error("invalid-input");
+    if (knownVersion === undefined && versionId !== "main") {
+      this.version(state, versionId);
     }
-    const version = this.mutationVersion(state, workspace, versionId);
     const requestId = parsed.requestId;
     const objectId = parsed.objectId ??
       (requestId !== undefined
         ? this.generatedWriteId("object", requestId, parsed.path)
-        : version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
+        : knownVersion?.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
     const momentId = parsed.momentId ??
       (requestId !== undefined
         ? this.generatedWriteId("moment", requestId, parsed.path)
-        : `moment-${this.nextMomentId++}`);
-    const replayFingerprint = this.textWriteFingerprint(
-      { ...params, path },
-      origin,
-      objectId,
-      momentId,
-    );
-    const replay = this.replay(state, requestId, params, replayFingerprint);
-    if (replay) return replay;
-    const existingMoment = state.moments.get(momentId);
+        : undefined);
+    let replayFingerprint: string | undefined;
+    if (requestId !== undefined) {
+      replayFingerprint = this.textWriteFingerprint(
+        { ...params, path },
+        origin,
+        objectId,
+        momentId!,
+      );
+      const replay = this.replay(state, requestId, params, replayFingerprint);
+      if (replay) return replay;
+    }
+    const existingMoment = momentId === undefined ? undefined : state.moments.get(momentId);
     const authorFingerprint = this.writeAuthorFingerprint(params);
     if (existingMoment) {
       const exact =
-        existingMoment.wire.versionId === version.id &&
+        existingMoment.wire.versionId === versionId &&
         existingMoment.wire.path === path &&
         existingMoment.wire.operation === "write" &&
         existingMoment.wire.afterContentKind === "text" &&
@@ -1260,13 +1256,28 @@ export class VersionedLoopbackEngine implements EngineTransport {
         const recorded = copyFile(existingMoment.after!);
         return {
           object: this.fileObject(workspace, recorded.objectId, existingMoment.wire.recordedAtMs),
-          snapshot: this.textSnapshot(workspace, version.id, path, recorded),
+          snapshot: this.textSnapshot(workspace, versionId, path, recorded),
           moment: this.capMoment(existingMoment.wire),
           deduped: true,
         };
       }
     }
-    this.assertFreshMoment(state, momentId);
+    if (momentId !== undefined) this.assertFreshMoment(state, momentId);
+    // The daemon checks the request ledger and a fixed moment before it reads
+    // the current alias. A retry can therefore reconstruct its recorded write
+    // after that path has been renamed or deleted.
+    if (parsed.objectId === "" && !knownVersion?.files.has(path)) {
+      throw new Error("invalid-input");
+    }
+    const version = this.mutationVersion(state, workspace, versionId);
+    const resolvedMomentId = momentId ?? `moment-${this.nextMomentId++}`;
+    replayFingerprint ??= this.textWriteFingerprint(
+      { ...params, path },
+      origin,
+      objectId,
+      resolvedMomentId,
+    );
+    if (momentId === undefined) this.assertFreshMoment(state, resolvedMomentId);
     const before = version.files.get(path);
     // The daemon binds the input object id to NEW paths only — an existing
     // head keeps its identity (store.rs existing_object.unwrap_or).
@@ -1277,14 +1288,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
       contentKind: "text",
       text,
       updatedAtMs: now,
-      latestMomentId: momentId,
+      latestMomentId: resolvedMomentId,
       metadataOrigin: origin,
       momentLog: before ? [...before.momentLog] : [],
     };
     const moment = this.makeMoment(
       version,
       path,
-      momentId,
+      resolvedMomentId,
       "write",
       file,
       before,
@@ -1299,7 +1310,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     };
     file.momentLog.push(internal);
     version.files.set(path, file);
-    state.moments.set(momentId, internal);
+    state.moments.set(resolvedMomentId, internal);
     const result: JsonObject = {
       object: this.fileObject(workspace, effectiveObjectId, now),
       snapshot: this.textSnapshot(workspace, version.id, path, file),
@@ -1690,7 +1701,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     const origin = requiredOrigin(params);
     const authorJson = this.writeAuthorFingerprint(params);
-    const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
+    const requestId =
+      serdeOptionalString(params, "requestId") ?? requestIdempotencyKey(request);
     const fingerprint = JSON.stringify({
       workspaceId: workspace,
       versionId: params.versionId,
@@ -1971,7 +1983,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const origin = requiredOrigin(params);
     // Before every replay/dedup/unchanged return — see metadataField.
     const metadata = this.momentMetadataFields(params);
-    const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
+    const requestId =
+      serdeOptionalString(params, "requestId") ?? requestIdempotencyKey(request);
     const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
     const targetVersionId = requiredString(params, "targetVersionId", "merge");
     const path = requiredString(params, "path", "merge");
