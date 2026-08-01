@@ -81,7 +81,6 @@ async function readDaemonMoments(
       method: VERSIONED_METHOD.momentsList,
       workspace: WORKSPACE_ID,
       params: {
-        workspaceId: WORKSPACE_ID,
         ...(beforeMomentOrder === null ? {} : { beforeMomentOrder }),
       },
     });
