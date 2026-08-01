@@ -1,10 +1,11 @@
-import { createLinkedChatStore } from "@dohc/workspace-engine";
-import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import {
+  CHATS_METHOD,
+  ChatsLoopbackEngine,
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
   type Request,
 } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,6 +15,7 @@ import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
+import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { formatChatBookmarkProjection } from "./chatBookmarkProjection";
 import {
   archiveChatBookmarkProjection,
@@ -45,8 +47,36 @@ function bookmarkProjection(bookmarkId: string, title: string): string {
   });
 }
 
+function makeChats(workspaceId: string, rootPath: string): {
+  store: ReturnType<typeof createLiveLinkedChatStore>;
+  seed: (request: Omit<Request, "id" | "workspace">) => Promise<void>;
+} {
+  const loopback = new ChatsLoopbackEngine();
+  const client = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request) {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: workspaceId } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+  const store = createLiveLinkedChatStore({ workspaceId, rootPath }, sessions);
+  let nextRequestId = 1;
+  return {
+    store,
+    seed: async (request) => {
+      await loopback.sendRequest({ ...request, id: nextRequestId++, workspace: workspaceId });
+    },
+  };
+}
+
 afterEach(async () => {
-  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -215,26 +245,35 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
 
   it("fences a deferred archive completion from a reactivated live projection", async () => {
     const rootPath = await root();
-    let now = 10_000;
-    const chats = createLinkedChatStore(rootPath, { nowMs: () => ++now });
+    const { store: chats, seed } = makeChats("ws", rootPath);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "generated-bookmark-archive-reactivate-race-test",
       rootPath,
       rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
     });
-    const channel = await chats.ensureGeneralChannel({ workspaceId: "ws" });
-    const started = await chats.startChannelThread({
-      workspaceId: "ws",
-      channelId: channel.id,
-      author: { kind: "human", displayName: "Ice" },
-      body: "Race archive against restore",
+    await seed({
+      method: CHATS_METHOD.channelCreate,
+      params: { channelId: "general", name: "general", kind: "channel", nowMs: 10_001 },
+    });
+    await seed({
+      method: CHATS_METHOD.threadStart,
+      idempotencyKey: "thread-race:message-race",
+      params: {
+        channelId: "general",
+        threadId: "thread-race",
+        messageId: "message-race",
+        authorKind: "human",
+        authorDisplayName: "Ice",
+        body: "Race archive against restore",
+        nowMs: 10_002,
+      },
     });
     const destinationPath = "Bookmarks/Chats/archive-reactivate-race.md";
     const saved = await chats.saveBookmark({
       workspaceId: "ws",
       ownerUserId: "viewer",
       targetKind: "thread",
-      targetId: started.thread.id,
+      targetId: "thread-race",
       mode: "live",
       destinationPath,
     });
@@ -270,7 +309,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
       workspaceId: "ws",
       ownerUserId: "viewer",
       targetKind: "thread",
-      targetId: started.thread.id,
+      targetId: "thread-race",
       mode: "live",
       destinationPath,
     });

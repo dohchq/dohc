@@ -894,6 +894,47 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonClone(dispatch);
   }
 
+  readDispatch(workspace: string, triggerMessageId: string): ChatDispatch | undefined {
+    const dispatch = this.workspaces.get(workspace)?.dispatches.get(triggerMessageId);
+    return dispatch === undefined ? undefined : jsonClone(dispatch);
+  }
+
+  reclaimRunningDispatches(workspace: string, nowMs: number): string[] {
+    const state = this.workspaces.get(workspace);
+    if (state === undefined) return [];
+    const running = [...state.dispatches.values()]
+      .filter((dispatch) => dispatch.state === "running")
+      .sort(
+        (left, right) =>
+          left.updatedAtMs - right.updatedAtMs ||
+          compareText(left.triggerMessageId, right.triggerMessageId),
+      );
+    if (running.length === 0) return [];
+
+    const atMs = this.tick(nowMs);
+    const requeued: string[] = [];
+    for (const dispatch of running) {
+      const run =
+        dispatch.runId === undefined ? undefined : state.runs.get(dispatch.runId);
+      if (run !== undefined && run.endedAtMs === undefined) {
+        run.endedAtMs = atMs;
+        run.exitCode = -1;
+        run.failureReason = "reclaimed-crashed";
+      }
+      if (dispatch.attemptCount < 2) {
+        dispatch.state = "pending";
+        delete dispatch.runId;
+        delete dispatch.failureReason;
+        requeued.push(dispatch.triggerMessageId);
+      } else {
+        dispatch.state = "failed";
+        dispatch.failureReason = "reclaim-exhausted";
+      }
+      dispatch.updatedAtMs = atMs;
+    }
+    return requeued;
+  }
+
   seedRun(input: SeedRunInput): ChatRun {
     const state = this.workspace(input.workspaceId);
     if (state.runs.has(input.runId)) throw new Error("target-exists");
@@ -2934,12 +2975,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const rows = [...state.runs.values()]
       .filter((run) => {
         const dispatch = state.dispatches.get(run.triggerMessageId);
+        const recoverableFailure =
+          (run.exitCode === APP_QUIT_EXIT_CODE && run.failureReason === "app-quit") ||
+          run.failureReason === "app restart during run";
         return (
           run.workspaceId === workspace &&
           run.endedAtMs !== undefined &&
-          run.exitCode === APP_QUIT_EXIT_CODE &&
-          run.failureReason === "app-quit" &&
-          !run.failureNotePosted &&
+          recoverableFailure &&
           dispatch?.state === "failed" &&
           dispatch.runId === run.runId
         );
