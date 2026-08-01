@@ -47,7 +47,9 @@ export function mockLiveSessions(
     close: () => undefined,
     onEvent: () => () => undefined,
     async sendRequest(request: Request): Promise<Response> {
-      await beforeRequest?.(request);
+      if (beforeRequest) {
+        await beforeRequest(request);
+      }
       requests?.push(request);
       const params = request.params as Record<string, JsonValue | undefined>;
       if (request.method === "workspace.open") {

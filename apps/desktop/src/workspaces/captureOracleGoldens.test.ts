@@ -200,9 +200,12 @@ async function runScenario(scenario: FixtureScenario): Promise<Record<string, Pa
     return {
       capture,
       async stop() {
-        await capture.stop();
-        await store.close().catch(() => undefined);
-        await secretStore.close().catch(() => undefined);
+        try {
+          await capture.stop();
+        } finally {
+          await store.close().catch(() => undefined);
+          await secretStore.close().catch(() => undefined);
+        }
       },
     };
   };
