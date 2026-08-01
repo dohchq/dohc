@@ -204,20 +204,12 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         const index = conflicts.findIndex((conflict) => conflict.id === afterConflictId);
         conflicts = index < 0 ? conflicts : conflicts.slice(index + 1);
       }
-      const limit =
-        typeof params.limit === "number" &&
-        Number.isSafeInteger(params.limit) &&
-        params.limit > 0
-          ? params.limit
-          : conflicts.length;
-      const page = conflicts.slice(0, limit);
+      // This desktop conflict ledger is intentionally single-page. Adapter paging is
+      // covered in versionedLiveAdapter.test.ts; the real cursor contract is covered
+      // in crates/dohc-workspace-engine/tests/rpc_conflicts.rs.
       return {
         id: request.id,
-        result: {
-          conflicts: page,
-          nextAfterConflictId:
-            conflicts.length > page.length && page.length > 0 ? page.at(-1)!.id : null,
-        },
+        result: { conflicts, nextAfterConflictId: null },
       };
     }
 
