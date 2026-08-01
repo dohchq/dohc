@@ -1974,6 +1974,26 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     const stopStarted = new Promise<void>((resolve) => {
       markStopStarted = resolve;
     });
+    const sessions = mockLiveSessions(
+      loopback,
+      requests,
+      undefined,
+      async (request) => {
+        if (
+          request.method === VERSIONED_METHOD.textWrite &&
+          (request.params as { path?: unknown }).path === "flushed.md"
+        ) {
+          markWriteBlocked?.();
+          await writeGate;
+        }
+      },
+    );
+    const closeWorkspace = sessions.closeWorkspace.bind(sessions);
+    let closeWorkspaceInvoked = false;
+    sessions.closeWorkspace = async (...args) => {
+      closeWorkspaceInvoked = true;
+      await closeWorkspace(...args);
+    };
     const activity = createWorkspaceActivity(
       () => resolveRecorded?.(),
       {
@@ -1982,20 +2002,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
           const engineCapture = createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
-            rustEngineSessions: mockLiveSessions(
-              loopback,
-              requests,
-              undefined,
-              async (request) => {
-                if (
-                  request.method === VERSIONED_METHOD.textWrite &&
-                  (request.params as { path?: unknown }).path === "flushed.md"
-                ) {
-                  markWriteBlocked?.();
-                  await writeGate;
-                }
-              },
-            ),
+            rustEngineSessions: sessions,
           });
           const stopCapture = engineCapture.stop.bind(engineCapture);
           engineCapture.stop = async () => {
@@ -2019,8 +2026,12 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     // must enter capture.stop and wait for that write before workspace.close.
     const stopping = activity.stopAll();
     await stopStarted;
+    // A close-before-drain mutation reaches closeWorkspace here, even though
+    // EngineWorkspaceSessions then waits for this active write run to finish.
+    expect(closeWorkspaceInvoked).toBe(false);
     writeGateState.release?.();
     await stopping;
+    expect(closeWorkspaceInvoked).toBe(true);
 
     const writeIndex = requests.findIndex(
       (request) =>
