@@ -137,23 +137,38 @@ interface CaptureOptions {
 function capture(root: string, options: CaptureOptions = {}) {
   const { store, secretStore, rustEngineSessions, ...rest } = options;
   const usesLegacyFixture = rustEngineSessions === undefined;
-  return createWorkspaceEngineCapture({
+  const ownedStore = !store && usesLegacyFixture
+    ? createVersionedTextStore(root)
+    : undefined;
+  const ownedSecretStore = !secretStore && usesLegacyFixture
+    ? createSecretFileStore(root)
+    : undefined;
+  const engineCapture = createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
     rustEngineSessions:
       rustEngineSessions ?? mockLiveSessions(new VersionedLoopbackEngine()),
-    ...(store
-      ? { store }
-      : usesLegacyFixture
-        ? { store: createVersionedTextStore(root) }
-        : {}),
-    ...(secretStore
-      ? { secretStore }
-      : usesLegacyFixture
-        ? { secretStore: createSecretFileStore(root) }
-        : {}),
+    ...((store ?? ownedStore) ? { store: store ?? ownedStore } : {}),
+    ...((secretStore ?? ownedSecretStore)
+      ? { secretStore: secretStore ?? ownedSecretStore }
+      : {}),
     ...rest,
   });
+  if (!ownedStore && !ownedSecretStore) return engineCapture;
+
+  const stopCapture = engineCapture.stop.bind(engineCapture);
+  let ownedStoresClosed = false;
+  engineCapture.stop = async () => {
+    try {
+      await stopCapture();
+    } finally {
+      if (ownedStoresClosed) return;
+      ownedStoresClosed = true;
+      await ownedStore?.close().catch(() => undefined);
+      await ownedSecretStore?.close().catch(() => undefined);
+    }
+  };
+  return engineCapture;
 }
 
 // Daemon-path capture: `rustEngineSessions` selects the Rust engine, and the

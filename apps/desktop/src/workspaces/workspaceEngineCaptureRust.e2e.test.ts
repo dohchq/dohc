@@ -142,7 +142,7 @@ it.skipIf(engine.missing)(
 );
 
 it.skipIf(engine.missing)(
-  "persists the final watcher capture across stopAll and a new daemon process",
+  "persists a settled final watcher capture across stopAll and a new daemon process",
   async () => {
     const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-stop-"));
     roots.push(root);
@@ -158,23 +158,39 @@ it.skipIf(engine.missing)(
     });
     await firstLifecycle.start();
     const firstSessions = new EngineWorkspaceSessions(firstLifecycle);
+    let openedCapture: ReturnType<typeof createWorkspaceEngineCapture> | null = null;
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: (opened) =>
-        createWorkspaceEngineCapture({
+      captureFor: (opened) => {
+        openedCapture = createWorkspaceEngineCapture({
           workspaceId: opened.workspaceId,
           rootPath: opened.rootPath,
           rustEngineSessions: firstSessions,
           daemonOwnsCapture: true,
-        }),
+        });
+        return openedCapture;
+      },
     });
 
     try {
       await activity.open(workspace);
+      const capture = openedCapture;
+      if (!capture) throw new Error("workspace capture did not open");
+
+      // Prove the daemon's startup baseline has finished before the write that
+      // stopAll must drain. Otherwise the baseline scan can race that write and
+      // make the shutdown assertion pass for the wrong reason.
+      await writeFile(join(root, "baseline-ready.md"), "ready\n", "utf8");
+      await waitForPathMoments(capture, "baseline-ready.md", 1);
+
       const finalText = "must survive shutdown\n";
       await writeFile(join(root, "final.md"), finalText, "utf8");
+      // The Rust watcher publishes a dirty generation after 500 ms of quiet.
+      // Do not call capture.flush here: stopAll owns the flush under test.
+      await delay(750);
 
       // stopAll must stop the watcher first, then drain and close capture. The
-      // write above deliberately gets no explicit capture flush before this.
+      // settled write above deliberately gets no explicit capture flush before
+      // this call.
       await activity.stopAll();
       await firstSessions.closeAll();
       await firstLifecycle.stop();
