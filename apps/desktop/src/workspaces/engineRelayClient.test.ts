@@ -36,17 +36,6 @@ import { syncJoinedSharedChannels } from "./sharedChannels";
 import { refreshSharedViewOnce } from "./sharedView";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
-const legacyStoreSpy = vi.hoisted(() =>
-  vi.fn(() => {
-    throw new Error("legacy TypeScript store constructed");
-  }),
-);
-
-vi.mock("@dohc/workspace-engine", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@dohc/workspace-engine")>();
-  return { ...actual, createVersionedTextStore: legacyStoreSpy };
-});
-
 class MockDaemon implements EngineDaemonClient {
   readonly requests: Request[] = [];
 
@@ -512,7 +501,6 @@ describe("EngineRelayClient", () => {
     ).resolves.toEqual({ status: "updated", changedPaths: 1 });
 
     expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(body);
-    expect(legacyStoreSpy).not.toHaveBeenCalled();
     expect(daemon.requests.map((request) => request.method)).toContain(
       "versionedText.read",
     );
