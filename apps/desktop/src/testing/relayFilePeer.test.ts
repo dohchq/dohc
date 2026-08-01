@@ -258,6 +258,28 @@ describe("RelayFilePeer", () => {
       "Relay request /sync/workspace-a/log timed out after 15000 ms.",
     );
   });
+
+  it("keeps the relay timeout context while reading a response body", async () => {
+    const timeout = new Error("body expired");
+    timeout.name = "AbortError";
+    const response = Response.json({ ok: true, missing: [] });
+    Object.defineProperty(response, "json", {
+      value: async () => {
+        throw timeout;
+      },
+    });
+    const peer = new RelayFilePeer({
+      baseUrl: "https://relay.test",
+      token: "peer-token",
+      workspaceId: "workspace-a",
+      originId: "peer-a",
+      fetch: async () => response,
+    });
+
+    await expect(peer.writeText("notes/a.md", "hello")).rejects.toThrow(
+      "Relay request /sync/workspace-a/blobs/have timed out after 15000 ms.",
+    );
+  });
 });
 
 const engine = requireEngineBinaryOrSkip();

@@ -139,6 +139,48 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       "# Roadmap\n\nThe galaxy-brain milestone lands next.\n",
     );
 
+    // Record the completed bootstrap pass, then queue a local change and wait
+    // for a later sync timestamp. This proves a push-capable normal pass has
+    // completed before the relay log is scanned.
+    const syncBeforeLocalChange = await page.evaluate(async (id) => {
+      const api = (window as unknown as {
+        dohcDesktop?: {
+          getSyncStatus(payload: { workspaceId: string }): Promise<{
+            lastSyncedAtMs: number | null;
+          }>;
+        };
+      }).dohcDesktop;
+      if (!api) throw new Error("desktop bridge is unavailable");
+      return await api.getSyncStatus({ workspaceId: id });
+    }, workspaceId);
+    expect(syncBeforeLocalChange.lastSyncedAtMs).not.toBeNull();
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/join-local-sync-probe.md", contents: "local sync probe\n" },
+    ]);
+    await page.waitForFunction(
+      async ({ id, previousSyncAtMs }) => {
+        const api = (window as unknown as {
+          dohcDesktop?: {
+            getSyncStatus(payload: { workspaceId: string }): Promise<{
+              lastSyncedAtMs: number | null;
+            }>;
+          };
+        }).dohcDesktop;
+        if (!api) return false;
+        const status = await api.getSyncStatus({ workspaceId: id });
+        return (
+          status.lastSyncedAtMs !== null &&
+          previousSyncAtMs !== null &&
+          status.lastSyncedAtMs > previousSyncAtMs
+        );
+      },
+      {
+        id: workspaceId,
+        previousSyncAtMs: syncBeforeLocalChange.lastSyncedAtMs,
+      },
+      { timeout: 30_000 },
+    );
+
     // The join is pull-first and seeds no starter files. The relay log must
     // therefore carry no `.context/me.md` operation from the joining app.
     //

@@ -19,6 +19,12 @@ interface RelayOperation {
   recordedAtMs: number;
 }
 
+interface RelayResponse {
+  response: Response;
+  requestPath: string;
+  timeoutSignal: AbortSignal;
+}
+
 export interface RelayFileHead {
   objectId: string;
   objectCreatedAtMs: number;
@@ -310,18 +316,69 @@ export class RelayFilePeer {
     await this.requireOk(response, `log append at origin sequence ${ops[0]!.originSeq}`);
   }
 
-  private async request(path: string, init: RequestInit): Promise<Response> {
+  private async request(path: string, init: RequestInit): Promise<RelayResponse> {
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${this.token}`);
     const requestPath = `/sync/${encodeURIComponent(this.workspaceId)}/${path}`;
+    const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    const response = await this.withTimeoutContext(
+      requestPath,
+      timeoutSignal,
+      async () =>
+        await this.fetchImpl(`${this.baseUrl}${requestPath}`, {
+          ...init,
+          headers,
+          signal: timeoutSignal,
+        }),
+    );
+    return { response, requestPath, timeoutSignal };
+  }
+
+  private async requireJson(
+    relayResponse: RelayResponse,
+    operation: string,
+  ): Promise<Record<string, unknown>> {
+    await this.requireOk(relayResponse, operation);
+    const value = await this.withTimeoutContext(
+      relayResponse.requestPath,
+      relayResponse.timeoutSignal,
+      async () => (await relayResponse.response.json()) as unknown,
+    );
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`Relay ${operation} returned an invalid JSON object.`);
+    }
+    return value as Record<string, unknown>;
+  }
+
+  private async requireOk(
+    relayResponse: RelayResponse,
+    operation: string,
+  ): Promise<void> {
+    const { response } = relayResponse;
+    if (response.ok) return;
+    const body = await this.withTimeoutContext(
+      relayResponse.requestPath,
+      relayResponse.timeoutSignal,
+      async () => await response.text(),
+    );
+    throw new Error(
+      `Relay ${operation} failed with status ${response.status}: ${body}`,
+    );
+  }
+
+  private async withTimeoutContext<T>(
+    requestPath: string,
+    timeoutSignal: AbortSignal,
+    operation: () => Promise<T>,
+  ): Promise<T> {
     try {
-      return await this.fetchImpl(`${this.baseUrl}${requestPath}`, {
-        ...init,
-        headers,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
+      return await operation();
     } catch (error) {
-      if (error instanceof Error && error.name === "TimeoutError") {
+      if (
+        timeoutSignal.aborted ||
+        (error instanceof Error &&
+          (error.name === "TimeoutError" || error.name === "AbortError"))
+      ) {
         throw new Error(
           `Relay request ${requestPath} timed out after ${REQUEST_TIMEOUT_MS} ms.`,
           { cause: error },
@@ -329,25 +386,6 @@ export class RelayFilePeer {
       }
       throw error;
     }
-  }
-
-  private async requireJson(
-    response: Response,
-    operation: string,
-  ): Promise<Record<string, unknown>> {
-    await this.requireOk(response, operation);
-    const value = (await response.json()) as unknown;
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      throw new Error(`Relay ${operation} returned an invalid JSON object.`);
-    }
-    return value as Record<string, unknown>;
-  }
-
-  private async requireOk(response: Response, operation: string): Promise<void> {
-    if (response.ok) return;
-    throw new Error(
-      `Relay ${operation} failed with status ${response.status}: ${await response.text()}`,
-    );
   }
 
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
