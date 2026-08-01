@@ -483,16 +483,21 @@ describe("workspaceEngineCapture batch capture", () => {
         daemonOwnsCapture: true,
         onCaptureOutcome: ({ ok }) => outcomes.push(ok),
       });
+      try {
+        engine.start();
+        await engine.flush();
+        degraded = true;
+        await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+        await engine.flush();
 
-      engine.start();
-      await engine.flush();
-      degraded = true;
-      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
-      await engine.flush();
-
-      expect(outcomes).toEqual([true, false]);
-      await engine.stop();
-      await liveStore.close();
+        expect(outcomes).toEqual([true, false]);
+      } finally {
+        try {
+          await engine.stop();
+        } finally {
+          await liveStore.close();
+        }
+      }
     } finally {
       vi.useRealTimers();
     }

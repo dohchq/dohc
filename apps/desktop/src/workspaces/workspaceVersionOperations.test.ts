@@ -122,6 +122,13 @@ function conflictState(
       metadataCorrelationId: null,
     };
   }
+  if (
+    typeof value.objectId !== "string" ||
+    typeof value.latestMomentId !== "string" ||
+    typeof value.text !== "string"
+  ) {
+    throw new Error("conflict snapshot fixture is missing required text fields");
+  }
   const snapshot = {
     ...value,
     metadataSummary: value.metadataSummary ?? null,
@@ -257,7 +264,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         const deletion = existing.current.snapshot === null
           ? null
           : await super.sendRequest({
-              id: request.id,
+              id: this.internalRequestId--,
               idempotencyKey: String(local.deleteMomentId),
               method: VERSIONED_METHOD.textDelete,
               workspace,
@@ -285,7 +292,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         ? existing.incoming.snapshot!.text
         : String(local.mergedText);
       const write = await super.sendRequest({
-        id: request.id,
+        id: this.internalRequestId--,
         method: VERSIONED_METHOD.textWrite,
         workspace,
         params: {
@@ -979,7 +986,7 @@ describe("mergeVersionIntoMain", () => {
     await engine.stop();
   });
 
-  it("keeps the desktop loopback adapter's conflict ledger workspace-scoped", async () => {
+  it("keeps the conflict-loopback fixture ledger workspace-scoped", async () => {
     const { loopback, engine, conflict } = await openDivergedTextConflict();
     const foreign = await loopback.sendRequest({
       id: -1000,

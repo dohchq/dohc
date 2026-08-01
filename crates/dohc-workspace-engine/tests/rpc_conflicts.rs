@@ -286,6 +286,127 @@ async fn conflict_list_and_resolve_are_isolated_by_workspace() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_refuses_a_stale_target_without_clobbering_the_newer_head() {
+    let (_scratch, transport, handle, workspace_id) = fixture("stale-target").await;
+    let path = "conflict-000.md";
+    let current = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "stale-object",
+                    "path": path,
+                    "text": "recorded current",
+                    "momentId": "stale-recorded",
+                    "origin": "api",
+                    "nowMs": 10,
+                    "requestId": "seed-stale-current",
+                }),
+            ),
+        )
+        .await
+        .expect("seed recorded current head");
+    let snapshot = &current.result["snapshot"];
+    let mut payload = conflict_payload(&workspace_id, 0, "incoming");
+    payload["conflict"]["current"]["snapshot"] = json!({
+        "workspaceId": snapshot["workspaceId"],
+        "versionId": snapshot["versionId"],
+        "objectId": snapshot["objectId"],
+        "path": snapshot["path"],
+        "text": snapshot["text"],
+        "blobSha256": snapshot["blobSha256"],
+        "updatedAtMs": snapshot["updatedAtMs"],
+        "latestMomentId": snapshot["latestMomentId"],
+        "metadataOrigin": snapshot["metadataOrigin"],
+    });
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(11, "conflicts.open", Some(handle.clone()), payload),
+        )
+        .await
+        .expect("open conflict against recorded head");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "stale-object",
+                    "path": path,
+                    "text": "newer current",
+                    "momentId": "stale-newer",
+                    "origin": "api",
+                    "nowMs": 20,
+                    "requestId": "advance-stale-current",
+                }),
+            ),
+        )
+        .await
+        .expect("advance target after conflict opens");
+
+    let stale = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-incoming",
+                    "objectId": "stale-resolution-object",
+                    "writeMomentId": "stale-resolution-write",
+                    "deleteMomentId": "stale-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 30,
+                }}),
+            ),
+        )
+        .await
+        .expect_err("a changed target must make conflict resolution stale");
+    assert_eq!(stale.code, ErrorCode::InvalidParams);
+    assert_eq!(stale.message, "conflict-stale-target");
+
+    let newer = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                14,
+                "versionedText.read",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await
+        .expect("read newer target after refused resolve");
+    assert_eq!(newer.result["text"], "newer current");
+
+    let conflicts = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                15,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("list open conflict after refused resolve");
+    assert_eq!(conflicts.result["conflicts"].as_array().unwrap().len(), 1);
+    assert_eq!(conflicts.result["conflicts"][0]["id"], "conflict-000");
+    assert_eq!(conflicts.result["conflicts"][0]["status"], "open");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_conflict_inventory_is_wire_safe_across_pages_and_session_survives() {
     // Fourteen rows serialize beyond the 8 MiB frame as one legacy array,
     // while each row remains under the hard single-row cap.
