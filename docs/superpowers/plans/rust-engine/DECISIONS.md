@@ -482,8 +482,8 @@ resolve it implicitly in implementation again.
 The "GitHub CI SKIPPED" entry above records that *native-suite evidence moves to
 R02's local runner scripts*. That runner is
 `tools/rust-engine-program/run-native-suite.mjs`, and what it actually runs is
-typecheck and test for the **legacy TypeScript engine package**. R16 deletes
-that package, so the runner's subject ceases to
+`pnpm --filter @dohc/workspace-engine typecheck|test` — the **legacy TypeScript
+engine's** suites. R16 deletes that package, so the runner's subject ceases to
 exist.
 
 **Decision (Ice, 2026-07-29): retire it, do not repoint it.** Repointing it at
@@ -517,7 +517,7 @@ Consequences, all owned by R16:
 
 - delete the two filter steps in `run-native-suite.mjs` (and the runner itself if
   nothing else remains in it)
-- delete the two legacy TypeScript engine package test/typecheck steps in
+- delete the two `pnpm --filter @dohc/workspace-engine test|typecheck` steps in
   `.github/workflows/desktop-release.yml`
 - rewrite `tools/rust-engine-program/README.md`, which currently calls this "the
   native evidence GATE0/TS-NATIVE-CI depends on" and a "mandatory pre-release
