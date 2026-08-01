@@ -100,13 +100,27 @@ function stores(root: string): {
 // at rest. Rust sessions are still required, but these stores take precedence.
 function capture(root: string, injected?: ReturnType<typeof stores>) {
   const selected = injected ?? stores(root);
-  return createWorkspaceEngineCapture({
+  const engineCapture = createWorkspaceEngineCapture({
     workspaceId: "engine-secret-test",
     rootPath: root,
     store: selected.store,
     secretStore: selected.secretStore,
     rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
   });
+  const stopCapture = engineCapture.stop.bind(engineCapture);
+  let storesClosed = false;
+  engineCapture.stop = async () => {
+    try {
+      await stopCapture();
+    } finally {
+      if (!storesClosed) {
+        storesClosed = true;
+        await selected.store.close().catch(() => undefined);
+        await selected.secretStore.close().catch(() => undefined);
+      }
+    }
+  };
+  return engineCapture;
 }
 
 // The DAEMON path: `rustEngineSessions` is what selects the Rust engine, and

@@ -829,6 +829,9 @@ export function createWorkspaceEngineCapture(
 
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
+    if (!options.rustEngineSessions) {
+      throw new Error("Rust engine workspace sessions are unavailable.");
+    }
     liveStores ??= createCaptureLiveStores(
       { workspaceId, rootPath },
       options.rustEngineSessions,
@@ -3592,8 +3595,8 @@ export function createWorkspaceEngineCapture(
         // the daemon process exits immediately afterward and releases every
         // workspace/session lease. Interactive lifecycle operations never use
         // this force-drop path; they must converge through closeEntry first.
-        // Release the SQLite handles for the stores THIS capture created, so
-        // repeated workspace switches never accumulate handles/WAL locks. An
+        // Release every store this capture owns, so repeated workspace
+        // switches never accumulate session leases or SQLite handles. An
         // injected store belongs to its creator and is left open. A degraded
         // daemon flush must not strand either close.
         if (!options.store && store) {

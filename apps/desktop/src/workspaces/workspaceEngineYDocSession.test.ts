@@ -20,11 +20,12 @@ import {
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 
-// WS-G2-C-2: the capture's engine Y.Doc session wiring — store sharing (one
-// store / one write lane, no second engine.db connection) + watcher
-// coexistence (a live ydoc path's settle is journaled ONLY as ydoc.update, never
-// double-captured as a moment.append that would collide (P0D) on a shared
-// workspace). A real store + real Yjs, no Electron.
+// WS-G2-C-2: the capture's legacy-fixture Y.Doc session wiring and watcher
+// coexistence. A live Y.Doc path's settle is journaled only as ydoc.update,
+// never double-captured as a moment.append that would collide (P0D) on a
+// shared workspace. A real store + real Yjs, no Electron. Production uses the
+// Rust provider directly; this suite retains focused coverage of the retired
+// provider while its remaining test callers migrate.
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
@@ -169,10 +170,8 @@ function legacyProviderOptions(providerStore: VersionedTextStore) {
 }
 
 function makeCapture() {
-  // Inject THIS test's store: the capture must reuse this exact instance for the
-  // ydoc session (single-writer safety). A second store on the same engine.db
-  // would be a second write connection and node:sqlite would deadlock — if the
-  // capture created its own store, the settle below would hang, not pass.
+  // The capture and retired provider fixture must inspect the same persisted
+  // state. Production's Rust Y.Doc provider does not use VersionedTextStore.
   return createWorkspaceEngineCapture({
     workspaceId: WS,
     rootPath: root,

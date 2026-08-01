@@ -142,7 +142,7 @@ it.skipIf(engine.missing)(
 );
 
 it.skipIf(engine.missing)(
-  "persists a settled final watcher capture across stopAll and a new daemon process",
+  "preserves a settled watcher capture across stopAll and a new daemon process",
   async () => {
     const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-stop-"));
     roots.push(root);
@@ -158,22 +158,25 @@ it.skipIf(engine.missing)(
     });
     await firstLifecycle.start();
     const firstSessions = new EngineWorkspaceSessions(firstLifecycle);
-    let openedCapture: ReturnType<typeof createWorkspaceEngineCapture> | null = null;
+    const openedState: {
+      capture: ReturnType<typeof createWorkspaceEngineCapture> | null;
+    } = { capture: null };
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: (opened) => {
-        openedCapture = createWorkspaceEngineCapture({
-          workspaceId: opened.workspaceId,
-          rootPath: opened.rootPath,
+      captureFor: (openedWorkspace) => {
+        const capture = createWorkspaceEngineCapture({
+          workspaceId: openedWorkspace.workspaceId,
+          rootPath: openedWorkspace.rootPath,
           rustEngineSessions: firstSessions,
           daemonOwnsCapture: true,
         });
-        return openedCapture;
+        openedState.capture = capture;
+        return capture;
       },
     });
 
     try {
       await activity.open(workspace);
-      const capture = openedCapture;
+      const capture = openedState.capture;
       if (!capture) throw new Error("workspace capture did not open");
 
       // Prove the daemon's startup baseline has finished before the write that
@@ -184,13 +187,12 @@ it.skipIf(engine.missing)(
 
       const finalText = "must survive shutdown\n";
       await writeFile(join(root, "final.md"), finalText, "utf8");
-      // The Rust watcher publishes a dirty generation after 500 ms of quiet.
-      // Do not call capture.flush here: stopAll owns the flush under test.
-      await delay(750);
+      // Prove the Rust watcher captured the settled write before shutdown. The
+      // request-order unit test covers stopAll's flush-before-close contract;
+      // this real-daemon test covers durable preservation across process exit.
+      await waitForPathMoments(capture, "final.md", 1);
 
-      // stopAll must stop the watcher first, then drain and close capture. The
-      // settled write above deliberately gets no explicit capture flush before
-      // this call.
+      // stopAll must not lose an already-settled durable capture.
       await activity.stopAll();
       await firstSessions.closeAll();
       await firstLifecycle.stop();

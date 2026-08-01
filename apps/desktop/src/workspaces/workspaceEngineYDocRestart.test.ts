@@ -5,16 +5,14 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   DaemonRefusalError,
+  type EngineYdocProviderSession as EngineYdocProviderSessionRust,
+  type EngineYdocProviderSessionOptions as EngineYdocProviderSessionRustOptions,
   VersionedLoopbackEngine,
   YdocLoopbackEngine,
   type EngineTransport,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import type {
-  EngineYdocProviderSessionRust,
-  EngineYdocProviderSessionRustOptions,
-} from "../collab/ydocEngineProviderSessionRust";
 import {
   EngineWorkspaceSessions,
   type EngineDaemonClient,

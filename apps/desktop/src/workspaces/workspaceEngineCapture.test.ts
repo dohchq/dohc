@@ -34,6 +34,8 @@ import {
 } from "./workspaceEngineCapture";
 import { createChangeSetStore } from "@dohc/workspace-engine";
 import {
+  type EngineYdocProviderSession as EngineYdocProviderSessionRust,
+  type EngineYdocProviderSessionOptions as EngineYdocProviderSessionRustOptions,
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
   type JsonValue,
@@ -42,10 +44,6 @@ import {
 } from "@dohc/workspace-engine-client";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import type {
-  EngineYdocProviderSessionRust,
-  EngineYdocProviderSessionRustOptions,
-} from "../collab/ydocEngineProviderSessionRust";
 import * as Y from "yjs";
 
 // node:sqlite via createRequire, matching the engine store: vitest's vite
