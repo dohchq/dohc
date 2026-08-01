@@ -5,7 +5,14 @@ import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { type VersionedTextStore } from "@dohc/workspace-contracts/engine";
+import {
+  type SecretFileStore,
+  type VersionedTextStore,
+} from "@dohc/workspace-contracts/engine";
+import {
+  createSecretFileStore,
+  createVersionedTextStore,
+} from "@dohc/workspace-engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import {
   VERSIONED_METHOD,
@@ -164,14 +171,44 @@ function capture(root: string, options: {
   onError?: (context: string, error: unknown) => void;
   diskWriter?: EngineDiskWriter;
   store?: VersionedTextStore;
+  secretStore?: SecretFileStore;
   rustEngineSessions?: EngineWorkspaceSessions;
-  useRustEngine?: boolean;
 } = {}): WorkspaceEngineCapture {
-  return createWorkspaceEngineCapture({
+  const { rustEngineSessions, store, secretStore, ...rest } = options;
+  const usesLegacyFixture = rustEngineSessions === undefined;
+  const ownedStore = !store && usesLegacyFixture
+    ? createVersionedTextStore(root)
+    : undefined;
+  const ownedSecretStore = !secretStore && usesLegacyFixture
+    ? createSecretFileStore(root)
+    : undefined;
+  const engineCapture = createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
-    ...options,
+    rustEngineSessions:
+      rustEngineSessions ?? mockLiveSessions(new VersionedLoopbackEngine()),
+    ...((store ?? ownedStore) ? { store: store ?? ownedStore } : {}),
+    ...((secretStore ?? ownedSecretStore)
+      ? { secretStore: secretStore ?? ownedSecretStore }
+      : {}),
+    ...rest,
   });
+  if (!ownedStore && !ownedSecretStore) return engineCapture;
+
+  const stopCapture = engineCapture.stop.bind(engineCapture);
+  let ownedStoresClosed = false;
+  engineCapture.stop = async () => {
+    try {
+      await stopCapture();
+    } finally {
+      if (!ownedStoresClosed) {
+        ownedStoresClosed = true;
+        await ownedStore?.close().catch(() => undefined);
+        await ownedSecretStore?.close().catch(() => undefined);
+      }
+    }
+  };
+  return engineCapture;
 }
 
 // The daemon-path capture. `requests` collects every wire request when
@@ -342,8 +379,8 @@ describe("switchVersion", () => {
     //
     // The counted store wraps the DAEMON store, not a legacy one. Injecting a
     // store used to force the legacy engine, which made this counter and the
-    // daemon mutually exclusive; `useRustEngine` states the choice instead, so
-    // the read being counted is now a real `versionedText.read` over the wire.
+    // daemon mutually exclusive. Required Rust sessions now fix the engine
+    // choice, so this read is a real `versionedText.read` over the wire.
     const loopback = new VersionedLoopbackEngine();
     const sessions = mockLiveSessions(loopback);
     const store = createCaptureLiveStores(
@@ -361,7 +398,6 @@ describe("switchVersion", () => {
     const engine = capture(root, {
       store: countingStore,
       rustEngineSessions: sessions,
-      useRustEngine: true,
     });
     engine.start();
     await engine.flush();

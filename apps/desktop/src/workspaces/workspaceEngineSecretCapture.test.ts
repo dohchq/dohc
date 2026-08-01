@@ -96,16 +96,32 @@ function stores(root: string): {
   };
 }
 
-// The LEGACY in-process engine (no `rustEngineSessions` ⇒ `useRustEngine` is
-// false), on the real AES-256-GCM secret store. Only the suites below that
-// prove something about bytes at rest still use it — see the comment on
-// "secret encryption at rest".
+// Keep the real AES-256-GCM stores injectable for the suites that inspect bytes
+// at rest. The colliding clock is the suite default, not only the pagination
+// case. Rust sessions are still required, but these stores take precedence.
 function capture(root: string, injected?: ReturnType<typeof stores>) {
-  return createWorkspaceEngineCapture({
+  const selected = injected ?? stores(root);
+  const engineCapture = createWorkspaceEngineCapture({
     workspaceId: "engine-secret-test",
     rootPath: root,
-    ...(injected ? { store: injected.store, secretStore: injected.secretStore } : {}),
+    store: selected.store,
+    secretStore: selected.secretStore,
+    rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
   });
+  const stopCapture = engineCapture.stop.bind(engineCapture);
+  let storesClosed = false;
+  engineCapture.stop = async () => {
+    try {
+      await stopCapture();
+    } finally {
+      if (!storesClosed) {
+        storesClosed = true;
+        await selected.store.close().catch(() => undefined);
+        await selected.secretStore.close().catch(() => undefined);
+      }
+    }
+  };
+  return engineCapture;
 }
 
 // The DAEMON path: `rustEngineSessions` is what selects the Rust engine, and

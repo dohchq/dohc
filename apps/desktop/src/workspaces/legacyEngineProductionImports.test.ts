@@ -37,18 +37,16 @@ const LEGACY_PACKAGE = "@dohc/workspace-engine";
 // Production files with a RUNTIME import of the legacy engine. Shrink this list
 // as the migration proceeds; never grow it.
 //
-// Both entries are blocked on the same thing (#391): `workspaceEngineCapture`
-// imports the two store factories used by the daemon-unavailable fallback, and
-// `ydocEngineProviderSession` is the legacy provider session that fallback
-// selects. Its Rust replacement already exists.
+// The remaining entry is the legacy provider's executable test subject.
+// Production no longer imports it. A separate coverage rehome can move or
+// delete the provider after its focused tests have a new owner.
 //
 // No other production file names this package at all: #432 repointed the eleven
 // type-only importers at @dohc/workspace-contracts, where those types are
 // actually declared. The parser tests below still pin the type-only handling,
-// because the two entries above import types alongside their values.
+// because the remaining entry imports types alongside its values.
 const ALLOWED = [
   "apps/desktop/src/collab/ydocEngineProviderSession.ts",
-  "apps/desktop/src/workspaces/workspaceEngineCapture.ts",
 ] as const;
 
 const SCAN_ROOTS = ["apps", "packages", "services"];
@@ -469,13 +467,13 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     expect(importers).toEqual([...ALLOWED].sort());
   });
 
-  it("pins the allowlist size at exactly two", () => {
+  it("pins the allowlist size at exactly one", () => {
     // Set equality alone passes if someone adds an importer AND its path in one
     // change, so this is a second, louder tripwire. EXACT rather than an upper
     // bound: a ceiling that only caps drifts loose as the list shrinks, and
     // shrinking is the whole point — removing an importer should have to edit
     // this number, which is how the win gets recorded instead of assumed.
-    expect(ALLOWED.length).toBe(2);
+    expect(ALLOWED.length).toBe(1);
   });
 
   it("still detects a runtime import that hides among type-only specifiers", () => {
