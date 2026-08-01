@@ -1845,6 +1845,23 @@ describe("loopback contract enforcement", () => {
     ).toEqual([]);
   });
 
+  it("rejects invalid compare paths before missing versions", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await expect(
+      call(engine, 0, VERSIONED_METHOD.versionsCompare, {
+        sourceVersionId: "missing-source",
+        targetVersionId: "missing-target",
+        path: "../escape.md",
+      }),
+    ).rejects.toThrow("invalid-path");
+    expect(
+      decodeVersionsListResult(
+        await call(engine, 1, VERSIONED_METHOD.versionsList, {}),
+      ).versions,
+    ).toEqual([]);
+    // MUTATION: resolve either version before the structural path floor -> fails.
+  });
+
   it("returns null when a binary read points at a text head", async () => {
     const engine = new VersionedLoopbackEngine();
     engine.seedTextFile({ workspace: WORKSPACE, path: "text.md", text: "text" });
@@ -1987,6 +2004,20 @@ describe("loopback contract enforcement", () => {
       }),
     );
     expect(secret.moments).toHaveLength(1);
+  });
+
+  it("refuses moments.list for an unknown version", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      call(engine, 1, VERSIONED_METHOD.momentsList, {
+        versionId: "missing",
+      }),
+    ).rejects.toThrow("version-not-found");
+    // MUTATION: filter the empty history without resolving versionId -> succeeds.
   });
 
   it("reports invalid-version for loopback secret apply", async () => {
@@ -2393,6 +2424,46 @@ describe("loopback contract enforcement", () => {
     ).toBe("occupied");
     // MUTATION: restore Map.set overwrite semantics -> the refusal and source preservation fail.
   });
+
+  it.each(["folder/source.md", "folder/./source.md"])(
+    "refuses a rename to the same normalized path (%s) before replay state",
+    async (toPath) => {
+      const engine = new VersionedLoopbackEngine();
+      engine.seedTextFile({
+        workspace: WORKSPACE,
+        path: "folder/source.md",
+        text: "source",
+      });
+      const requestId = `self-rename-${toPath}`;
+
+      await expect(
+        call(engine, 1, VERSIONED_METHOD.textRename, {
+          versionId: "main",
+          fromPath: "folder/source.md",
+          toPath,
+          origin: "api",
+          requestId,
+        }),
+      ).rejects.toThrow("invalid-path");
+
+      await call(engine, 2, VERSIONED_METHOD.textRename, {
+        versionId: "main",
+        fromPath: "folder/source.md",
+        toPath: "folder/renamed.md",
+        origin: "api",
+        requestId,
+      });
+      expect(
+        decodeVersionedTextReadResult(
+          await call(engine, 3, VERSIONED_METHOD.textRead, {
+            versionId: "main",
+            path: "folder/renamed.md",
+          }),
+        )?.text,
+      ).toBe("source");
+      // MUTATION: accept the self-rename or record replay state before refusing -> fails.
+    },
+  );
 
   it("refuses rollback of a named version fork point", async () => {
     const engine = new VersionedLoopbackEngine();

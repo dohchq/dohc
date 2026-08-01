@@ -1579,6 +1579,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const fromPath = normalizedEnginePath(parsed.fromPath, "addressable");
     const toAddressablePath = normalizedEnginePath(parsed.toPath, "addressable");
     const toPath = normalizedEnginePath(toAddressablePath, "storable");
+    if (fromPath === toPath) throw new Error("invalid-path");
     const version = this.version(state, versionId);
     const momentId = requestId !== undefined
       ? this.generatedRequestId("moment", requestId, parsed.toPath)
@@ -1974,9 +1975,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     workspace: string,
     params: JsonObject,
   ): JsonValue {
+    const path = requiredString(params, "path", "compare");
+    validateRustPathFloor(path);
     const source = this.version(state, requiredString(params, "sourceVersionId", "compare"));
     const target = this.version(state, requiredString(params, "targetVersionId", "compare"));
-    const path = requiredString(params, "path", "compare");
     return this.comparisonRecord(workspace, path, target, source);
   }
 
@@ -2484,6 +2486,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
       throw new Error("invalid-input");
     }
     const limit = Math.min(500, requestedLimit ?? 200);
+    if (versionId !== undefined && !state.versions.has(versionId)) {
+      throw new Error("version-not-found");
+    }
     const all = [...state.moments.values()]
       .map((moment) => moment.wire)
       .filter((moment) => versionId === undefined || moment.versionId === versionId)
