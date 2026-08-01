@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@dohc/security-contract": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
+    "@dohc/workspace-core": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
     "yjs": "^13.6.30"
   },

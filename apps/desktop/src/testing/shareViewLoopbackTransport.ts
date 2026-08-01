@@ -282,7 +282,6 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
     const snapshot = async (path: string) =>
       asRecord(
         await this.loopbackRequest(workspaceId, VERSIONED_METHOD.textRead, {
-          workspaceId,
           versionId,
           path,
         }),
