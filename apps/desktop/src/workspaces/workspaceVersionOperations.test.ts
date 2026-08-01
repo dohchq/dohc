@@ -226,7 +226,6 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         method: VERSIONED_METHOD.textRead,
         workspace,
         params: {
-          workspaceId: workspace,
           versionId: existing.targetVersionId,
           path: existing.path,
         },
@@ -271,7 +270,6 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
               method: VERSIONED_METHOD.textDelete,
               workspace,
               params: {
-                workspaceId: workspace,
                 versionId: existing.targetVersionId,
                 path: existing.path,
                 origin: String(local.metadataOrigin),
@@ -298,7 +296,6 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         method: VERSIONED_METHOD.textWrite,
         workspace,
         params: {
-          workspaceId: workspace,
           versionId: existing.targetVersionId,
           path: existing.path,
           text,
