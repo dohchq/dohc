@@ -12,8 +12,7 @@
   running.
 - Don't run build commands unless the task or an applicable repository gate
   requires them.
-- Focus on checking commands like `pnpm typecheck`, `pnpm test`, and
-  `pnpm lint`.
+- Focus on checking commands like `pnpm typecheck` and `pnpm test`.
 
 ## Package Managers
 

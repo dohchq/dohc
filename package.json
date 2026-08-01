@@ -32,7 +32,6 @@
     "test:sites:e2e": "pnpm --filter @dohc/desktop run test:sites:e2e",
     "smoke:settings:desktop": "pnpm --filter @dohc/desktop run smoke:settings",
     "sync:local": "pnpm --filter @dohc/workspace-fs sync",
-    "lint": "pnpm -r --if-present lint",
     "check:self-host": "node scripts/check-self-host.mjs",
     "check:debt": "node scripts/check-tech-debt.mjs",
     "check:brand": "node scripts/check-brand.mjs"
