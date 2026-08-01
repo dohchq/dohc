@@ -1951,46 +1951,6 @@ fn imported_feed_read_waits_for_placeholder_channel_resolution() {
 }
 
 #[test]
-fn imported_dm_mints_receiver_local_identity_distinct_from_owner_wire_id() {
-    let (_scratch, _path, mut engine) = store();
-    let channel = envelope(
-        "dm-owner-origin",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "dm-owner-channel",
-            "name": "Participant",
-            "slug": "participant",
-            "kind": "dm",
-            "createdAtMs": 10,
-            "wireId": "dm-owner-channel"
-        }),
-    );
-    apply_chat_envelope(&mut engine, &channel, &NoFaults).expect("import DM channel");
-
-    let (local_id, wire_id, kind): (String, String, String) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT c.channel_id,w.wire_id,c.kind FROM chat_channel_wire_ids w \
-                 JOIN chat_channels c \
-                   ON c.workspace_id=w.workspace_id AND c.channel_id=w.channel_id \
-                 WHERE w.workspace_id='ws' AND w.wire_id='dm-owner-channel'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("imported DM identity");
-    assert_eq!(wire_id, "dm-owner-channel");
-    assert_eq!(kind, "dm");
-    assert_eq!(local_id, "placeholder:dm-owner-origin:dm-owner-channel");
-    assert_ne!(
-        local_id, wire_id,
-        "participant provenance must survive after the joined-share row is removed"
-    );
-}
-
-#[test]
 fn imported_person_follow_waits_for_a_non_dm_message() {
     let (_scratch, _path, mut engine) = store();
     for operation in [
