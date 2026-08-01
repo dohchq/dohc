@@ -894,6 +894,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonClone(dispatch);
   }
 
+  readDispatch(workspace: string, triggerMessageId: string): ChatDispatch | undefined {
+    const dispatch = this.workspaces.get(workspace)?.dispatches.get(triggerMessageId);
+    return dispatch === undefined ? undefined : jsonClone(dispatch);
+  }
+
   seedRun(input: SeedRunInput): ChatRun {
     const state = this.workspace(input.workspaceId);
     if (state.runs.has(input.runId)) throw new Error("target-exists");
