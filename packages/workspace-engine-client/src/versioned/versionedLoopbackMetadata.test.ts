@@ -1608,6 +1608,39 @@ describe("loopback moment metadata", () => {
     expect((renamed.after as { path?: unknown }).path).toBe("notes/final.md");
   });
 
+  it("normalizes accepted aliases for text and binary reads", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const textPath = "notes/./read.md";
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: textPath,
+      text: "hello",
+      origin: "local-file",
+    });
+    await expect(
+      send(engine, VERSIONED_METHOD.textRead, {
+        versionId: "main",
+        path: textPath,
+      }),
+    ).resolves.toMatchObject({ path: "notes/read.md", text: "hello" });
+
+    const binaryPath = "images//icon.bin";
+    await send(engine, VERSIONED_METHOD.binaryWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: binaryPath,
+      bytes: [1, 2, 3],
+      origin: "local-file",
+    });
+    await expect(
+      send(engine, VERSIONED_METHOD.binaryRead, {
+        versionId: "main",
+        path: binaryPath,
+      }),
+    ).resolves.toMatchObject({ bytesBase64: "AQID", byteLength: 3 });
+  });
+
   it("derives request-scoped ids from raw paths while storing canonical paths", async () => {
     const engine = new VersionedLoopbackEngine();
     const rawWritePath = "notes/./draft.md";

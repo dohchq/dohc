@@ -1323,7 +1323,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private textRead(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
     const version = this.version(state, requiredString(params, "versionId", "text read"));
-    const path = requiredString(params, "path", "text read");
+    const path = normalizedEnginePath(
+      requiredString(params, "path", "text read"),
+      "addressable",
+    );
     const file = version.files.get(path);
     if (!file) return null;
 
@@ -1337,12 +1340,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
 
     const text = file.text ?? "";
-    if (utf8Length(text) > INBAND_LIMIT_BYTES) {
+    if (utf8Length(text) > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
       return {
         ...metadata,
         text: null,
         blobSha256: sha256(text),
-        inbandLimitBytes: INBAND_LIMIT_BYTES,
+        inbandLimitBytes: MAX_DESKTOP_CAPTURE_TEXT_BYTES,
       };
     }
     return { ...metadata, text, blobSha256: sha256(text) };
@@ -1814,7 +1817,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private binaryRead(state: WorkspaceState, params: JsonObject): JsonValue {
     const version = this.version(state, requiredString(params, "versionId", "binary read"));
-    const path = requiredString(params, "path", "binary read");
+    const path = normalizedEnginePath(
+      requiredString(params, "path", "binary read"),
+      "addressable",
+    );
     const file = version.files.get(path);
     if (!file) return null;
     if (file.contentKind !== "binary" || !file.bytes || !file.binarySha) {
@@ -2284,9 +2290,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const text = version.secrets.get(path);
     if (text === undefined) return null;
     const byteLength = utf8Length(text);
-    return byteLength <= INBAND_LIMIT_BYTES
+    return byteLength <= MAX_SECRET_FILE_BYTES
       ? { text }
-      : { text: null, byteLength, inbandLimitBytes: INBAND_LIMIT_BYTES };
+      : { text: null, byteLength, inbandLimitBytes: MAX_SECRET_FILE_BYTES };
   }
 
   private secretDelete(

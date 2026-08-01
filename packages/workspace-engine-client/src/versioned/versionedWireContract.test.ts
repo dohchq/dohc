@@ -403,7 +403,7 @@ describe("versioned typed loopback", () => {
     });
   });
 
-  it("round-trips versions.list, secrets.list, and secrets.materialize including over-cap metadata", async () => {
+  it("round-trips versions.list, secrets.list, and secrets.materialize at the secret cap", async () => {
     const engine = new VersionedLoopbackEngine();
     engine.seedTextFile({
       workspace: WORKSPACE,
@@ -465,11 +465,11 @@ describe("versioned typed loopback", () => {
       origin: "api",
       momentId: "small-secret",
     });
-    const overCapText = "x".repeat(48 * 1024 + 1);
+    const largeInbandText = "x".repeat(48 * 1024 + 1);
     engine.seedSecretFile({
       workspace: WORKSPACE,
       path: ".env.large",
-      text: overCapText,
+      text: largeInbandText,
       momentId: "large-secret",
     });
 
@@ -519,14 +519,30 @@ describe("versioned typed loopback", () => {
           path: ".env.large",
         }),
       ),
-    ).toEqual({
-      text: null,
-      byteLength: 48 * 1024 + 1,
-      inbandLimitBytes: 48 * 1024,
+    ).toEqual({ text: largeInbandText });
+
+    const overCapText = "x".repeat(1024 * 1024 + 1);
+    engine.seedSecretFile({
+      workspace: WORKSPACE,
+      path: ".env.over-cap",
+      text: overCapText,
+      momentId: "over-cap-secret",
     });
     expect(
       decodeSecretsMaterializeResult(
         await call(engine, 9, VERSIONED_METHOD.secretsMaterialize, {
+          versionId: "main",
+          path: ".env.over-cap",
+        }),
+      ),
+    ).toEqual({
+      text: null,
+      byteLength: 1024 * 1024 + 1,
+      inbandLimitBytes: 1024 * 1024,
+    });
+    expect(
+      decodeSecretsMaterializeResult(
+        await call(engine, 10, VERSIONED_METHOD.secretsMaterialize, {
           versionId: "main",
           path: ".env.absent",
         }),
@@ -2032,12 +2048,27 @@ describe("loopback contract enforcement", () => {
     });
   });
 
-  it("returns metadata-only text readBlob for a referenced over-cap body", async () => {
+  it("uses the desktop text cap for reads and the transport cap for readBlob", async () => {
     const engine = new VersionedLoopbackEngine();
-    const text = "x".repeat(48 * 1024 + 1);
+    const inbandText = "x".repeat(48 * 1024 + 1);
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      path: "large-inband.md",
+      text: inbandText,
+    });
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 1, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "large-inband.md",
+        }),
+      ),
+    ).toMatchObject({ text: inbandText, byteLength: inbandText.length });
+
+    const text = "x".repeat(128 * 1024 + 1);
     engine.seedTextFile({ workspace: WORKSPACE, path: "large.md", text });
     const read = decodeVersionedTextReadResult(
-      await call(engine, 1, VERSIONED_METHOD.textRead, {
+      await call(engine, 2, VERSIONED_METHOD.textRead, {
         versionId: "main",
         path: "large.md",
       }),
@@ -2045,7 +2076,7 @@ describe("loopback contract enforcement", () => {
     expect(read).toMatchObject({
       text: null,
       byteLength: text.length,
-      inbandLimitBytes: 48 * 1024,
+      inbandLimitBytes: 128 * 1024,
     });
     const blobParams: VersionedTextReadBlobParams = {
       workspaceId: WORKSPACE,
@@ -2053,7 +2084,7 @@ describe("loopback contract enforcement", () => {
     };
     expect(
       decodeVersionedTextReadBlobResult(
-        await call(engine, 2, VERSIONED_METHOD.textReadBlob, blobParams),
+        await call(engine, 3, VERSIONED_METHOD.textReadBlob, blobParams),
       ),
     ).toEqual({
       bytesBase64: null,
