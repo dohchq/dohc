@@ -2934,12 +2934,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const rows = [...state.runs.values()]
       .filter((run) => {
         const dispatch = state.dispatches.get(run.triggerMessageId);
+        const recoverableFailure =
+          (run.exitCode === APP_QUIT_EXIT_CODE && run.failureReason === "app-quit") ||
+          run.failureReason === "app restart during run";
         return (
           run.workspaceId === workspace &&
           run.endedAtMs !== undefined &&
-          run.exitCode === APP_QUIT_EXIT_CODE &&
-          run.failureReason === "app-quit" &&
-          !run.failureNotePosted &&
+          recoverableFailure &&
           dispatch?.state === "failed" &&
           dispatch.runId === run.runId
         );
