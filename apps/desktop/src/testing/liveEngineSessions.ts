@@ -41,11 +41,15 @@ export function mockLiveSessions(
     running: true,
     degraded: false,
   }),
+  beforeRequest?: (request: Request) => void | Promise<void>,
 ): EngineWorkspaceSessions {
   const client = {
     close: () => undefined,
     onEvent: () => () => undefined,
     async sendRequest(request: Request): Promise<Response> {
+      if (beforeRequest) {
+        await beforeRequest(request);
+      }
       requests?.push(request);
       const params = request.params as Record<string, JsonValue | undefined>;
       if (request.method === "workspace.open") {

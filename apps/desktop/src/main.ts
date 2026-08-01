@@ -255,7 +255,6 @@ import {
   type PresenceScope as RelayPresenceScope,
 } from "./renderer/collab/presenceChannel";
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
-import type { EngineYDocProviderSession } from "./collab/ydocEngineProviderSession";
 import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks } from "./performance/launchMarks";
 import {
@@ -401,7 +400,10 @@ import {
   versionConflictForIpc,
 } from "./ipc/engineHistoryIpc";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
-import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
+import type {
+  WorkspaceEngineCapture,
+  WorkspaceEngineYDocProviderSession,
+} from "./workspaces/workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
   createRustEngineDaemon,
@@ -2454,7 +2456,7 @@ const searchCleanupHooked = new WeakSet<Electron.WebContents>();
 // the single-canonical reservation for its object; closing it (renderer close,
 // window gone, app quit) releases the reservation so the object can reopen.
 interface EngineYDocSessionEntry {
-  session: EngineYDocProviderSession;
+  session: WorkspaceEngineYDocProviderSession;
   senderId: number;
   workspaceId: string;
   // The renderer that owns this session, and the generation it was opened
@@ -7392,7 +7394,7 @@ function registerIpcHandlers(
     }
     const finishPendingOpen = beginPendingEngineYDocOpen(sender.id);
     try {
-      let session: EngineYDocProviderSession;
+      let session: WorkspaceEngineYDocProviderSession;
       try {
         session = await capture.openYDocSession({
           path: input.path,

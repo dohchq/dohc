@@ -96,24 +96,39 @@ function stores(root: string): {
   };
 }
 
-// The LEGACY in-process engine (no `rustEngineSessions` ⇒ `useRustEngine` is
-// false), on the real AES-256-GCM secret store. Only the suites below that
-// prove something about bytes at rest still use it — see the comment on
-// "secret encryption at rest".
+// Keep the real AES-256-GCM stores injectable for the suites that inspect bytes
+// at rest. The colliding clock is the suite default, not only the pagination
+// case. Rust sessions are still required, but these stores take precedence.
 function capture(root: string, injected?: ReturnType<typeof stores>) {
-  return createWorkspaceEngineCapture({
+  const selected = injected ?? stores(root);
+  const engineCapture = createWorkspaceEngineCapture({
     workspaceId: "engine-secret-test",
     rootPath: root,
-    ...(injected ? { store: injected.store, secretStore: injected.secretStore } : {}),
+    store: selected.store,
+    secretStore: selected.secretStore,
+    rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
   });
+  const stopCapture = engineCapture.stop.bind(engineCapture);
+  let storesClosed = false;
+  engineCapture.stop = async () => {
+    try {
+      await stopCapture();
+    } finally {
+      if (!storesClosed) {
+        storesClosed = true;
+        await selected.store.close().catch(() => undefined);
+        await selected.secretStore.close().catch(() => undefined);
+      }
+    }
+  };
+  return engineCapture;
 }
 
-// The DAEMON path: `rustEngineSessions` is what selects the Rust engine, and
-// the loopback behind it holds real secret/version/moment state, so what these
-// tests read back is recorded state and not a hand-written responder. Passing
-// `requests` is what lets a test PROVE the path it took instead of inferring
-// it from a result the legacy engine would also produce.
-function daemonCapture(
+// Passing mock sessions through `rustEngineSessions` selects the production
+// live adapters. `VersionedLoopbackEngine` supplies deterministic contract
+// state, and the request log proves which adapter calls ran. This suite does
+// not launch the Rust daemon or test encryption at rest.
+function liveAdapterCapture(
   root: string,
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
@@ -154,19 +169,18 @@ function readTextStorePaths(root: string): string[] {
   }
 }
 
-describe("secret capture through the desktop pipeline (daemon path)", () => {
-  it("captures live .env batches, coalesces no-op rewrites, and retires deletions", async () => {
+describe("secret capture through the desktop live-adapter path", () => {
+  it("captures metadata-only .env batches, coalesces no-op rewrites, and retires deletions", async () => {
     const root = await tempRoot();
     await write(root, ".env", ENV_A);
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
-    const engine = daemonCapture(root, loopback, requests);
+    const engine = liveAdapterCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
 
-    // Positive proof of the path: a relapse to the legacy in-process engine
-    // never opens a daemon workspace and never writes the secret over the
-    // wire, so the suite cannot go quietly green on the engine it left.
+    // Positive proof of the adapter path: the legacy in-process engine never
+    // opens an engine workspace or writes the secret through the live adapter.
     const methods = requests.map((request) => request.method);
     expect(methods).toContain("workspace.open");
     expect(methods).toContain(VERSIONED_METHOD.secretsWrite);
@@ -203,7 +217,7 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
-    const engine = daemonCapture(root, loopback, requests);
+    const engine = liveAdapterCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
     // Fork Experiment while no secret exists.
@@ -237,7 +251,7 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     await write(root, ".env", ENV_A);
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
-    const engine = daemonCapture(root, loopback, requests);
+    const engine = liveAdapterCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
     const created = await engine.createVersion("Experiment");

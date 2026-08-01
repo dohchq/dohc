@@ -46,6 +46,18 @@ async function openWorkspace(engine: VersionedLoopbackEngine): Promise<string> {
   return String((active.version as { id?: unknown } | undefined)?.id ?? "main");
 }
 
+function generatedRequestId(prefix: string, requestId: string, path: string): string {
+  const digest = createHash("sha256");
+  for (const field of [requestId, path]) {
+    const bytes = Buffer.from(field, "utf8");
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64LE(BigInt(bytes.length));
+    digest.update(length);
+    digest.update(bytes);
+  }
+  return `${prefix}-${digest.digest("hex")}`;
+}
+
 type MutationRefusalCase = {
   handler: string;
   method: string;
@@ -186,9 +198,7 @@ async function expectRefusalWithoutVersion(
     send(engine, method, { workspaceId: WORKSPACE, ...params }, requestFields),
     label,
   ).rejects.toThrow(error);
-  const listed = await send(engine, VERSIONED_METHOD.versionsList, {
-    workspaceId: WORKSPACE,
-  });
+  const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
   expect(listed.versions, `${label}: refusal must not create a version`).toEqual([]);
 }
 
@@ -206,7 +216,6 @@ describe("loopback moment metadata", () => {
       correlationId: "corr-text",
     });
     const page = await send(engine, VERSIONED_METHOD.momentsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     const moments = page.moments as Array<Record<string, unknown>>;
@@ -231,7 +240,6 @@ describe("loopback moment metadata", () => {
       correlationId: "corr-binary",
     });
     const page = await send(engine, VERSIONED_METHOD.momentsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     const moments = page.moments as Array<Record<string, unknown>>;
@@ -349,7 +357,6 @@ describe("loopback moment metadata", () => {
       },
     });
     const page = await send(engine, VERSIONED_METHOD.momentsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     const moments = page.moments as Array<Record<string, unknown>>;
@@ -384,7 +391,6 @@ describe("loopback moment metadata", () => {
     // And nothing was recorded — a refusal that still mutated would be worse
     // than accepting the author.
     const page = await send(engine, VERSIONED_METHOD.momentsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     expect(page.moments as unknown[]).toHaveLength(0);
@@ -419,7 +425,6 @@ describe("loopback moment metadata", () => {
       author: { kind: "agent", agentId: "agent-1", onBehalfOf: "user-1" },
     });
     const page = await send(engine, VERSIONED_METHOD.momentsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     const moments = page.moments as Array<Record<string, unknown>>;
@@ -503,7 +508,7 @@ describe("loopback moment metadata", () => {
         summary: 42,
         origin: "restore",
        }),
-    ).rejects.toThrow(/summary is invalid/);
+    ).rejects.toThrow(/invalid parameters/);
   });
 
   it("refuses a metadata field over the daemon's 16 KiB cap", async () => {
@@ -571,7 +576,6 @@ describe("loopback moment metadata", () => {
       correlationId: atCap,
     });
     const page = await send(engine, VERSIONED_METHOD.momentsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     const moments = page.moments as Array<Record<string, unknown>>;
@@ -656,7 +660,6 @@ describe("loopback moment metadata", () => {
       correlationId: null,
     });
     const page = await send(engine, VERSIONED_METHOD.momentsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     const moments = page.moments as Array<Record<string, unknown>>;
@@ -664,6 +667,60 @@ describe("loopback moment metadata", () => {
     expect(text).toBeDefined();
     expect(text?.metadataSummary).toBeUndefined();
     expect(text?.metadataCorrelationId).toBeUndefined();
+  });
+
+  it("dedupes equal binary heads before validating an ignored empty object id", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const versionId = await openWorkspace(engine);
+    const bytes = [10, 20, 30];
+    const first = await send(engine, VERSIONED_METHOD.binaryWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "raw.bin",
+      bytes,
+      origin: "local-file",
+    });
+    const rawDedup = await send(engine, VERSIONED_METHOD.binaryWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "raw.bin",
+      bytes,
+      objectId: "",
+      origin: "local-file",
+    });
+    expect(rawDedup.deduped).toBe(true);
+    expect((rawDedup.object as { id?: unknown }).id).toBe(
+      (first.object as { id?: unknown }).id,
+    );
+    expect((rawDedup.moment as { id?: unknown }).id).toBe(
+      (first.moment as { id?: unknown }).id,
+    );
+
+    const blobBytes = Buffer.from([40, 50, 60]);
+    const blobSha256 = createHash("sha256").update(blobBytes).digest("hex");
+    const blobFirst = await send(engine, VERSIONED_METHOD.binaryWrite, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "blob.bin",
+      bytesBase64: blobBytes.toString("base64"),
+      origin: "local-file",
+    });
+    const blobDedup = await send(engine, VERSIONED_METHOD.binaryWriteBlob, {
+      workspaceId: WORKSPACE,
+      versionId,
+      path: "blob.bin",
+      sha256: blobSha256,
+      bytesBase64: blobBytes.toString("base64"),
+      objectId: "",
+      origin: "local-file",
+    });
+    expect(blobDedup.deduped).toBe(true);
+    expect((blobDedup.object as { id?: unknown }).id).toBe(
+      (blobFirst.object as { id?: unknown }).id,
+    );
+    expect((blobDedup.moment as { id?: unknown }).id).toBe(
+      (blobFirst.moment as { id?: unknown }).id,
+    );
   });
 
   it("replays an exact TEXT retry that carried an explicit null", async () => {
@@ -844,7 +901,7 @@ describe("loopback moment metadata", () => {
         beforeMomentId: "moment-origin-required",
         momentId: "moment-origin-missing",
       }),
-    ).rejects.toThrow(/invalid-metadata/);
+    ).rejects.toThrow(/invalid parameters/);
   });
 
   it("refuses over-cap RENAME and DELETE metadata before resolving the version", async () => {
@@ -1094,7 +1151,6 @@ describe("loopback moment metadata", () => {
     });
     expect(written.changed).toBe(true);
     const listed = await send(engine, VERSIONED_METHOD.secretsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     const secrets = listed.secrets as Array<Record<string, unknown>>;
@@ -1264,7 +1320,6 @@ describe("loopback moment metadata", () => {
     expect((deleted.before as { path?: unknown }).path).toBe("after.md");
     await expect(
       send(engine, VERSIONED_METHOD.textRead, {
-        workspaceId: WORKSPACE,
         versionId,
         path: "after.md",
       }),
@@ -1323,9 +1378,7 @@ describe("loopback moment metadata", () => {
         }),
         testCase.name,
       ).resolves.toMatchObject({ deduped: false });
-      const listed = await send(engine, VERSIONED_METHOD.versionsList, {
-        workspaceId: WORKSPACE,
-      });
+      const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
       expect(listed.versions, testCase.name).toHaveLength(1);
     }
 
@@ -1371,9 +1424,7 @@ describe("loopback moment metadata", () => {
         }),
         testCase.name,
       ).rejects.toThrow(/invalid parameters/);
-      const listed = await send(engine, VERSIONED_METHOD.versionsList, {
-        workspaceId: WORKSPACE,
-      });
+      const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
       expect(listed.versions, testCase.name).toEqual([]);
     }
 
@@ -1492,6 +1543,55 @@ describe("loopback moment metadata", () => {
     }
   });
 
+  it("rejects invalid merge paths before replay state", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      versionId: "main",
+      path: "merge-path.md",
+      text: "base",
+    });
+    const named = await send(engine, VERSIONED_METHOD.versionsCreateNamed, {
+      workspaceId: WORKSPACE,
+      name: "merge-path-validation",
+      fromVersionId: "main",
+    });
+    const sourceVersionId = String(named.id);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: sourceVersionId,
+      path: "merge-path.md",
+      text: "incoming",
+      origin: "api",
+    });
+    const requestId = "merge-path-request";
+    for (const path of [
+      "notes/../merge-path.md",
+      "%2e%2e/merge-path.md",
+    ]) {
+      await expect(
+        send(engine, VERSIONED_METHOD.versionsMerge, {
+          workspaceId: WORKSPACE,
+          sourceVersionId,
+          targetVersionId: "main",
+          path,
+          origin: "api",
+          requestId,
+        }),
+      ).rejects.toThrow(/invalid-path/);
+    }
+
+    const merged = await send(engine, VERSIONED_METHOD.versionsMerge, {
+      workspaceId: WORKSPACE,
+      sourceVersionId,
+      targetVersionId: "main",
+      path: "merge-path.md",
+      origin: "api",
+      requestId,
+    });
+    expect(merged).toMatchObject({ status: "merged", deduped: false });
+  });
+
   it("normalizes accepted write and rename paths before storing them", async () => {
     const engine = new VersionedLoopbackEngine();
     const written = await send(engine, VERSIONED_METHOD.textWrite, {
@@ -1513,6 +1613,130 @@ describe("loopback moment metadata", () => {
     expect((renamed.after as { path?: unknown }).path).toBe("notes/final.md");
   });
 
+  it("normalizes accepted aliases for text and binary reads", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const textPath = "notes/./read.md";
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: textPath,
+      text: "hello",
+      origin: "local-file",
+    });
+    await expect(
+      send(engine, VERSIONED_METHOD.textRead, {
+        versionId: "main",
+        path: textPath,
+      }),
+    ).resolves.toMatchObject({ path: "notes/read.md", text: "hello" });
+
+    const binaryPath = "images//icon.bin";
+    await send(engine, VERSIONED_METHOD.binaryWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: binaryPath,
+      bytes: [1, 2, 3],
+      origin: "local-file",
+    });
+    await expect(
+      send(engine, VERSIONED_METHOD.binaryRead, {
+        versionId: "main",
+        path: binaryPath,
+      }),
+    ).resolves.toMatchObject({ bytesBase64: "AQID", byteLength: 3 });
+  });
+
+  it("derives request-scoped ids from raw paths while storing canonical paths", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const rawWritePath = "notes/./draft.md";
+    const writeRequestId = "raw-write-path";
+    const written = await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: rawWritePath,
+      text: "hello",
+      origin: "local-file",
+      requestId: writeRequestId,
+    });
+    expect((written.object as { id?: unknown }).id).toBe(
+      generatedRequestId("object", writeRequestId, rawWritePath),
+    );
+    expect((written.moment as { momentId?: unknown }).momentId).toBe(
+      generatedRequestId("moment", writeRequestId, rawWritePath),
+    );
+    expect((written.snapshot as { path?: unknown }).path).toBe("notes/draft.md");
+    await expect(
+      send(engine, VERSIONED_METHOD.textWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "notes/draft.md",
+        text: "hello",
+        origin: "local-file",
+        requestId: writeRequestId,
+      }),
+    ).rejects.toThrow(/idempotency-key-reuse-mismatch/);
+
+    const rawBinaryPath = "images/./icon.bin";
+    const binaryRequestId = "raw-binary-path";
+    const binary = await send(engine, VERSIONED_METHOD.binaryWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: rawBinaryPath,
+      bytes: [1, 2, 3],
+      origin: "local-file",
+      requestId: binaryRequestId,
+    });
+    expect((binary.object as { id?: unknown }).id).toBe(
+      generatedRequestId("object", binaryRequestId, rawBinaryPath),
+    );
+    expect((binary.moment as { momentId?: unknown }).momentId).toBe(
+      generatedRequestId("moment", binaryRequestId, rawBinaryPath),
+    );
+
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "notes/source.md",
+      text: "rename",
+      origin: "local-file",
+      momentId: "raw-rename-seed",
+    });
+    const rawRenamePath = "notes//renamed.md";
+    const renameRequestId = "raw-rename-path";
+    const renamed = await send(engine, VERSIONED_METHOD.textRename, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      fromPath: "notes/./source.md",
+      toPath: rawRenamePath,
+      origin: "local-file",
+      requestId: renameRequestId,
+    });
+    expect((renamed.moment as { momentId?: unknown }).momentId).toBe(
+      generatedRequestId("moment", renameRequestId, rawRenamePath),
+    );
+
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "notes/delete.md",
+      text: "delete",
+      origin: "local-file",
+      momentId: "raw-delete-seed",
+    });
+    const rawDeletePath = "notes/./delete.md";
+    const deleteRequestId = "raw-delete-path";
+    const deleted = await send(engine, VERSIONED_METHOD.textDelete, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: rawDeletePath,
+      origin: "local-file",
+      requestId: deleteRequestId,
+    });
+    expect((deleted.moment as { momentId?: unknown }).momentId).toBe(
+      generatedRequestId("moment", deleteRequestId, rawDeletePath),
+    );
+  });
+
   it("normalizes author null and omission to the same replay identity", async () => {
     const engine = new VersionedLoopbackEngine();
     const params = {
@@ -1532,6 +1756,299 @@ describe("loopback moment metadata", () => {
     expect((replayed.moment as { momentId?: unknown }).momentId).toBe(
       (first.moment as { momentId?: unknown }).momentId,
     );
+  });
+
+  it("canonicalizes nested author object order for replay identity", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const params = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "author-order.md",
+      text: "hello",
+      origin: "local-file",
+      requestId: "author-order-replay",
+    };
+    const first = await send(engine, VERSIONED_METHOD.textWrite, {
+      ...params,
+      author: {
+        kind: "agent",
+        agentId: "agent-1",
+        onBehalfOf: "user-1",
+        context: { z: 1, nested: { y: 2, x: 3 } },
+      },
+    });
+    const replayed = await send(engine, VERSIONED_METHOD.textWrite, {
+      ...params,
+      author: {
+        context: { nested: { x: 3, y: 2 }, z: 1 },
+        onBehalfOf: "user-1",
+        agentId: "agent-1",
+        kind: "agent",
+      },
+    });
+    expect(replayed.deduped).toBe(true);
+    expect((replayed.moment as { momentId?: unknown }).momentId).toBe(
+      (first.moment as { momentId?: unknown }).momentId,
+    );
+  });
+
+  it("keeps author extension fields in replay identity", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const params = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "author-extension.md",
+      text: "hello",
+      origin: "local-file",
+      requestId: "author-extension-replay",
+    };
+    const first = await send(engine, VERSIONED_METHOD.textWrite, {
+      ...params,
+      author: {
+        kind: "agent",
+        agentId: "agent-1",
+        onBehalfOf: "user-1",
+        context: { attempt: 1 },
+      },
+    });
+    expect((first.moment as { author?: unknown }).author).toEqual({
+      kind: "agent",
+      agentId: "agent-1",
+      onBehalfOf: "user-1",
+    });
+
+    await expect(
+      send(engine, VERSIONED_METHOD.textWrite, {
+        ...params,
+        author: {
+          kind: "agent",
+          agentId: "agent-1",
+          onBehalfOf: "user-1",
+          context: { attempt: 2 },
+        },
+      }),
+    ).rejects.toThrow("idempotency-key-reuse-mismatch");
+    // Rust fingerprints the full validated author JSON for replay identity,
+    // then returns only the recognized attribution fields in moment responses.
+  });
+
+  it("canonicalizes rollback aliases, nullable fields, and request-id carriers", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "notes/rollback.md",
+      text: "remove me",
+      origin: "local-file",
+      momentId: "canonical-rollback-mutation",
+    });
+    const first = await send(
+      engine,
+      VERSIONED_METHOD.textRollback,
+      {
+        versionId: "main",
+        path: "notes/./rollback.md",
+        mutationMomentId: "canonical-rollback-mutation",
+        origin: "restore",
+      },
+      { idempotencyKey: "canonical-rollback-request" },
+    );
+    const replayed = await send(engine, VERSIONED_METHOD.textRollback, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "notes/rollback.md",
+      mutationMomentId: "canonical-rollback-mutation",
+      origin: "restore",
+      author: null,
+      legacyBeforeText: null,
+      requestId: "canonical-rollback-request",
+    });
+    expect(first.deduped).toBe(false);
+    expect(replayed.deduped).toBe(true);
+  });
+
+  it("uses envelope request ids when rollback and merge requestId is null", async () => {
+    const rollbackEngine = new VersionedLoopbackEngine();
+    await send(rollbackEngine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "rollback-null.md",
+      text: "remove me",
+      origin: "local-file",
+      momentId: "rollback-null-mutation",
+    });
+    const rollbackParams = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "rollback-null.md",
+      mutationMomentId: "rollback-null-mutation",
+      origin: "restore",
+      requestId: null,
+    };
+    const firstRollback = await send(
+      rollbackEngine,
+      VERSIONED_METHOD.textRollback,
+      rollbackParams,
+      { idempotencyKey: "rollback-null-envelope" },
+    );
+    const replayedRollback = await send(
+      rollbackEngine,
+      VERSIONED_METHOD.textRollback,
+      rollbackParams,
+      { idempotencyKey: "rollback-null-envelope" },
+    );
+    expect(firstRollback.deduped).toBe(false);
+    expect(replayedRollback.deduped).toBe(true);
+
+    const mergeEngine = new VersionedLoopbackEngine();
+    mergeEngine.seedTextFile({
+      workspace: WORKSPACE,
+      versionId: "main",
+      path: "merge-null.md",
+      text: "base",
+    });
+    const named = await send(mergeEngine, VERSIONED_METHOD.versionsCreateNamed, {
+      workspaceId: WORKSPACE,
+      name: "null-request-id",
+      fromVersionId: "main",
+    });
+    const sourceVersionId = String(named.id);
+    await send(mergeEngine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: sourceVersionId,
+      path: "merge-null.md",
+      text: "incoming",
+      origin: "api",
+    });
+    const mergeParams = {
+      workspaceId: WORKSPACE,
+      sourceVersionId,
+      targetVersionId: "main",
+      path: "merge-null.md",
+      origin: "api",
+      requestId: null,
+    };
+    const firstMerge = await send(
+      mergeEngine,
+      VERSIONED_METHOD.versionsMerge,
+      mergeParams,
+      { idempotencyKey: "merge-null-envelope" },
+    );
+    const replayedMerge = await send(
+      mergeEngine,
+      VERSIONED_METHOD.versionsMerge,
+      mergeParams,
+      { idempotencyKey: "merge-null-envelope" },
+    );
+    expect(firstMerge.deduped).toBe(false);
+    expect(replayedMerge.deduped).toBe(true);
+  });
+
+  it("replays merges when only summary and correlationId change", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      versionId: "main",
+      path: "merge-metadata.md",
+      text: "base",
+    });
+    const named = await send(engine, VERSIONED_METHOD.versionsCreateNamed, {
+      workspaceId: WORKSPACE,
+      name: "merge-metadata-replay",
+      fromVersionId: "main",
+    });
+    const sourceVersionId = String(named.id);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: sourceVersionId,
+      path: "merge-metadata.md",
+      text: "incoming",
+      origin: "api",
+    });
+    const mergeParams = {
+      workspaceId: WORKSPACE,
+      sourceVersionId,
+      targetVersionId: "main",
+      path: "merge-metadata.md",
+      origin: "api",
+      requestId: "merge-metadata-request",
+    };
+    const first = await send(engine, VERSIONED_METHOD.versionsMerge, {
+      ...mergeParams,
+      summary: "first summary",
+      correlationId: "first-correlation",
+    });
+    const replayed = await send(engine, VERSIONED_METHOD.versionsMerge, {
+      ...mergeParams,
+      summary: "changed summary",
+      correlationId: "changed-correlation",
+    });
+    expect(first.deduped).toBe(false);
+    expect(replayed.deduped).toBe(true);
+    expect((replayed.moment as { momentId?: unknown }).momentId).toBe(
+      (first.moment as { momentId?: unknown }).momentId,
+    );
+    expect(replayed.moment).toMatchObject({
+      metadataSummary: "first summary",
+      metadataCorrelationId: "first-correlation",
+    });
+  });
+
+  it("accepts null rollback and merge request ids without opening missing versions", async () => {
+    for (const [name, method, params] of [
+      [
+        "rollback",
+        VERSIONED_METHOD.textRollback,
+        {
+          versionId: "no-such-version",
+          path: "missing.md",
+          mutationMomentId: "missing-mutation",
+          origin: "restore",
+          requestId: null,
+        },
+      ],
+      [
+        "merge",
+        VERSIONED_METHOD.versionsMerge,
+        {
+          sourceVersionId: "no-such-source",
+          targetVersionId: "no-such-target",
+          path: "missing.md",
+          origin: "api",
+          requestId: null,
+        },
+      ],
+    ] as const) {
+      const engine = new VersionedLoopbackEngine();
+      await expect(send(engine, method, params), name).rejects.toThrow(
+        /version-not-found|invalid-version/,
+      );
+      const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
+      expect(listed.versions, name).toEqual([]);
+      await expectRefusalWithoutVersion(
+        `${name}: malformed envelope request id`,
+        method,
+        params,
+        /invalid parameters/,
+        { idempotencyKey: 1 },
+      );
+    }
+  });
+
+  it("checks apply versions before rejecting an empty moment id without changing state", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await expect(
+      send(engine, VERSIONED_METHOD.secretsApply, {
+        workspaceId: WORKSPACE,
+        sourceVersionId: "missing-source",
+        targetVersionId: "missing-target",
+        path: ".env",
+        momentId: "",
+        origin: "api",
+      }),
+    ).rejects.toThrow(/invalid-version/);
+    const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
+    expect(listed.versions).toEqual([]);
   });
 
   it("preserves empty request and envelope idempotency keys", async () => {
@@ -1607,13 +2124,140 @@ describe("loopback moment metadata", () => {
       }),
     ).rejects.toThrow(/invalid-input/);
     const listed = await send(engine, VERSIONED_METHOD.secretsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     expect(listed.secrets).toEqual([]);
   });
 
-  it("accepts the full serde i64 range represented by JavaScript numbers", async () => {
+  it("rejects empty explicit object ids without changing state", async () => {
+    const blobBytes = Buffer.from([1, 2, 3]);
+    const blobSha256 = createHash("sha256").update(blobBytes).digest("hex");
+    for (const [name, method, params] of [
+      [
+        "textWrite",
+        VERSIONED_METHOD.textWrite,
+        {
+          versionId: "main",
+          objectId: "",
+          path: "notes.md",
+          text: "x",
+          origin: "local-file",
+        },
+      ],
+      [
+        "binaryWrite",
+        VERSIONED_METHOD.binaryWrite,
+        {
+          versionId: "main",
+          objectId: "",
+          path: "logo.png",
+          bytes: [1, 2, 3],
+          origin: "local-file",
+        },
+      ],
+      [
+        "binaryWriteBlob",
+        VERSIONED_METHOD.binaryWriteBlob,
+        {
+          versionId: "main",
+          objectId: "",
+          path: "logo.png",
+          sha256: blobSha256,
+          bytesBase64: blobBytes.toString("base64"),
+          origin: "local-file",
+        },
+      ],
+    ] as const) {
+      await expectRefusalWithoutVersion(name, method, params, /invalid-input/);
+    }
+  });
+
+  it("keeps an existing text object's identity when an ignored empty object id is supplied", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const first = await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "notes.md",
+      text: "first",
+      origin: "local-file",
+    });
+    const rewritten = await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      objectId: "",
+      path: "notes.md",
+      text: "second",
+      origin: "local-file",
+    });
+    expect((rewritten.object as { id?: unknown }).id).toBe(
+      (first.object as { id?: unknown }).id,
+    );
+  });
+
+  it("reconstructs empty-object text retries after rename and delete", async () => {
+    const requestEngine = new VersionedLoopbackEngine();
+    await send(requestEngine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "request-replay.md",
+      text: "first",
+      origin: "local-file",
+    });
+    const requestParams = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      objectId: "",
+      path: "request-replay.md",
+      text: "recorded",
+      origin: "local-file",
+      requestId: "empty-object-request-replay",
+    };
+    const requestWrite = await send(
+      requestEngine,
+      VERSIONED_METHOD.textWrite,
+      requestParams,
+    );
+    await send(requestEngine, VERSIONED_METHOD.textRename, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      fromPath: "request-replay.md",
+      toPath: "request-replay-moved.md",
+      origin: "local-file",
+    });
+    expect(
+      await send(requestEngine, VERSIONED_METHOD.textWrite, requestParams),
+    ).toEqual({ ...requestWrite, deduped: true });
+
+    const momentEngine = new VersionedLoopbackEngine();
+    await send(momentEngine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "moment-replay.md",
+      text: "first",
+      origin: "local-file",
+    });
+    const momentParams = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      objectId: "",
+      path: "moment-replay.md",
+      text: "recorded",
+      origin: "local-file",
+      momentId: "empty-object-fixed-moment",
+    };
+    const momentWrite = await send(momentEngine, VERSIONED_METHOD.textWrite, momentParams);
+    await send(momentEngine, VERSIONED_METHOD.textDelete, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: "moment-replay.md",
+      origin: "local-file",
+    });
+    expect(
+      await send(momentEngine, VERSIONED_METHOD.textWrite, momentParams),
+    ).toEqual({ ...momentWrite, deduped: true });
+  });
+
+  it("accepts wire-representable serde i64 values and rejects both rounded boundaries", async () => {
     const engine = new VersionedLoopbackEngine();
     const accepted = 2 ** 53;
     const result = await send(engine, VERSIONED_METHOD.textWrite, {
@@ -1638,6 +2282,167 @@ describe("loopback moment metadata", () => {
       },
       /invalid parameters/,
     );
+    await expectRefusalWithoutVersion(
+      "nowMs below i64 after JSON serialization",
+      VERSIONED_METHOD.textWrite,
+      {
+        versionId: "main",
+        path: "notes.md",
+        text: "hello",
+        origin: "local-file",
+        nowMs: -(2 ** 63),
+      },
+      /invalid parameters/,
+    );
+  });
+
+  it("deserializes every method's params before requiring a workspace handle", async () => {
+    const digest = "a".repeat(64);
+    const paramsByMethod: Record<string, Record<string, unknown>> = {
+      [VERSIONED_METHOD.textWrite]: {
+        versionId: "main", path: "notes.md", text: "x", origin: "local-file",
+      },
+      [VERSIONED_METHOD.textRead]: { versionId: "main", path: "notes.md" },
+      [VERSIONED_METHOD.textReadBlob]: { workspaceId: WORKSPACE, sha256: digest },
+      [VERSIONED_METHOD.textRename]: {
+        versionId: "main", fromPath: "a.md", toPath: "b.md", origin: "local-file",
+      },
+      [VERSIONED_METHOD.textDelete]: {
+        versionId: "main", path: "notes.md", origin: "local-file",
+      },
+      [VERSIONED_METHOD.textRollback]: {
+        versionId: "main", path: "notes.md", mutationMomentId: "moment-1",
+      },
+      [VERSIONED_METHOD.textList]: { versionId: "main" },
+      [VERSIONED_METHOD.binaryWrite]: {
+        versionId: "main", path: "logo.png", bytes: [1], origin: "local-file",
+      },
+      [VERSIONED_METHOD.binaryWriteBlob]: {
+        versionId: "main", path: "logo.png", sha256: digest, origin: "local-file",
+      },
+      [VERSIONED_METHOD.binaryRead]: { versionId: "main", path: "logo.png" },
+      [VERSIONED_METHOD.binaryReadBlob]: { workspaceId: WORKSPACE, sha256: digest },
+      [VERSIONED_METHOD.versionsCreateNamed]: {
+        workspaceId: WORKSPACE, name: "Draft", fromVersionId: "main",
+      },
+      [VERSIONED_METHOD.versionsList]: {},
+      [VERSIONED_METHOD.versionsSetActive]: { versionId: "main" },
+      [VERSIONED_METHOD.versionsEnsureMain]: {},
+      [VERSIONED_METHOD.versionsActive]: {},
+      [VERSIONED_METHOD.versionsMerge]: {
+        path: "notes.md", sourceVersionId: "source", targetVersionId: "target",
+      },
+      [VERSIONED_METHOD.versionsCompare]: {
+        path: "notes.md", sourceVersionId: "source", targetVersionId: "target",
+      },
+      [VERSIONED_METHOD.versionsCompareFiles]: {
+        sourceVersionId: "source", targetVersionId: "target",
+      },
+      [VERSIONED_METHOD.secretsWrite]: {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        text: "KEY=value",
+        origin: "local-file",
+        momentId: "secret-write-1",
+      },
+      [VERSIONED_METHOD.secretsList]: { versionId: "main" },
+      [VERSIONED_METHOD.secretsStateExists]: {},
+      [VERSIONED_METHOD.secretsMaterialize]: { versionId: "main", path: ".env" },
+      [VERSIONED_METHOD.secretsDelete]: {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        origin: "local-file",
+        momentId: "secret-delete-1",
+      },
+      [VERSIONED_METHOD.secretsFork]: {
+        workspaceId: WORKSPACE, fromVersionId: "main", toVersionId: "draft",
+      },
+      [VERSIONED_METHOD.secretsCompare]: {
+        workspaceId: WORKSPACE, sourceVersionId: "source", targetVersionId: "target",
+      },
+      [VERSIONED_METHOD.secretsApply]: {
+        workspaceId: WORKSPACE,
+        path: ".env",
+        sourceVersionId: "source",
+        targetVersionId: "target",
+        momentId: "secret-apply-1",
+        origin: "local-file",
+      },
+      [VERSIONED_METHOD.secretsRestore]: {
+        workspaceId: WORKSPACE,
+        path: ".env",
+        beforeMomentId: "before-1",
+        momentId: "secret-restore-1",
+        origin: "local-file",
+      },
+      [VERSIONED_METHOD.secretsMomentsList]: { workspaceId: WORKSPACE },
+      [VERSIONED_METHOD.secretsMomentsGet]: {
+        workspaceId: WORKSPACE, momentId: "secret-moment-1",
+      },
+      [VERSIONED_METHOD.momentsList]: {},
+      [VERSIONED_METHOD.momentsGet]: { momentId: "moment-1" },
+      [VERSIONED_METHOD.searchEnsureIndex]: {
+        workspaceId: WORKSPACE, versionId: "main",
+      },
+    };
+    expect(Object.keys(paramsByMethod).sort()).toEqual(
+      Object.values(VERSIONED_METHOD).sort(),
+    );
+
+    for (const [method, params] of Object.entries(paramsByMethod)) {
+      const engine = new VersionedLoopbackEngine();
+      await expect(
+        send(engine, method, { ...params, stray: true }, { workspace: null }),
+        method,
+      ).rejects.toThrow(/invalid parameters/);
+      const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
+      expect(listed.versions, method).toEqual([]);
+    }
+  });
+
+  it("runs Rust's semantic preflight before requiring a workspace handle", async () => {
+    const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+      [VERSIONED_METHOD.versionsSetActive, { versionId: " main" }, /invalid-version/],
+      [
+        VERSIONED_METHOD.textReadBlob,
+        { workspaceId: WORKSPACE, sha256: "bad" },
+        /invalid-input/,
+      ],
+      [
+        VERSIONED_METHOD.binaryReadBlob,
+        { workspaceId: WORKSPACE, sha256: "bad" },
+        /invalid-input/,
+      ],
+      [VERSIONED_METHOD.momentsList, { objectId: "" }, /objectId must not be empty/],
+      [VERSIONED_METHOD.momentsGet, { momentId: "" }, /momentId must not be empty/],
+      [
+        VERSIONED_METHOD.secretsApply,
+        {
+          workspaceId: WORKSPACE,
+          path: "notes.md",
+          sourceVersionId: "source",
+          targetVersionId: "target",
+          momentId: "secret-apply-1",
+          origin: "local-file",
+        },
+        /not-secret-path/,
+      ],
+      [
+        VERSIONED_METHOD.secretsMaterialize,
+        { versionId: "main", path: "notes.md" },
+        /not a secret path/,
+      ],
+    ];
+
+    for (const [method, params, refusal] of cases) {
+      const engine = new VersionedLoopbackEngine();
+      await expect(
+        send(engine, method, params, { workspace: null }),
+        method,
+      ).rejects.toThrow(refusal);
+    }
   });
 
   it("rejects unknown fields before creating main", async () => {
@@ -1844,7 +2649,6 @@ describe("loopback moment metadata", () => {
 
     for (const path of ["before.md", "delete.md"]) {
       const read = await send(engine, VERSIONED_METHOD.textRead, {
-        workspaceId: WORKSPACE,
         versionId,
         path,
       });
@@ -1852,14 +2656,12 @@ describe("loopback moment metadata", () => {
     }
     await expect(
       send(engine, VERSIONED_METHOD.textRead, {
-        workspaceId: WORKSPACE,
         versionId,
         path: "after.md",
       }),
     ).resolves.toEqual({});
     await expect(
       send(engine, VERSIONED_METHOD.secretsMaterialize, {
-        workspaceId: WORKSPACE,
         versionId,
         path: ".env",
       }),
@@ -1891,7 +2693,6 @@ describe("loopback moment metadata", () => {
         `secretWrite: missing ${field}`,
       ).rejects.toThrow(/invalid parameters/);
       const listed = await send(engine, VERSIONED_METHOD.secretsList, {
-        workspaceId: WORKSPACE,
         versionId,
       });
       expect(listed.secrets, `secretWrite: missing ${field}`).toEqual([]);
@@ -1921,7 +2722,6 @@ describe("loopback moment metadata", () => {
         `secretDelete: missing ${field}`,
       ).rejects.toThrow(/invalid parameters/);
       const listed = await send(engine, VERSIONED_METHOD.secretsList, {
-        workspaceId: WORKSPACE,
         versionId,
       });
       expect(listed.secrets as unknown[], `secretDelete: missing ${field}`).toHaveLength(1);
@@ -1950,9 +2750,7 @@ describe("loopback moment metadata", () => {
             ...extra,
           }),
         ).rejects.toThrow(/invalid-version/);
-        const listed = await send(engine, VERSIONED_METHOD.versionsList, {
-          workspaceId: WORKSPACE,
-        });
+        const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
         expect(listed.versions).toEqual([]);
         const moments = await send(
           engine,
@@ -1985,9 +2783,7 @@ describe("loopback moment metadata", () => {
           ...extra,
         }),
       ).rejects.toThrow(/not-secret-path/);
-      const listed = await send(engine, VERSIONED_METHOD.versionsList, {
-        workspaceId: WORKSPACE,
-      });
+      const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
       expect(listed.versions).toEqual([]);
     }
   });
@@ -2015,7 +2811,7 @@ describe("loopback moment metadata", () => {
         momentId: "moment-legacy-refused",
         metadataOrigin: "restore",
       }),
-    ).rejects.toThrow(/invalid-metadata/);
+    ).rejects.toThrow(/invalid parameters/);
 
     // And an accepted origin other than "restore" is PRESERVED on the moment.
     await send(engine, VERSIONED_METHOD.secretsWrite, {
@@ -2063,7 +2859,7 @@ describe("loopback moment metadata", () => {
         origin: "restore",
         metadataOrigin: "restore",
       }),
-    ).rejects.toThrow(/invalid-metadata/);
+    ).rejects.toThrow(/invalid parameters/);
   });
 
   it("refuses over-cap RESTORE metadata before it looks for the moment", async () => {
@@ -2118,7 +2914,6 @@ describe("loopback moment metadata", () => {
     // The secret must still hold the FIRST value: a refused write that mutated
     // would be worse than one that succeeded.
     const listed = await send(engine, VERSIONED_METHOD.secretsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     const secrets = listed.secrets as Array<Record<string, unknown>>;
@@ -2142,7 +2937,6 @@ describe("loopback moment metadata", () => {
       origin: "local-file",
     });
     const page = await send(engine, VERSIONED_METHOD.momentsList, {
-      workspaceId: WORKSPACE,
       versionId,
     });
     const moments = page.moments as Array<Record<string, unknown>>;

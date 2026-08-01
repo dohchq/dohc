@@ -5,19 +5,27 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
+  createSecretFileStore,
   createVersionedTextStore,
+  type SecretFileStore,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
-import type { EngineYDocProviderSession } from "../collab/ydocEngineProviderSession";
+import {
+  openEngineYDocProviderSession,
+  type EngineYDocProviderSession,
+} from "../collab/ydocEngineProviderSession";
+import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 
-// WS-G2-C-2: the capture's engine Y.Doc session wiring — store sharing (one
-// store / one write lane, no second engine.db connection) + watcher
-// coexistence (a live ydoc path's settle is journaled ONLY as ydoc.update, never
-// double-captured as a moment.append that would collide (P0D) on a shared
-// workspace). A real store + real Yjs, no Electron.
+// WS-G2-C-2: the capture's legacy-fixture Y.Doc session wiring and watcher
+// coexistence. A live Y.Doc path's settle is journaled only as ydoc.update,
+// never double-captured as a moment.append that would collide (P0D) on a
+// shared workspace. A real store + real Yjs, no Electron. Production uses the
+// Rust provider directly; this suite retains focused coverage of the retired
+// provider while its remaining test callers migrate.
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
@@ -38,6 +46,7 @@ const PATH = "notes/solo.md";
 const roots: string[] = [];
 let root: string;
 let store: VersionedTextStore;
+let secretStore: SecretFileStore;
 let versionId: string;
 
 function enginePath(): string {
@@ -114,6 +123,7 @@ beforeEach(async () => {
   root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-ydoc-session-"));
   roots.push(root);
   store = createVersionedTextStore(root);
+  secretStore = createSecretFileStore(root);
   const main = await store.ensureMainVersion({ workspaceId: WS });
   versionId = main.id;
   await store.writeTextFile({
@@ -128,16 +138,45 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await store.close().catch(() => undefined);
+  await secretStore.close().catch(() => undefined);
   closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
 
+function legacyProviderOptions(providerStore: VersionedTextStore) {
+  return {
+    store: providerStore,
+    secretStore,
+    rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+    // Keep the retired provider executable as a test subject without leaving
+    // a production import or engine-selection branch in the capture factory.
+    openRustYDocProviderSession: async (options) =>
+      await openEngineYDocProviderSession({
+        store: providerStore,
+        rootDir: root,
+        workspaceId: WS,
+        versionId: options.versionId,
+        path: options.path,
+        ...(options.contentKind ? { contentKind: options.contentKind } : {}),
+        onRemoteUpdate: options.onRemoteUpdate,
+        onSettled: options.onSettled as never,
+        onSettleStart: options.onSettleStart,
+        onSettleError: options.onSettleError,
+      }) as never,
+  } satisfies Pick<
+    Parameters<typeof createWorkspaceEngineCapture>[0],
+    "store" | "secretStore" | "rustEngineSessions" | "openRustYDocProviderSession"
+  >;
+}
+
 function makeCapture() {
-  // Inject THIS test's store: the capture must reuse this exact instance for the
-  // ydoc session (single-writer safety). A second store on the same engine.db
-  // would be a second write connection and node:sqlite would deadlock — if the
-  // capture created its own store, the settle below would hang, not pass.
-  return createWorkspaceEngineCapture({ workspaceId: WS, rootPath: root, store });
+  // The capture and retired provider fixture must inspect the same persisted
+  // state. Production's Rust Y.Doc provider does not use VersionedTextStore.
+  return createWorkspaceEngineCapture({
+    workspaceId: WS,
+    rootPath: root,
+    ...legacyProviderOptions(store),
+  });
 }
 
 it("editing a live ydoc doc journals ONLY ydoc.update (no double moment.append, no P0D) and lands the .md", async () => {
@@ -364,7 +403,7 @@ it("a settled over-cap doc SURVIVES an app restart — the startup reconcile mus
   const relaunched = createWorkspaceEngineCapture({
     workspaceId: WS,
     rootPath: root,
-    store,
+    ...legacyProviderOptions(store),
   });
   relaunched.start();
   await relaunched.flush();
@@ -430,7 +469,7 @@ it("a FAILING settle is logged and reported as an error save-state — the doc n
   const capture = createWorkspaceEngineCapture({
     workspaceId: WS,
     rootPath: root,
-    store: failingStore,
+    ...legacyProviderOptions(failingStore),
     onError: (context, error) => logged.push({ context, error }),
   });
   const session = await capture.openYDocSession({
