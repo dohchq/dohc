@@ -313,14 +313,22 @@ export class RelayFilePeer {
   private async request(path: string, init: RequestInit): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${this.token}`);
-    return await this.fetchImpl(
-      `${this.baseUrl}/sync/${encodeURIComponent(this.workspaceId)}/${path}`,
-      {
+    const requestPath = `/sync/${encodeURIComponent(this.workspaceId)}/${path}`;
+    try {
+      return await this.fetchImpl(`${this.baseUrl}${requestPath}`, {
         ...init,
         headers,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      },
-    );
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new Error(
+          `Relay request ${requestPath} timed out after ${REQUEST_TIMEOUT_MS} ms.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
   }
 
   private async requireJson(

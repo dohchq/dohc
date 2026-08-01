@@ -161,6 +161,103 @@ describe("RelayFilePeer", () => {
     expect(uploaded.url).toContain(first.blobSha256);
     expect(Buffer.from(uploaded.body as ArrayBuffer).toString("utf8")).toBe("first");
   });
+
+  it("uses the staged head when one batch rewrites the same path", async () => {
+    const relay = recordingRelay();
+    let nextId = 0;
+    const peer = new RelayFilePeer({
+      baseUrl: "https://relay.test",
+      token: "peer-token",
+      workspaceId: "workspace-a",
+      originId: "peer-a",
+      fetch: relay.fetch,
+      nowMs: () => 1_000,
+      newId: (kind) => `${kind}-${nextId++}`,
+    });
+
+    const [first, second] = await peer.writeTextFiles([
+      { path: "notes/a.md", text: "first" },
+      { path: "notes/a.md", text: "second" },
+    ]);
+
+    const operations = logOperations(relay.requests);
+    expect(operations.map((operation) => operation.originSeq)).toEqual([0, 1, 2]);
+    expect(operations[2]!.payload).toMatchObject({
+      objectId: first!.objectId,
+      objectCreatedAtMs: first!.objectCreatedAtMs,
+      path: first!.path,
+      payloadBeforeBlobSha256: first!.blobSha256,
+      payloadBeforePath: first!.path,
+      beforePresent: "present",
+      beforeObjectId: first!.objectId,
+      beforeVersionId: "main",
+      beforePath: first!.path,
+      beforeBlobSha256: first!.blobSha256,
+      beforeUpdatedAtMs: first!.updatedAtMs,
+      beforeLatestMomentId: first!.latestMomentId,
+      beforeMetadata: first!.metadata,
+      payloadAfterBlobSha256: second!.blobSha256,
+    });
+  });
+
+  it("creates a linked chat thread before its authored message", async () => {
+    const relay = recordingRelay();
+    let nextId = 0;
+    const peer = new RelayFilePeer({
+      baseUrl: "https://relay.test",
+      token: "peer-token",
+      workspaceId: "workspace-a",
+      originId: "peer-a",
+      fetch: relay.fetch,
+      nowMs: () => 1_000,
+      newId: (kind) => `${kind}-${nextId++}`,
+    });
+
+    const chat = await peer.createLinkedChat({
+      linkedObjectId: "object-a",
+      linkedPathHint: "notes/a.md",
+      title: "Review",
+      body: "Please review this note.",
+      authorDisplayName: "Ada",
+      authorUserId: "user-a",
+    });
+
+    const operations = logOperations(relay.requests);
+    expect(operations.map((operation) => operation.originSeq)).toEqual([0, 1, 2]);
+    expect(operations.map((operation) => operation.opKind)).toEqual([
+      "workspace.init",
+      "chat.thread.create",
+      "chat.message.append",
+    ]);
+    expect(operations[1]!.payload).toMatchObject({
+      threadId: chat.threadId,
+      linkedObjectId: "object-a",
+      linkedPathHint: "notes/a.md",
+    });
+    expect(operations[2]!.payload).toMatchObject({
+      messageId: chat.messageId,
+      threadId: chat.threadId,
+      authorUserId: "user-a",
+    });
+  });
+
+  it("names the relay request path and timeout when a request expires", async () => {
+    const timeout = new Error("request expired");
+    timeout.name = "TimeoutError";
+    const peer = new RelayFilePeer({
+      baseUrl: "https://relay.test",
+      token: "peer-token",
+      workspaceId: "workspace-a",
+      originId: "peer-a",
+      fetch: async () => {
+        throw timeout;
+      },
+    });
+
+    await expect(peer.initialize()).rejects.toThrow(
+      "Relay request /sync/workspace-a/log timed out after 15000 ms.",
+    );
+  });
 });
 
 const engine = requireEngineBinaryOrSkip();
@@ -238,7 +335,7 @@ describe("RelayFilePeer receiver contract", () => {
       } finally {
         await sessions?.closeAll().catch(() => undefined);
         await lifecycle?.stop().catch(() => undefined);
-        await relay?.stop();
+        await relay?.stop().catch(() => undefined);
         await rm(baseDir, { recursive: true, force: true });
       }
     },

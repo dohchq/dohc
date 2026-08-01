@@ -150,28 +150,43 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       .poll(
         async () => {
           identity ??= relayAdoptedIdentity(relayDb, workspaceId);
-          const query = new URLSearchParams({ since: "0", limit: "500" });
-          if (identity) {
-            query.set("replicationEpoch", identity.replicationEpoch);
-            query.set("streamIdentity", identity.streamIdentity);
-          }
-          const response = await fetch(
-            `${relay!.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?${query.toString()}`,
-            { headers: { authorization: `Bearer ${TOKEN}` } },
-          );
-          if (response.status === 409) {
-            // Identity was adopted between our read and this request (or
-            // rotated); relearn on the next interval.
-            identity = null;
-            return null;
-          }
-          if (!response.ok) throw new Error(`relay log read failed (${response.status})`);
-          const body = (await response.json()) as {
-            ops: Array<{ payload?: { path?: string } }>;
-          };
           loggedPaths.length = 0;
-          for (const op of body.ops) {
-            if (typeof op.payload?.path === "string") loggedPaths.push(op.payload.path);
+          let since = 0;
+          while (true) {
+            const query = new URLSearchParams({ since: String(since), limit: "500" });
+            if (identity) {
+              query.set("replicationEpoch", identity.replicationEpoch);
+              query.set("streamIdentity", identity.streamIdentity);
+            }
+            const response = await fetch(
+              `${relay!.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?${query.toString()}`,
+              { headers: { authorization: `Bearer ${TOKEN}` } },
+            );
+            if (response.status === 409) {
+              // Identity was adopted between our read and this request (or
+              // rotated); relearn on the next interval.
+              identity = null;
+              loggedPaths.length = 0;
+              return null;
+            }
+            if (!response.ok) {
+              throw new Error(`relay log read failed (${response.status})`);
+            }
+            const body = (await response.json()) as {
+              ops: Array<{ payload?: { path?: string } }>;
+              nextCursor: number;
+              hasMore: boolean;
+            };
+            for (const op of body.ops) {
+              if (typeof op.payload?.path === "string") {
+                loggedPaths.push(op.payload.path);
+              }
+            }
+            if (!body.hasMore) break;
+            if (!Number.isSafeInteger(body.nextCursor) || body.nextCursor <= since) {
+              throw new Error("relay log pagination did not advance");
+            }
+            since = body.nextCursor;
           }
           return true;
         },
