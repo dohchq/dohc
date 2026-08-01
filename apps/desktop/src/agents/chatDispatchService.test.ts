@@ -4,7 +4,6 @@ import {
   CHATS_METHOD,
   ChatsLoopbackEngine,
   type ChatDispatch,
-  type ChatRun,
   type JsonValue,
   type Request,
   type Response,
@@ -164,7 +163,6 @@ interface Fixture {
   storeResolves: { chat: number; dispatch: number };
   now: { value: number };
   readDispatch(triggerMessageId: string, threadId: string): ChatDispatch;
-  readScanCursor(): { max_created_at_ms: number } | undefined;
   setNextChatTimestamp(value: number): void;
   requeueRaw(input: {
     workspaceId: string;
@@ -195,8 +193,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const chatIds = { channel: 0, message: 0, thread: 0 };
   let chatNow = CHAT_START_MS;
   let nextChatTimestamp: number | null = null;
-  let maxMessageCreatedAtMs = -1;
-  let scanCursorMs = -1;
   const now = { value: 1_000_000 };
   let nextRunId = 0;
   let nextSelfTestId = 0;
@@ -242,8 +238,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   let nextFailRunError: Error | null = null;
   const failRunErrors: Error[] = [];
   const completeRunErrors: Error[] = [];
-  const restartFailureRunIds = new Set<string>();
-  let probeRequestId = -1;
   let daemon: {
     close(): void;
     sendRequest(request: Request): Promise<Response>;
@@ -345,101 +339,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       ...request,
       params,
     });
-    if (
-      request.method === CHATS_METHOD.dispatchFail &&
-      params.reason === "app restart during run" &&
-      typeof params.runId === "string"
-    ) {
-      restartFailureRunIds.add(params.runId);
-    }
-    if (request.method === CHATS_METHOD.dispatchListAppQuitRecoveries) {
-      const result =
-        response.result &&
-        typeof response.result === "object" &&
-        !Array.isArray(response.result)
-          ? response.result
-          : {};
-      const recoveries = Array.isArray(result.recoveries)
-        ? [...result.recoveries]
-        : [];
-      const recoveredRunIds = new Set(
-        recoveries.flatMap((recovery) => {
-          if (
-            !recovery ||
-            typeof recovery !== "object" ||
-            Array.isArray(recovery) ||
-            !recovery.run ||
-            typeof recovery.run !== "object" ||
-            Array.isArray(recovery.run) ||
-            typeof recovery.run.runId !== "string"
-          ) {
-            return [];
-          }
-          return [recovery.run.runId];
-        }),
-      );
-      for (const runId of restartFailureRunIds) {
-        if (recoveredRunIds.has(runId)) continue;
-        const runResponse = await engine.sendRequest({
-          id: probeRequestId,
-          method: CHATS_METHOD.dispatchGetRunRecord,
-          workspace: WORKSPACE_ID,
-          params: { runId },
-        });
-        probeRequestId -= 1;
-        const run = runResponse.result as ChatRun | null;
-        if (!run) continue;
-        const dispatch = engine.seedDispatch({
-          workspaceId: WORKSPACE_ID,
-          triggerMessageId: run.triggerMessageId,
-          threadId: run.threadId,
-          state: "pending",
-        });
-        if (dispatch.state !== "failed" || dispatch.runId !== runId) continue;
-        recoveries.push({ run, attemptCount: dispatch.attemptCount });
-      }
-      return {
-        id: response.id,
-        result: {
-          recoveries,
-          nextCursor: null,
-        },
-      };
-    }
-    if (
-      request.method === CHATS_METHOD.threadStart &&
-      response.result &&
-      typeof response.result === "object" &&
-      !Array.isArray(response.result)
-    ) {
-      const message = response.result.message;
-      if (
-        message &&
-        typeof message === "object" &&
-        !Array.isArray(message) &&
-        typeof message.createdAtMs === "number"
-      ) {
-        maxMessageCreatedAtMs = Math.max(
-          maxMessageCreatedAtMs,
-          message.createdAtMs,
-        );
-      }
-    } else if (
-      request.method === CHATS_METHOD.messageSend &&
-      response.result &&
-      typeof response.result === "object" &&
-      !Array.isArray(response.result) &&
-      typeof response.result.createdAtMs === "number"
-    ) {
-      maxMessageCreatedAtMs = Math.max(
-        maxMessageCreatedAtMs,
-        response.result.createdAtMs,
-      );
-    } else if (
-      request.method === CHATS_METHOD.dispatchRecordEligibleTriggers
-    ) {
-      scanCursorMs = Math.max(scanCursorMs, maxMessageCreatedAtMs);
-    }
     return response;
   };
   daemon = { close: () => undefined, sendRequest };
@@ -645,8 +544,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
         threadId,
         state: "pending",
       }),
-    readScanCursor: () =>
-      scanCursorMs < 0 ? undefined : { max_created_at_ms: scanCursorMs },
     setNextChatTimestamp: (value) => {
       nextChatTimestamp = value;
     },
@@ -948,10 +845,12 @@ describe("chatDispatchService", () => {
         verifiedUserId: "user_local",
       }),
     ).toBe(0);
-    expect(
-      fixture.readScanCursor(),
-    ).toEqual({ max_created_at_ms: unrelated.message.createdAtMs });
 
+    fixture.setNextChatTimestamp(unrelated.message.createdAtMs - 2);
+    await createAgentThread(fixture, {
+      body: "A trigger older than the cursor overlap floor.",
+      authorUserId: "user_local",
+    });
     fixture.setNextChatTimestamp(unrelated.message.createdAtMs);
     const tied = await createAgentThread(fixture, {
       body: "A trigger tied at the cursor timestamp.",
