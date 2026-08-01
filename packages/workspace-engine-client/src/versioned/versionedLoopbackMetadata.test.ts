@@ -1543,6 +1543,50 @@ describe("loopback moment metadata", () => {
     }
   });
 
+  it("rejects invalid merge paths before replay state", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      versionId: "main",
+      path: "merge-path.md",
+      text: "base",
+    });
+    const named = await send(engine, VERSIONED_METHOD.versionsCreateNamed, {
+      workspaceId: WORKSPACE,
+      name: "merge-path-validation",
+      fromVersionId: "main",
+    });
+    const sourceVersionId = String(named.id);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: sourceVersionId,
+      path: "merge-path.md",
+      text: "incoming",
+      origin: "api",
+    });
+    const requestId = "merge-path-request";
+    await expect(
+      send(engine, VERSIONED_METHOD.versionsMerge, {
+        workspaceId: WORKSPACE,
+        sourceVersionId,
+        targetVersionId: "main",
+        path: "notes/../merge-path.md",
+        origin: "api",
+        requestId,
+      }),
+    ).rejects.toThrow(/invalid-path/);
+
+    const merged = await send(engine, VERSIONED_METHOD.versionsMerge, {
+      workspaceId: WORKSPACE,
+      sourceVersionId,
+      targetVersionId: "main",
+      path: "merge-path.md",
+      origin: "api",
+      requestId,
+    });
+    expect(merged).toMatchObject({ status: "merged", deduped: false });
+  });
+
   it("normalizes accepted write and rename paths before storing them", async () => {
     const engine = new VersionedLoopbackEngine();
     const written = await send(engine, VERSIONED_METHOD.textWrite, {
@@ -1820,6 +1864,56 @@ describe("loopback moment metadata", () => {
     );
     expect(firstMerge.deduped).toBe(false);
     expect(replayedMerge.deduped).toBe(true);
+  });
+
+  it("replays merges when only summary and correlationId change", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      versionId: "main",
+      path: "merge-metadata.md",
+      text: "base",
+    });
+    const named = await send(engine, VERSIONED_METHOD.versionsCreateNamed, {
+      workspaceId: WORKSPACE,
+      name: "merge-metadata-replay",
+      fromVersionId: "main",
+    });
+    const sourceVersionId = String(named.id);
+    await send(engine, VERSIONED_METHOD.textWrite, {
+      workspaceId: WORKSPACE,
+      versionId: sourceVersionId,
+      path: "merge-metadata.md",
+      text: "incoming",
+      origin: "api",
+    });
+    const mergeParams = {
+      workspaceId: WORKSPACE,
+      sourceVersionId,
+      targetVersionId: "main",
+      path: "merge-metadata.md",
+      origin: "api",
+      requestId: "merge-metadata-request",
+    };
+    const first = await send(engine, VERSIONED_METHOD.versionsMerge, {
+      ...mergeParams,
+      summary: "first summary",
+      correlationId: "first-correlation",
+    });
+    const replayed = await send(engine, VERSIONED_METHOD.versionsMerge, {
+      ...mergeParams,
+      summary: "changed summary",
+      correlationId: "changed-correlation",
+    });
+    expect(first.deduped).toBe(false);
+    expect(replayed.deduped).toBe(true);
+    expect((replayed.moment as { momentId?: unknown }).momentId).toBe(
+      (first.moment as { momentId?: unknown }).momentId,
+    );
+    expect(replayed.moment).toMatchObject({
+      metadataSummary: "first summary",
+      metadataCorrelationId: "first-correlation",
+    });
   });
 
   it("accepts null rollback and merge request ids without opening missing versions", async () => {
