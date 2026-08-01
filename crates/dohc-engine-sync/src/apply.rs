@@ -683,12 +683,11 @@ fn apply_channel(
     op: &ReplicationEnvelope,
     payload: ChannelCreate,
 ) -> Result<(), SyncError> {
-    let replicated_channel_id =
-        normalize_replicated_chat_id(&payload.channel_id, "channel id is invalid")
-            .map_err(|error| map_chat_rule(error, "chat channel id is invalid"))?;
-    if replicated_channel_id != payload.channel_id
+    let channel_id = normalize_replicated_chat_id(&payload.channel_id, "channel id is invalid")
+        .map_err(|error| map_chat_rule(error, "chat channel id is invalid"))?;
+    if channel_id != payload.channel_id
         || matches!(
-            replicated_channel_id.as_str(),
+            channel_id.as_str(),
             GENERAL_CHANNEL_WIRE_ID | AGENT_CHANNEL_WIRE_ID
         )
     {
@@ -741,7 +740,7 @@ fn apply_channel(
             }
             normalized
         }
-        None => replicated_channel_id.clone(),
+        None => channel_id.clone(),
     };
     let mapped: Option<String> = tx
         .query_row(
@@ -782,15 +781,6 @@ fn apply_channel(
         }
         return Ok(());
     }
-    // A DM's replicated channel id belongs to its owner. Mint a stable receiver-
-    // local id so participant provenance survives after the joined-share row is
-    // removed on leave. If a thread arrived first, its placeholder already owns
-    // this wire mapping and the mapped branch above materializes that same row.
-    let channel_id = if payload.kind == "dm" && payload.wire_id.is_some() {
-        format!("placeholder:{}:{}", op.origin_id, wire_id)
-    } else {
-        replicated_channel_id
-    };
     let slug = allocate_channel_slug(tx, &op.workspace_id, &requested_slug, &channel_id, &wire_id)?;
     debug_assert!(is_replicated_channel_slug(&slug));
     tx.execute(
