@@ -255,6 +255,7 @@ async fn conflict_list_and_resolve_are_isolated_by_workspace() {
         .await
         .expect_err("workspace B must not resolve workspace A's conflict");
     assert_eq!(wrong_workspace_resolve.code, ErrorCode::InvalidParams);
+    assert_eq!(wrong_workspace_resolve.message, "conflict-not-found");
 
     let workspace_a_conflicts = transport
         .call(
