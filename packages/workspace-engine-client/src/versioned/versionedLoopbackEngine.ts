@@ -2440,6 +2440,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretMomentsList(state: WorkspaceState, params: JsonObject): JsonValue {
+    const rawPath = optionalString(params, "path");
+    const path = rawPath === undefined ? undefined : normalizedSecretPath(rawPath);
     const versionId = optionalString(params, "versionId");
     // Daemon parity: a PRESENT but unknown versionId refuses invalid-version
     // (require_version inside the keyless domain query) instead of answering
@@ -2447,7 +2449,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (versionId !== undefined && !state.versions.has(versionId)) {
       throw new Error("invalid-version");
     }
-    const path = optionalString(params, "path");
     const before = optionalNumber(params, "beforeMomentOrder");
     const limit = Math.min(500, Math.max(1, optionalNumber(params, "limit") ?? 200));
     const filtered = [...state.secretMoments.values()]

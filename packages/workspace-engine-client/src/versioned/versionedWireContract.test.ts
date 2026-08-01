@@ -2133,6 +2133,50 @@ describe("loopback contract enforcement", () => {
     expect(second.nextBeforeMomentOrder).toBeNull();
   });
 
+  it("normalizes secret moment path filters before version lookup", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
+    await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "secret",
+      origin: "api",
+      momentId: "secret-alias-history",
+    });
+
+    const aliased = decodeSecretsMomentsListResult(
+      await call(engine, 2, VERSIONED_METHOD.secretsMomentsList, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "%2eenv",
+      }),
+    );
+    expect(aliased.moments.map((moment) => [moment.id, moment.path])).toEqual([
+      ["secret-alias-history", ".env"],
+    ]);
+
+    await expect(
+      call(engine, 3, VERSIONED_METHOD.secretsMomentsList, {
+        workspaceId: WORKSPACE,
+        versionId: "missing-version",
+        path: "notes.md",
+      }),
+    ).rejects.toThrow(/not-secret-path/);
+
+    const unchanged = decodeSecretsMomentsListResult(
+      await call(engine, 4, VERSIONED_METHOD.secretsMomentsList, {
+        workspaceId: WORKSPACE,
+        path: ".env",
+      }),
+    );
+    expect(unchanged.moments.map((moment) => moment.id)).toEqual([
+      "secret-alias-history",
+    ]);
+  });
+
   it("pages version-wide secret moments across paths newest-first", async () => {
     const engine = new VersionedLoopbackEngine();
     await call(engine, 1, VERSIONED_METHOD.versionsEnsureMain, {
