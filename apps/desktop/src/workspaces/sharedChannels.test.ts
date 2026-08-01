@@ -1,23 +1,24 @@
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
 } from "@dohc/workspace-contracts/relay";
-import {
-  createLinkedChatStore,
-} from "@dohc/workspace-engine";
+import { CHATS_METHOD, ChatsLoopbackEngine, type Request } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
+  endJoinedChannel,
   joinedSharedChannelForTarget,
   mergeJoinedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
 } from "./sharedChannels";
 import type { JoinedSharedChannel } from "./registryStore";
+import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
+import { nativeTmpdir } from "./testTemp";
 
 // MU-C4: the desktop's best-effort refresh pass over joined shared channels.
 // The engine client is injected; these tests pin the pass's CONTAINMENT
@@ -25,6 +26,38 @@ import type { JoinedSharedChannel } from "./registryStore";
 // a read-only downgrade keeps reads flowing.
 
 const RELAY = { baseUrl: "http://relay.test", token: "token" };
+
+async function makeChats(workspaceId: string): Promise<{
+  store: ReturnType<typeof createLiveLinkedChatStore>;
+  root: string;
+  seed: (request: Omit<Request, "id" | "workspace">) => Promise<void>;
+}> {
+  const root = await mkdtemp(join(nativeTmpdir(), "dohc-shared-channel-"));
+  const loopback = new ChatsLoopbackEngine();
+  const client = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request) {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: workspaceId } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+  const store = createLiveLinkedChatStore({ workspaceId, rootPath: root }, sessions);
+  let nextRequestId = 1;
+  return {
+    store,
+    root,
+    seed: async (request) => {
+      await loopback.sendRequest({ ...request, id: nextRequestId++, workspace: workspaceId });
+    },
+  };
+}
 
 function joined(overrides: Partial<JoinedSharedChannel> = {}): JoinedSharedChannel {
   return {
@@ -234,26 +267,61 @@ describe("mergeJoinedChannel", () => {
   });
 });
 
+describe("endJoinedChannel", () => {
+  it("keeps an ended provenance tombstone instead of deleting the joined row", () => {
+    const existing = [
+      joined({ shareId: "share-leave", channelWireId: "wire-leave" }),
+      joined({ shareId: "share-other", channelWireId: "wire-other" }),
+    ];
+
+    const ended = endJoinedChannel(existing, "share-leave");
+
+    expect(ended).toEqual([
+      joined({ shareId: "share-leave", channelWireId: "wire-leave", ended: true }),
+      joined({ shareId: "share-other", channelWireId: "wire-other" }),
+    ]);
+  });
+});
+
 describe("assertSharedChannelWritable", () => {
   it("rejects writes into a READ-ONLY joined channel before any durable mutation, leaving other channels writable", async () => {
-    const root = await mkdtemp(join(tmpdir(), "dohc-shared-channel-gate-"));
-    const chats = createLinkedChatStore(root);
+    const { store: chats, root, seed } = await makeChats("ws-1");
     try {
-      const team = await chats.createChannel({ workspaceId: "ws-1", name: "team" });
-      const teamWire = await chats.getChannelWireId({ workspaceId: "ws-1", channelId: team.id });
-      expect(teamWire).not.toBeNull();
-      const started = await chats.startChannelThread({
-        workspaceId: "ws-1",
-        channelId: team.id,
-        author: { kind: "human", displayName: "Member" },
-        body: "seeded",
+      await seed({
+        method: CHATS_METHOD.channelCreate,
+        params: { channelId: "team", name: "team", kind: "channel", nowMs: 1 },
       });
-      const personal = await chats.createChannel({ workspaceId: "ws-1", name: "personal" });
-      const personalThread = await chats.startChannelThread({
-        workspaceId: "ws-1",
-        channelId: personal.id,
-        author: { kind: "human", displayName: "Member" },
-        body: "mine",
+      const teamWire = await chats.getChannelWireId({ workspaceId: "ws-1", channelId: "team" });
+      expect(teamWire).not.toBeNull();
+      await seed({
+        method: CHATS_METHOD.threadStart,
+        idempotencyKey: "team-thread:team-message",
+        params: {
+          channelId: "team",
+          threadId: "team-thread",
+          messageId: "team-message",
+          authorKind: "human",
+          authorDisplayName: "Member",
+          body: "seeded",
+          nowMs: 2,
+        },
+      });
+      await seed({
+        method: CHATS_METHOD.channelCreate,
+        params: { channelId: "personal", name: "personal", kind: "channel", nowMs: 3 },
+      });
+      await seed({
+        method: CHATS_METHOD.threadStart,
+        idempotencyKey: "personal-thread:personal-message",
+        params: {
+          channelId: "personal",
+          threadId: "personal-thread",
+          messageId: "personal-message",
+          authorKind: "human",
+          authorDisplayName: "Member",
+          body: "mine",
+          nowMs: 4,
+        },
       });
 
       const readOnlyRows = [joined({ channelWireId: teamWire!, access: "read-only" })];
@@ -264,7 +332,7 @@ describe("assertSharedChannelWritable", () => {
           workspaceId: "ws-1",
           sharedChannels: readOnlyRows,
           store: chats,
-          target: { threadId: started.thread.id },
+          target: { threadId: "team-thread" },
         }),
       ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
       await expect(
@@ -272,11 +340,11 @@ describe("assertSharedChannelWritable", () => {
           workspaceId: "ws-1",
           sharedChannels: readOnlyRows,
           store: chats,
-          target: { channelId: team.id },
+          target: { channelId: "team" },
         }),
       ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
       // Nothing durable landed: the seeded message is still alone.
-      const messages = await chats.listMessages({ workspaceId: "ws-1", threadId: started.thread.id });
+      const messages = await chats.listMessages({ workspaceId: "ws-1", threadId: "team-thread" });
       expect(messages).toHaveLength(1);
 
       // The SAME channel under a read-write grant stays writable…
@@ -285,7 +353,7 @@ describe("assertSharedChannelWritable", () => {
           workspaceId: "ws-1",
           sharedChannels: [joined({ channelWireId: teamWire!, access: "read-write" })],
           store: chats,
-          target: { threadId: started.thread.id },
+          target: { threadId: "team-thread" },
         }),
       ).resolves.toBeUndefined();
       await expect(
@@ -305,7 +373,7 @@ describe("assertSharedChannelWritable", () => {
             }),
           ],
           store: chats,
-          target: { threadId: started.thread.id },
+          target: { threadId: "team-thread" },
         }),
       ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
       // …a plain local channel is unaffected even while a read-only grant
@@ -315,7 +383,7 @@ describe("assertSharedChannelWritable", () => {
           workspaceId: "ws-1",
           sharedChannels: readOnlyRows,
           store: chats,
-          target: { channelId: personal.id },
+          target: { channelId: "personal" },
         }),
       ).resolves.toBeUndefined();
       await expect(
@@ -323,7 +391,7 @@ describe("assertSharedChannelWritable", () => {
           workspaceId: "ws-1",
           sharedChannels: readOnlyRows,
           store: chats,
-          target: { threadId: personalThread.thread.id },
+          target: { threadId: "personal-thread" },
         }),
       ).resolves.toBeUndefined();
       // …and an unknown thread is not this gate's problem (the store's own
@@ -346,7 +414,7 @@ describe("assertSharedChannelWritable", () => {
           workspaceId: "ws-1",
           sharedChannels: endedRows,
           store: chats,
-          target: { threadId: started.thread.id },
+          target: { threadId: "team-thread" },
         }),
       ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
       await expect(
@@ -354,13 +422,13 @@ describe("assertSharedChannelWritable", () => {
           workspaceId: "ws-1",
           sharedChannels: endedRows,
           store: chats,
-          target: { channelId: team.id },
+          target: { channelId: "team" },
         }),
       ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
       // Nothing durable landed for the ended channel either.
       const afterEnded = await chats.listMessages({
         workspaceId: "ws-1",
-        threadId: started.thread.id,
+        threadId: "team-thread",
       });
       expect(afterEnded).toHaveLength(1);
     } finally {
@@ -372,22 +440,34 @@ describe("assertSharedChannelWritable", () => {
 
 describe("joinedSharedChannelForTarget", () => {
   it("resolves a joined channel by channel or thread and ignores local channels", async () => {
-    const root = await mkdtemp(join(tmpdir(), "dohc-shared-channel-target-"));
-    const chats = createLinkedChatStore(root);
+    const { store: chats, root, seed } = await makeChats("ws-1");
     try {
-      const shared = await chats.createChannel({ workspaceId: "ws-1", name: "shared" });
+      await seed({
+        method: CHATS_METHOD.channelCreate,
+        params: { channelId: "shared", name: "shared", kind: "channel", nowMs: 1 },
+      });
       const sharedWire = await chats.getChannelWireId({
         workspaceId: "ws-1",
-        channelId: shared.id,
+        channelId: "shared",
       });
       expect(sharedWire).not.toBeNull();
-      const thread = await chats.startChannelThread({
-        workspaceId: "ws-1",
-        channelId: shared.id,
-        author: { kind: "human", displayName: "Member" },
-        body: "seeded",
+      await seed({
+        method: CHATS_METHOD.threadStart,
+        idempotencyKey: "shared-thread:shared-message",
+        params: {
+          channelId: "shared",
+          threadId: "shared-thread",
+          messageId: "shared-message",
+          authorKind: "human",
+          authorDisplayName: "Member",
+          body: "seeded",
+          nowMs: 2,
+        },
       });
-      const local = await chats.createChannel({ workspaceId: "ws-1", name: "local" });
+      await seed({
+        method: CHATS_METHOD.channelCreate,
+        params: { channelId: "local", name: "local", kind: "channel", nowMs: 3 },
+      });
       const rows = [joined({ channelWireId: sharedWire!, relayUrl: "https://relay.one" })];
 
       await expect(
@@ -395,7 +475,7 @@ describe("joinedSharedChannelForTarget", () => {
           workspaceId: "ws-1",
           sharedChannels: rows,
           store: chats,
-          target: { channelId: shared.id },
+          target: { channelId: "shared" },
         }),
       ).resolves.toEqual(rows[0]);
       await expect(
@@ -403,7 +483,7 @@ describe("joinedSharedChannelForTarget", () => {
           workspaceId: "ws-1",
           sharedChannels: rows,
           store: chats,
-          target: { threadId: thread.thread.id },
+          target: { threadId: "shared-thread" },
         }),
       ).resolves.toEqual(rows[0]);
       await expect(
@@ -411,7 +491,7 @@ describe("joinedSharedChannelForTarget", () => {
           workspaceId: "ws-1",
           sharedChannels: rows,
           store: chats,
-          target: { channelId: local.id },
+          target: { channelId: "local" },
         }),
       ).resolves.toBeNull();
     } finally {

@@ -110,7 +110,11 @@ export async function listDmRecords(input: {
       channelId: channel.id,
     });
     const running = runningThread(threads);
-    const role = wireId === channel.id ? "owner" : "participant";
+    const joined = joinedByWire.get(wireId);
+    // Current Rust imports preserve the owner's channel id. Joined-share state
+    // identifies those participants; id inequality preserves provenance for
+    // older imported rows whose leave record was deleted before tombstones.
+    const role = joined !== undefined || wireId !== channel.id ? "participant" : "owner";
     // An OWNER DM with no running thread is an aborted / rolled-back start: a
     // committed owner DM always sent its first message (creating the thread),
     // and startDm revokes this call's grants on a partial grant failure, so the
@@ -119,7 +123,6 @@ export async function listDmRecords(input: {
     // complete DM. A PARTICIPANT with no thread yet is a REAL pending DM (the
     // owner may grant before sending the first message), so it stays visible.
     if (role === "owner" && running === undefined) continue;
-    const joined = joinedByWire.get(wireId);
     dms.push({
       channelId: channel.id,
       channelWireId: wireId,

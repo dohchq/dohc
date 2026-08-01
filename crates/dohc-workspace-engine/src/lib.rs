@@ -7567,11 +7567,15 @@ impl EngineService {
         let resolution = match local.resolution.as_str() {
             "keep-current" => ResolveConflictKind::KeepCurrent,
             "apply-incoming" => ResolveConflictKind::ApplyIncoming,
-            "apply-merged" => ResolveConflictKind::ApplyMerged {
-                text: local
+            "apply-merged" => {
+                let text = local
                     .merged_text
-                    .ok_or_else(|| wire(ErrorCode::InvalidParams, "missing merged text"))?,
-            },
+                    .ok_or_else(|| wire(ErrorCode::InvalidParams, "missing merged text"))?;
+                if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
+                    return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+                }
+                ResolveConflictKind::ApplyMerged { text }
+            }
             _ => {
                 return Err(wire(
                     ErrorCode::InvalidParams,
@@ -10717,6 +10721,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
             DomainError::InvalidVersionName => Some("invalid-version-name"),
             DomainError::DuplicateId => Some("duplicate-id"),
             DomainError::ForkBaseNotFound => Some("fork-base-not-found"),
+            DomainError::ConflictNotFound => Some("conflict-not-found"),
             DomainError::ConflictStaleTarget => Some("conflict-stale-target"),
             DomainError::BinaryHeadNotText => Some("binary-head-not-text"),
             DomainError::InvalidPath { .. } => Some("invalid-path"),

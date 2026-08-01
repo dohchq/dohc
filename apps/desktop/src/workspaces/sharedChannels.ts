@@ -70,6 +70,17 @@ export function mergeJoinedChannel(
   ];
 }
 
+// Member leave stops sync but keeps a durable provenance tombstone. The local
+// rows stay readable, and DM ownership must not flip when live grant data goes.
+export function endJoinedChannel(
+  existing: readonly JoinedSharedChannel[],
+  shareId: string,
+): JoinedSharedChannel[] {
+  return existing.map((channel) =>
+    channel.shareId === shareId ? { ...channel, ended: true } : channel,
+  );
+}
+
 // MU-C4 write gate (CodeRabbit security; product invariant "agent writes must
 // respect sharing boundaries"): a READ-ONLY or ENDED shared-channel grant must
 // reject chat writes BEFORE any durable local mutation. The renderer disabling

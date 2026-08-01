@@ -3,11 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createVersionedTextStore,
-  pullShareView,
-} from "@dohc/workspace-engine";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createShareViewDaemonHarness,
   type ShareViewDaemonHarness,
@@ -30,31 +26,12 @@ const SHARE_ID = "share-1";
 const HOST_WORKSPACE = "host-workspace-1";
 const TOKEN = "test:recipient";
 
-// The daemon-backed refreshes assert they built no legacy store. The three
-// tests still on `refreshShareMountOnceOnLegacyStore` do build one, so the spy
-// delegates instead of throwing and is cleared before every test.
-const legacyStoreSpy = vi.hoisted(() => vi.fn());
-
-vi.mock("@dohc/workspace-engine", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@dohc/workspace-engine")>();
-  return {
-    ...actual,
-    createVersionedTextStore: (
-      ...args: Parameters<typeof actual.createVersionedTextStore>
-    ) => {
-      legacyStoreSpy(...args);
-      return actual.createVersionedTextStore(...args);
-    },
-  };
-});
-
 let roots: string[] = [];
 let harnesses: ShareViewDaemonHarness[] = [];
 
 beforeEach(() => {
   roots = [];
   harnesses = [];
-  legacyStoreSpy.mockClear();
 });
 
 afterEach(async () => {
@@ -113,23 +90,6 @@ async function refreshShareMountOnce(
     relay: harness.relay,
     pull,
     openStore: input.openStore ?? harness.openStore,
-  });
-}
-
-// The legacy TypeScript fixture, kept for the three tests that still need it:
-// one asserts the mount's pull state exists ON DISK inside the mount folder,
-// and two refuse before any store is opened at all.
-function refreshShareMountOnceOnLegacyStore(
-  input: Omit<
-    Parameters<typeof refreshShareMountOnceWithPull>[0],
-    "openStore" | "pull" | "hostWorkspaceId"
-  >,
-) {
-  return refreshShareMountOnceWithPull({
-    hostWorkspaceId: HOST_WORKSPACE,
-    ...input,
-    pull: pullShareView,
-    openStore: ({ rootPath }) => createVersionedTextStore(rootPath),
   });
 }
 
@@ -288,25 +248,16 @@ describe("mount labels", () => {
 });
 
 describe("refreshShareMountOnce", () => {
-  // DELIBERATELY still on the legacy TypeScript store. The engine.db assertion
-  // below is the only proof anywhere that a mount's pull state is nested INSIDE
-  // the mount folder — which is why the host watcher ignores it and why
-  // removeMountFolder destroys it. An in-memory daemon double holds that state
-  // in the process, so it cannot reproduce the assertion; converting it to a
-  // daemon-observable substitute (workspace.open carried rootDir === mountRoot)
-  // would prove the daemon was ASKED to root a workspace there, not that the
-  // state lands there. Re-prove the on-disk form against a real daemon, then
-  // this test can move too.
   it("materializes shared files under shared-with-me/<label>/ and reports statuses", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "the brief");
     relay.addWrite("docs/deep/notes.md", "deep notes");
 
-    const first = await refreshShareMountOnceOnLegacyStore({
+    const first = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(first.status).toBe("updated");
     expect(first.changedPaths).toBe(2);
@@ -315,22 +266,26 @@ describe("refreshShareMountOnce", () => {
     expect(await readFile(join(mountRoot, "docs/deep/notes.md"), "utf8")).toBe(
       "deep notes",
     );
-    // The mount's pull state is its own nested engine store, invisible to
-    // the host's tree/watcher (`.dohc` is ignored at any depth).
-    expect(existsSync(join(mountRoot, ".dohc/engine/engine.db"))).toBe(true);
+    expect(harness.transport.requests).toContainEqual(
+      expect.objectContaining({
+        method: "workspace.open",
+        params: expect.objectContaining({
+          workspaceId: mountStoreWorkspaceIdFor(HOST_WORKSPACE, SHARE_ID),
+          rootDir: mountRoot,
+        }),
+      }),
+    );
 
-    const second = await refreshShareMountOnceOnLegacyStore({
+    const second = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(second).toEqual({ status: "unchanged", changedPaths: 0 });
 
     relay.addWrite("docs/brief.md", "the brief v2");
-    const third = await refreshShareMountOnceOnLegacyStore({
+    const third = await refreshShareMountOnce(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
-      relay: relay.connection(),
     });
     expect(third.status).toBe("updated");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe(
@@ -369,7 +324,6 @@ describe("refreshShareMountOnce", () => {
     expect(
       await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex/docs/brief.md"), "utf8"),
     ).toBe("the brief");
-    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("reports ended on revocation and leaves the files untouched", async () => {
@@ -391,26 +345,21 @@ describe("refreshShareMountOnce", () => {
     expect(
       await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex", "plan.md"), "utf8"),
     ).toBe("keep me");
-    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
-  // Legacy fixture on purpose: the guard refuses before any store is opened or
-  // any pull runs, so the daemon wrapper's own mount-folder setup would be the
-  // first thing to throw and the test would stop proving that
-  // refreshShareMountOnce refuses.
   it("refuses a symlinked shared-with-me or label directory (real-path guard)", async () => {
     const elsewhere = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "the brief");
 
     // Symlinked container: shared-with-me itself points outside.
     const hostA = await tempHostRoot();
     await symlink(elsewhere, join(hostA, SHARED_WITH_ME_FOLDER), "dir");
     await expect(
-      refreshShareMountOnceOnLegacyStore({
+      refreshShareMountOnce(harness, {
         hostRoot: hostA,
         mount: { shareId: SHARE_ID, label: "alex" },
-        relay: relay.connection(),
       }),
     ).rejects.toThrow(/not a real directory/);
     expect(existsSync(join(elsewhere, "alex"))).toBe(false);
@@ -420,13 +369,13 @@ describe("refreshShareMountOnce", () => {
     await mkdir(join(hostB, SHARED_WITH_ME_FOLDER), { recursive: true });
     await symlink(elsewhere, join(hostB, SHARED_WITH_ME_FOLDER, "alex"), "dir");
     await expect(
-      refreshShareMountOnceOnLegacyStore({
+      refreshShareMountOnce(harness, {
         hostRoot: hostB,
         mount: { shareId: SHARE_ID, label: "alex" },
-        relay: relay.connection(),
       }),
     ).rejects.toThrow(/not a real directory/);
     expect(existsSync(join(elsewhere, "docs"))).toBe(false);
+    expect(harness.transport.requests).toEqual([]);
   });
 
   it("never follows a symlink planted INSIDE the mount (directory or file)", async () => {
@@ -467,7 +416,6 @@ describe("refreshShareMountOnce", () => {
     expect(healed.status).toBe("updated");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v3");
     expect(existsSync(join(elsewhere, "brief.md"))).toBe(false);
-    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("repairs local tampering on refresh even when the relay has nothing new", async () => {
@@ -507,7 +455,6 @@ describe("refreshShareMountOnce", () => {
       mount: { shareId: SHARE_ID, label: "alex" },
     });
     expect(quiet).toEqual({ status: "unchanged", changedPaths: 0 });
-    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("creates NOTHING outside the workspace when a dir symlink sits on a deep write path", async () => {
@@ -536,7 +483,6 @@ describe("refreshShareMountOnce", () => {
       await readFile(join(mountRoot, "docs/deep/file.md"), "utf8"),
     ).toBe("payload");
     expect(existsSync(join(elsewhere, "deep"))).toBe(false);
-    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("unmount removes a tampered symlinked mount root as a link (never through it)", async () => {
@@ -573,7 +519,6 @@ describe("refreshShareMountOnce", () => {
     });
     expect(healed.status).toBe("updated");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v1");
-    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("routes DELETE ops through the same real-parent containment", async () => {
@@ -602,7 +547,6 @@ describe("refreshShareMountOnce", () => {
     expect(outcome.status).toBe("updated");
     expect(existsSync(join(mountRoot, "docs/brief.md"))).toBe(false);
     expect(await readFile(join(elsewhere, "brief.md"), "utf8")).toBe("victim");
-    expect(legacyStoreSpy).not.toHaveBeenCalled();
   });
 
   it("createMountDirectory refuses a symlinked container BEFORE any write", async () => {
@@ -636,20 +580,17 @@ describe("refreshShareMountOnce", () => {
     ).not.toThrow();
   });
 
-  // Legacy fixture on purpose, for the same reason as the real-path guard
-  // above: refreshShareMountOnce must be the thing that refuses the label, and
-  // the daemon wrapper would have to resolve the mount root before it could
-  // bind a relay route.
   it("refuses to refresh a mount whose registry label was tampered into traversal", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
     await expect(
-      refreshShareMountOnceOnLegacyStore({
+      refreshShareMountOnce(harness, {
         hostRoot: host,
         mount: { shareId: SHARE_ID, label: "../../etc" },
-        relay: relay.connection(),
       }),
     ).rejects.toThrow(/Invalid share mount label/);
+    expect(harness.transport.requests).toEqual([]);
   });
 });
 
