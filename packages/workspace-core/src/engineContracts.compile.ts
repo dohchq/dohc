@@ -16,17 +16,10 @@ type IsSame<A, B> =
 
 type AssertSame<A, B> = IsSame<A, B>;
 
-type SharedHistoryField =
-  | "kind"
-  | "author"
-  | "files"
-  | "boundaryCrossings"
-  | "provenance";
-
 type HistoryDriftChecks = [
   AssertSame<
-    Pick<VersionedFileWriteResult["history"], SharedHistoryField>,
-    Pick<ChangeSet, SharedHistoryField>
+    Omit<VersionedFileWriteResult["history"], "id" | "recordedAtMs">,
+    ChangeSet
   >,
   AssertSame<
     Pick<VersionedFileWorkspaceOptions, "author">,
