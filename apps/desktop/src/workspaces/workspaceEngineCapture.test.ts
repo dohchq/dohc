@@ -371,7 +371,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it("flushes daemon capture before resolving a conflict", async () => {
+  it("flushes daemon capture before reading conflicts for resolution", async () => {
     const root = await tempRoot();
     const requests: Request[] = [];
     const engine = capture(root, {
@@ -386,12 +386,12 @@ describe("workspaceEngineCapture batch capture", () => {
     const relevant = requests
       .map((request) => request.method)
       .filter(
-        (method) => method === "capture.flush" || method === "conflicts.resolve",
+        (method) => method === "capture.flush" || method === "conflicts.list",
       );
 
-    // MUTATION: remove resolveConflict's daemon flush. The resolution request
+    // MUTATION: remove resolveConflict's daemon flush. The conflict lookup
     // remains, making this order assertion fail on the missing first entry.
-    expect(relevant).toEqual(["capture.flush", "conflicts.resolve"]);
+    expect(relevant).toEqual(["capture.flush", "conflicts.list"]);
     await engine.stop();
   });
 
