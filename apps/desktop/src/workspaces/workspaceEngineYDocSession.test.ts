@@ -169,20 +169,37 @@ it("captures a different disk edit while the Rust Y.Doc session is live", async 
   typeIntoBody(editor, "Owner edit.");
   await session.settleNow();
   const writesBeforeExternalEdit = methodCount(VERSIONED_METHOD.textWrite);
-
-  await writeFile(
-    join(root, PATH),
-    "# Solo\n\nAn external agent changed this file.\n",
-    "utf8",
+  const beforeExternalEdit = await capture.listMoments({ limit: 100 });
+  const priorMomentIds = new Set(
+    beforeExternalEdit.moments.map((moment) => moment.id),
   );
+  const externalMarkdown =
+    "# Solo\n\nAn external agent changed this file.\n";
+
+  await writeFile(join(root, PATH), externalMarkdown, "utf8");
   capture.captureBatch([{ path: PATH, operation: "update" }]);
   await capture.flush();
 
   expect(methodCount(VERSIONED_METHOD.textWrite)).toBeGreaterThan(
     writesBeforeExternalEdit,
   );
-  const moments = await capture.listMoments({ limit: 100 });
-  expect(moments.moments.some((moment) => moment.path === PATH)).toBe(true);
+  const afterExternalEdit = await capture.listMoments({ limit: 100 });
+  const externalMoment = afterExternalEdit.moments.find(
+    (moment) => moment.path === PATH && !priorMomentIds.has(moment.id),
+  );
+  if (!externalMoment) {
+    throw new Error("Expected the external disk edit to record a new moment.");
+  }
+  expect(await capture.readMoment(externalMoment.id)).toMatchObject({
+    protected: false,
+    moment: {
+      payload: {
+        after: {
+          text: externalMarkdown,
+        },
+      },
+    },
+  });
   await session.close({ settle: false });
 });
 
