@@ -140,20 +140,58 @@ function conflictState(
   };
 }
 
+function liveTextStateMatches(
+  live: JsonValue,
+  recorded: ConflictRecord["current"],
+  targetPath: string,
+): boolean {
+  if (recorded.contentKind !== "text") return false;
+  if (recorded.snapshot === null) {
+    return live === null && targetPath === recorded.path;
+  }
+  if (live === null || typeof live !== "object" || Array.isArray(live)) {
+    return false;
+  }
+  return (
+    live.contentKind === "text" &&
+    live.path === recorded.path &&
+    live.objectId === recorded.snapshot.objectId &&
+    live.latestMomentId === recorded.snapshot.latestMomentId &&
+    live.text === recorded.snapshot.text
+  );
+}
+
 // VersionedLoopbackEngine decides every merge outcome. This bridge only models
 // the workspace-scoped conflict ledger that surrounds the versioned contract.
 class ConflictLoopbackEngine extends VersionedLoopbackEngine {
   private readonly conflicts = new Map<string, ConflictRecord>();
   private conflictClock = 1;
+  private internalRequestId = -1;
+
+  private conflictKey(workspace: string, conflictId: string): string {
+    return `${workspace}\u0000${conflictId}`;
+  }
+
+  private requiredWorkspace(request: Request): string {
+    if (typeof request.workspace !== "string" || request.workspace.length === 0) {
+      throw new Error("workspace-not-open");
+    }
+    return request.workspace;
+  }
 
   override async sendRequest(request: Request): Promise<Response> {
     if (request.method === "conflicts.list") {
       this.requests.push(request);
+      const workspace = this.requiredWorkspace(request);
       const params = request.params as JsonObject;
       const status = params.status;
       const afterConflictId = params.afterConflictId;
       let conflicts = [...this.conflicts.values()]
-        .filter((conflict) => status === undefined || conflict.status === status)
+        .filter(
+          (conflict) =>
+            conflict.workspaceId === workspace &&
+            (status === undefined || conflict.status === status),
+        )
         .sort((left, right) => left.id.localeCompare(right.id));
       if (typeof afterConflictId === "string") {
         const index = conflicts.findIndex((conflict) => conflict.id === afterConflictId);
@@ -167,11 +205,26 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
 
     if (request.method === "conflicts.resolve") {
       this.requests.push(request);
+      const workspace = this.requiredWorkspace(request);
       const params = request.params as JsonObject;
       const local = params.local as JsonObject;
       const conflictId = String(local.conflictId);
-      const existing = this.conflicts.get(conflictId);
+      const key = this.conflictKey(workspace, conflictId);
+      const existing = this.conflicts.get(key);
       if (!existing) throw new Error("conflict-not-found");
+      const live = await super.sendRequest({
+        id: this.internalRequestId--,
+        method: VERSIONED_METHOD.textRead,
+        workspace,
+        params: {
+          workspaceId: workspace,
+          versionId: existing.targetVersionId,
+          path: existing.path,
+        },
+      });
+      if (!liveTextStateMatches(live.result, existing.current, existing.path)) {
+        throw new Error("conflict-stale-target");
+      }
       const resolution = String(local.resolution);
       const resolutionName =
         resolution === "keep-current"
@@ -192,25 +245,51 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         resolution: resolutionName,
         updatedAtMs: this.conflictClock++,
       };
-      this.conflicts.set(conflictId, resolved);
-
       if (resolution === "keep-current") {
+        this.conflicts.set(key, resolved);
         return {
           id: request.id,
           result: { conflict: resolved, write: null, delete: null },
         };
       }
 
-      const text =
-        resolution === "apply-incoming"
-          ? existing.incoming.snapshot?.text ?? ""
-          : String(local.mergedText);
+      if (resolution === "apply-incoming" && existing.incoming.snapshot === null) {
+        const deletion = existing.current.snapshot === null
+          ? null
+          : await super.sendRequest({
+              id: request.id,
+              idempotencyKey: String(local.deleteMomentId),
+              method: VERSIONED_METHOD.textDelete,
+              workspace,
+              params: {
+                workspaceId: workspace,
+                versionId: existing.targetVersionId,
+                path: existing.path,
+                origin: String(local.metadataOrigin),
+                ...(typeof local.metadataSummary === "string"
+                  ? { summary: local.metadataSummary }
+                  : {}),
+                ...(typeof local.metadataCorrelationId === "string"
+                  ? { correlationId: local.metadataCorrelationId }
+                  : {}),
+              },
+            });
+        this.conflicts.set(key, resolved);
+        return {
+          id: request.id,
+          result: { conflict: resolved, write: null, delete: deletion?.result ?? null },
+        };
+      }
+
+      const text = resolution === "apply-incoming"
+        ? existing.incoming.snapshot!.text
+        : String(local.mergedText);
       const write = await super.sendRequest({
         id: request.id,
         method: VERSIONED_METHOD.textWrite,
-        workspace: request.workspace,
+        workspace,
         params: {
-          workspaceId: existing.workspaceId,
+          workspaceId: workspace,
           versionId: existing.targetVersionId,
           path: existing.path,
           text,
@@ -225,6 +304,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
             : {}),
         },
       });
+      this.conflicts.set(key, resolved);
       return {
         id: request.id,
         result: { conflict: resolved, write: write.result, delete: null },
@@ -235,15 +315,17 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
     if (request.method !== VERSIONED_METHOD.versionsMerge) return response;
     const result = response.result as JsonObject;
     if (result.status !== "conflict") return response;
+    const workspace = this.requiredWorkspace(request);
     const conflictId = String(result.conflictId);
-    if (this.conflicts.has(conflictId)) return response;
+    const key = this.conflictKey(workspace, conflictId);
+    if (this.conflicts.has(key)) return response;
     const params = request.params as JsonObject;
     const comparison = result.comparison as JsonObject;
     const path = String(params.path);
     const recordedAtMs = this.conflictClock++;
-    this.conflicts.set(conflictId, {
+    this.conflicts.set(key, {
       id: conflictId,
-      workspaceId: String(params.workspaceId),
+      workspaceId: workspace,
       path,
       targetVersionId: String(params.targetVersionId),
       sourceVersionId: String(params.sourceVersionId),
@@ -321,6 +403,35 @@ async function versionIdByName(
   const version = versions.find((entry) => entry.name === name);
   if (!version) throw new Error(`No version named ${name}`);
   return version.id;
+}
+
+async function openDivergedTextConflict(incomingText: string | null = "draft\n") {
+  const root = await tempRoot();
+  await write(root, "plan.md", "base\n");
+  const loopback = new ConflictLoopbackEngine();
+  const engine = daemonCapture(root, loopback);
+  engine.start();
+  await engine.flush();
+  await engine.createVersion("Draft");
+  if (incomingText === null) {
+    await rm(join(root, "plan.md"));
+    engine.captureBatch([{ path: "plan.md", operation: "delete" }]);
+  } else {
+    await write(root, "plan.md", incomingText);
+    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+  }
+  await engine.flush();
+  await engine.switchVersion("main");
+  await write(root, "plan.md", "current\n");
+  engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+  await engine.flush();
+
+  const draftId = await versionIdByName(engine, "Draft");
+  const merge = await engine.mergeVersionIntoMain(draftId);
+  if (merge.conflicts.length !== 1) {
+    throw new Error(`Expected one conflict, received ${merge.conflicts.length}.`);
+  }
+  return { root, loopback, engine, conflict: merge.conflicts[0] };
 }
 
 describe("active-version capture routing", () => {
@@ -818,6 +929,81 @@ describe("mergeVersionIntoMain", () => {
     ]);
     await engine.stop();
     expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
+  });
+
+  it("applies an absent incoming side as a delete", async () => {
+    const { root, loopback, engine, conflict } =
+      await openDivergedTextConflict(null);
+
+    const resolved = await engine.resolveConflict(conflict.id, {
+      kind: "apply-incoming",
+    });
+
+    expect(resolved.conflict.resolution).toBe("applied-incoming");
+    expect(existsSync(join(root, "plan.md"))).toBe(false);
+    expect(
+      loopback.requests.some(
+        (request) =>
+          request.method === VERSIONED_METHOD.textDelete &&
+          (request.params as JsonObject).path === "plan.md",
+      ),
+    ).toBe(true);
+    await engine.stop();
+  });
+
+  it("rejects a stale target and keeps its conflict open", async () => {
+    const { root, engine, conflict } = await openDivergedTextConflict();
+    await write(root, "plan.md", "newer current\n");
+    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    await engine.flush();
+
+    await expect(
+      engine.resolveConflict(conflict.id, { kind: "apply-incoming" }),
+    ).rejects.toThrow(/conflict-stale-target/);
+    expect(await readText(root, "plan.md")).toBe("newer current\n");
+    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    await engine.stop();
+  });
+
+  it("keeps a conflict open when its delegated write fails", async () => {
+    const { root, engine, conflict } = await openDivergedTextConflict();
+
+    await expect(
+      engine.resolveConflict(conflict.id, {
+        kind: "apply-merged",
+        text: "x".repeat(48 * 1024 + 1),
+      }),
+    ).rejects.toThrow(/content-exceeds-inband-cap/);
+    expect(await readText(root, "plan.md")).toBe("current\n");
+    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    await engine.stop();
+  });
+
+  it("scopes conflict list and resolution to the request workspace", async () => {
+    const { loopback, engine, conflict } = await openDivergedTextConflict();
+    const foreign = await loopback.sendRequest({
+      id: -1000,
+      method: "conflicts.list",
+      workspace: "other-workspace",
+      params: { status: "open" },
+    });
+
+    expect((foreign.result as JsonObject).conflicts).toEqual([]);
+    await expect(
+      loopback.sendRequest({
+        id: -1001,
+        method: "conflicts.resolve",
+        workspace: "other-workspace",
+        params: {
+          local: {
+            conflictId: conflict.id,
+            resolution: "keep-current",
+          },
+        },
+      }),
+    ).rejects.toThrow(/conflict-not-found/);
+    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    await engine.stop();
   });
 
   it("re-running a merge resumes open conflicts instead of duplicating them", async () => {
