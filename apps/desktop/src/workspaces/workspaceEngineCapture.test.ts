@@ -433,6 +433,29 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(closeWorkspace).toHaveBeenCalledTimes(2);
   });
 
+  it("flushes daemon capture before closing production workspace stores", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback, requests),
+      daemonOwnsCapture: true,
+    });
+
+    // createVersion opens both the text and secret daemon adapters.
+    await engine.createVersion("Draft");
+    requests.length = 0;
+    await engine.stop();
+
+    expect(
+      requests
+        .map((request) => request.method)
+        .filter(
+          (method) => method === "capture.flush" || method === "workspace.close",
+        ),
+    ).toEqual(["capture.flush", "workspace.close"]);
+  });
+
   it("mutation proof: installs remote updates buffered during the initial Y.Doc open", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
@@ -2397,15 +2420,11 @@ describe("Rust engine session selection", () => {
         } as never;
       },
     });
-    try {
-      const session = await engine.openYDocSession({
-        path: "note.md",
-        onRemoteUpdate: () => undefined,
-      });
-      await session.close({ settle: false });
-    } catch {
-      // The legacy branch may refuse this fixture; providerOpened is the signal.
-    }
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+    });
+    await session.close({ settle: false });
     await engine.stop();
     return { providerOpened, storeReads };
   }
