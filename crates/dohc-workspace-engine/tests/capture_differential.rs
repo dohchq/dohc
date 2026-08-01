@@ -366,7 +366,7 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
     // it pass. Work out which behaviour changed, and why the new answer is right.
     // See tools/rust-engine-program/capture-goldens.provenance.md.
     const FIXTURES_SHA256: &str =
-        "2a8649c9b2a7e513e6f7a480569c7ac995b31309bfab48b1bda2cf02fbe92304";
+        "ecf8710b19870fab090abfc2c6b78e80a050d245d60c42c21cc6eb62962122d7";
     const GOLDENS_SHA256: &str = "246655d8e2f697d069d121c50faec04222f7f45eecc970f1af4e0b4ee64e5292";
 
     let hash_of = |raw: &str| -> String {

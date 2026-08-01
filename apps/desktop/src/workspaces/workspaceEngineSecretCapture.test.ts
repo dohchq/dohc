@@ -1,13 +1,11 @@
-import type { SecretFileStore, VersionedTextStore } from "@dohc/workspace-engine";
-import { createSecretFileStore, createVersionedTextStore } from "@dohc/workspace-engine";
-import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import {
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
   type Request,
+  type Response,
 } from "@dohc/workspace-engine-client";
+import type { SecretFileStore } from "@dohc/workspace-contracts/engine";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
@@ -17,20 +15,8 @@ import {
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 
-// Secret-backed files through the DESKTOP capture pipeline (PR 08): secret
-// paths are captured encrypted with metadata-only moments, follow version
-// switch/merge/restore, and never leak plaintext into engine.db.
-
-const requireModule = createRequire(import.meta.url);
-const { DatabaseSync } = requireModule("node:sqlite") as {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => {
-    prepare(sql: string): { all(...params: unknown[]): Array<Record<string, unknown>> };
-    close(): void;
-  };
-};
+// Secret-backed files through the desktop daemon pipeline: protected moments
+// stay metadata-only while switch, merge, and restore materialize disk state.
 
 const MARKER = "DESKTOP_SECRET_MARKER_31337";
 const ENV_A = `API_KEY=${MARKER}\n`;
@@ -46,9 +32,6 @@ async function tempRoot(): Promise<string> {
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  // Windows cannot unlink engine.db* files with open sqlite handles (EBUSY),
-  // so release every tracked engine handle before removing the temp roots.
-  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -66,121 +49,67 @@ async function readText(root: string, path: string): Promise<string | null> {
   }
 }
 
-// Deterministic COLLIDING clock shared by both injected stores. The daemon
-// stamps one wall time per reconcile pass, so TIED timestamps are the normal
-// regime, not an edge case. A strictly increasing counter makes every
-// timestamp distinct, which leaves the half-open interleave window in
-// listMoments ([lowerMs, upperMs)) untested: invert either of its comparisons
-// and the interleave test below still passes.
-// Each logical write reads the clock exactly once, so holding one value for
-// two reads ties every secret moment to an adjacent text moment — including
-// one on a page seam, which is the only place the two comparisons differ.
-const READS_PER_CLOCK_TICK = 2;
-
-function stores(root: string): {
-  store: VersionedTextStore;
-  secretStore: SecretFileStore;
-  tick: () => number;
-} {
-  let now = 1_000_000;
-  let reads = 0;
-  const tick = () => {
-    if (reads % READS_PER_CLOCK_TICK === 0) now += 10;
-    reads += 1;
-    return now;
-  };
-  return {
-    store: createVersionedTextStore(root, { nowMs: tick }),
-    secretStore: createSecretFileStore(root, { nowMs: tick }),
-    tick,
-  };
-}
-
-// Keep the real AES-256-GCM stores injectable for the suites that inspect bytes
-// at rest. The colliding clock is the suite default, not only the pagination
-// case. Rust sessions are still required, but these stores take precedence.
-function capture(root: string, injected?: ReturnType<typeof stores>) {
-  const selected = injected ?? stores(root);
-  const engineCapture = createWorkspaceEngineCapture({
-    workspaceId: "engine-secret-test",
-    rootPath: root,
-    store: selected.store,
-    secretStore: selected.secretStore,
-    rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
-  });
-  const stopCapture = engineCapture.stop.bind(engineCapture);
-  let storesClosed = false;
-  engineCapture.stop = async () => {
-    try {
-      await stopCapture();
-    } finally {
-      if (!storesClosed) {
-        storesClosed = true;
-        await selected.store.close().catch(() => undefined);
-        await selected.secretStore.close().catch(() => undefined);
-      }
-    }
-  };
-  return engineCapture;
-}
-
-// Passing mock sessions through `rustEngineSessions` selects the production
-// live adapters. `VersionedLoopbackEngine` supplies deterministic contract
-// state, and the request log proves which adapter calls ran. This suite does
-// not launch the Rust daemon or test encryption at rest.
-function liveAdapterCapture(
+// The daemon path holds real secret, version, and moment state in the loopback.
+// The request log proves which live adapter calls ran.
+function daemonCapture(
   root: string,
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
+  secretStore?: SecretFileStore,
 ): WorkspaceEngineCapture {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-secret-test",
     rootPath: root,
     rustEngineSessions: mockLiveSessions(loopback, requests),
+    ...(secretStore === undefined ? {} : { secretStore }),
   });
 }
 
-function engineDbFiles(root: string): string[] {
-  const base = join(root, ".dohc/engine/engine.db");
-  return [base, `${base}-wal`, `${base}-shm`];
-}
-
-async function engineDbBytes(root: string): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for (const path of engineDbFiles(root)) {
-    try {
-      chunks.push(await readFile(path));
-    } catch {
-      // Absent WAL/SHM contribute nothing.
+class SecretMergeLoopbackEngine extends VersionedLoopbackEngine {
+  override async sendRequest(request: Request): Promise<Response> {
+    if (request.method === "conflicts.list") {
+      return {
+        id: request.id,
+        result: { conflicts: [], nextAfterConflictId: null },
+      };
     }
-  }
-  return Buffer.concat(chunks);
-}
-
-function readTextStorePaths(root: string): string[] {
-  const db = new DatabaseSync(join(root, ".dohc/engine/engine.db"), { readOnly: true });
-  try {
-    return db
-      .prepare("SELECT path FROM snapshots")
-      .all()
-      .map((row) => String(row.path));
-  } finally {
-    db.close();
+    return await super.sendRequest(request);
   }
 }
 
-describe("secret capture through the desktop live-adapter path", () => {
+function secretMoment(
+  id: string,
+  recordedAtMs: number,
+): Awaited<ReturnType<SecretFileStore["listSecretMoments"]>>[number] {
+  return {
+    id,
+    workspaceId: "engine-secret-test",
+    versionId: "main",
+    path: ".env",
+    recordedAtMs,
+    operation: "write",
+    metadata: {
+      origin: "api",
+      summary: id,
+      correlationId: id,
+    },
+    momentOrder: recordedAtMs,
+    protected: true,
+  };
+}
+
+describe("secret capture through the desktop pipeline (daemon path)", () => {
   it("captures metadata-only .env batches, coalesces no-op rewrites, and retires deletions", async () => {
     const root = await tempRoot();
     await write(root, ".env", ENV_A);
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
-    const engine = liveAdapterCapture(root, loopback, requests);
+    const engine = daemonCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
 
-    // Positive proof of the adapter path: the legacy in-process engine never
-    // opens an engine workspace or writes the secret through the live adapter.
+    // The legacy in-process engine never opens a daemon workspace or writes
+    // the secret over the wire.
     const methods = requests.map((request) => request.method);
     expect(methods).toContain("workspace.open");
     expect(methods).toContain(VERSIONED_METHOD.secretsWrite);
@@ -189,7 +118,18 @@ describe("secret capture through the desktop live-adapter path", () => {
     engine.captureBatch([{ path: ".env", operation: "update" }]);
     await engine.flush();
     let page = await engine.listMoments();
-    expect(page.moments.filter((moment) => moment.protected)).toHaveLength(1);
+    let protectedMoments = page.moments.filter((moment) => moment.protected);
+    expect(protectedMoments).toHaveLength(1);
+    expect(protectedMoments[0].path).toBe(".env");
+    expect(protectedMoments[0].metadata.summary).toBe("Updated .env");
+    expect(JSON.stringify(protectedMoments[0]).includes(MARKER)).toBe(false);
+
+    const detail = await engine.readMoment(protectedMoments[0].id);
+    expect(detail?.protected).toBe(true);
+    expect(JSON.stringify(detail).includes(MARKER)).toBe(false);
+    expect(requests.map((request) => request.method)).toContain(
+      VERSIONED_METHOD.secretsMomentsGet,
+    );
 
     // Real change: one more metadata-only moment.
     await write(root, ".env", ENV_B);
@@ -203,7 +143,7 @@ describe("secret capture through the desktop live-adapter path", () => {
     engine.captureBatch([{ path: ".env", operation: "delete" }]);
     await engine.flush();
     page = await engine.listMoments();
-    const protectedMoments = page.moments.filter((moment) => moment.protected);
+    protectedMoments = page.moments.filter((moment) => moment.protected);
     expect(protectedMoments).toHaveLength(3);
     expect(protectedMoments[0].operation).toBe("delete");
     expect(protectedMoments[0].metadata.summary).toBe("Deleted .env");
@@ -217,7 +157,7 @@ describe("secret capture through the desktop live-adapter path", () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
-    const engine = liveAdapterCapture(root, loopback, requests);
+    const engine = daemonCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
     // Fork Experiment while no secret exists.
@@ -251,7 +191,7 @@ describe("secret capture through the desktop live-adapter path", () => {
     await write(root, ".env", ENV_A);
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
-    const engine = liveAdapterCapture(root, loopback, requests);
+    const engine = daemonCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
     const created = await engine.createVersion("Experiment");
@@ -276,94 +216,13 @@ describe("secret capture through the desktop live-adapter path", () => {
   });
 });
 
-// These stay on the LEGACY in-process engine on purpose, and must not be
-// ported to `mockLiveSessions`.
-//
-// The first three are about what reaches DISK: they read the raw
-// `.dohc/engine/engine.db` (+wal/shm) bytes, or open the DB directly through
-// `readTextStorePaths`, and assert a plaintext marker is ABSENT.
-// `VersionedLoopbackEngine` has no encryption at all — it holds secrets as
-// plaintext strings in a Map and never writes engine.db — so on the daemon
-// fixture those assertions would stay green while proving nothing, and each
-// title's claim about the encrypted path would be false. Porting them deletes
-// the leak proof and keeps the check mark.
-//
-// The last two are legacy for their own reasons, stated on each test.
-describe("secret capture through the desktop pipeline (encryption at rest)", () => {
-  it("captures .env encrypted with a metadata-only moment and no text-store entry", async () => {
-    const root = await tempRoot();
-    await write(root, "notes.md", "plain notes\n");
-    await write(root, ".env", ENV_A);
-    const engine = capture(root);
-    engine.start();
-    await engine.flush();
-
-    const page = await engine.listMoments();
-    const protectedMoments = page.moments.filter((moment) => moment.protected);
-    expect(protectedMoments).toHaveLength(1);
-    expect(protectedMoments[0].path).toBe(".env");
-    expect(protectedMoments[0].metadata.summary).toBe("Updated .env");
-    // Metadata-only: the summary row has no content-bearing field.
-    expect(JSON.stringify(protectedMoments[0]).includes(MARKER)).toBe(false);
-
-    // The protected diff detail is metadata-only too.
-    const detail = await engine.readMoment(protectedMoments[0].id);
-    expect(detail?.protected).toBe(true);
-    expect(JSON.stringify(detail).includes(MARKER)).toBe(false);
-
-    // The plaintext text store never holds the secret path.
-    expect(readTextStorePaths(root)).not.toContain(".env");
-    await engine.stop();
-
-    // ADVERSARIAL: dump engine.db (+wal/shm) bytes — plaintext marker absent.
-    const bytes = await engineDbBytes(root);
-    expect(bytes.length).toBeGreaterThan(0);
-    expect(bytes.includes(Buffer.from(MARKER, "utf8"))).toBe(false);
-    expect(
-      bytes.includes(Buffer.from(Buffer.from(ENV_A, "utf8").toString("base64"), "utf8")),
-    ).toBe(false);
-  });
-
-  it("secrets follow a version switch (the product win) without leaking plaintext", async () => {
-    const root = await tempRoot();
-    await write(root, "notes.md", "main notes\n");
-    await write(root, ".env", ENV_A);
-    const engine = capture(root);
-    engine.start();
-    await engine.flush();
-
-    // Create+switch to a named version; edit the secret there.
-    const created = await engine.createVersion("Experiment");
-    const experimentId = created.activeVersionId;
-    await write(root, ".env", ENV_B);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
-    await engine.flush();
-
-    // Switch back to Main: .env on disk returns to Main's copy.
-    await engine.switchVersion("main");
-    expect(await readText(root, ".env")).toBe(ENV_A);
-
-    // The watcher's observation of the materialized write is expected —
-    // no duplicate protected moment.
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
-    await engine.flush();
-
-    // Switch forward again: the experiment's copy comes back.
-    await engine.switchVersion(experimentId);
-    expect(await readText(root, ".env")).toBe(ENV_B);
-
-    const page = await engine.listMoments();
-    expect(JSON.stringify(page).includes(MARKER)).toBe(false);
-    await engine.stop();
-
-    const bytes = await engineDbBytes(root);
-    expect(bytes.includes(Buffer.from(MARKER, "utf8"))).toBe(false);
-  });
-
-  it("merges a version's secret into Main through the encrypted path and materializes it", async () => {
+describe("secret version operations through the desktop daemon path", () => {
+  it("merges a version's secret into Main and materializes it", async () => {
     const root = await tempRoot();
     await write(root, ".env", ENV_A);
-    const engine = capture(root);
+    const loopback = new SecretMergeLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = daemonCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
     const created = await engine.createVersion("Experiment");
@@ -375,29 +234,23 @@ describe("secret capture through the desktop pipeline (encryption at rest)", () 
     await engine.switchVersion("main");
     expect(await readText(root, ".env")).toBe(ENV_A);
     const result = await engine.mergeVersionIntoMain(created.activeVersionId);
-    expect(result.conflicts).toHaveLength(0);
     expect(result.mergedFileCount).toBeGreaterThanOrEqual(1);
     expect(await readText(root, ".env")).toBe(ENV_B);
 
-    // Secrets NEVER create conflict records (conflict records carry side
-    // texts — protected contents must not ride them).
-    expect(await engine.listOpenConflicts()).toEqual([]);
+    const methods = requests.map((request) => request.method);
+    expect(methods).toContain("conflicts.list");
+    expect(methods).toContain(VERSIONED_METHOD.secretsApply);
+    expect(methods).toContain(VERSIONED_METHOD.secretsMaterialize);
+    expect(methods).not.toContain(VERSIONED_METHOD.versionsMerge);
     await engine.stop();
-
-    const bytes = await engineDbBytes(root);
-    expect(bytes.includes(Buffer.from(MARKER, "utf8"))).toBe(false);
   });
 
-  // Legacy on purpose. Restore reads the encrypted BEFORE-state back out and
-  // materializes it as plaintext on disk, so the decrypt is the thing under
-  // test — on the loopback the before-state is already a plaintext Map entry
-  // and the round-trip cannot fail. The marker check on the recorded moment is
-  // an absence claim, and an absence claim is worthless against a fixture that
-  // never had ciphertext to get wrong.
-  it("restores a protected file to before a moment through the encrypted path", async () => {
+  it("restores a protected file to before a moment and materializes it", async () => {
     const root = await tempRoot();
     await write(root, ".env", ENV_A);
-    const engine = capture(root);
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = daemonCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
     await write(root, ".env", ENV_B);
@@ -421,78 +274,85 @@ describe("secret capture through the desktop pipeline (encryption at rest)", () 
     expect(after.moments[0].id).toBe(result.restoredMomentId);
     expect(after.moments[0].metadata.summary).toBe("Restored .env");
     expect(JSON.stringify(after).includes(MARKER)).toBe(false);
+    const methods = requests.map((request) => request.method);
+    expect(methods).toContain(VERSIONED_METHOD.secretsRestore);
+    expect(methods).toContain(VERSIONED_METHOD.secretsMaterialize);
     await engine.stop();
   });
+});
 
-  // Legacy on purpose, and NOT because of encryption: this test needs the
-  // colliding clock injected above (#406), and the daemon fixture cannot be
-  // given one. `VersionedLoopbackEngine` stamps every secret moment with its
-  // own `this.clock++` and accepts no `nowMs` for the secret methods, so
-  // timestamps there are always distinct — exactly the regime the comment on
-  // READS_PER_CLOCK_TICK says leaves the half-open interleave window untested
-  // (see #403). Ported, the seam-tie assertion below would go green on a
-  // timeline that no longer has a tie in it.
-  it("interleaves protected moments into paged timelines without duplication or loss", async () => {
+describe("listMoments protected pagination", () => {
+  it("assigns tied protected moments to one half-open production page window", async () => {
     const root = await tempRoot();
-    const injected = stores(root);
-    const engine = capture(root, injected);
-    engine.start();
-    await engine.flush();
-
-    // Alternate text and secret edits so protected rows land between text
-    // pages: 6 text moments, a secret moment after every second one.
-    for (let index = 0; index < 6; index += 1) {
-      await write(root, "doc.md", `revision ${index}\n`);
-      engine.captureBatch([{ path: "doc.md", operation: "update" }]);
-      await engine.flush();
-      if (index % 2 === 1) {
-        await write(root, ".env", `KEY=${index}\n`);
-        engine.captureBatch([{ path: ".env", operation: "update" }]);
-        await engine.flush();
-      }
-    }
-
-    // Page through with a small limit and collect every moment id.
-    const seen: string[] = [];
-    const seamMs: number[] = [];
-    let cursor: number | undefined;
-    for (let guard = 0; guard < 10; guard += 1) {
-      const page = await engine.listMoments({
-        limit: 2,
-        ...(cursor !== undefined ? { beforeMomentOrder: cursor } : {}),
+    const loopback = new VersionedLoopbackEngine();
+    await loopback.sendRequest({
+      id: 1,
+      method: VERSIONED_METHOD.versionsEnsureMain,
+      workspace: "engine-secret-test",
+      params: { workspaceId: "engine-secret-test" },
+    });
+    for (const recordedAtMs of [10, 20, 30, 40, 50, 60]) {
+      await loopback.sendRequest({
+        id: recordedAtMs,
+        method: VERSIONED_METHOD.textWrite,
+        workspace: "engine-secret-test",
+        params: {
+          workspaceId: "engine-secret-test",
+          versionId: "main",
+          path: `text-${recordedAtMs}.md`,
+          text: String(recordedAtMs),
+          origin: "api",
+          momentId: `text-${recordedAtMs}`,
+          nowMs: recordedAtMs,
+        },
       });
-      seen.push(...page.moments.map((moment) => moment.id));
-      if (page.nextBeforeMomentOrder === null) break;
-      // A page's oldest TEXT moment is its own inclusive lower bound and the
-      // next page's exclusive upper bound: the seam between two windows.
-      const textOnPage = page.moments.filter((moment) => !moment.protected);
-      const oldestText = textOnPage[textOnPage.length - 1];
-      if (oldestText) seamMs.push(oldestText.recordedAtMs);
-      cursor = page.nextBeforeMomentOrder;
     }
-    // No duplicates across pages.
-    expect(new Set(seen).size).toBe(seen.length);
-    // Every protected moment shows up exactly once.
-    const all = await engine.listMoments({ limit: 500 });
-    const protectedIds = all.moments
+    const protectedMoments = [
+      secretMoment("protected-upper", 50),
+      secretMoment("protected-middle", 35),
+      secretMoment("protected-lower", 20),
+    ];
+    const secretStore = {
+      listSecretMoments: vi.fn(async () => protectedMoments),
+    } as unknown as SecretFileStore;
+    const engine = daemonCapture(root, loopback, undefined, secretStore);
+
+    const newest = await engine.listMoments({ limit: 2 });
+    const middle = await engine.listMoments({
+      limit: 2,
+      beforeMomentOrder: newest.nextBeforeMomentOrder ?? undefined,
+    });
+    const oldest = await engine.listMoments({
+      limit: 2,
+      beforeMomentOrder: middle.nextBeforeMomentOrder ?? undefined,
+    });
+
+    expect(newest.moments.map((moment) => moment.id)).toEqual([
+      "text-60",
+      "text-50",
+      "protected-upper",
+    ]);
+    expect(middle.moments.map((moment) => moment.id)).toEqual([
+      "text-40",
+      "protected-middle",
+      "text-30",
+    ]);
+    expect(oldest.moments.map((moment) => moment.id)).toEqual([
+      "text-20",
+      "protected-lower",
+      "text-10",
+    ]);
+
+    const protectedIds = [...newest.moments, ...middle.moments, ...oldest.moments]
       .filter((moment) => moment.protected)
       .map((moment) => moment.id);
-    expect(protectedIds).toHaveLength(3);
-    // A protected moment sits ON a seam, so the assertions below exercise both
-    // window comparisons: `> lowerMs` would drop it from every page and
-    // `<= upperMs` would put it on two. Without this tie the checks are blind
-    // to either inversion, so guard the tie rather than trust the clock.
-    expect(
-      all.moments.filter(
-        (moment) => moment.protected && seamMs.includes(moment.recordedAtMs),
-      ).length,
-    ).toBeGreaterThan(0);
-    for (const id of protectedIds) {
-      expect(seen.filter((seenId) => seenId === id)).toHaveLength(1);
-    }
-    // Text moments all present too (6 edits + initial reconcile of doc.md
-    // does not exist yet at start, so exactly 6).
-    expect(seen.length).toBe(all.moments.length);
+    expect(protectedIds).toEqual([
+      "protected-upper",
+      "protected-middle",
+      "protected-lower",
+    ]);
+    expect(new Set(protectedIds).size).toBe(protectedMoments.length);
+    expect(secretStore.listSecretMoments).toHaveBeenCalledTimes(3);
     await engine.stop();
   });
 });

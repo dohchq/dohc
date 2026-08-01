@@ -1,8 +1,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLinkedChatStore, type LinkedChatStore } from "@dohc/workspace-engine";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CHATS_METHOD, ChatsLoopbackEngine, type Request } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   dmChannelNameFor,
   grantDmRecipients,
@@ -14,6 +14,8 @@ import {
   type ShareLogPage,
 } from "./dmChats";
 import type { JoinedSharedChannel } from "./registryStore";
+import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
+import { nativeTmpdir } from "./testTemp";
 
 // WS-MU-C3 — the desktop DM orchestration: role derivation (owner vs
 // participant), display labels, and connected-state — all sourced from the
@@ -21,27 +23,44 @@ import type { JoinedSharedChannel } from "./registryStore";
 // `kind:"dm"` channel; participant metadata rides the shared-channel grant.
 
 const WS = "workspace-a";
+const roots: string[] = [];
 
-let roots: string[] = [];
-let stores: LinkedChatStore[] = [];
-
-beforeEach(() => {
-  roots = [];
-  stores = [];
-});
+async function makeStore(): Promise<{
+  store: ReturnType<typeof createLiveLinkedChatStore>;
+  loopback: ChatsLoopbackEngine;
+  seed: (request: Omit<Request, "id" | "workspace">) => Promise<void>;
+}> {
+  const root = await mkdtemp(join(nativeTmpdir(), "dohc-dm-desktop-"));
+  roots.push(root);
+  const loopback = new ChatsLoopbackEngine();
+  const client = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request) {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: WS } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+  const store = createLiveLinkedChatStore({ workspaceId: WS, rootPath: root }, sessions);
+  let nextRequestId = 1;
+  return {
+    store,
+    loopback,
+    seed: async (request) => {
+      await loopback.sendRequest({ ...request, id: nextRequestId++, workspace: WS });
+    },
+  };
+}
 
 afterEach(async () => {
-  for (const store of stores) await store.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
-
-async function makeStore(): Promise<{ root: string; store: LinkedChatStore }> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-dm-desktop-"));
-  roots.push(root);
-  const store = createLinkedChatStore(root);
-  stores.push(store);
-  return { root, store };
-}
 
 function joined(overrides: Partial<JoinedSharedChannel> & { channelWireId: string }): JoinedSharedChannel {
   return {
@@ -446,21 +465,30 @@ describe("peekReceivedGrantKind", () => {
 
 describe("requireShareableChatChannel", () => {
   it("rejects a crafted generic-share request for a DM at runtime", async () => {
-    const { store } = await makeStore();
-    const dm = await store.createChannel({ workspaceId: WS, name: "bob@x.com", kind: "dm" });
+    const { store, seed } = await makeStore();
+    await seed({
+      method: CHATS_METHOD.channelCreate,
+      params: { channelId: "dm-1", name: "bob@x.com", kind: "dm", nowMs: 1 },
+    });
 
     await expect(
-      requireShareableChatChannel({ workspaceId: WS, channelId: dm.id, store }),
+      requireShareableChatChannel({ workspaceId: WS, channelId: "dm-1", store }),
     ).rejects.toThrow(/Direct messages can't be shared as channels/u);
 
-    const ordinary = await store.createChannel({ workspaceId: WS, name: "Project room" });
+    await seed({
+      method: CHATS_METHOD.channelCreate,
+      params: { channelId: "channel-1", name: "Project room", kind: "channel", nowMs: 2 },
+    });
     await expect(
-      requireShareableChatChannel({ workspaceId: WS, channelId: ordinary.id, store }),
+      requireShareableChatChannel({ workspaceId: WS, channelId: "channel-1", store }),
     ).resolves.toBeUndefined();
 
-    const agent = await store.ensureAgentChannel({ workspaceId: WS });
+    await seed({
+      method: CHATS_METHOD.channelCreate,
+      params: { channelId: "agent-1", name: "My agent", kind: "agent", nowMs: 3 },
+    });
     await expect(
-      requireShareableChatChannel({ workspaceId: WS, channelId: agent.id, store }),
+      requireShareableChatChannel({ workspaceId: WS, channelId: "agent-1", store }),
     ).rejects.toThrow(/Only ordinary channels can be shared/u);
     await expect(
       requireShareableChatChannel({ workspaceId: WS, channelId: "missing-channel", store }),
@@ -470,69 +498,90 @@ describe("requireShareableChatChannel", () => {
 
 describe("listDmRecords", () => {
   it("derives owner role from wire id == channel id and labels it by the recipient set", async () => {
-    const { store } = await makeStore();
-    const channel = await store.createChannel({ workspaceId: WS, name: "bob@x.com", kind: "dm" });
-    const started = await store.startChannelThread({
-      workspaceId: WS,
-      channelId: channel.id,
-      author: { kind: "human", displayName: "Alice" },
-      authorUserId: "user-alice",
-      body: "hello",
+    const { store, seed } = await makeStore();
+    await seed({
+      method: CHATS_METHOD.channelCreate,
+      params: { channelId: "dm-1", name: "bob@x.com", kind: "dm", nowMs: 1 },
+    });
+    await seed({
+      method: CHATS_METHOD.threadStart,
+      idempotencyKey: "thread-1:message-1",
+      params: {
+        channelId: "dm-1",
+        threadId: "thread-1",
+        messageId: "message-1",
+        authorKind: "human",
+        authorDisplayName: "Alice",
+        authorUserId: "user-alice",
+        body: "hello",
+        nowMs: 2,
+      },
     });
     // A PLAIN channel never appears in the DM list.
-    await store.createChannel({ workspaceId: WS, name: "general-ish" });
+    await seed({
+      method: CHATS_METHOD.channelCreate,
+      params: { channelId: "channel-1", name: "general-ish", kind: "channel", nowMs: 3 },
+    });
 
     const dms = await listDmRecords({ workspaceId: WS, store, sharedChannels: [] });
     expect(dms).toHaveLength(1);
     expect(dms[0]).toMatchObject({
-      channelId: channel.id,
-      channelWireId: channel.id,
+      channelId: "dm-1",
+      channelWireId: "dm-1",
       role: "owner",
       peerLabel: "bob@x.com",
-      threadId: started.thread.id,
+      threadId: "thread-1",
       shareId: null,
       connected: true,
     });
   });
 
   it("hides an OWNER DM with no thread (aborted/rolled-back start) but keeps a committed owner DM", async () => {
-    const { store } = await makeStore();
+    const { store, seed } = await makeStore();
     // An aborted start: the channel was created but grants failed → rolled back
     // before the first message, so there is no thread.
-    await store.createChannel({ workspaceId: WS, name: "aborted@x.com", kind: "dm" });
+    await seed({
+      method: CHATS_METHOD.channelCreate,
+      params: { channelId: "dm-aborted", name: "aborted@x.com", kind: "dm", nowMs: 1 },
+    });
     expect(await listDmRecords({ workspaceId: WS, store, sharedChannels: [] })).toHaveLength(0);
 
     // A committed owner DM (first message sent → a thread exists) still shows.
-    const live = await store.createChannel({ workspaceId: WS, name: "bob@x.com", kind: "dm" });
-    await store.startChannelThread({
-      workspaceId: WS,
-      channelId: live.id,
-      author: { kind: "human", displayName: "Alice" },
-      authorUserId: "user-alice",
-      body: "hi",
+    await seed({
+      method: CHATS_METHOD.channelCreate,
+      params: { channelId: "dm-live", name: "bob@x.com", kind: "dm", nowMs: 2 },
+    });
+    await seed({
+      method: CHATS_METHOD.threadStart,
+      idempotencyKey: "thread-live:message-live",
+      params: {
+        channelId: "dm-live",
+        threadId: "thread-live",
+        messageId: "message-live",
+        authorKind: "human",
+        authorDisplayName: "Alice",
+        authorUserId: "user-alice",
+        body: "hi",
+        nowMs: 3,
+      },
     });
     const dms = await listDmRecords({ workspaceId: WS, store, sharedChannels: [] });
-    expect(dms.map((d) => d.channelId)).toEqual([live.id]);
+    expect(dms.map((d) => d.channelId)).toEqual(["dm-live"]);
   });
 
   it("keeps a PARTICIPANT DM with no thread yet visible (a real pending conversation)", async () => {
-    const { store } = await makeStore();
+    const { store, loopback } = await makeStore();
     // A replayed DM whose owner granted before sending — channel.create only,
-    // no thread.create yet. It must remain visible (not treated as an orphan).
-    await store.applyReplicationOp({
-      workspaceId: WS,
-      originId: "origin-owner",
-      originSeq: 0,
-      opKind: "chat.channel.create",
-      payload: {
-        channelId: "owner-channel-1",
-        name: "bob@x.com",
-        slug: "bob-x-com",
-        kind: "dm",
-        createdAtMs: 1,
-        wireId: "owner-channel-1",
-      },
-      recordedAtMs: 1,
+    // no thread.create yet. Current Rust replay preserves the owner's channel
+    // id, so the durable joined-share row is the participant provenance.
+    // The pending DM must remain visible instead of looking like an owner orphan.
+    loopback.seedChannel({
+      workspace: WS,
+      channelId: "owner-channel-1",
+      wireId: "owner-channel-1",
+      name: "bob@x.com",
+      kind: "dm",
+      createdAtMs: 1,
     });
     const registry = [joined({ shareId: "share-1", channelWireId: "owner-channel-1" })];
     const dms = await listDmRecords({ workspaceId: WS, store, sharedChannels: registry });
@@ -546,39 +595,30 @@ describe("listDmRecords", () => {
   });
 
   it("derives participant role from a replayed channel and labels it by the GRANTER, not the replicated name", async () => {
-    const { store } = await makeStore();
-    // A replayed DM: the wire id is the OWNER's channel id; the local channel
-    // id is minted fresh — exactly what pullSharedChannel's applyReplicationOp
-    // produces for a joined channel.
-    await store.applyReplicationOp({
-      workspaceId: WS,
-      originId: "origin-owner",
-      originSeq: 0,
-      opKind: "chat.channel.create",
-      payload: {
-        channelId: "owner-channel-1",
-        // The owner's recipient list — i.e. THIS participant's own address.
-        name: "bob@x.com",
-        slug: "bob-x-com",
-        kind: "dm",
-        createdAtMs: 1,
-        wireId: "owner-channel-1",
-      },
-      recordedAtMs: 1,
+    const { store, loopback, seed } = await makeStore();
+    // A replayed DM with the active Rust import shape: local id and wire id
+    // are equal. The joined row supplies participant role and granter label.
+    loopback.seedChannel({
+      workspace: WS,
+      channelId: "owner-channel-1",
+      wireId: "owner-channel-1",
+      // The owner's recipient list — i.e. THIS participant's own address.
+      name: "bob@x.com",
+      kind: "dm",
+      createdAtMs: 1,
     });
-    await store.applyReplicationOp({
-      workspaceId: WS,
-      originId: "origin-owner",
-      originSeq: 1,
-      opKind: "chat.thread.create",
-      payload: {
+    await seed({
+      method: CHATS_METHOD.threadStart,
+      idempotencyKey: "thread-dm:message-dm",
+      params: {
+        channelId: "owner-channel-1",
         threadId: "thread-dm",
-        title: "",
-        createdAtMs: 2,
-        channelSlug: "bob-x-com",
-        channelWireId: "owner-channel-1",
+        messageId: "message-dm",
+        authorKind: "human",
+        authorDisplayName: "Alice",
+        body: "hi",
+        nowMs: 2,
       },
-      recordedAtMs: 2,
     });
 
     const registry = [joined({ shareId: "share-1", channelWireId: "owner-channel-1" })];
@@ -603,12 +643,12 @@ describe("listDmRecords", () => {
     });
     expect(ended[0]).toMatchObject({ role: "participant", connected: false });
 
-    // No matching grant at all (the honest end-of-share): still a participant,
-    // still readable, disconnected — and the replicated name is the fallback.
-    const orphaned = await listDmRecords({ workspaceId: WS, store, sharedChannels: [] });
-    expect(orphaned[0]).toMatchObject({
-      role: "participant",
-      connected: false,
+    // No joined provenance models a normal owner-workspace replay. Equal ids
+    // remain owner-owned and writable; member leave keeps an ended row instead.
+    const ownerReplay = await listDmRecords({ workspaceId: WS, store, sharedChannels: [] });
+    expect(ownerReplay[0]).toMatchObject({
+      role: "owner",
+      connected: true,
       shareId: null,
       peerLabel: "bob@x.com",
     });

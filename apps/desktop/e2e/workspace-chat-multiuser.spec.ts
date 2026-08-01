@@ -1,13 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  createLinkedChatStore,
-  fetchSharedChannelInfo,
-  pullSharedChannel,
-  pushSharedChannel,
-} from "@dohc/workspace-engine";
 import { claimRelayWorkspace } from "./helpers/relayPeer";
+import {
+  openLiveDaemonWorkspace,
+  type LiveDaemonWorkspace,
+} from "./helpers/daemonSeed";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
@@ -19,6 +17,7 @@ import {
   seedWorkspaceRegistry,
   seedWorkspaceSettings,
 } from "./helpers/workspace";
+import { fetchSharedChannelInfo } from "../src/workspaces/sharedChannelInfo";
 
 // MU-C6 — the multi-user chat + co-presence PRODUCT proof, driven through the
 // REAL Electron app. One real desktop app is the channel OWNER (signed in as
@@ -26,8 +25,8 @@ import {
 // participant the channel is shared to. The participant is exercised through
 // the SAME public relay surface the desktop's own main process uses — the
 // share presence route (a participant's ephemeral awareness path) and the
-// workspace-engine shared-channel push/pull helpers (a participant's durable
-// chat path) — because the serial single-display harness runs one Electron
+// daemon shared-channel push/pull APIs (a participant's durable chat path) —
+// because the serial single-display harness runs one Electron
 // instance at a time (the 0P-C / MU integration pattern).
 //
 // What this proves in the real app that unit/integration tests cannot:
@@ -122,6 +121,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
   const memberWs = "chat-mu-member";
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let member: LiveDaemonWorkspace | null = null;
 
   const recipientRelay = (baseUrl: string) => ({ baseUrl, token: RECIPIENT_TOKEN });
 
@@ -260,48 +260,44 @@ test("owner + participant chat and co-presence converge in the real app", async 
     const relayConn = recipientRelay(baseUrl);
     const info = await fetchSharedChannelInfo({ relay: relayConn, shareId });
     expect(info.channelWireId).toBe(channelWireId);
-    await pullSharedChannel({
-      rootDir: memberDir,
+    await mkdir(memberDir, { recursive: true });
+    member = await openLiveDaemonWorkspace({
       workspaceId: memberWs,
-      relay: relayConn,
-      shareId,
-      channelWireId,
+      rootPath: memberDir,
     });
+    const memberRelay = member.relay.bind({
+      workspaceId: memberWs,
+      rootPath: memberDir,
+      relay: relayConn,
+    });
+    await memberRelay.pullSharedChannel({ shareId, channelWireId });
 
-    const memberStore = createLinkedChatStore(memberDir);
-    let ownerMessageId = "";
-    try {
-      const messages = await memberStore.listMessages({ workspaceId: memberWs, threadId: threadId! });
-      expect(messages.length).toBeGreaterThan(0);
-      ownerMessageId = messages[0]!.id;
-      // The participant's reply.
-      await memberStore.sendMessage({
-        workspaceId: memberWs,
-        threadId: threadId!,
-        author: { kind: "human", displayName: "Morgan" },
-        authorUserId: RECIPIENT_USER,
-        body: "Joining from the other side — count me in.",
-      });
-      // The participant reacts to the owner's first message.
-      await memberStore.setReaction({
-        workspaceId: memberWs,
-        threadId: threadId!,
-        messageId: ownerMessageId,
-        emoji: "🚀",
-        author: { authorId: RECIPIENT_USER, kind: "human", displayName: "Morgan" },
-        replicationAuthorId: RECIPIENT_USER,
-        state: "added",
-      });
-    } finally {
-      await memberStore.close();
-    }
-    const pushed = await pushSharedChannel({
-      rootDir: memberDir,
+    const memberStore = member.chats;
+    const messages = await memberStore.listMessages({
       workspaceId: memberWs,
-      relay: relayConn,
-      shareId,
-      channelWireId,
+      threadId: threadId!,
     });
+    expect(messages.length).toBeGreaterThan(0);
+    const ownerMessageId = messages[0]!.id;
+    // The participant's reply.
+    await memberStore.sendMessage({
+      workspaceId: memberWs,
+      threadId: threadId!,
+      author: { kind: "human", displayName: "Morgan" },
+      authorUserId: RECIPIENT_USER,
+      body: "Joining from the other side — count me in.",
+    });
+    // The participant reacts to the owner's first message.
+    await memberStore.setReaction({
+      workspaceId: memberWs,
+      threadId: threadId!,
+      messageId: ownerMessageId,
+      emoji: "🚀",
+      author: { authorId: RECIPIENT_USER, kind: "human", displayName: "Morgan" },
+      replicationAuthorId: RECIPIENT_USER,
+      state: "added",
+    });
+    const pushed = await memberRelay.pushSharedChannel({ shareId, channelWireId });
     expect(pushed.pushed).toBeGreaterThan(0);
 
     // The member's ops are in the OWNER's workspace bucket (share-namespaced
@@ -335,6 +331,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
     // Stop the relay child BEFORE removing the temp tree: its sqlite db lives
     // under temp.baseDir, and Windows refuses to unlink files a live process
     // still holds open (EBUSY). POSIX tolerates the old order; Windows does not.
+    await member?.close();
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);
     else await temp.cleanup();

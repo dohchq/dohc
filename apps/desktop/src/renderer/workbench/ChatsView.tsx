@@ -2301,7 +2301,12 @@ export function ChatsView(props: {
   }, [channelShares]);
   const receivedNotJoined = useMemo(() => {
     if (!channelShares) return [];
-    const joinedIds = new Set(channelShares.joined.map((row) => row.shareId));
+    // An ended row is a durable leave tombstone, not an active join. Keep its
+    // invitation visible so Leave has an explicit reverse path; a successful
+    // rejoin replaces the tombstone through mergeJoinedChannel.
+    const joinedIds = new Set(
+      channelShares.joined.filter((row) => row.ended !== true).map((row) => row.shareId),
+    );
     return channelShares.received.filter((row) => !joinedIds.has(row.shareId));
   }, [channelShares]);
   const joinedFor = useCallback(

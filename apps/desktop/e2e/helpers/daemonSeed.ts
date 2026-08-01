@@ -4,6 +4,11 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import {
+  EngineRelayClient,
+  RelayConfiguredDaemonClientSource,
+  RelayTransportRouteGuard,
+} from "../../src/workspaces/engineRelayClient";
+import {
   createLiveLinkedChatStore,
   type DesktopLinkedChatStore,
 } from "../../src/workspaces/liveLinkedChatStore";
@@ -24,6 +29,42 @@ import {
 export interface DaemonSeedStores {
   chats: DesktopLinkedChatStore;
   files: CaptureVersionedTextStore;
+}
+
+export interface LiveDaemonWorkspace {
+  chats: DesktopLinkedChatStore;
+  relay: EngineRelayClient;
+  close(): Promise<void>;
+}
+
+export async function openLiveDaemonWorkspace(
+  workspace: { workspaceId: string; rootPath: string },
+): Promise<LiveDaemonWorkspace> {
+  const lifecycle = new EngineDaemonLifecycle({ command: resolveEngineBinary() });
+  await lifecycle.start();
+  const routes = new RelayTransportRouteGuard();
+  const source = new RelayConfiguredDaemonClientSource(lifecycle, routes);
+  const sessions = new EngineWorkspaceSessions(source);
+  const relay = new EngineRelayClient({
+    sessions,
+    routes,
+    allowInsecureLoopbackForTests: true,
+  });
+  let closed = false;
+  return {
+    chats: createLiveLinkedChatStore(workspace, sessions),
+    relay,
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      try {
+        await relay.closeAll();
+        await sessions.closeAll();
+      } finally {
+        await lifecycle.stop();
+      }
+    },
+  };
 }
 
 export async function seedThroughDaemon<T>(

@@ -2170,6 +2170,51 @@ describe("ChatsView shared channels (MU-C4)", () => {
     });
   });
 
+  it("offers an explicit rejoin action for an ended leave tombstone", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [
+        {
+          shareId: "share-return",
+          channelWireId: "wire-return",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+        },
+      ],
+      joined: [
+        {
+          shareId: "share-return",
+          channelWireId: "wire-return",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+          ended: true,
+        },
+      ],
+    });
+    bridgeMock.joinSharedChannel.mockResolvedValue({
+      joined: {
+        shareId: "share-return",
+        channelWireId: "wire-return",
+        access: "read-write",
+        granterEmail: "owner@example.com",
+        ended: false,
+      },
+    });
+
+    renderView();
+
+    const section = await screen.findByTestId("chats-shared-with-you");
+    expect(section.textContent).toContain("owner@example.com");
+    await userEvent.click(screen.getByTestId("chats-join-shared"));
+    await waitFor(() =>
+      expect(bridgeMock.joinSharedChannel).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        shareId: "share-return",
+      }),
+    );
+  });
+
   it("shows a joined channel's provenance, disables composers when read-only, and can leave", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [teamChannel()],

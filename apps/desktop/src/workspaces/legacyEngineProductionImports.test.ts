@@ -34,20 +34,14 @@ import ts from "typescript";
 const REPO_ROOT = resolve(__dirname, "..", "..", "..", "..");
 const LEGACY_PACKAGE = "@dohc/workspace-engine";
 
-// Production files with a RUNTIME import of the legacy engine. Shrink this list
-// as the migration proceeds; never grow it.
-//
-// The remaining entry is the legacy provider's executable test subject.
-// Production no longer imports it. A separate coverage rehome can move or
-// delete the provider after its focused tests have a new owner.
+// Production files with a RUNTIME import of the legacy engine. Never grow this
+// list. The Rust daemon now owns every production engine path.
 //
 // No other production file names this package at all: #432 repointed the eleven
 // type-only importers at @dohc/workspace-contracts, where those types are
-// actually declared. The parser tests below still pin the type-only handling,
-// because the remaining entry imports types alongside its values.
-const ALLOWED = [
-  "apps/desktop/src/collab/ydocEngineProviderSession.ts",
-] as const;
+// actually declared. The parser tests below still pin the type-only handling
+// after the migration reached zero production importers.
+const ALLOWED = [] as const;
 
 const SCAN_ROOTS = ["apps", "packages", "services"];
 
@@ -467,13 +461,13 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     expect(importers).toEqual([...ALLOWED].sort());
   });
 
-  it("pins the allowlist size at exactly one", () => {
+  it("pins the allowlist at zero", () => {
     // Set equality alone passes if someone adds an importer AND its path in one
     // change, so this is a second, louder tripwire. EXACT rather than an upper
     // bound: a ceiling that only caps drifts loose as the list shrinks, and
     // shrinking is the whole point — removing an importer should have to edit
     // this number, which is how the win gets recorded instead of assumed.
-    expect(ALLOWED.length).toBe(1);
+    expect(ALLOWED.length).toBe(0);
   });
 
   it("still detects a runtime import that hides among type-only specifiers", () => {
