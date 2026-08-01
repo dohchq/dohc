@@ -51,8 +51,8 @@ Per Gate 0, the per-platform GitHub Actions matrix is retired. Evidence is
 collected on the founder's machine:
 
 **Run the JS suites too.** The runner retired in R16 was not a second Rust gate — its
-entire step list was `pnpm --filter @dohc/workspace-engine typecheck` and `test`, i.e. JS
-checks. Deleting it must not quietly drop JS coverage from this procedure, so from the
+entire step list ran typecheck and test for the legacy TypeScript engine package, i.e. JS
+checks. Its deletion must not quietly drop JS coverage from this procedure, so from the
 repo root:
 
 ```sh

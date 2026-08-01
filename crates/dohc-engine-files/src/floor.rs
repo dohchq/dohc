@@ -2,8 +2,8 @@
 //!
 //! This ports the win32-safe classification *lessons* from the retired
 //! reference accelerator (its documented output survives as
-//! `fixtures/workspace-kernel/`) and the TS path floor
-//! (`packages/workspace-engine/.../enginePathFloor.ts`, `paths.ts`): a path is
+//! `fixtures/workspace-kernel/`) and the shared TypeScript path floor
+//! (`packages/security-contract/src/enginePathFloor.ts`): a path is
 //! excluded if any segment is reserved (`.dohc`, `.git`, `node_modules`), a
 //! segment carries an ignored write-temp prefix (`.dohc-write-`), or the file
 //! is a SQLite sidecar (`*.db-wal` / `-shm` / `-journal`, and the `.sqlite`

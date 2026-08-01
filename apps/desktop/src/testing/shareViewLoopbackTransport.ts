@@ -29,7 +29,7 @@ import {
 // A daemon double for the RECIPIENT side of a relay share, built so the
 // desktop share-view and share-mount suites can drive their production code
 // paths — EngineRelayClient.pullShareView and createCaptureLiveStores — with
-// no legacy `@dohc/workspace-engine` store anywhere in the picture.
+// no legacy TypeScript engine store anywhere in the picture.
 //
 // It lives here rather than beside the other loopbacks in
 // packages/workspace-engine-client because share.view.pull is not part of that

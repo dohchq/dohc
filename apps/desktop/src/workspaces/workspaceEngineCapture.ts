@@ -82,8 +82,8 @@ export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 // batch capture or with each other.
 //
 // What the engine owns (shared policy, not local heuristics):
-//   - resolveEffectivePolicy (workspace-engine) decides engine ownership: the
-//     classifyEngineFilePath hard floor (ignored segments, `.env`-style
+//   - resolveEffectivePolicy (@dohc/security-contract) decides engine
+//     ownership: the classifyEngineFilePath hard floor (ignored segments, `.env`-style
 //     secret paths — the SAME floor engine search uses) that .dohc policy
 //     files can NEVER override, plus workspace policy from .dohc/files.toml
 //     which can only narrow (tracked = false), never widen.
@@ -911,6 +911,7 @@ export function createWorkspaceEngineCapture(
       result: {
         sha256: string;
         markdown: string | null;
+        materialized: boolean;
       },
       token: number,
     ) => void | Promise<void>;
@@ -2227,14 +2228,11 @@ export function createWorkspaceEngineCapture(
       };
       const onSettled = async (
         result: {
-        sha256: string;
-        markdown: string | null;
-        // OPTIONAL here on purpose, though the daemon wire decoder REQUIRES
-        // it: the in-process driver (packages/workspace-engine) has no
-        // materialization job and never sets it. Absent therefore means "no
-        // separate materialization step to fail", which is the safe reading
-        // for that driver — only an explicit `false` suppresses the save.
-        materialized?: boolean;
+          sha256: string;
+          markdown: string | null;
+          // The daemon reports whether the settled document reached the workspace
+          // file. Only an explicit success may continue to the save notification.
+          materialized: boolean;
         },
         token: number,
       ) => {

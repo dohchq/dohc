@@ -1,4 +1,9 @@
-# R16 consumer inventory — what still depends on `@dohc/workspace-engine`
+# R16 consumer inventory — legacy TypeScript workspace engine
+
+> **CLOSED (2026-08-02).** PR #452 moved the remaining desktop and multiuser
+> tests to the Rust daemon. PR #462 relocated the contract-drift proof. R16 then
+> deleted the package and the deep-relative sync script that this inventory had
+> missed. This file remains as the historical migration inventory.
 
 > **STOP — this snapshot's SCOPE is too narrow, not just its contents (2026-07-29).**
 >
@@ -35,9 +40,9 @@
 >   replacing it silently drops multiuser coverage.
 > - **CI/gate references**: `.github/workflows/desktop-release.yml:151,154` and
 >   `tools/rust-engine-program/run-native-suite.mjs:76,80` invoke
->   `pnpm --filter @dohc/workspace-engine test|typecheck`.
+>   the legacy TypeScript engine package's test and typecheck scripts.
 > - **`scripts/engine-sync-folder.ts:5`** imports by deep relative path, so it is
->   invisible to any `@dohc/workspace-engine` grep.
+>   invisible to any package-name grep.
 > - **Docs and guards that describe the package must move with it.** These are not
 >   import sites, so no code scan finds them:
 >   - `docs/security/authz-boundaries.md:4,39` names `packages/workspace-engine`
@@ -62,7 +67,7 @@
 > the revised ordering, and the two decisions R16 depends on. **#363** covers the
 > kernel-sidecar question.
 >
-> Also do not scope this with grep: a loose `@dohc/workspace-engine` match
+> Also do not scope this with grep: a loose legacy-package-name match
 > overcounts (it also matches `@dohc/workspace-engine-client`, a *different*
 > package), and several relay **functions** are imported in type position only as
 > DI signatures, which grep reads as live runtime use. Note this cuts both ways —
@@ -85,7 +90,7 @@ the shard; do not trust this snapshot blind.
 **Type-only imports are excluded below — but for a DELETION shard they still are
 work.** They erase at build, so they are not *runtime* risk; that is the only
 sense in which they do not matter. TypeScript must still resolve the module to
-erase them, so once `@dohc/workspace-engine` is gone, root `pnpm typecheck`
+erase them, so once the legacy package is gone, root `pnpm typecheck`
 fails on every pure type consumer — e.g.
 `apps/desktop/src/agents/awaitableAgentDispatchStore.ts` and
 `apps/desktop/src/ipc/engineHistoryIpc.ts`, neither of which appears in the
@@ -95,7 +100,7 @@ non-test — `main.ts`, `workspaceEngineCapture.ts`,
 `workspaceEngineCaptureLiveStore.ts` and `engineRelayClient.ts` account for 39 of
 them between them. Repo-wide outside the package it is **112 across 36 files**.
 An earlier version of this line said "46 across 15", which undercounted by half;
-recount by parsing the actual `import … from "@dohc/workspace-engine"`
+recount by parsing the actual imports from the legacy package
 statements and classifying each specifier, not by counting files or names.
 
 The work splits into two very different halves.
@@ -111,7 +116,7 @@ replacement homes rather than swaps — and it is not a rounding error:
 
 **17 homeless types**, computed. Method: names with an `export interface|type`
 under `packages/workspace-engine/src`, that are **actually imported from
-`@dohc/workspace-engine`** by code outside it, and have no `export interface|type`
+the legacy package** by code outside it, and have no `export interface|type`
 of the same name **anywhere under `packages/`, `apps/` or `services/` other than
 `packages/workspace-engine/src` itself** (excluding `node_modules`, `dist`,
 `target` and worktrees). A barrel re-export does NOT count as a home — a
@@ -164,7 +169,7 @@ exists to prevent.
 ## The runtime surface, regenerated on current `main`
 
 **31 distinct value-imported names across `apps/desktop/src` non-test.** Every
-entry below is a real `import { … } from "@dohc/workspace-engine"` value
+entry below is a real value import from the legacy package
 specifier at the stated file, verified by parsing the import statements.
 
 | symbol | imported by |
@@ -280,4 +285,3 @@ The sequence of wrong answers, kept as a warning rather than tidied away:
 - `parseFilesPolicy` — workspaces/workspaceEnginePolicyFile.ts
 - `parseVisibilityPolicy` — workspaces/workspaceEnginePolicyFile.ts
 - `resolveEffectivePolicy` — workspaces/workspaceEngineCapture.ts, workspaces/workspaceEnginePolicyFile.ts
-

@@ -69,8 +69,8 @@ type SyncRelayRoute =
 // Transport cap, deliberately LARGER than the engine's 5 MiB binary-file
 // limit (MAX_VERSIONED_BINARY_FILE_BYTES): text blobs need the headroom and
 // the relay never parses content, so it cannot tell text from binary.
-// Clients enforce the engine limit by referenced kind on hydrate
-// (workspace-engine syncApply) — an oversized BINARY blob a peer smuggles
+// The Rust sync-apply path enforces the engine limit by referenced kind on
+// hydrate. An oversized BINARY blob a peer smuggles
 // under this cap is rejected client-side as a protocol violation.
 export const MAX_BLOB_BYTES = 10 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;

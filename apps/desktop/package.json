@@ -63,7 +63,6 @@
     "@dohc/sqlite-worker": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
-    "@dohc/workspace-engine": "workspace:*",
     "@dohc/workspace-engine-client": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",
     "@fontsource-variable/inter": "^5.2.8",

@@ -16,7 +16,7 @@ const WORKSPACE = "shared-view-ws";
 const SHARE_ID = "share-1";
 const TOKEN = "test:recipient";
 
-// This file no longer references @dohc/workspace-engine at all — not by import
+// This file no longer references the legacy TypeScript engine at all — not by import
 // and not by vi.mock. That is a stronger guarantee than a not-called spy: the
 // module cannot be reached from here even indirectly. The production side is
 // held by the #402 ratchet, which fails if sharedView.ts ever gains a runtime
@@ -242,7 +242,7 @@ describe("shared view refresh", () => {
 
     // Provable migration: the pull really went through the daemon share RPC.
     // (That no legacy store was built is structural here — this file has no
-    // reference to @dohc/workspace-engine at all.)
+    // reference to the legacy TypeScript engine at all.)
     expect(
       harness.transport.requests.map((request) => request.method),
     ).toContain("share.view.pull");

@@ -1539,7 +1539,7 @@ delivers BlobChunk now (done, #196) and its remaining surfaces are deferred unti
 the daemon dispatcher grows the needed methods (a later R13-follow-up / part of
 R15 wiring). Flagged for Ice at the R15 checkpoint.
 
-Ownership gaps (unowned `@dohc/workspace-engine` consumers found by the shard-open
+Ownership gaps (unowned legacy TypeScript engine consumers found by the shard-open
 import scan, to fold into SHARDS on the next refinement):
 `apps/desktop/src/agents/{chatDispatchService,runnerThreadContext}.ts`,
 `apps/desktop/src/collab/ydocEngineProviderSession.ts` (the LIVE sibling),
@@ -2403,7 +2403,7 @@ R15-6 scoped RPC-E and R13b-rest INTO the pre-flip work. Neither is close.
   #268 (S8 partial, stacked on #263's branch rather than `main`).
 - **Five surfaces had no branch and no PR:** `sharedChannels.ts`,
   `shareMounts.ts`, `workspaceFiles.ts`, `workspaceSearch.ts`,
-  `workspaceGraph.ts` (~2,485 lines), all still importing `@dohc/workspace-engine`
+  `workspaceGraph.ts` (~2,485 lines), all still importing the legacy TypeScript engine
   directly. That line count badly overstates the work: **84% of it (2,083
   lines) is three files whose ONLY engine import is
   `classifyEngineFilePathForRead`**, a compatibility re-export of
@@ -3138,7 +3138,7 @@ of the four changes it describes are not in its diff:
 
 - the `--expect-arch` pin "moved there instead of being lost" into
   `run-rust-checks.mjs` — **not done**; that file is not in the diff;
-- the two `pnpm --filter @dohc/workspace-engine` steps removed from
+- the two legacy TypeScript engine package steps removed from
   `desktop-release.yml` — **not done**, deliberately;
 - `DECISIONS.md` recording the move — **not done**; that file is append-only and
   the edit was a revert.
@@ -3201,7 +3201,7 @@ program.
 
 ### Scoping this campaign with grep does not work
 
-Restating it because it keeps costing time. A `@dohc/workspace-engine` grep over
+Restating it because it keeps costing time. A legacy engine package-name grep over
 `apps/desktop/src/workspaces/` matches 40 files but only 27 import the legacy
 package — the rest import `@dohc/workspace-engine-client`, a different package.
 An exact-string grep including the closing quote finds 45 across the repo, and
@@ -3674,3 +3674,25 @@ exactly the class the guard was built for, and exactly the class the compiler ca
 So the guard should survive the deletion, re-pointed at "nothing may load this name" rather than
 "this package has two importers". Twice I reasoned from "the compiler will catch it" without
 asking which forms the compiler actually resolves.
+
+## 2026-08-02 — R16 legacy TypeScript engine deletion closeout (#463)
+
+R16 deleted all 57 tracked files in `packages/workspace-engine` and the orphaned
+`scripts/engine-sync-folder.ts`. The script was the important inventory miss: it loaded the
+package by a deep relative path, so a package-name scan could never find it. The deletion also
+removed the obsolete key-envelope negative-import test; the surviving enrollment suite proves
+the positive daemon `keys.upload` and `keys.download` route instead.
+
+The desktop manifest, Electron bundle allowlist, release workflow, and lockfile no longer own or
+invoke the retired package. pnpm 10.24.0 changed only the desktop dependency and deleted workspace
+importer in the lockfile. The runtime-load ratchet remains with an empty allowlist. It now asserts
+that the package directory is absent and scans `apps`, `packages`, `services`, `scripts`, and
+`tools`, with a live sentinel in each root. Its dynamic import, `createRequire`, evaluated worker,
+deep-relative, parser, and vacuity proofs remain intact.
+
+Local Linux evidence before the exact-head workflow: frozen install PASS; root typecheck PASS;
+database-backed root tests with the real debug daemon PASS (19 projects; desktop 193 files,
+2,353 passed and 3 skipped); desktop release-script tests PASS (13/13); strict exact-name scan
+PASS; `git diff --check` PASS. The first saturated root-test run hit one unrelated site-runner
+timing assertion; that file passed 17/17 in isolation and the complete root suite then passed.
+The canonical exact-head JavaScript and Rust workflow results are recorded on the deletion PR.
