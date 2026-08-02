@@ -648,22 +648,31 @@ describe("Rust engine daemon lifecycle", () => {
     }
   }, 20_000);
 
-  it("ends terminal when every replacement wedges, like a crash loop", async () => {
-    // The window slot each wedge kill spends is what makes this reachable.
-    // MUTATION: route the wedge kill around handleUnexpectedExit (so it never
-    // reaches recordCrash) and this times out waiting for a terminal failure.
+  it("ends a wedge loop at PRODUCTION cadence, on a driven clock", async () => {
+    // THE RATIO, not the numbers. Every other wedge test compresses the probe
+    // cadence, and compression changes the one relationship that was broken:
+    // a wedge cycle is 3 intervals + 3 expiries = 225s, so the shared crash
+    // window (10 exits per 600s) can never hold more than 3 of them, and
+    // healthyResetMs (30s) is shorter than the cycle so the burst budget
+    // resets every generation too. A daemon that wedged after every launch
+    // therefore restarted forever — #412's own complaint, for wedges.
+    //
+    // So this test changes NO production constant. It drives a clock instead.
+    // MUTATION: delete the consecutive-wedge budget and leave wedge exits to
+    // the shared 10-in-600s crash contract -> no terminal failure ever
+    // arrives and this fails on an empty list.
+    const realSetTimeout = globalThis.setTimeout;
+    vi.useFakeTimers();
+    let now = 0;
     const clients: SelfExitingClient[] = [];
     const terminalFailures: Error[] = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
-      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
       initialBackoffMs: 0,
-      healthyResetMs: HEALTHY_RESET_MS,
-      restartWindowMs: 120_000,
-      maxRestartsPerWindow: 2,
-      pingIntervalMs: 5,
-      pingExpiryMs: 10,
-      maxPingExpiries: 1,
+      // Ping cadence, expiry, wedge budget, healthy reset, and the rolling
+      // window are all left at their production defaults ON PURPOSE.
+      monotonicNowMs: () => now,
+      wallNowMs: () => now,
       launch: async (options) => {
         const client = new SelfExitingClient(silentPing);
         client.exit = options.onExit;
@@ -677,13 +686,85 @@ describe("Rust engine daemon lifecycle", () => {
 
     try {
       await lifecycle.start();
-      await vi.waitFor(() => expect(terminalFailures).toHaveLength(1), {
+      // Twenty minutes of driven time: twice the crash window, and room for
+      // five 225s wedge cycles.
+      const step = 5_000;
+      for (
+        let elapsed = 0;
+        elapsed < 20 * 60_000 && terminalFailures.length === 0;
+        elapsed += step
+      ) {
+        now += step;
+        await vi.advanceTimersByTimeAsync(step);
+        // Each launch runs the smoke against a real temporary directory. A
+        // driven clock does not move real I/O, so give the event loop a real
+        // turn between steps or the relaunch never completes.
+        await new Promise((resolve) => realSetTimeout(resolve, 0));
+      }
+
+      expect(terminalFailures.map((error) => error.message)).toEqual([
+        "The Rust engine stopped answering engine.ping on 2 launches in a row, " +
+          "with no reply in between: 3 probes in a row got no reply within " +
+          "45000ms each. The limit is 2 wedged launches. dohc stopped restarting it.",
+      ]);
+      // Two generations, both wedged, both killed. A third would mean the
+      // terminal verdict failed to stop the restart it ordered.
+      expect(clients).toHaveLength(2);
+      expect(clients.every((client) => client.closed)).toBe(true);
+      // And it ended well inside the crash window it could never have filled:
+      // ten wedge exits at 225s each would take 37.5 minutes.
+      expect(now).toBeLessThan(600_000);
+    } finally {
+      vi.useRealTimers();
+      await lifecycle.stop();
+    }
+  }, 30_000);
+
+  it("clears the wedge streak when a generation answers a probe", async () => {
+    // A daemon that wedges, is restarted, ANSWERS, then wedges again is being
+    // recovered — not looping. Only consecutive wedges with nothing answered
+    // in between are evidence, so this daemon must keep getting restarted.
+    // MUTATION: drop the consecutiveWedges reset in probeOnce and the second
+    // wedge condemns a daemon that demonstrably answered between the two.
+    const clients: SelfExitingClient[] = [];
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      pingExpiryMs: 10,
+      maxPingExpiries: 1,
+      maxConsecutiveWedges: 2,
+      launch: async (options) => {
+        // Every generation after the first answers two probes before going
+        // silent, so no streak ever reaches two.
+        let answers = clients.length === 0 ? 0 : 2;
+        const client = new SelfExitingClient((request) => {
+          if (request.method !== "engine.ping") return healthyPing(request);
+          if (answers > 0) {
+            answers -= 1;
+            return healthyPing(request);
+          }
+          return new Promise<Response>(() => {});
+        });
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => {
+        failures.push({ error, terminal });
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      // Four generations means three wedge kills survived without terminating.
+      await vi.waitFor(() => expect(clients.length).toBeGreaterThanOrEqual(4), {
         timeout: 10_000,
       });
-      expect(terminalFailures[0]?.message).toBe(
-        "The Rust engine crashed again after 2 restarts in the last 2 minutes. " +
-          "The limit is 2 restarts per 2 minutes. dohc stopped restarting it.",
-      );
+      expect(failures.filter(({ terminal }) => terminal)).toEqual([]);
     } finally {
       await lifecycle.stop();
     }

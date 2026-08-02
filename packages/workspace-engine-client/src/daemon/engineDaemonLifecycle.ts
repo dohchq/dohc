@@ -50,6 +50,26 @@ const DEFAULT_PING_EXPIRY_MS = 45_000;
 // three and a half minutes of unbroken silence from a process that answers in
 // milliseconds when it is well. One answer in that span clears the count.
 const DEFAULT_MAX_PING_EXPIRIES = 3;
+// A wedge cannot be counted like a crash, so it gets its own budget.
+//
+// The crash window asks for 10 exits inside 10 minutes. One wedge cycle is
+// 3 intervals + 3 expiries = 225s by construction, so a 10-minute window can
+// never hold more than 3 of them. Ten is unreachable, `healthyResetMs` (30s)
+// is shorter than the cycle so the burst budget resets every generation too,
+// and a daemon that wedges after every launch would restart forever — the
+// exact failure this file exists to end.
+//
+// The deeper reason the shared contract does not fit: a crash is a SAMPLE and
+// a wedge is already a VERDICT. Ten crashes are evidence because one crash
+// might be a bad input. One wedge kill already cost three silent probes and
+// about three and a half minutes of proven silence. When a FRESH process
+// repeats that from a clean start, with no probe answered in between,
+// restarting a third time is not a recovery plan — it is a loop. Two strikes
+// is about 7.5 minutes of a workspace that has answered nothing.
+//
+// Any answered probe clears the streak, so a daemon that wedges once and then
+// recovers is restarted, not condemned.
+const DEFAULT_MAX_CONSECUTIVE_WEDGES = 2;
 
 export interface EngineDaemonClient {
   sendRequest(request: Request): Promise<Response>;
@@ -78,6 +98,7 @@ export interface EngineDaemonLifecycleOptions {
   pingIntervalMs?: number;
   pingExpiryMs?: number;
   maxPingExpiries?: number;
+  maxConsecutiveWedges?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
   // Fires once per launched-and-healthy daemon generation (the first launch
   // AND every restart). A capture event committed by a previous generation
@@ -194,6 +215,11 @@ export class EngineDaemonLifecycle {
   private healthyResetTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setTimeout> | null = null;
   private pingExpiries = 0;
+  // Wedge kills with no probe answered since, across generations.
+  private consecutiveWedges = 0;
+  // A terminal verdict was reported. The kill it ordered still has an exit
+  // coming, and that exit must not start another generation.
+  private terminal = false;
   private readonly exitedGenerations = new Set<number>();
   private readonly inFlightLaunches = new Set<InFlightLaunch>();
   private readonly launchingClients = new Set<EngineDaemonClient>();
@@ -585,6 +611,9 @@ export class EngineDaemonLifecycle {
     this.clearPingTimer();
     this.running = false;
     this.client = null;
+    // A terminal wedge already reported its verdict and then ordered this kill.
+    // Tear the generation down, but do not relaunch what was just condemned.
+    if (this.terminal) return;
     const detail = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
     const exitError = new EngineDaemonUnavailableError(
       `Rust engine daemon exited unexpectedly with ${detail}.`,
@@ -737,6 +766,9 @@ export class EngineDaemonLifecycle {
     if (!this.probedGenerationIsLive(generation, client)) return;
     if (answered) {
       this.pingExpiries = 0;
+      // One answer ends a wedge streak, whichever generation it came from. A
+      // daemon that wedged once and now replies is being recovered, not looped.
+      this.consecutiveWedges = 0;
       this.schedulePing(generation, client);
       return;
     }
@@ -788,20 +820,37 @@ export class EngineDaemonLifecycle {
   private reportWedge(client: EngineDaemonClient, maxExpiries: number): void {
     this.clearPingTimer();
     this.pingExpiries = 0;
-    this.reportFailure(
-      new EngineDaemonUnavailableError(
-        `The Rust engine is running but stopped answering engine.ping: ${maxExpiries} probes in a row got no reply within ${this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS}ms each. The limit is ${maxExpiries} silent probes. dohc is restarting it.`,
-      ),
-      false,
-    );
-    // Killing it is the point. Restarting starts at process exit, so the only
-    // way a wedge reaches the restart path is to become an exit. That exit then
-    // spends one rolling-window slot like any crash, so a wedge LOOP reaches
-    // terminal exactly like a crash loop.
+    this.consecutiveWedges += 1;
+    const maxWedges =
+      this.options.maxConsecutiveWedges ?? DEFAULT_MAX_CONSECUTIVE_WEDGES;
+    const expiryMs = this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS;
+    const silence = `${maxExpiries} probes in a row got no reply within ${expiryMs}ms each`;
+    // The crash window cannot end a wedge loop: one wedge cycle is longer than
+    // a tenth of that window, so its count is unreachable by construction. A
+    // wedge streak carries its own budget.
+    if (this.consecutiveWedges >= maxWedges) {
+      this.reportFailure(
+        new EngineDaemonUnavailableError(
+          `The Rust engine stopped answering engine.ping on ${this.consecutiveWedges} launches in a row, with no reply in between: ${silence}. The limit is ${maxWedges} wedged launches. dohc stopped restarting it.`,
+        ),
+        true,
+      );
+    } else {
+      this.reportFailure(
+        new EngineDaemonUnavailableError(
+          `The Rust engine is running but stopped answering engine.ping: ${silence}. The limit is ${maxExpiries} silent probes. dohc is restarting it.`,
+        ),
+        false,
+      );
+    }
+    // Killing it is the point either way. Restarting starts at process exit, so
+    // the only way a wedge reaches the restart path is to become an exit — and
+    // a terminal wedge must still not leave a wedged sidecar running.
     client.close();
   }
 
   private reportFailure(error: Error, terminal: boolean): void {
+    if (terminal) this.terminal = true;
     try {
       this.options.onFailure?.(error, terminal);
     } catch {
