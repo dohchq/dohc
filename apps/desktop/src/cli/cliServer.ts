@@ -15,10 +15,7 @@ import {
 import { renderShowMarkdown } from "@dohc/cli/render";
 import { formatMessageHandle } from "@dohc/cli/thread-markdown";
 import { validateUserReadPath } from "@dohc/workspace-core";
-import {
-  AgentDispatchStoreError,
-  LINKED_CHAT_STORE_RELATIVE_PATH,
-} from "@dohc/workspace-contracts/engine";
+import { LINKED_CHAT_STORE_RELATIVE_PATH } from "@dohc/workspace-contracts/engine";
 import type {
   ChannelThreadSummary,
   ChatChannelSummary,
@@ -29,6 +26,7 @@ import type {
   VersionedTextMomentSummary,
 } from "@dohc/workspace-contracts/engine";
 import {
+  DaemonRefusalError,
   MAX_GRANULAR_CHAT_QUERY_CHARS,
   type ChatUnreadFileThread,
   type GranularChatMessageSearchResponse,
@@ -945,6 +943,23 @@ type RunMessageLinkInput = {
   messageId: string;
 };
 
+// A daemon refusal carries the engine's domain code as its message (#418).
+// Two of those codes can never succeed on a retry: a malformed message or run
+// id ("invalid-input"), and a run that is not in this workspace
+// ("run-not-found"). Retryability does not select them — a persist failure is
+// terminal too, and giving up on it would drop a recoverable link.
+const PERMANENT_RUN_MESSAGE_LINK_CODES = new Set([
+  "invalid-input",
+  "run-not-found",
+]);
+
+function isPermanentRunMessageLinkFailure(error: unknown): boolean {
+  return (
+    error instanceof DaemonRefusalError &&
+    PERMANENT_RUN_MESSAGE_LINK_CODES.has(error.message)
+  );
+}
+
 async function tryRunMessageLink(
   context: CliWorkspaceContext,
   input: RunMessageLinkInput,
@@ -1171,10 +1186,7 @@ class RunMessageLinkRecoveryQueue {
       this.notifySettled(pending.link);
     } catch (error) {
       if (this.closed || this.pending.get(key) !== pending) return;
-      if (
-        error instanceof AgentDispatchStoreError &&
-        (error.code === "invalid-input" || error.code === "run-not-found")
-      ) {
+      if (isPermanentRunMessageLinkFailure(error)) {
         this.pending.delete(key);
         this.persist();
         this.notifySettled(pending.link);
@@ -1337,12 +1349,7 @@ async function linkRunMessage(
       return null;
     } catch (error) {
       lastError = error;
-      if (
-        error instanceof AgentDispatchStoreError &&
-        (error.code === "invalid-input" || error.code === "run-not-found")
-      ) {
-        return null;
-      }
+      if (isPermanentRunMessageLinkFailure(error)) return null;
       const remaining = foregroundDeadline - Date.now();
       if (attempt < RUN_MESSAGE_LINK_ATTEMPTS && remaining > 0) {
         await new Promise<void>((resolveDelay) => {

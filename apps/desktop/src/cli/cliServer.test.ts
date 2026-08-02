@@ -25,6 +25,7 @@ import type {
 import {
   CHATS_METHOD,
   ChatsLoopbackEngine,
+  DaemonRefusalError,
   type Request,
 } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -1866,6 +1867,217 @@ describe("CLI socket server", () => {
     expect(
       await originalDispatch.listRunMessages(WORKSPACE_ID, claim.run.runId),
     ).toEqual([]);
+  });
+
+  it("gives up on the first permanently refused foreground provenance link", async () => {
+    // MUTATION: treat the terminal refusal as retryable -> three attempts, a
+    // degraded-provenance warning, and a background queue entry for a link the
+    // daemon has already refused for good.
+    await seedDispatchThread("thread_terminal_foreground");
+    await dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_terminal_foreground_trigger",
+      threadId: "thread_terminal_foreground",
+    });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for terminal linkage.");
+    let attempts = 0;
+    const queued: string[] = [];
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage() {
+          attempts += 1;
+          throw new DaemonRefusalError(
+            {
+              code: "INVALID_PARAMS",
+              message: "run-not-found",
+              retry: "no",
+            },
+            null,
+          );
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.onRunMessageLinkPending = (link) =>
+      queued.push(link.messageId);
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Terminal provenance",
+      body: "A refused link must not consume the foreground budget.",
+    });
+
+    expect(attempts).toBe(1);
+    expect(result.warning).toBeUndefined();
+    expect(queued).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("settles a background provenance link on the first permanent refusal", async () => {
+    // MUTATION: treat the terminal refusal as retryable -> the recovery queue
+    // burns all twelve attempts and reports the link abandoned instead of
+    // settled.
+    await seedDispatchThread("thread_terminal_recovery");
+    await dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_terminal_recovery_trigger",
+      threadId: "thread_terminal_recovery",
+    });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for terminal recovery.");
+    let attempts = 0;
+    const settled: string[] = [];
+    const abandoned: string[] = [];
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage() {
+          attempts += 1;
+          // The first three attempts are the foreground loop; the daemon only
+          // turns permanent once the link is already in background recovery.
+          if (attempts <= 3) throw new Error("daemon restart in progress");
+          throw new DaemonRefusalError(
+            {
+              code: "INVALID_PARAMS",
+              message: "invalid-input",
+              retry: "no",
+            },
+            null,
+          );
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkRecoveryRetryMs = 0;
+    serverOptions.onRunMessageLinkSettled = (link) =>
+      settled.push(link.messageId);
+    serverOptions.onRunMessageLinkAbandoned = (link) =>
+      abandoned.push(link.messageId);
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Terminal recovery",
+      body: "A refused link must leave the recovery queue at once.",
+    });
+    for (let index = 0; index < 100 && settled.length === 0; index += 1) {
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    expect(settled).toEqual([engineMessageId]);
+    expect(abandoned).toEqual([]);
+    expect(attempts).toBe(4);
+    await expect(
+      stat(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps retrying a terminal refusal the link taxonomy does not call permanent", async () => {
+    // MUTATION: classify every terminal refusal as permanent -> a persist
+    // failure the daemon can recover from drops the provenance link forever.
+    await seedDispatchThread("thread_terminal_transient");
+    await dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_terminal_transient_trigger",
+      threadId: "thread_terminal_transient",
+    });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for transient refusal.");
+    let attempts = 0;
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage(input) {
+          attempts += 1;
+          if (attempts < 3) {
+            throw new DaemonRefusalError(
+              {
+                code: "INTERNAL",
+                message: "persist-failed",
+                retry: "no",
+              },
+              null,
+            );
+          }
+          return originalDispatch.recordRunMessage(input);
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Recoverable refusal",
+      body: "A retryable refusal must not be read as permanent.",
+    });
+
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    expect(attempts).toBe(3);
+    expect(result.warning).toBeUndefined();
+    expect(
+      await originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
+    ).toBe(claim.run.runId);
+    expect(errors).toEqual([]);
+  });
+
+  it("reads a permanent code only from a daemon refusal, not any Error", async () => {
+    // MUTATION: widen the guard from DaemonRefusalError to Error -> a plain
+    // Error whose message happens to read "run-not-found" ends the retries.
+    // ChatsLoopbackEngine throws exactly that (chatsLoopbackEngine.ts:2909) and
+    // never wraps it into a wire error, so the narrowing carries real weight.
+    await seedDispatchThread("thread_plain_error");
+    await dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_plain_error_trigger",
+      threadId: "thread_plain_error",
+    });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for plain-error linkage.");
+    let attempts = 0;
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage() {
+          attempts += 1;
+          throw new Error("run-not-found");
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkRecoveryRetryMs = 60_000;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Plain error provenance",
+      body: "A message string is not a refusal taxonomy.",
+    });
+
+    expect(attempts).toBe(3);
+    expect(result.warning).toContain(
+      "agent-run provenance could not be recorded after 3 attempts",
+    );
   });
 
   it("forwards a deadline to every provenance RPC attempt", async () => {
