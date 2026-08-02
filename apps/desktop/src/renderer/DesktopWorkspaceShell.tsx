@@ -1362,14 +1362,28 @@ export function DesktopWorkspaceShell(props: {
   // it lands. Only an answer OLDER than what is already displayed is dropped.
   const filesRequest = useRef(0);
   const committedFilesRequest = useRef(0);
+  // How many listings are still in flight, and a bump each time that reaches
+  // zero. The destructive close waits for quiet, not for a particular id: a
+  // request that FAILS never commits, so keying off "newest issued" would
+  // block the close for as long as the app ran.
+  const pendingFilesRequests = useRef(0);
+  const [listingsSettled, setListingsSettled] = useState(0);
   const refreshFiles = useCallback(async () => {
     const request = ++filesRequest.current;
-    const result = await bridge().listWorkspaceFiles({ workspaceId });
-    if (request <= committedFilesRequest.current) return;
-    committedFilesRequest.current = request;
-    setFiles(result.files);
-    setFolders(result.folders ?? []);
-    setFilesLoaded(true);
+    pendingFilesRequests.current += 1;
+    try {
+      const result = await bridge().listWorkspaceFiles({ workspaceId });
+      if (request <= committedFilesRequest.current) return;
+      committedFilesRequest.current = request;
+      setFiles(result.files);
+      setFolders(result.folders ?? []);
+      setFilesLoaded(true);
+    } finally {
+      pendingFilesRequests.current -= 1;
+      if (pendingFilesRequests.current === 0) {
+        setListingsSettled((settled) => settled + 1);
+      }
+    }
   }, [workspaceId]);
 
   // Keep a restored tab only while the workspace still lists its file. A
@@ -1389,12 +1403,15 @@ export function DesktopWorkspaceShell(props: {
   // is what has to re-run the check.
   useEffect(() => {
     if (!filesLoaded || restoredTabPaths.size === 0) return;
-    // Closing a tab is destructive, so it waits for the NEWEST answer. The
-    // watermark above deliberately lets an older success fill the display —
-    // right for the explorer, wrong for closing tabs, because a pull still in
-    // flight can carry back a file this older listing predates. A pending
-    // request defers the close; its response re-runs this.
-    if (committedFilesRequest.current !== filesRequest.current) return;
+    // Closing a tab is destructive, so it waits until no listing is in
+    // flight. The watermark above deliberately lets an older success fill the
+    // display — right for the explorer, wrong for closing tabs, because a
+    // pull still in flight can carry back a file this older listing predates.
+    // Once everything has settled, the committed response is the newest
+    // SUCCESS by construction (a response only commits if it is newer than
+    // what is displayed), so a failed newer request leaves the older listing
+    // authoritative instead of blocking the close for the rest of the session.
+    if (pendingFilesRequests.current > 0) return;
     // A DIRTY tab is never closed. Closing it unmounts the keyed inspector
     // mid-draft, whose cleanup flushes best-effort to a path that no longer
     // exists; the write fails, the failure is swallowed, and the draft is
@@ -1431,7 +1448,14 @@ export function DesktopWorkspaceShell(props: {
       }
     }
     setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
-  }, [files, filesLoaded, restoredTabPaths, activeTabDirty, wb.activeTab]);
+  }, [
+    files,
+    filesLoaded,
+    listingsSettled,
+    restoredTabPaths,
+    activeTabDirty,
+    wb.activeTab,
+  ]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
     setShellError(error instanceof Error ? error.message : fallback);

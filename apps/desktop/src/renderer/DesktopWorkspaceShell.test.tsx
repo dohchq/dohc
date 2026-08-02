@@ -970,6 +970,55 @@ describe("ui-state merge-on-load", () => {
     mark.mockRestore();
   });
 
+  // A failed request never commits, so gating the close on "the newest ISSUED
+  // id is the displayed one" would block it for the rest of the session and
+  // keep re-persisting tabs whose files are gone. The close waits for quiet
+  // instead, and the older listing is authoritative once the newer one fails.
+  it("closes on the older listing once a newer request fails", async () => {
+    const older = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let failNewer!: (error: Error) => void;
+    const newer = new Promise<never>((_resolve, reject) => {
+      failNewer = reject;
+    });
+    let issued = 0;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "gone.md"],
+        activeTab: "b.md",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(() => (++issued === 1 ? older.promise : newer));
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The older listing commits, but a newer request is still in flight.
+    await act(async () => {
+      older.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await older.promise;
+    });
+    expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
+
+    // The newer request fails. Nothing else will arrive, so the older listing
+    // is the best answer there is and the close must proceed.
+    await act(async () => {
+      failNewer(new Error("listing failed"));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
   // CodeRabbit: reconciling commits through the direct setter (it must not set
   // the touched flag), which also skips mutateWb's DM-navigation invalidation.
   // A DM navigation in flight would then still pass its isCurrent() check and

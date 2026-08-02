@@ -400,6 +400,37 @@ describe("ChatsView panel navigator unread badges", () => {
     });
   });
 
+  // Clearing a badge must never cost the user the navigator itself.
+  it("keeps a working navigator when the badge refresh fails, and retries on the next read", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    const view = render(navigator(0));
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+
+    // The refresh the read triggers fails.
+    bridgeMock.listChatChannels.mockRejectedValue(new Error("offline"));
+    view.rerender(navigator(1));
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
+
+    // The channel list is still there — a stale badge beats an error card.
+    expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
+    expect(screen.getByTestId("chats-channel-unread").textContent).toBe("2");
+
+    // The signal was not spent on that failure: the next read still refetches
+    // and the badge catches up.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    view.rerender(navigator(2));
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+    expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
+  });
+
   it("does not refetch while the revision stands still", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ unreadCount: 2 })],

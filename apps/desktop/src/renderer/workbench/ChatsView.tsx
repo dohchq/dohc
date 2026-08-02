@@ -1017,36 +1017,44 @@ export function ChatsView(props: {
     setSending(contextIsSending);
   }, [sendContextKey]);
 
-  const refreshOverview = useCallback(async () => {
-    const token = ++liveToken.current;
-    setOverview((current) =>
-      current.status === "ready" ? current : { status: "loading" },
-    );
-    try {
-      const [result, shares] = await Promise.all([
-        bridge().listChatChannels({ workspaceId }),
-        // Sharing is OPTIONAL: solo / signed-out workspaces simply render
-        // without the sharing affordances.
-        bridge()
-          .listChatChannelShares({ workspaceId })
-          .catch(() => null),
-      ]);
-      if (token !== liveToken.current) return;
-      setChannelShares(shares);
-      setSharesWorkspaceId(workspaceId);
-      setOverview({
-        status: "ready",
-        channels: result.channels,
-        fileThreads: result.fileThreads,
-      });
-    } catch (error) {
-      if (token !== liveToken.current) return;
-      setOverview({
-        status: "unavailable",
-        message: ipcErrorMessage(error, "Could not load Chats."),
-      });
-    }
-  }, [workspaceId]);
+  // `keepReadyOnError` is for BACKGROUND refreshes (the navigator's badge
+  // catch-up), where the user asked for nothing and a transient IPC failure
+  // must not replace a working navigator with an error card.
+  const refreshOverview = useCallback(
+    async (options?: { keepReadyOnError?: boolean }): Promise<void> => {
+      const token = ++liveToken.current;
+      setOverview((current) =>
+        current.status === "ready" ? current : { status: "loading" },
+      );
+      try {
+        const [result, shares] = await Promise.all([
+          bridge().listChatChannels({ workspaceId }),
+          // Sharing is OPTIONAL: solo / signed-out workspaces simply render
+          // without the sharing affordances.
+          bridge()
+            .listChatChannelShares({ workspaceId })
+            .catch(() => null),
+        ]);
+        if (token !== liveToken.current) return;
+        setChannelShares(shares);
+        setSharesWorkspaceId(workspaceId);
+        setOverview({
+          status: "ready",
+          channels: result.channels,
+          fileThreads: result.fileThreads,
+        });
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        const message = ipcErrorMessage(error, "Could not load Chats.");
+        setOverview((current) =>
+          options?.keepReadyOnError && current.status === "ready"
+            ? current
+            : { status: "unavailable", message },
+        );
+      }
+    },
+    [workspaceId],
+  );
 
   const refreshBookmarks = useCallback(async () => {
     const workspaceGeneration = bookmarkWorkspaceGeneration.current;
@@ -1264,9 +1272,13 @@ export function ChatsView(props: {
   // effect above, so only later ones refetch.
   const seenReadRevision = useRef(props.readRevision);
   useEffect(() => {
-    if (props.readRevision === seenReadRevision.current) return;
-    seenReadRevision.current = props.readRevision;
-    void refreshOverview();
+    const revision = props.readRevision;
+    if (revision === seenReadRevision.current) return;
+    seenReadRevision.current = revision;
+    // The user asked for nothing here, so a transient failure must leave the
+    // navigator standing rather than replace it with an error card. The badge
+    // catches up on the next read.
+    void refreshOverview({ keepReadyOnError: true });
   }, [props.readRevision, refreshOverview]);
 
   const loadChannelSnapshot = useCallback(
