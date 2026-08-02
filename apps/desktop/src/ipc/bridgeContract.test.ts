@@ -274,12 +274,20 @@ describe("settings IPC contract", () => {
       SetUserSettingsPayload.parse({ settings: DEFAULT_USER_SETTINGS }).settings
         .appearance.themeMode,
     ).toBe("system");
+    // A save carries only the changed controls: main merges them onto the
+    // file, so a whole-settings body is not what this channel takes.
     expect(
       SetWorkspaceSettingsPayload.parse({
         workspaceId: "ws-settings",
-        settings: DEFAULT_WORKSPACE_SETTINGS,
-      }).settings.sites.defaultPreviewMode,
+        patch: { sites: { defaultPreviewMode: "auto" } },
+      }).patch.sites?.defaultPreviewMode,
     ).toBe("auto");
+    expect(
+      SetWorkspaceSettingsPayload.safeParse({
+        workspaceId: "ws-settings",
+        settings: DEFAULT_WORKSPACE_SETTINGS,
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects unknown settings keys, invalid values, bounds, and oversized strings", () => {

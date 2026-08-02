@@ -2382,22 +2382,38 @@ describe("settings entry points", () => {
 // AUDIT-OPTOUT: a settings file that cannot be read reads as opted out, so the
 // workspace records no history. The Settings dialog is not enough — the user
 // must see it without opening Settings.
+//
+// #483: the notice states what MAIN's open-time read found — the read that
+// decided whether anything is recorded. The renderer's own read of the same
+// file happens at a different moment and can disagree with it: one way round
+// the user gets a true "history is off" under a false cause, the other way a
+// recording workspace promises "no history".
+const UNREADABLE_WARNING =
+  "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
+
+const OPTED_OUT_READ = async (): Promise<WorkspaceSettingsResult> => ({
+  settings: {
+    ...DEFAULT_WORKSPACE_SETTINGS,
+    experimental: {
+      ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+      workspaceEngineAlpha: false,
+    },
+  },
+  source: "recovered" as const,
+  warning: UNREADABLE_WARNING,
+});
+
 describe("unreadable workspace settings", () => {
   it("raises the settings warning in the notice center, not only in Settings", async () => {
-    const warning =
-      "Workspace settings could not be read. dohc records no history for this workspace until you fix /ws/.dohc/settings.local.json.";
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: {
-          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-          workspaceEngineAlpha: false,
-        },
-      },
-      source: "recovered" as const,
-      warning,
-    }));
+    bridge.getWorkspaceSettings = vi.fn(OPTED_OUT_READ);
+    const offStatus = {
+      ...SYNC_STATUS,
+      historyRecordingOff: true,
+      settingsWarning: UNREADABLE_WARNING,
+    };
+    bridge.openWorkspace = vi.fn(async () => offStatus);
+    bridge.getSyncStatus = vi.fn(async () => offStatus);
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -2406,5 +2422,45 @@ describe("unreadable workspace settings", () => {
       (await screen.findByTestId("notice-workspace-settings-unreadable"))
         .textContent,
     ).toContain("/ws/.dohc/settings.local.json");
+  });
+
+  it("names main's cause even when the renderer's own read succeeded", async () => {
+    // Main's read hit a transient error at open, so nothing is recorded for
+    // this session. The renderer read the same file a moment later and it was
+    // fine — the notice must still say WHY, not blame the Settings toggle.
+    const bridge = makeBridge(Promise.resolve(null));
+    const offStatus = {
+      ...SYNC_STATUS,
+      historyRecordingOff: true,
+      settingsWarning: UNREADABLE_WARNING,
+    };
+    bridge.openWorkspace = vi.fn(async () => offStatus);
+    bridge.getSyncStatus = vi.fn(async () => offStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    expect(
+      (await screen.findByTestId("notice-workspace-settings-unreadable"))
+        .textContent,
+    ).toContain("/ws/.dohc/settings.local.json");
+    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
+  });
+
+  it("never promises 'no history' while the workspace is recording", async () => {
+    // The reverse race: the renderer's read failed, main's succeeded and the
+    // engine is recording. A notice sourced from the renderer's read would be
+    // a false privacy assurance.
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getWorkspaceSettings = vi.fn(OPTED_OUT_READ);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    // The panel opened, so a missing notice means no notice — not a missed
+    // render.
+    expect(await screen.findByTestId("notice-center")).toBeTruthy();
+    expect(screen.queryByTestId("notice-workspace-settings-unreadable")).toBeNull();
+    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
   });
 });

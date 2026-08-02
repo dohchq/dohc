@@ -3,7 +3,10 @@ import {
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { readWorkspaceSettingsFile } from "./workspaceSettingsFile";
-import type { WorkspaceCaptureHooks } from "./workspaceActivity";
+import type {
+  WorkspaceCaptureDecision,
+  WorkspaceCaptureHooks,
+} from "./workspaceActivity";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 
 // THE captureFor gate (single owner). Workspace-engine alpha (PR 0M-3/0M-5):
@@ -20,21 +23,29 @@ export async function captureForFlaggedWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions: EngineWorkspaceSessions,
-): Promise<WorkspaceEngineCapture | null> {
-  if (!(await workspaceEngineEnabled(workspace.rootPath))) return null;
-  return createWorkspaceEngineCapture({
-    workspaceId: workspace.workspaceId,
-    rootPath: workspace.rootPath,
-    // Feeds the persistent history-capture notice (PR 0M-7): with legacy
-    // recording off for flagged workspaces, a failing engine store must be
-    // user-visible, not console-only.
-    onCaptureOutcome: hooks.onCaptureOutcome,
-    // PR 0N-1: batches settled while a dohc-tracked agent run is active are
-    // stamped with agent authorship (History shows "<User Name>'s agent").
-    activeAgentRun: hooks.activeAgentRun,
-    rustEngineSessions,
-    daemonOwnsCapture: true,
-  });
+): Promise<WorkspaceCaptureDecision> {
+  // ONE read decides both the recorder and what the user is told about it.
+  // A second read taken later (the renderer's) could disagree with this one
+  // and give the notice a cause that never happened.
+  const { settings, warning } = await readWorkspaceSettingsFile(workspace.rootPath);
+  if (!settings.experimental.workspaceEngineAlpha) {
+    return { capture: null, ...(warning ? { warning } : {}) };
+  }
+  return {
+    capture: createWorkspaceEngineCapture({
+      workspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+      // Feeds the persistent history-capture notice (PR 0M-7): with legacy
+      // recording off for flagged workspaces, a failing engine store must be
+      // user-visible, not console-only.
+      onCaptureOutcome: hooks.onCaptureOutcome,
+      // PR 0N-1: batches settled while a dohc-tracked agent run is active are
+      // stamped with agent authorship (History shows "<User Name>'s agent").
+      activeAgentRun: hooks.activeAgentRun,
+      rustEngineSessions,
+      daemonOwnsCapture: true,
+    }),
+  };
 }
 
 // The gate's predicate on its own, for callers that must honor the opt-out
