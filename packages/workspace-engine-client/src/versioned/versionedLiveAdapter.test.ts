@@ -1034,6 +1034,38 @@ describe("VersionedLiveAdapter", () => {
     },
   );
 
+  it("REFUSES a withheld conflict body from a listing, and accepts one from a resolve", () => {
+    // Only `conflicts.resolve` withholds, to keep its answer inside one control
+    // frame (`settled_conflict_json`, lib.rs). A listing carries every body it
+    // returns, so a null from THAT surface is a protocol fault — accepting one
+    // would hand a reader an empty document that reads like an edit.
+    //
+    // MUTATION: decode both surfaces with the same nullability -> the listing
+    // stops refusing and this fails.
+    const withheld = {
+      ...conflict,
+      base: {
+        ...conflict.base,
+        snapshot: { ...snapshot, text: null, inbandLimitBytes: 131072 },
+      },
+    };
+
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.conflictsList, {
+        conflicts: [withheld],
+        nextAfterConflictId: null,
+      }),
+    ).toThrow(WorkspaceProtocolShapeError);
+
+    const resolved = decodeWorkspaceResult(WORKSPACE_METHOD.conflictsResolve, {
+      conflict: withheld,
+      write: null,
+      delete: null,
+    }) as { conflict: ConflictRecord };
+    expect(resolved.conflict.base.snapshot?.text).toBeNull();
+    expect(resolved.conflict.base.snapshot?.inbandLimitBytes).toBe(131072);
+  });
+
   it("keeps the daemon's provenance fields on decoded conflict snapshots", () => {
     const decoded = decodeWorkspaceResult(WORKSPACE_METHOD.conflictsList, {
       conflicts: [conflict],

@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-  MAX_MERGED_RESOLUTION_TEXT_BYTES,
+  RESOLVE_REQUEST_FRAME_BYTES,
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
   jsonStringEncodedLength,
@@ -429,13 +429,16 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
       // Only a COMBINED body is bounded, and by the control frame that carried
       // it — the daemon puts no size check on a side choice, which sends no
       // text at all (lib.rs conflicts_resolve).
-      const encoded = jsonStringEncodedLength(text);
-      if (resolution === "apply-merged" && encoded > MAX_MERGED_RESOLUTION_TEXT_BYTES) {
+      // The daemon measures the whole REQUEST, not the body alone: the same
+      // envelope carries two 16 KiB metadata fields and five identifiers.
+      const encodedRequest = jsonStringEncodedLength(JSON.stringify(params));
+      if (resolution === "apply-merged" && encodedRequest > RESOLVE_REQUEST_FRAME_BYTES) {
         throw new Error(
-          `merged-text-exceeds-wire-limit: one control frame carries a combined ` +
-            `resolution body of at most ${MAX_MERGED_RESOLUTION_TEXT_BYTES} encoded ` +
-            `bytes, observed ${encoded} encoded bytes ` +
-            `(${Buffer.byteLength(text, "utf8")} raw bytes)`,
+          `merged-text-exceeds-wire-limit: one control frame carries a resolve ` +
+            `request of at most ${RESOLVE_REQUEST_FRAME_BYTES} encoded bytes, ` +
+            `observed ${encodedRequest} encoded bytes for this request ` +
+            `(${Buffer.byteLength(text, "utf8")} raw bytes of combined body, ` +
+            `${jsonStringEncodedLength(text)} encoded)`,
         );
       }
       // The daemon settles inside the store, so `versionedText.write`'s in-band
@@ -1348,12 +1351,12 @@ describe("mergeVersionIntoMain", () => {
     await expect(
       engine.resolveConflict(conflict.id, {
         kind: "apply-merged",
-        text: "x".repeat(MAX_MERGED_RESOLUTION_TEXT_BYTES + 1),
+        text: "x".repeat(RESOLVE_REQUEST_FRAME_BYTES),
       }),
     ).rejects.toThrow(
       new RegExp(
-        `merged-text-exceeds-wire-limit:.*${MAX_MERGED_RESOLUTION_TEXT_BYTES} encoded ` +
-          `bytes, observed ${MAX_MERGED_RESOLUTION_TEXT_BYTES + 3} encoded bytes`,
+        `merged-text-exceeds-wire-limit:.*${RESOLVE_REQUEST_FRAME_BYTES} encoded ` +
+          `bytes, observed \\d+ encoded bytes for this request`,
       ),
     );
     expect(await readText(root, "plan.md")).toBe("current\n");

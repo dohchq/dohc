@@ -166,6 +166,36 @@ fn json_string_encoded_len(text: &str) -> usize {
     })
 }
 
+/// The encoded size of the request envelope that carried these params — what
+/// the control frame actually has to hold.
+///
+/// The envelope around `params` is MEASURED, not assumed: the same encoder
+/// the transport uses serializes a request with the caller's own workspace
+/// handle and idempotency key and an empty params object, and the worst-case
+/// id and deadline. A reserved constant instead of this measurement is how a
+/// bound drifts away from the wire it claims to describe.
+fn resolve_request_encoded_bytes(
+    handle: Option<&WorkspaceHandle>,
+    idempotency_key: Option<&str>,
+    params: &Value,
+) -> usize {
+    let scaffold =
+        dohc_engine_protocol::wire::Envelope::Request(dohc_engine_protocol::wire::Request {
+            id: u64::MAX,
+            method: "conflicts.resolve".to_owned(),
+            workspace: handle.cloned(),
+            deadline_ms: Some(u32::MAX),
+            idempotency_key: idempotency_key.map(str::to_owned),
+            params: json!({}),
+        });
+    let scaffold_bytes = serde_json::to_vec(&scaffold).map_or(usize::MAX, |bytes| bytes.len());
+    let params_bytes = serde_json::to_vec(params).map_or(usize::MAX, |bytes| bytes.len());
+    // `- 2` drops the empty object the scaffold measured in the params slot.
+    scaffold_bytes
+        .saturating_sub(2)
+        .saturating_add(params_bytes)
+}
+
 fn encode_ydoc_state_base64(full_state: &[u8]) -> Result<String, WireError> {
     if full_state.len() > MAX_YDOC_STATE_WIRE_BYTES {
         return Err(wire(ErrorCode::Internal, "ydoc-state-exceeds-wire-limit"));
@@ -263,17 +293,19 @@ const CONFLICTS_RESPONSE_ROW_LIMIT: usize =
 /// retaining explicit envelope and continuation headroom.
 const CONFLICT_ROW_HARD_CAP_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
-/// A hand-combined resolution arrives as one wire string in one control
-/// frame, so it gets the same frame-derived budget the conflict listing keeps
-/// for the sides that produced it: every conflict a caller can read back can
-/// be combined and applied. The store's 10 MiB text cap never binds first.
+/// What a hand-combined resolution is bounded by: the control frame that has
+/// to carry the whole REQUEST. Not the body alone, and not a fixed headroom
+/// beside it — the same request also carries two 16 KiB metadata fields, a
+/// path, four identifiers and an idempotency key, each of which can double
+/// under escaping. Every conflict a caller can list can still be combined and
+/// applied; what a body gets is whatever the rest of its request leaves.
 ///
-/// MEASURED ON THE ENCODED BODY, not on raw UTF-8 (`json_string_encoded_len`).
-/// The frame carries the ENCODED request, and escaping doubles a
-/// newline-heavy body: 4,194,304 newlines are 4 MiB raw and 8 MiB encoded, so
-/// a raw-byte budget would promise a size the transport refuses before the
-/// daemon ever sees it.
-const MAX_MERGED_RESOLUTION_TEXT_BYTES: usize = CONFLICT_ROW_HARD_CAP_BYTES;
+/// MEASURED ON THE ENCODED REQUEST (`resolve_request_encoded_bytes`). The
+/// frame carries encoded bytes and `check_string` bounds decoded ones, so
+/// escaping is invisible to every other limit on this path: 4,194,304
+/// newlines are 4 MiB raw and 8 MiB encoded.
+const RESOLVE_REQUEST_FRAME_BYTES: usize =
+    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
 const SEARCH_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
 const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
@@ -7588,6 +7620,8 @@ impl EngineService {
         params: Value,
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
+        let encoded_request =
+            resolve_request_encoded_bytes(handle.as_ref(), request_id.as_deref(), &params);
         let params: ConflictResolveParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
@@ -7618,16 +7652,16 @@ impl EngineService {
                 let text = local
                     .merged_text
                     .ok_or_else(|| wire(ErrorCode::InvalidParams, "missing merged text"))?;
-                let encoded = json_string_encoded_len(&text);
-                if encoded > MAX_MERGED_RESOLUTION_TEXT_BYTES {
+                if encoded_request > RESOLVE_REQUEST_FRAME_BYTES {
                     return Err(WireError::new(
                         ErrorCode::InvalidParams,
                         format!(
                             "merged-text-exceeds-wire-limit: one control frame carries a \
-                             combined resolution body of at most \
-                             {MAX_MERGED_RESOLUTION_TEXT_BYTES} encoded bytes, observed \
-                             {encoded} encoded bytes ({} raw bytes)",
-                            text.len()
+                             resolve request of at most {RESOLVE_REQUEST_FRAME_BYTES} encoded \
+                             bytes, observed {encoded_request} encoded bytes for this request \
+                             ({} raw bytes of combined body, {} encoded)",
+                            text.len(),
+                            json_string_encoded_len(&text)
                         ),
                     ));
                 }

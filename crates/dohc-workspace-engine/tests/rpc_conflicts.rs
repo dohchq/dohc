@@ -528,17 +528,17 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
     let (_scratch, transport, handle, workspace_id) = fixture("past-frame-limit").await;
     let path =
         open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
-    let limit = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
     // Every newline encodes as two bytes, so this body is 4 MiB raw and 8 MiB
     // once encoded: under any raw-byte budget, past the frame that has to
     // carry it. A raw-byte check would accept it here and let the client's own
     // framer refuse it, with no limit named anywhere.
     //
-    // MUTATION: measure `text.len()` instead of the encoded length -> the
+    // MUTATION: measure `text.len()` instead of the encoded request -> the
     // resolve is accepted and this refusal never happens.
     let newlines = "\n".repeat(4 * 1024 * 1024);
     let encoded_newlines = newlines.len() * 2 + 2;
-    assert!(newlines.len() < limit && encoded_newlines > limit);
+    assert!(newlines.len() < frame && encoded_newlines > frame);
     let escaped = transport
         .call(
             RequestContext::unbounded(),
@@ -563,13 +563,12 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
     assert!(
         escaped
             .message
-            .contains(&format!("observed {encoded_newlines} encoded bytes")),
+            .contains(&format!("{encoded_newlines} encoded)")),
         "the refusal must measure the encoded body: {}",
         escaped.message
     );
 
-    let merged = "x".repeat(limit + 1);
-    let encoded = merged.len() + 2;
+    let merged = "x".repeat(frame);
 
     let refused = transport
         .call(
@@ -601,22 +600,15 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
         refused.message
     );
     assert!(
-        refused.message.contains(&format!("{limit} encoded bytes")),
+        refused.message.contains(&format!("{frame} encoded bytes")),
         "the refusal must name the limit and its unit: {}",
         refused.message
     );
     assert!(
         refused
             .message
-            .contains(&format!("observed {encoded} encoded bytes")),
-        "the refusal must name the observed size: {}",
-        refused.message
-    );
-    assert!(
-        refused
-            .message
-            .contains(&format!("({} raw bytes)", merged.len())),
-        "the refusal must name the raw size the caller sent: {}",
+            .contains(&format!("({} raw bytes of combined body", merged.len())),
+        "the refusal must name the body the caller sent: {}",
         refused.message
     );
 
@@ -733,24 +725,92 @@ async fn a_near_cap_conflict_row_answers_a_resolution_inside_one_control_frame()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_largest_accepted_body_crosses_as_a_complete_request_envelope() {
-    // The budget is stated in encoded bytes and spent on the BODY, while the
-    // frame carries the whole envelope. This pins the headroom that makes the
-    // stated bound the enforced one: a body at exactly the limit, inside a
-    // real `conflicts.resolve` request, still encodes into one control frame.
+async fn metadata_beside_a_large_body_is_measured_against_the_same_frame() {
+    // The request carries more than its body. Two metadata fields at the
+    // 16 KiB each `validate_metadata_fields` accepts, filled with quotes,
+    // encode to 32 KiB each — so a body that fits on its own no longer fits
+    // beside them. A body-only budget accepts this request and the client's
+    // framer then refuses it, naming nothing the caller asked about.
     //
-    // MUTATION: raise MAX_MERGED_RESOLUTION_TEXT_BYTES to the frame limit ->
-    // the envelope no longer encodes.
-    let limit = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+    // MUTATION: bound the body alone (encoded or raw) instead of the request
+    // -> this resolve is accepted and the refusal never happens.
+    let (_scratch, transport, handle, workspace_id) = fixture("metadata-headroom").await;
+    let path =
+        open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
+    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let metadata = "\"".repeat(16 * 1024 - 1);
+    // Comfortably inside the frame on its own, past it beside the metadata.
+    let merged = "x".repeat(frame - 40 * 1024);
+
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": merged,
+                    "metadataSummary": metadata,
+                    "metadataCorrelationId": metadata,
+                    "objectId": "metadata-resolution-object",
+                    "writeMomentId": "metadata-resolution-write",
+                    "deleteMomentId": "metadata-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect_err("a request past the frame must be refused, whatever fills it");
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+    assert!(
+        refused
+            .message
+            .starts_with("merged-text-exceeds-wire-limit:"),
+        "unexpected refusal: {}",
+        refused.message
+    );
+    assert!(
+        refused.message.contains(&format!("{frame} encoded bytes")),
+        "the refusal must name the frame it measured against: {}",
+        refused.message
+    );
+
+    let unchanged = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "versionedText.read",
+                Some(handle),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await
+        .expect("read target after refused resolve");
+    assert_eq!(unchanged.result["text"], "recorded current");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_largest_accepted_request_crosses_as_one_control_frame() {
+    // The bound is the frame, so the largest request the daemon accepts must
+    // be one the transport can carry. This pins that: a resolve request built
+    // to sit just inside the budget encodes into one control frame.
+    //
+    // MUTATION: compare against `max_frame_bytes + 1` -> the envelope the
+    // daemon would accept no longer encodes.
+    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
     let envelope = Envelope::Request(request(
         12,
         "conflicts.resolve",
         Some(WorkspaceHandle("ws-0000000000000001".to_owned())),
         json!({ "local": {
             "conflictId": "conflict-000",
-            // Encoded length == raw length + the two quotes.
             "resolution": "apply-merged",
-            "mergedText": "x".repeat(limit - 2),
+            "mergedText": "x".repeat(frame - 1024),
             "objectId": "largest-resolution-object",
             "writeMomentId": "largest-resolution-write",
             "deleteMomentId": "largest-resolution-delete",
@@ -759,8 +819,8 @@ async fn the_largest_accepted_body_crosses_as_a_complete_request_envelope() {
         }}),
     ));
     let encoded = encode_control(&envelope, &WireLimits::default())
-        .expect("a body at the limit still crosses as one control frame");
-    assert!(encoded.len() <= WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize);
+        .expect("the largest accepted request crosses as one control frame");
+    assert!(encoded.len() <= frame);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

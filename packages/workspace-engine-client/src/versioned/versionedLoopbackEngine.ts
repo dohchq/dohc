@@ -51,7 +51,7 @@ const INBAND_LIMIT_BYTES = 48 * 1024;
 // without pulling this fixture's `node:crypto` into a browser bundle.
 export {
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-  MAX_MERGED_RESOLUTION_TEXT_BYTES,
+  RESOLVE_REQUEST_FRAME_BYTES,
   jsonStringEncodedLength,
 } from "./engineTextLimits";
 

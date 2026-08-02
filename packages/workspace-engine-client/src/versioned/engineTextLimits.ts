@@ -17,21 +17,21 @@
 export const MAX_DESKTOP_CAPTURE_TEXT_BYTES = 128 * 1024;
 
 /**
- * `MAX_MERGED_RESOLUTION_TEXT_BYTES`: what `conflicts.resolve` accepts as a
- * hand-combined body, measured in JSON-ENCODED bytes — one control frame
- * (8 MiB) less the envelope headroom the conflict listing keeps.
+ * `RESOLVE_REQUEST_FRAME_BYTES`: the control frame that carries a whole
+ * `conflicts.resolve` request, measured in JSON-ENCODED bytes.
  *
- * Encoded, not raw: escaping doubles every newline and quote, and turns most
- * other control bytes into six bytes, so a raw byte count is not this budget.
- * A surface that wants a bound a person can act on should measure its own
- * editing limit; this one bounds what the apply route accepts.
+ * A combined body is not bounded on its own. The same request carries two
+ * 16 KiB metadata fields, a path, four identifiers and an idempotency key, and
+ * escaping can double any of them, so what a body gets is whatever the rest of
+ * its request leaves. Measure a candidate with `jsonStringEncodedLength`
+ * instead of comparing a raw byte count against this.
  */
-export const MAX_MERGED_RESOLUTION_TEXT_BYTES = 8 * 1024 * 1024 - 64 * 1024;
+export const RESOLVE_REQUEST_FRAME_BYTES = 8 * 1024 * 1024;
 
 /**
  * How many bytes a string occupies once JSON-encoded, quotes included — the
  * daemon's `json_string_encoded_len` (lib.rs), and the only count
- * `MAX_MERGED_RESOLUTION_TEXT_BYTES` is spent in.
+ * `RESOLVE_REQUEST_FRAME_BYTES` is spent in.
  *
  * `JSON.stringify` gives the same answer; this counts instead of building, so
  * measuring a multi-megabyte body does not allocate a second copy of it.
@@ -56,6 +56,14 @@ export function jsonStringEncodedLength(text: string): number {
       length += 1;
     } else if (code < 0x800) {
       length += 2;
+    } else if (code >= 0xd800 && code <= 0xdfff) {
+      // A LONE surrogate. `for...of` yields a matched pair as its combined
+      // code point, so anything left in this range is unpaired, and
+      // `JSON.stringify` emits it as a six-character escape rather than the
+      // three UTF-8 bytes its value suggests. The Rust twin cannot reach this
+      // class — a `&str` holds no unpaired surrogate, and the daemon rejects
+      // the escape as malformed — which is why measuring it belongs here.
+      length += 6;
     } else if (code < 0x10000) {
       length += 3;
     } else {

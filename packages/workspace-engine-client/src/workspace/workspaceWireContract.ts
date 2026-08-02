@@ -381,7 +381,22 @@ function enumValue<T extends string>(
   return value as T;
 }
 
-function decodeSnapshot(value: JsonValue, label: string): ConflictSnapshot {
+/**
+ * Whether THIS response may withhold a conflict body.
+ *
+ * Only `conflicts.resolve` withholds (`settled_conflict_json`, lib.rs), and it
+ * does so to keep its answer inside one control frame. A listing carries every
+ * body it returns, so a null from that surface is a protocol fault, not a
+ * hydration hint — and accepting one there would hand a reader an empty
+ * document that looks like an edit.
+ */
+type ConflictBodies = "carried" | "may-be-withheld";
+
+function decodeSnapshot(
+  value: JsonValue,
+  label: string,
+  bodies: ConflictBodies,
+): ConflictSnapshot {
   const object = objectValue(value, label, [
     "workspaceId",
     "versionId",
@@ -413,7 +428,10 @@ function decodeSnapshot(value: JsonValue, label: string): ConflictSnapshot {
     versionId: stringValue(object, "versionId", label),
     objectId: stringValue(object, "objectId", label),
     path: stringValue(object, "path", label),
-    text: object.text === null ? null : stringValue(object, "text", label),
+    text:
+      object.text === null && bodies === "may-be-withheld"
+        ? null
+        : stringValue(object, "text", label),
     ...(inbandLimitBytes === undefined ? {} : { inbandLimitBytes }),
     contentKind: "text",
     sha256: stringValue(object, "sha256", label),
@@ -434,6 +452,7 @@ function decodeSnapshot(value: JsonValue, label: string): ConflictSnapshot {
 function decodeConflictState(
   value: JsonValue,
   label: string,
+  bodies: ConflictBodies,
 ): ConflictFileState {
   const object = objectValue(value, label, [
     "path",
@@ -452,7 +471,7 @@ function decodeConflictState(
     snapshot:
       object.snapshot === null
         ? null
-        : decodeSnapshot(object.snapshot ?? null, `${label}.snapshot`),
+        : decodeSnapshot(object.snapshot ?? null, `${label}.snapshot`, bodies),
     binarySha256: nullableString(object, "binarySha256", label),
     binaryByteLength: nullableInteger(object, "binaryByteLength", label),
     binaryObjectId: nullableString(object, "binaryObjectId", label),
@@ -473,6 +492,7 @@ function decodeConflictState(
 export function decodeConflictRecord(
   value: JsonValue,
   label = "conflict",
+  bodies: ConflictBodies = "carried",
 ): ConflictRecord {
   const object = objectValue(value, label, [
     "id",
@@ -525,11 +545,16 @@ export function decodeConflictRecord(
       summary: nullableString(metadata, "summary", metadataLabel),
       correlationId: nullableString(metadata, "correlationId", metadataLabel),
     },
-    base: decodeConflictState(object.base ?? null, `${label}.base`),
-    current: decodeConflictState(object.current ?? null, `${label}.current`),
+    base: decodeConflictState(object.base ?? null, `${label}.base`, bodies),
+    current: decodeConflictState(
+      object.current ?? null,
+      `${label}.current`,
+      bodies,
+    ),
     incoming: decodeConflictState(
       object.incoming ?? null,
       `${label}.incoming`,
+      bodies,
     ),
   };
 }
@@ -764,6 +789,7 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
           conflict: decodeConflictRecord(
             local.conflict ?? null,
             `${label}.conflict`,
+            "may-be-withheld",
           ),
           write:
             local.write === null
