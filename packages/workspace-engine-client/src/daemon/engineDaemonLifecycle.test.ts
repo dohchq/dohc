@@ -18,6 +18,16 @@ import {
 // from this so the two can never drift apart.
 const HEALTHY_RESET_MS = 20;
 
+// Burst headroom for the rolling-window tests. `restartAttempts` counts every
+// attempt, including the successful ones, and only the healthy-reset timer
+// clears it — so a low maxRestarts makes those tests depend on a real timer
+// firing between crashes, and a loaded run that delays it ends them on the
+// BURST terminal instead of the window terminal under test. None of them needs
+// more than 6 attempts, so a budget this high can never fire and the window
+// stays the only way they can reach terminal. The burst budget has its own
+// tests above.
+const WINDOW_TEST_MAX_RESTARTS = 10;
+
 class FakeClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
   readonly cancelledRequestIds: number[] = [];
@@ -292,16 +302,15 @@ describe("Rust engine daemon lifecycle", () => {
 
   it("ends terminal when restarts keep recurring across healthy generations", async () => {
     // The crash-every-31s daemon: every generation outlives healthyResetMs, so
-    // the attempt budget resets before it can ever be exhausted and only the
-    // rolling window can reach terminal — the one signal the desktop turns
-    // into a dialog.
+    // the attempt budget never ends the run and only the rolling window can
+    // reach terminal — the one signal the desktop turns into a dialog.
     // MUTATION: drop the window check in restartAfterExit and this test times
     // out waiting for a terminal failure that never arrives.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
-      maxRestarts: 1,
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
       initialBackoffMs: 0,
       healthyResetMs: HEALTHY_RESET_MS,
       restartWindowMs: 120_000,
@@ -326,9 +335,9 @@ describe("Rust engine daemon lifecycle", () => {
         await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
           timeout: 5_000,
         });
-        // Outlive the healthy window by a wide multiple, as the budget-reset
-        // test above does: each replacement must reset the attempt budget, or
-        // maxRestarts: 1 would end this run terminal for the wrong reason.
+        // Outlive the healthy window by a wide multiple: these are the healthy
+        // gaps the issue describes, the ones a budget reset by health cannot
+        // see past.
         await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
       }
       exits[3]?.(1, null);
@@ -358,7 +367,7 @@ describe("Rust engine daemon lifecycle", () => {
     const restartWindowMs = HEALTHY_RESET_MS * 2;
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
-      maxRestarts: 1,
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
       initialBackoffMs: 0,
       healthyResetMs: HEALTHY_RESET_MS,
       restartWindowMs,
@@ -393,14 +402,15 @@ describe("Rust engine daemon lifecycle", () => {
     // MUTATION: move the recordCrash call inside the attempt loop and the
     // flaky first attempt of every crash burns a second slot — terminal
     // arrives at crash 2 with only 2 generations launched, so both counts
-    // below fail. maxRestarts: 1 cannot tell the two apart; this needs a
-    // crash that costs more than one attempt.
+    // below fail. A run that spends one attempt per crash cannot tell the two
+    // accountings apart; this needs a crash that costs more than one attempt.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
     let launchCount = 0;
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
-      maxRestarts: 3,
+      // 6 attempts here, the most of any window test — see the constant.
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
       initialBackoffMs: 0,
       healthyResetMs: HEALTHY_RESET_MS,
       restartWindowMs: 120_000,
@@ -457,7 +467,7 @@ describe("Rust engine daemon lifecycle", () => {
     let wallNow = 0;
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
-      maxRestarts: 1,
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
       initialBackoffMs: 0,
       healthyResetMs: HEALTHY_RESET_MS,
       restartWindowMs,
@@ -505,7 +515,7 @@ describe("Rust engine daemon lifecycle", () => {
     let wallNow = 10 * 60_000;
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
-      maxRestarts: 1,
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
       initialBackoffMs: 0,
       healthyResetMs: HEALTHY_RESET_MS,
       restartWindowMs,
