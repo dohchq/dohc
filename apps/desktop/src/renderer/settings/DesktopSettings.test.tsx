@@ -450,6 +450,37 @@ describe("DesktopSettings", () => {
     ).toBe("success");
   });
 
+  it("blocks the runner self-test when the workspace engine is off", async () => {
+    // AUDIT-OPTOUT: the self-test writes a chat thread, which an opted-out
+    // workspace must never record. The main process refuses it; the button
+    // must not offer it.
+    bridge.getWorkspaceSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: { workspaceEngineAlpha: false },
+      },
+      source: "default" as const,
+    });
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+
+    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
+    const button = await screen.findByTestId("runner-self-test-button");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("runner-self-test-engine-note").textContent).toContain(
+      "The workspace engine is off",
+    );
+    await user.click(button);
+    expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
+  });
+
   it("surfaces a failed runner self-test without enabling dispatch", async () => {
     bridge.runnerSelfTest.mockResolvedValueOnce({
       ok: false,
