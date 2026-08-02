@@ -1899,6 +1899,110 @@ describe("ChatsView live activity refresh", () => {
     );
   });
 
+  // A failed lookup learned nothing. "Unknown" is a state of the whole share
+  // listing, so a response that no longer owns both lanes must not write it:
+  // doing so throws away a newer joined-grant answer and locks every channel.
+  it("does not let a failed share lookup undo a newer joined correction", async () => {
+    const joinedRow = {
+      shareId: "share-joined",
+      channelWireId: "wire-joined",
+      granterEmail: "owner@example.com",
+      access: "read-write" as const,
+      ended: false,
+    };
+    const joinedChannel = channel({
+      id: "channel-joined",
+      name: "joined-one",
+      slug: "joined-one",
+      wireId: "wire-joined",
+    });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel(), joinedChannel],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    let failFullRead!: () => void;
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return Promise.resolve({ granted: [], received: [], joined: [joinedRow] });
+      }
+      if (shareReads === 2) {
+        // The refresh the user's back-navigation owns. It stalls, then fails.
+        return new Promise((_resolve, reject) => {
+          failFullRead = () => reject(new Error("signed out"));
+        });
+      }
+      // The badge pass's lookup, issued later: the sync recorded the revoke.
+      return Promise.resolve({
+        granted: [],
+        received: [],
+        joined: [{ ...joinedRow, ended: true }],
+      });
+    });
+    const user = userEvent.setup();
+    renderView();
+
+    // Back out of a channel: goBack owns a foreground overview refresh, whose
+    // share lookup is the one that will fail.
+    await waitFor(() => expect(screen.getAllByTestId("chats-channel")).toHaveLength(2));
+    await user.click(screen.getAllByTestId("chats-channel")[0]);
+    await user.click(await screen.findByTestId("chats-channel-back"));
+    await waitFor(() => expect(shareReads).toBe(2));
+
+    // A write lands, and the badge pass corrects the joined grant.
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
+        "no longer shared",
+      ),
+    );
+
+    // Now the older lookup fails.
+    await act(async () => {
+      failFullRead();
+      await Promise.resolve();
+    });
+
+    // The correction stands, and nothing locked behind a response that
+    // learned nothing: the owned channel still has its composer.
+    expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
+      "no longer shared",
+    );
+    await user.click(screen.getAllByTestId("chats-channel")[0]);
+    expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
+  // The other half of the same rule: a failed lookup that DOES own both lanes
+  // must still settle the state, or the share controls wait forever. Unknown
+  // fails closed.
+  it("commits unknown when the share lookup fails with nothing newer to keep", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    const user = userEvent.setup();
+    renderView();
+
+    // The mount resolved the share metadata: the owned channel is writable.
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
+
+    // Back out: that refresh owns both lanes, and its lookup fails.
+    bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
+    await user.click(await screen.findByTestId("chats-channel-back"));
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2),
+    );
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect(await screen.findByTestId("chats-readonly-note")).toBeTruthy();
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+  });
+
   // The channel listing syncs joined shared channels BEFORE it reads, and that
   // sync records a revoked or downgraded grant. Those joined rows are local, so
   // they are answered even while the relay is down — and until they land, the

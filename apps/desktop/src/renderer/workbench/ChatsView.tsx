@@ -1079,14 +1079,44 @@ export function ChatsView(props: {
     relayShares: 0,
   });
   const takeCommitTicket = useCallback(() => ++commitTicket.current, []);
-  const claimLane = useCallback((lane: CommitLane, ticket: number): boolean => {
-    if (ticket <= committedLane.current[lane]) return false;
-    committedLane.current[lane] = ticket;
-    return true;
-  }, []);
+  // Claim every lane in `lanes`, or none of them. A response writes exactly
+  // what it claims, so a reader that can only speak for part of what it is
+  // about to write must not claim the rest and then write it anyway.
+  const claimLanes = useCallback(
+    (lanes: readonly CommitLane[], ticket: number): boolean => {
+      if (lanes.some((lane) => ticket <= committedLane.current[lane])) return false;
+      for (const lane of lanes) committedLane.current[lane] = ticket;
+      return true;
+    },
+    [],
+  );
   // Read the committed state from an async callback (see latestComposerState).
   const overviewIsReady = useRef(false);
   overviewIsReady.current = overview.status === "ready";
+  // The one place a full share listing lands, whichever reader produced it.
+  // Success commits per lane: each takes the newest answer it has.
+  //
+  // A FAILED lookup says nothing about either lane, and "unknown" is a state
+  // of the whole listing — there is no way to store it for one lane alone. So
+  // it may commit only when it owns BOTH lanes. Otherwise a response that
+  // learned nothing would discard a newer joined-grant answer and lock every
+  // channel through channelIsLocked until some later refresh succeeded.
+  const commitShareListing = useCallback(
+    (ticket: number, value: ListChatChannelSharesResult | null) => {
+      if (value === null) {
+        if (!claimLanes(["joinedShares", "relayShares"], ticket)) return;
+        setChannelShares(null);
+        setSharesWorkspaceId(workspaceId);
+        return;
+      }
+      const joined = claimLanes(["joinedShares"], ticket);
+      const relay = claimLanes(["relayShares"], ticket);
+      if (!joined && !relay) return;
+      setChannelShares((current) => mergeShareLanes(current, value, { joined, relay }));
+      setSharesWorkspaceId(workspaceId);
+    },
+    [claimLanes, workspaceId],
+  );
   const refreshOverview = useCallback(
     async (options?: { background?: boolean }): Promise<void> => {
       const token = options?.background ? liveToken.current : ++liveToken.current;
@@ -1123,18 +1153,8 @@ export function ChatsView(props: {
         const sharesResolvedForWorkspace = committedLane.current.relayShares > 0;
         const keepCached =
           options?.background && !shares.answered && sharesResolvedForWorkspace;
-        if (!keepCached) {
-          const value = shares.value;
-          const joined = claimLane("joinedShares", ticket);
-          const relay = claimLane("relayShares", ticket);
-          if (joined || relay) {
-            setChannelShares((current) =>
-              value === null ? null : mergeShareLanes(current, value, { joined, relay }),
-            );
-            setSharesWorkspaceId(workspaceId);
-          }
-        }
-        if (claimLane("overview", ticket)) {
+        if (!keepCached) commitShareListing(ticket, shares.value);
+        if (claimLanes(["overview"], ticket)) {
           setOverview({
             status: "ready",
             channels: result.channels,
@@ -1147,14 +1167,14 @@ export function ChatsView(props: {
         // with an error card. Having nothing to commit, it must not claim the
         // lane either, or it would discard an answer still in flight.
         if (options?.background && overviewIsReady.current) return;
-        if (!claimLane("overview", ticket)) return;
+        if (!claimLanes(["overview"], ticket)) return;
         setOverview({
           status: "unavailable",
           message: ipcErrorMessage(error, "Could not load Chats."),
         });
       }
     },
-    [claimLane, takeCommitTicket, workspaceId],
+    [claimLanes, commitShareListing, takeCommitTicket, workspaceId],
   );
 
   // Badge-only refresh, for the invalidation nobody asked for. It differs from
@@ -1207,7 +1227,7 @@ export function ChatsView(props: {
           if (!isCurrent()) return;
           // Only over a list that is already resolved: this reader has no
           // share metadata, so it must not be the one to settle the surface.
-          if (overviewIsReady.current && claimLane("overview", ticket)) {
+          if (overviewIsReady.current && claimLanes(["overview"], ticket)) {
             setOverview({
               status: "ready",
               channels: result.channels,
@@ -1228,7 +1248,7 @@ export function ChatsView(props: {
             // reader's to answer — "the relay did not answer" reaches this
             // renderer as an empty listing, which is not an answer — and
             // leaving their lane alone lets a full read still in flight land.
-            if (isCurrent() && claimLane("joinedShares", sharesTicket)) {
+            if (isCurrent() && claimLanes(["joinedShares"], sharesTicket)) {
               setChannelShares((current) =>
                 mergeShareLanes(current, refreshed, { joined: true, relay: false }),
               );
@@ -1241,7 +1261,7 @@ export function ChatsView(props: {
     } finally {
       if (badgeRead.current === mine) badgeRead.current = null;
     }
-  }, [claimLane, takeCommitTicket, workspaceId]);
+  }, [claimLanes, takeCommitTicket, workspaceId]);
 
   const refreshBookmarks = useCallback(async () => {
     const workspaceGeneration = bookmarkWorkspaceGeneration.current;
@@ -2660,15 +2680,8 @@ export function ChatsView(props: {
       .listChatChannelShares({ workspaceId })
       .catch(() => null);
     if (token !== liveToken.current) return;
-    // This reader answers both questions, so it claims both lanes.
-    const joined = claimLane("joinedShares", ticket);
-    const relay = claimLane("relayShares", ticket);
-    if (!joined && !relay) return;
-    setChannelShares((current) =>
-      shares === null ? null : mergeShareLanes(current, shares, { joined, relay }),
-    );
-    setSharesWorkspaceId(workspaceId);
-  }, [claimLane, takeCommitTicket, workspaceId]);
+    commitShareListing(ticket, shares);
+  }, [commitShareListing, takeCommitTicket]);
 
   const submitShare = useCallback(async () => {
     if (readOnly) return;
