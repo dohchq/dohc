@@ -10,8 +10,9 @@ const workflow = await readFile(
 const triggerBlock = workflow.slice(0, workflow.indexOf("\nconcurrency:"));
 
 const passVerdict =
-  "- 2026-07-27T00:00:00.000Z | run-rust-checks | linux/x64 | PASS | " +
-  "fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
+  "- 2026-07-27T00:00:00.000Z | run-rust-checks | linux/x64 " +
+  "(rust cfg x86_64/linux/gnu) | PASS | " +
+  "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
   "build --workspace=PASS test --workspace=PASS test collab crash tier=PASS " +
   "cargo-deny=PASS cargo-audit=PASS";
 
@@ -30,6 +31,13 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
         passVerdict.replace("cargo-deny=PASS", "cargo-deny=SKIP"),
       ),
     /cargo-deny/,
+  );
+  // Drop this row and the platform in the verdict line is Node's unverified
+  // claim again — a cross-compiled run recorded as native evidence.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(passVerdict.replace("native target=PASS ", "")),
+    /native target/,
   );
   // The crash tier is compiled out of the plain workspace test run, so an
   // evidence line missing this row means the exactly-once tests never ran.

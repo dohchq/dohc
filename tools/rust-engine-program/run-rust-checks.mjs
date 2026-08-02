@@ -9,11 +9,11 @@
 // Requirements: Node >= 22, zero npm dependencies. Windows-first — works from
 // PowerShell and Git Bash (spawns through the platform shell).
 //
-// Steps: fixture drift, cargo fmt --check, cargo clippy -D warnings, cargo
-// build --workspace, cargo test --workspace, the collab crash tier (which only
-// compiles under `--features fault-injection`, so the plain workspace run
-// never sees it), then cargo-deny / cargo-audit IF installed
-// (skip-with-warning when absent, never fail on a missing tool).
+// Steps: native target (see below), fixture drift, cargo fmt --check, cargo
+// clippy -D warnings, cargo build --workspace, cargo test --workspace, the
+// collab crash tier (which only compiles under `--features fault-injection`,
+// so the plain workspace run never sees it), then cargo-deny / cargo-audit IF
+// installed (skip-with-warning when absent, never fail on a missing tool).
 //
 // A REQUIRED step that SKIPs fails the verdict: a gate that silently drops a
 // row is how the fault-injection tests went unrun for a month. Optional tools
@@ -28,6 +28,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { arch, platform, release } from "node:os";
+import { verifyNativeTarget } from "./native-target.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -73,6 +74,14 @@ const required = [
   },
 ];
 
+// Cost of the native-target probe: a check-build of dohc-engine-protocol and
+// its dependencies. It is not free and not fully shared — the probe compiles
+// the crate's default features while the clippy step below passes
+// `--all-features`, so tokio and its dependencies are checked once for each
+// feature set. Measured, the guard's own cost is one extra tokio check-build,
+// seconds on a warm target dir. It runs first and unconditionally: a guard
+// behind a flag no call site passes is not a guard.
+
 // Optional supply-chain checks: run only when the tool is installed.
 const optional = [
   { name: "cargo-deny", probe: "cargo deny --version", cmd: "cargo deny check" },
@@ -86,7 +95,25 @@ console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}\n`);
 
-for (const step of required) {
+console.log(`\n--- native target ---`);
+const native = verifyNativeTarget();
+if (native.ok) {
+  console.log(`  rust cfg ${native.cfg} — matches the host.`);
+} else {
+  // cargo's full output first: its primary error sits above the tail.
+  if (native.output) console.error(native.output);
+  console.error(`  native target — FAILED: ${native.reason}`);
+  failed = true;
+}
+results.push({
+  name: "native target",
+  status: native.ok ? "PASS" : "FAIL",
+  reason: native.ok ? undefined : native.reason,
+});
+
+// An unverified host makes every later result unattributable, so nothing else
+// runs — and the expensive steps are the ones worth skipping.
+for (const step of native.ok ? required : []) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
   if (r.code === step.skipCode) {
@@ -111,7 +138,7 @@ for (const step of required) {
   if (r.error) console.error(`  (spawn error: ${r.error.message})`);
 }
 
-for (const step of optional) {
+for (const step of native.ok ? optional : []) {
   console.log(`\n--- ${step.name} ---`);
   if (!toolAvailable(step.probe)) {
     console.warn(
@@ -141,7 +168,7 @@ for (const r of results) {
 const verdict = failed ? "FAIL" : "PASS";
 console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
 console.log(
-  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} | ${verdict} | ${summary}`,
+  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}) | ${verdict} | ${summary}`,
 );
 
 process.exit(failed ? 1 : 0);

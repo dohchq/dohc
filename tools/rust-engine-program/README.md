@@ -10,7 +10,8 @@ local evidence pipeline.
 
 | Script | What it does |
 | --- | --- |
-| `run-rust-checks.mjs` | Rust policy gate: fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
+| `run-rust-checks.mjs` | Rust policy gate: native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
+| `native-target.mjs` | The gate's first step, importable so it can be tested: asks rustc through cargo what it compiled for. See [Native target](#native-target). |
 | `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 
 Banked soak artifacts live in `soak-evidence/`; see
@@ -40,8 +41,12 @@ node tools/rust-engine-program/run-rust-checks.mjs
 It prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
 
 ```
-- 2026-07-28T10:11:10.183Z | run-rust-checks | win32/x64 | PASS | fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
+- 2026-07-28T10:11:10.183Z | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc) | PASS | native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
 ```
+
+`win32/x64` is Node's view of the host. The `rust cfg` field is what rustc
+reported through cargo, and the run stops before any other step unless the two
+agree — see [Native target](#native-target).
 
 Copy that line into `EXECUTION_LOG.md` under the relevant shard entry.
 
@@ -86,20 +91,63 @@ CI is dispatch-only and nothing else will catch it.
    distribution (DECISIONS.md Gate 0 item 2). Until it exists, Gate 7's "every
    supported platform" claim is scoped to `{Windows, Linux-WSL}`.
 
-**There is no architecture guard on this gate — and the retired runner's one did not
-work either.** `run-native-suite.mjs` accepted `--expect-arch=<x64|arm64>` and compared
-`os.arch()`, the architecture *Node* was built for. It never checked what the Rust
-toolchain targeted; in fact it ran no cargo at all, only the two `pnpm` steps above. So
-the capability that left with that runner was a check that could not do its job.
+## Native target
 
-Rebuilding it properly is tracked separately. Ten distinct channels can set cargo's
-effective target, and neither parsing `.cargo/config.toml` nor watching for
-`target/<triple>/` directories covers all of them — a `--target` injected through
-`RUSTFLAGS` reaches rustc while cargo still writes to `target/debug`, so it is invisible
-to both.
+The evidence line records a platform, so the gate verifies it. Its first step
+runs
 
-Until that lands, **a run's platform is whatever the operator asserts when pasting the
-evidence line.** The gate prints `platform()/arch()` from Node and does not verify it.
+```sh
+cargo rustc -p dohc-engine-protocol --lib --profile check -- --print cfg
+```
+
+and compares the reported `target_arch`/`target_os` against the host Node
+reports. On a mismatch the run stops before every other step and the verdict is
+`FAIL`, so a cross-compiled run cannot be recorded as native evidence.
+
+The question goes to rustc **through cargo**, which is what makes it complete.
+Ten channels can set cargo's effective target — `CARGO_BUILD_TARGET`, seven
+spellings of `[build].target` merged across cargo's config hierarchy up to
+`CARGO_HOME`, and a `--target` injected through `RUSTFLAGS`. Asking the compiler
+what it compiled for reflects all of them. Parsing `.cargo/config.toml` cannot
+(no stable `cargo config get`), and watching for a `target/<triple>/` directory
+cannot either (the `RUSTFLAGS` route never creates one).
+
+Cargo can also be configured to build for several targets at once. The gate
+counts the `target_arch` lines rather than the distinct values, because two
+triples that share an arch and an os (`…-linux-gnu` and `…-linux-musl`) collapse
+to one value each and would read as a single native target. Anything other than
+exactly one target fails. On the pinned cargo 1.96.1 the probe never gets that
+far: cargo refuses `cargo rustc -- <args>` under multiple targets and exits 101,
+which fails the gate anyway. The count is therefore latent on this toolchain —
+defense for a cargo that answers rather than refusing, not a reachable hole
+today.
+
+The check costs a check-build of one crate and its dependencies. Most of that
+work is shared with later steps, but not all of it: the probe compiles
+`dohc-engine-protocol` with its default features while `clippy` passes
+`--all-features`, so tokio and its dependencies are checked once per feature
+set. Measured, the guard's own cost is one extra tokio check-build — seconds on
+a warm target dir.
+
+What it does **not** catch:
+
+- **A fully emulated host**, Node and cargo alike. Both then report the emulated
+  architecture and agree. Rust exposes no host-hardware fact to test that
+  against.
+- **An execution redirect.** The probe proves the target the code was *compiled*
+  for. A `target.<triple>.runner` in cargo's config makes `cargo test` hand the
+  test binary to another command — a wrapper, an emulator, a remote shell — so a
+  natively compiled suite can still execute somewhere else.
+
+Both stay an operator responsibility.
+
+`native-target.mjs` holds the guard, so it can be imported and tested;
+`scripts/native-target-guard.test.mjs` covers the multi-target count, a
+cross-compile, an unmappable host, and a failed probe.
+
+The retired `run-native-suite.mjs` guard was not this. It accepted
+`--expect-arch=<x64|arm64>` and compared `os.arch()`, the architecture *Node*
+was built for, on a run that executed no cargo at all.
 
 ## Rust policy enforced here
 
