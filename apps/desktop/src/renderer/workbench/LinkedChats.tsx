@@ -52,6 +52,9 @@ export function LinkedChatsPanel(props: {
   // re-opens the stale thread.
   onInitialThreadConsumed?: () => void;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
+  // Reports a landed read so the Chats navigator can refetch its badges. The
+  // file-linked threads it lists are read HERE, not in the Chats view.
+  onThreadRead?: () => void;
   onError: (message: string) => void;
 }) {
   const { workspaceId, filePath } = props;
@@ -126,6 +129,25 @@ export function LinkedChatsPanel(props: {
         setMessages(result.messages);
         setReactions(reactionResult.reactions);
         setViewerAuthorId(reactionResult.viewerAuthorId);
+        // Everything on screen is read. A read-only shared view never moves a
+        // read cursor (the Chats view's locked-channel rule). Reporting waits
+        // for the write to LAND: the navigator refetches on that signal, and
+        // refetching earlier would read the same count back.
+        if (!readOnly) {
+          void bridge()
+            .markChatThreadRead({
+              workspaceId,
+              threadId: thread.id,
+              upToSequence: result.messages.length,
+            })
+            .then(
+              () => props.onThreadRead?.(),
+              () => {
+                // Best-effort, like the Chats view: the badge stays until the
+                // next refresh if the cursor write did not land.
+              },
+            );
+        }
         requestAnimationFrame(() => {
           // Rendering is deferred one frame so the freshly loaded messages
           // exist in the DOM. Re-check the same request token inside that
@@ -151,7 +173,7 @@ export function LinkedChatsPanel(props: {
         if (token === liveToken.current) setMessagesLoading(false);
       }
     },
-    [props, workspaceId],
+    [props, readOnly, workspaceId],
   );
 
   // A search-result chat open is consumed ONCE by object identity: the Shell

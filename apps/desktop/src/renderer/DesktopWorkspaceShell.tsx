@@ -1269,8 +1269,12 @@ export function DesktopWorkspaceShell(props: {
   const wbRef = useRef(wb);
   // The tab paths the stored state restored — the only ones a file listing is
   // allowed to close. Empty until the load applies, and empty forever when the
-  // user acted first and the stored tabs were discarded.
-  const restoredTabPaths = useRef<ReadonlySet<string>>(new Set<string>());
+  // user acted first and the stored tabs were discarded. STATE, not a ref: the
+  // reconciliation below reads it, and the listing can win the race against
+  // this load, so it has to re-run when the restore lands.
+  const [restoredTabPaths, setRestoredTabPaths] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  );
 
   // THE one mutation seam for workbench state: every user-driven transition
   // routes through here so the touched flag is set before React even queues
@@ -1297,7 +1301,7 @@ export function DesktopWorkspaceShell(props: {
           // must flush the restored state, never the stale default.
           wbRef.current = parsed;
           setWb(parsed);
-          restoredTabPaths.current = new Set(parsed.tabs.map((tab) => tab.path));
+          setRestoredTabPaths(new Set(parsed.tabs.map((tab) => tab.path)));
         }
         uiStateLoaded.current = true;
         if (userTouchedWb.current) {
@@ -1363,15 +1367,19 @@ export function DesktopWorkspaceShell(props: {
   // remote delete or judge the tabs against a pre-pull snapshot. Only the
   // RESTORED paths are eligible (see pruneMissingRestoredTabs), so a listing
   // that raced a create can never close a tab opened this session.
+  //
+  // Both inputs are dependencies because either can arrive first: a listing
+  // that beats the ui-state load finds nothing restored yet, and the restore
+  // is what has to re-run the check.
   useEffect(() => {
-    if (!filesLoaded || restoredTabPaths.current.size === 0) return;
+    if (!filesLoaded || restoredTabPaths.size === 0) return;
     const present = new Set(files.map((file) => file.path));
     setWb((state) =>
-      pruneMissingRestoredTabs(state, restoredTabPaths.current, (path) =>
+      pruneMissingRestoredTabs(state, restoredTabPaths, (path) =>
         present.has(path),
       ),
     );
-  }, [files, filesLoaded]);
+  }, [files, filesLoaded, restoredTabPaths]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
     setShellError(error instanceof Error ? error.message : fallback);
@@ -3070,6 +3078,7 @@ export function DesktopWorkspaceShell(props: {
                     initialFocusMessageId={searchChatTarget?.focusMessageId}
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
+                    onThreadRead={onChatsThreadRead}
                     onError={(message) => setShellError(message)}
                   />
                 </Suspense>

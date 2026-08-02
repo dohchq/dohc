@@ -815,6 +815,39 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
+  // Either load can win. When the listing lands FIRST there is nothing
+  // restored to judge yet, so the restore itself has to re-run the check —
+  // otherwise the missing tab survives and gets written back out.
+  it("prunes a restored tab when the file listing arrives before the stored state", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+
+    // The listing lands first: a.md and b.md, no ghost.md.
+    await screen.findByText("a.md");
+
+    await act(async () => {
+      stored.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "ghost.md"],
+        activeTab: "b.md",
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-ghost.md")).toBeNull();
+    });
+    await waitFor(() => {
+      const states = bridge.setWorkspaceUiState.mock.calls.map(
+        ([payload]) => payload.state,
+      );
+      expect(states.some((state) => state.tabs.includes("ghost.md"))).toBe(false);
+      expect(states.some((state) => state.tabs.join() === "b.md")).toBe(true);
+    });
+  });
+
   // The scoping earns its keep here: only stored tabs are eligible, so a
   // listing that raced a create cannot close what the user just opened.
   it("never prunes a tab opened this session, whatever a later listing says", async () => {

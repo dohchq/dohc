@@ -26,6 +26,7 @@ const bridgeMock = {
   sendChatMessage: vi.fn(),
   listChatReactions: vi.fn(),
   setChatReaction: vi.fn(),
+  markChatThreadRead: vi.fn(),
 };
 
 // jsdom doesn't implement scrollIntoView; the thread view nudges the latest
@@ -39,6 +40,7 @@ beforeEach(() => {
     threads: [searchThread],
   });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+  bridgeMock.markChatThreadRead.mockResolvedValue(undefined);
   bridgeMock.listChatReactions.mockResolvedValue({
     reactions: [],
     viewerAuthorId: "you@example.com",
@@ -383,5 +385,101 @@ describe("LinkedChatsPanel shared-workspace read-only boundary", () => {
     expect(screen.queryByTestId("linked-chat-new")).toBeNull();
     expect(screen.getByTestId("linked-chat-readonly-note")).toBeTruthy();
     expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
+  });
+});
+
+// #337 item 3, second path: the Chats navigator lists FILE-linked threads
+// beside its channels, but opening one routes here — not through the Chats
+// view. Without a read here the durable count never moved, so the navigator's
+// badge was not merely stale, it was correct about an unread thread the user
+// had just read.
+describe("LinkedChatsPanel read cursor", () => {
+  function panel(extra: Partial<Parameters<typeof LinkedChatsPanel>[0]> = {}) {
+    return (
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={searchThread}
+        onError={() => undefined}
+        {...extra}
+      />
+    );
+  }
+
+  it("marks the opened thread read up to the last message it showed", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        {
+          id: "message-1",
+          threadId: searchThread.id,
+          authorKind: "human",
+          authorDisplayName: "Ice",
+          body: "First.",
+          createdAtMs: 1_700_000_000_000,
+        },
+        {
+          id: "message-2",
+          threadId: searchThread.id,
+          authorKind: "human",
+          authorDisplayName: "Ice",
+          body: "Second.",
+          createdAtMs: 1_700_000_000_001,
+        },
+      ],
+    });
+    const onThreadRead = vi.fn();
+    render(panel({ onThreadRead }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    await waitFor(() =>
+      expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
+        workspaceId: "workspace-1",
+        threadId: "thread-1",
+        upToSequence: 2,
+      }),
+    );
+    await waitFor(() => expect(onThreadRead).toHaveBeenCalledTimes(1));
+  });
+
+  it("reports the read only after the cursor write lands", async () => {
+    let landed!: () => void;
+    bridgeMock.markChatThreadRead.mockReturnValue(
+      new Promise<void>((resolve) => {
+        landed = resolve;
+      }),
+    );
+    const onThreadRead = vi.fn();
+    render(panel({ onThreadRead }));
+
+    await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalled());
+    // A refetch now would read the same count back.
+    expect(onThreadRead).not.toHaveBeenCalled();
+
+    await act(async () => {
+      landed();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(onThreadRead).toHaveBeenCalledTimes(1));
+  });
+
+  it("a failed cursor write reports nothing and does not surface an error", async () => {
+    bridgeMock.markChatThreadRead.mockRejectedValue(new Error("offline"));
+    const onThreadRead = vi.fn();
+    const onError = vi.fn();
+    render(panel({ onThreadRead, onError }));
+
+    await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(onThreadRead).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("never moves a read cursor in a read-only shared view", async () => {
+    const onThreadRead = vi.fn();
+    render(panel({ readOnly: true, onThreadRead }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+    expect(onThreadRead).not.toHaveBeenCalled();
   });
 });
