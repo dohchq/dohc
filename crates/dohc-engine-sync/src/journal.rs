@@ -36,26 +36,40 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
     false
 }
 
-/// Whether `workspace_id` has a sync identity, read inside the caller's
-/// transaction.
+/// Whether `workspace_id` actually replicates with a relay, read inside the
+/// caller's transaction.
 ///
-/// Y.Doc base origination consults this BEFORE it claims a base:
-/// [`journal_local_op_in_tx`] refuses without an identity, and a refusal raised
-/// inside the append transaction would roll the user's edit back with it. A
-/// workspace with no identity has sync off, so nothing there originates.
-pub fn workspace_has_sync_identity_in_tx(
+/// A `sync_identity` row does NOT answer this. `local_replication_coordinate`
+/// (`dohc-engine-domain/src/chats.rs`) mints one with `INSERT OR IGNORE` from
+/// `randomblob(16)` on every ordinary chat write, including the
+/// `ensure_general_channel` bootstrap, so a workspace that has never seen a
+/// relay still has an identity. Gating anything cloud-shaped on its existence
+/// promotes private local documents.
+///
+/// A durable relay position does answer it. `sync_relay_cursors` advances only
+/// when a pull cursor commits and `sync_relay_push_state` only when a push
+/// succeeds; both run behind `relay-not-configured`, which the desktop
+/// satisfies only for a workspace the user explicitly enabled cloud sync on
+/// (`RegistryEntry.remote` plus matching credentials). `adopt_join_identity`
+/// below already treats these two tables as this workspace's replication
+/// position; this is the same fact read the other way round.
+///
+/// The identity is checked as well, because Y.Doc base origination consults
+/// this BEFORE it claims a base: [`journal_local_op_in_tx`] refuses without an
+/// identity, and a refusal raised inside the append transaction would roll the
+/// user's edit back with it.
+pub fn workspace_replicates_with_relay_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
 ) -> Result<bool, SyncError> {
-    let found: Option<i64> = tx
-        .query_row(
-            "SELECT 1 FROM sync_identity WHERE workspace_id = ?1",
-            [workspace_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    Ok(found.is_some())
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id = ?1) \
+           AND (EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id = ?1) \
+             OR EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id = ?1))",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// Transaction-composable local journal append for callers that must commit

@@ -116,10 +116,10 @@ fn marker_state(db: &Path, key: &DocKey) -> (Regime, bool) {
     (marker.regime, marker.base_claimed)
 }
 
-/// Sync init: the workspace gets an origin identity. Its presence is what
-/// makes a lineage eligible to originate — a workspace without one is private
-/// and replicates nothing.
-fn enable_sync(db: &Path, workspace_id: &str) {
+/// The workspace has an origin identity. This ALONE is not sync: ordinary
+/// local chat writes mint one (`local_replication_coordinate`), so
+/// [`chat_minted_identity`] is the shape a purely private workspace reaches.
+fn seed_identity(db: &Path, workspace_id: &str) {
     let mut store = EngineStore::open(db, 9_103).expect("open store");
     store
         .write_with(&NoFaults, |tx| {
@@ -127,6 +127,31 @@ fn enable_sync(db: &Path, workspace_id: &str) {
                 "INSERT OR IGNORE INTO sync_identity \
                  (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
                  VALUES (?1, 'origin-local', 'epoch-local', 'stream-local', 1)",
+                rusqlite::params![workspace_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed identity");
+}
+
+/// What a chat-only workspace looks like: an identity and nothing else. No
+/// relay has ever been contacted for it.
+fn chat_minted_identity(db: &Path, workspace_id: &str) {
+    seed_identity(db, workspace_id);
+}
+
+/// Sync is genuinely on: the workspace has an identity AND a durable relay
+/// position, which only a committed pull cursor or a successful push writes.
+/// That pair is what makes a lineage eligible to originate.
+fn enable_sync(db: &Path, workspace_id: &str) {
+    seed_identity(db, workspace_id);
+    let mut store = EngineStore::open(db, 9_106).expect("open store");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO sync_relay_push_state \
+                 (workspace_id, origin_id, pushed_seq) VALUES (?1, 'origin-local', 0)",
                 rusqlite::params![workspace_id],
             )
             .map_err(StorageError::persist_public)?;
@@ -300,23 +325,17 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
     );
 }
 
-/// A workspace with no sync identity is private: it originates nothing, and its
-/// lineage stays prunable local-only however many times it is edited.
-///
-/// Mutation check: drop the sync-identity gate in `ydoc_originate_base_in_tx`
-/// and the claim still succeeds while `journal_local_op_in_tx` refuses, which
-/// rolls back the user's edit — this test fails on the op count and the marker.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unsynced_workspace_never_originates() {
-    const WS: &str = "ws-originate-private";
-    const PATH: &str = "notes/private.md";
+/// Edit a lineage twice on a workspace prepared by `prepare`, then assert it
+/// stayed private: no replication op, and a prunable local-only marker.
+async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &str)) {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
+    prepare(&db, ws);
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
-    let object_id = capture_seed(&handle, WS, PATH, 100).await;
-    let key = DocKey::new(WS, "main", &object_id).expect("key");
+    let object_id = capture_seed(&handle, ws, path, 100).await;
+    let key = DocKey::new(ws, "main", &object_id).expect("key");
 
     let doc = Ydoc::wire();
     for (index, (text, now)) in [("alpha", 200), (" beta", 300)].into_iter().enumerate() {
@@ -324,7 +343,7 @@ async fn an_unsynced_workspace_never_originates() {
         handle
             .ydoc_record_update(
                 key.clone(),
-                PATH.to_owned(),
+                path.to_owned(),
                 ContentKind::Plaintext,
                 Regime::LocalOnly,
                 update,
@@ -349,6 +368,37 @@ async fn an_unsynced_workspace_never_originates() {
         (Regime::LocalOnly, false),
         "and its lineage stays prunable local-only"
     );
+}
+
+/// A workspace that never contacted a relay is private: it originates nothing,
+/// and its lineage stays prunable local-only however many times it is edited.
+///
+/// Mutation check: drop the relay-replication gate in
+/// `ydoc_originate_base_in_tx` and the claim still succeeds while
+/// `journal_local_op_in_tx` refuses, which rolls back the user's edit — this
+/// test fails on the op count and the marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsynced_workspace_never_originates() {
+    two_edits_originate_nothing("ws-originate-private", "notes/private.md", |_, _| {}).await;
+}
+
+/// A chat-minted `sync_identity` is NOT sync. `local_replication_coordinate`
+/// creates that row on every ordinary local chat write — creating a channel is
+/// enough — so identity-row existence would promote the private documents of a
+/// user who has only ever chatted locally. Promotion is not reversible: the
+/// lineage stops pruning on close and starts filling `replication_log`.
+///
+/// Mutation check: gate origination on `sync_identity` alone (the shape this
+/// suite shipped with) and this test fails on both assertions while every
+/// other scenario stays green.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chat_minted_identity_is_not_sync_and_never_originates() {
+    two_edits_originate_nothing(
+        "ws-originate-chat-only",
+        "notes/chat-only.md",
+        chat_minted_identity,
+    )
+    .await;
 }
 
 /// PROMOTION. A local-only lineage that already holds durable update rows — the

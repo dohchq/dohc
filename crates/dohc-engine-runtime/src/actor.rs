@@ -9072,13 +9072,16 @@ fn ydoc_originate_base_in_tx(
     if marker.base_claimed {
         return Ok(None);
     }
-    // Sync is off for this workspace, so nothing here replicates: the lineage
-    // stays local-only, keeps markdown as its artifact, and prunes on close.
+    // This workspace does not replicate with a relay, so nothing here has a
+    // peer: the lineage stays local-only, keeps markdown as its artifact, and
+    // prunes on close. A private document must never be promoted to a shared
+    // lineage — promotion is irreversible in the log it starts writing.
+    //
     // Checked BEFORE the claim because `journal_local_op_in_tx` refuses
     // without an identity, and that refusal would roll back the user's edit.
-    if !dohc_engine_sync::workspace_has_sync_identity_in_tx(tx, &key.workspace_id).map_err(
+    if !dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, &key.workspace_id).map_err(
         |error| dohc_engine_collab::CollabError::Corrupt {
-            reason: format!("sync identity probe failed: {error}"),
+            reason: format!("relay replication probe failed: {error}"),
         },
     )? {
         return Ok(None);
