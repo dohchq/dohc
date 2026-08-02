@@ -422,6 +422,10 @@ it("keeps the close loud when a released lineage never settled the edits", async
 
   // Typed AFTER the last settle: this text is in no moment.
   typeIntoBody(editor, "Typed again, never settled.");
+  // And the outside writer, so the drift proof PASSES. Without it that proof
+  // alone makes this close loud and the settled-coverage check below is never
+  // the reason — the test would hold with the counter deleted.
+  await writeFile(join(root, PATH), "# Solo\n\nEdited in another app.\n", "utf8");
   settleRefusal = wireRefusal("conflict-stale-target");
   // The release is left to SUCCEED — the replicated close.
   await expect(session.close()).rejects.toThrow(
