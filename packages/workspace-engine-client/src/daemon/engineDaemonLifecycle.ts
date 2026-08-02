@@ -45,15 +45,23 @@ const DEFAULT_PING_INTERVAL_MS = 30_000;
 // arms a client-side timer for any request that has one, and that timer turns
 // the very silence this looks for into a rejection, which reads as life.
 //
-// The 30s is not the whole wait. A reply — a pong or the DEADLINE_EXCEEDED
-// refusal that also proves life — is queued on the daemon's single output
-// channel, and `write_output` writes one whole blob egress (BlobStart, every
-// chunk, Response) before it reads the next item. So a reply can sit behind
-// blob bytes. What bounds that wait is the egress budget, not this constant:
-// `BLOB_EGRESS_BYTE_BUDGET` is a 64 MiB byte semaphore held until the bytes
-// reach stdout, so at most 64 MiB can ever be queued ahead of a reply. Burning
-// the remaining 15s would need stdout to drain slower than 4.3 MB/s, which is
-// a stalled reader — itself the wedge this detector exists to catch.
+// The 30s does NOT bound when the reply arrives, and no constant here could.
+// A reply is queued on the daemon's single output channel, and `write_output`
+// writes one whole item before it reads the next. The supervisor's deadline
+// covers `run_job` only; the wait on that channel is untimed. The queue holds
+// `OUTPUT_QUEUE_CAPACITY` = 64 ITEMS, counted without regard to size, and a
+// control frame may reach `max_frame_bytes` = 8 MiB — so up to 512 MiB can sit
+// ahead of a reply. `BlobEgressBudget` does not bound this: it reserves blob
+// bytes only. Most responses are far smaller (`SINGLE_ROW_HARD_CAP_BYTES` is
+// 700 KiB, page budgets 256 KiB), but `ydoc.open` and `ydoc.resync` carry a
+// base64 state sized to fill a frame, so 64 of those reach the ceiling.
+//
+// That is why the expiry alone cannot be the test, and why raising it would
+// not help: no timeout both survives 512 MiB of egress and still catches a
+// wedge. `sendPing` reads inbound TRAFFIC instead. A probe stuck behind bulk
+// output arrives with that output, and bytes for anybody prove the daemon is
+// turning; a wedged daemon sends nothing to anyone. The expiry then measures
+// what it can honestly measure — total silence.
 const DEFAULT_PING_EXPIRY_MS = 45_000;
 // Three silent probes in a row. They are one interval apart and each waits out
 // its own expiry, so a wedge verdict needs at least 2 intervals + 3 expiries —
@@ -96,6 +104,9 @@ export interface EngineDaemonClient {
   // is a replacement, which they must. A client that cannot tell the two apart
   // falls back to `close`.
   closeUnresponsive?(): void;
+  // Frames received from the daemon, counting up. The wedge detector reads it
+  // to tell a queued probe from a silent daemon.
+  inboundActivity?(): number;
   waitForExit?(): Promise<void>;
 }
 
@@ -812,9 +823,18 @@ export class EngineDaemonLifecycle {
   // reads as life, and the detector would never fire against the real client.
   private async sendPing(client: EngineDaemonClient): Promise<boolean> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    // Traffic is life. The daemon serializes ONE output queue, so a probe waits
+    // behind whatever is already queued and cannot overtake it — its own reply
+    // is therefore a measure of queue depth, not of health. Frames arriving for
+    // anybody prove the daemon is still turning, so only a client that heard
+    // NOTHING for the whole expiry has met silence.
+    const before = client.inboundActivity?.();
     const silence = new Promise<boolean>((resolve) => {
       timeout = setTimeout(
-        () => resolve(false),
+        () => {
+          const after = client.inboundActivity?.();
+          resolve(before !== undefined && after !== undefined && after > before);
+        },
         this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS,
       );
       timeout.unref();

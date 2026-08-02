@@ -203,6 +203,9 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
   // Swallowing this one would make a wedge kill report a deliberate shutdown,
   // and every retry-enabled caller would stay failed across the restart.
   readonly closeUnresponsive?: EngineDaemonClient["closeUnresponsive"];
+  // Dropping this one would make the wedge detector read a busy daemon as a
+  // silent one, because it would see no traffic it could count.
+  readonly inboundActivity?: EngineDaemonClient["inboundActivity"];
   readonly waitForExit?: EngineDaemonClient["waitForExit"];
 
   constructor(
@@ -214,6 +217,9 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     if (client.onEvent) this.onEvent = client.onEvent.bind(client);
     if (client.closeUnresponsive) {
       this.closeUnresponsive = client.closeUnresponsive.bind(client);
+    }
+    if (client.inboundActivity) {
+      this.inboundActivity = client.inboundActivity.bind(client);
     }
     if (client.waitForExit) this.waitForExit = client.waitForExit.bind(client);
   }

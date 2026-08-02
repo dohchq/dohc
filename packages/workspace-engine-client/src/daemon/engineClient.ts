@@ -554,6 +554,7 @@ export class EngineClient implements EngineTransport {
   private bufferedBlobBytes = 0;
   private connectTimer: ReturnType<typeof setTimeout> | undefined;
   helloAck: HelloAckEnvelope | undefined;
+  private inboundFrames = 0;
 
   constructor(
     private readonly connection: EngineClientConnection,
@@ -798,7 +799,16 @@ export class EngineClient implements EngineTransport {
     }
   };
 
+  // Every frame this client has decoded, of any kind. A liveness probe cannot
+  // read its own reply as the only proof of life: the daemon writes ONE output
+  // queue in order, so a probe can sit behind bulk egress it is not allowed to
+  // overtake. Bytes arriving for anyone prove the daemon is turning.
+  inboundActivity(): number {
+    return this.inboundFrames;
+  }
+
   private receiveFrame(frame: Frame): void {
+    this.inboundFrames += 1;
     if (frame.kind === "blobChunk") {
       if (!this.readyState) {
         throw new EngineClientError(

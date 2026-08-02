@@ -60,6 +60,7 @@ describe("engine.ping against a real daemon", () => {
             // dropped it would send the supervisor down the close() fallback
             // and prove nothing about what a wedge kill reports.
             closeUnresponsive: () => client.closeUnresponsive(),
+            inboundActivity: () => client.inboundActivity(),
             waitForExit: async () => await client.waitForExit(),
           };
         },

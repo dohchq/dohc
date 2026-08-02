@@ -37,7 +37,14 @@ class FakeClient implements EngineDaemonClient {
   // tell a replacement from a deliberate shutdown. A fake that only recorded
   // `closed = true` could not tell the two apart at all.
   closeCause: "closed" | "transport-error" | null = null;
+  // Frames arriving from the daemon for ANYONE. Bulk egress advances this
+  // while a probe waits behind it in the daemon's single output queue.
+  inbound = 0;
   waitForExit?: () => Promise<void>;
+
+  inboundActivity(): number {
+    return this.inbound;
+  }
 
   constructor(
     private readonly respond: (
@@ -867,6 +874,54 @@ describe("Rust engine daemon lifecycle", () => {
       });
       expect(closedWhenReported).toEqual([true]);
     } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("never kills a daemon whose output is still arriving", async () => {
+    // A probe cannot overtake the daemon's output queue. That queue holds 64
+    // ITEMS counted without regard to size, a control frame may reach 8 MiB,
+    // and BlobEgressBudget reserves blob bytes only — so a reply can sit
+    // behind hundreds of megabytes, and the wait on that channel is untimed.
+    // No expiry can both survive that and still catch a wedge, so silence is
+    // measured as NO TRAFFIC AT ALL rather than as no reply.
+    // MUTATION: drop the inboundActivity check in sendPing and this daemon —
+    // which never answers a probe but never stops sending — is killed as
+    // wedged, restarting a daemon that is draining real work.
+    const clients: SelfExitingClient[] = [];
+    const failures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 2,
+      pingExpiryMs: 20,
+      maxPingExpiries: 1,
+      launch: async (options) => {
+        const client = new SelfExitingClient(silentPing);
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error) => failures.push(error),
+    });
+
+    // Output keeps arriving for OTHER callers throughout, exactly as it would
+    // while the daemon writes down a queued backlog. No probe is ever answered.
+    const traffic = setInterval(() => {
+      for (const client of clients) client.inbound += 1;
+    }, 2);
+    try {
+      await lifecycle.start();
+      // Long enough for several expiries to pass and condemn it, if silence
+      // were still being measured by the probe's own reply.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(failures).toEqual([]);
+      expect(clients).toHaveLength(1);
+      expect(clients[0]?.closed).toBe(false);
+    } finally {
+      clearInterval(traffic);
       await lifecycle.stop();
     }
   }, 20_000);
