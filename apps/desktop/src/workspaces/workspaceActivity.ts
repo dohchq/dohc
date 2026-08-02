@@ -217,6 +217,13 @@ export function createWorkspaceActivity(
           }
         },
       });
+      // Startup reconciliation claims its capture-chain slot here, in the same
+      // synchronous turn as the watcher start: a batch that settles inside the
+      // ready race below would otherwise take the first slot, and
+      // reconciliation would then record that batch's effects before the
+      // baseline they landed on. The pass runs in the background — closed-period
+      // edits become engine moments without blocking the open.
+      entry.capture?.start();
       // Don't report the workspace open until the watcher's initial scan is
       // done — a write made right after openWorkspace resolves is guaranteed
       // observed. Bounded so a pathological scan can't hang the renderer.
@@ -224,10 +231,6 @@ export function createWorkspaceActivity(
         entry.handle.ready,
         new Promise<void>((resolve) => setTimeout(resolve, 5000)),
       ]);
-      // Kick the capture's startup reconciliation in the background once the
-      // watcher is live: closed-period edits become engine moments without
-      // blocking the open.
-      entry.capture?.start();
       const engine = options.engineFor?.(workspace, entry.capture) ?? null;
       if (engine) {
         entry.engine = engine;
