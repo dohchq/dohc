@@ -2087,6 +2087,201 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
+  // A refresh nobody asked for must not take the surface down to a spinner
+  // before it knows anything: it commits nothing on failure, so the error card
+  // and its Try again would never come back.
+  it("leaves the retry on screen when a background refresh fails over an error", async () => {
+    bridgeMock.listChatChannels.mockRejectedValue(new Error("offline"));
+    const navigator = (readRevision: number) => (
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        onOpenInTab={vi.fn()}
+        readRevision={readRevision}
+      />
+    );
+    const view = render(navigator(0));
+    // The mount refresh is the user's, so it reports its failure.
+    expect(await screen.findByText("Try again")).toBeTruthy();
+
+    // A read lands; that background refresh fails too, and says nothing.
+    view.rerender(navigator(1));
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
+
+    // The way out is still on screen, and it still works.
+    expect(screen.getByText("Try again")).toBeTruthy();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    await userEvent.click(screen.getByText("Try again"));
+    expect((await screen.findByTestId("chats-channel-name")).textContent).toBe("general");
+  });
+
+  // The same rule on the share lanes. A background lookup that REJECTS holds
+  // no answer about the grants either, and committing "unknown" for it locks
+  // every channel — including this workspace's own.
+  it("does not lock every channel when a background share lookup rejects", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    let shareReads = 0;
+    let answerMount!: (value: {
+      granted: unknown[];
+      received: unknown[];
+      joined: unknown[];
+    }) => void;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return new Promise((resolve) => {
+          answerMount = resolve;
+        });
+      }
+      return Promise.reject(new Error("signed out"));
+    });
+    // No onOpenInTab: this instance navigates in place, so the channel view is
+    // reachable. With it, clicking a channel hands off to the shell instead.
+    const navigator = (readRevision: number) => (
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        readRevision={readRevision}
+      />
+    );
+    const user = userEvent.setup();
+    const view = render(navigator(0));
+    await waitFor(() => expect(shareReads).toBe(1));
+
+    // A read lands while the mount's lookup is still out. That background
+    // refresh's lookup rejects.
+    view.rerender(navigator(1));
+    await waitFor(() => expect(shareReads).toBe(2));
+
+    // The request the surface was waiting on answers, and it is believed.
+    await act(async () => {
+      answerMount({ granted: [], received: [], joined: [] });
+      await Promise.resolve();
+    });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
+  // ONE listing in flight is what keeps an activity storm off the relay, and
+  // the slot is the whole mechanism. A drain that has been superseded must not
+  // hand it back when it finally gives up, or the next write opens a second
+  // listing beside the one already running.
+  it("does not open a second listing when a superseded drain finishes", async () => {
+    type ChannelListPage = {
+      channels: ChatChannelRecord[];
+      fileThreads: FileChatThreadRecord[];
+    };
+    let answerAbandoned!: (value: ChannelListPage) => void;
+    let reads = 0;
+    bridgeMock.listChatChannels.mockImplementation(() => {
+      reads += 1;
+      // 2 is the drain the navigation abandons; it answers late. 4 is the
+      // drain that owns the slot afterwards, and it stays in flight.
+      if (reads === 2) {
+        return new Promise<ChannelListPage>((resolve) => {
+          answerAbandoned = resolve;
+        });
+      }
+      if (reads >= 4) return new Promise<ChannelListPage>(() => {});
+      return Promise.resolve({ channels: [channel()], fileThreads: [] });
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    const user = userEvent.setup();
+    renderView();
+    await screen.findByTestId("chats-channel-name");
+
+    // A write starts a drain, then a navigation leaves it behind.
+    act(() => emitWorkspaceActivity());
+    expect(reads).toBe(2);
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-channel-back"));
+    await waitFor(() => expect(reads).toBe(3));
+
+    // The next write starts the drain that now owns the slot.
+    act(() => emitWorkspaceActivity());
+    expect(reads).toBe(4);
+
+    // The abandoned drain answers and gives up. The slot is not its to release.
+    await act(async () => {
+      answerAbandoned({ channels: [channel()], fileThreads: [] });
+      await Promise.resolve();
+    });
+    act(() => emitWorkspaceActivity());
+    expect(reads).toBe(4);
+  });
+
+  // A pass queued before a navigation belongs to the era it was queued in.
+  // Running it afterwards would put another listing on the relay for a write
+  // the navigation's own refresh has already accounted for.
+  it("drops a queued pass that a navigation has moved past", async () => {
+    const joinedRow = {
+      shareId: "share-joined",
+      channelWireId: "wire-joined",
+      granterEmail: "owner@example.com",
+      access: "read-write" as const,
+      ended: false,
+    };
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [joinedRow],
+    });
+    bridgeMock.listChatChannels.mockImplementation(() =>
+      Promise.resolve({
+        channels: [channel({ wireId: "wire-joined" })],
+        fileThreads: [],
+      }),
+    );
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    let answerCorrection!: (value: { joined: unknown[] }) => void;
+    bridgeMock.listJoinedSharedChannels.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answerCorrection = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    renderView();
+    await screen.findByTestId("chats-channel-shared");
+
+    // A write starts a pass; it is inside its joined-grant read.
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.listJoinedSharedChannels).toHaveBeenCalled());
+    // A second write queues one more pass onto it.
+    act(() => emitWorkspaceActivity());
+    const readsBeforeNavigation = bridgeMock.listChatChannels.mock.calls.length;
+
+    // The user navigates, which refreshes the list on its own account.
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-channel-back"));
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannels.mock.calls.length).toBe(
+        readsBeforeNavigation + 1,
+      ),
+    );
+
+    // The pass finishes. Its queued successor belongs to the era before the
+    // navigation, so it does not run.
+    await act(async () => {
+      answerCorrection({ joined: [joinedRow] });
+      await Promise.resolve();
+    });
+    expect(bridgeMock.listChatChannels.mock.calls.length).toBe(
+      readsBeforeNavigation + 1,
+    );
+  });
+
   // A background failure is fast when the relay is refusing, and the load it
   // lands on top of is slow. The failure holds no answer for the list, so it
   // must not take the lane away from the request that does.
