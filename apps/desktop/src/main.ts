@@ -7023,7 +7023,10 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.chatDispatchStateForThread, async (event, payload) => {
     assertTrustedSender(event);
     const input = ChatDispatchStateForThreadPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
+    await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
     return ChatDispatchStateForThreadResult.parse(
       await chatDispatchService.dispatchStateForThread(
         input.workspaceId,
@@ -7035,7 +7038,10 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.resumeThreadDispatch, async (event, payload) => {
     assertTrustedSender(event);
     const input = ResumeThreadDispatchPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
     assertWritableWorkspace(workspace);
     await chatDispatchService.resumeThreadDispatch(
       input.workspaceId,

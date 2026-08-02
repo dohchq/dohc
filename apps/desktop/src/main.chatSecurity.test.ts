@@ -75,6 +75,27 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("syncDms")).toContain("if (relay && !readOnly)");
   });
 
+  it("gates every chat dispatch IPC on the workspace engine capture", () => {
+    // AUDIT-OPTOUT: each handler resolves the engine dispatch store — the read
+    // resolves it, the resume WRITES a paused flag through it. An opted-out
+    // workspace must refuse both, exactly like its sibling chat IPCs.
+    const gated = [
+      ["chatDispatchStateForThread", "chatDispatchService.dispatchStateForThread("],
+      ["resumeThreadDispatch", "chatDispatchService.resumeThreadDispatch("],
+    ] as const;
+
+    for (const [channel, call] of gated) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("requireEngineCapture(");
+      expect(handler, channel).toContain(
+        '"Chats are not enabled for this workspace."',
+      );
+      expect(handler.indexOf("requireEngineCapture("), channel).toBeLessThan(
+        handler.indexOf(call),
+      );
+    }
+  });
+
   it("connects the production reaction handler to its behavior-tested boundary", () => {
     const handler = handlerSource("setChatReaction");
     expect(handler).toContain("setChatReactionFromMain({");

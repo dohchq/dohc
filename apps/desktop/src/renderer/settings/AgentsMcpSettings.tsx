@@ -35,6 +35,7 @@ export function AgentsMcpSettings(props: {
   preferredName?: string;
   onPreferredNameChange: (preferredName: string | undefined) => Promise<void>;
   runner: RunnerSettings;
+  engineEnabled: boolean;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
   onAgentActiveChange?: (active: boolean) => void;
 }) {
@@ -44,6 +45,7 @@ export function AgentsMcpSettings(props: {
     preferredName,
     onPreferredNameChange,
     runner,
+    engineEnabled,
     onRunnerChange,
     onAgentActiveChange,
   } = props;
@@ -330,6 +332,7 @@ export function AgentsMcpSettings(props: {
       <RunnerSettingsCard
         workspaceId={workspaceId}
         runner={runner}
+        engineEnabled={engineEnabled}
         onRunnerChange={onRunnerChange}
       />
 

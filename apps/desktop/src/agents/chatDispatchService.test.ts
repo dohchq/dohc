@@ -2655,6 +2655,64 @@ describe("chatDispatchService", () => {
     ).toHaveLength(1);
   });
 
+  it("refuses a runner self-test on an opted-out workspace before resolving a store", async () => {
+    // AUDIT-OPTOUT: the self-test writes a scratch thread, so resolving the chat
+    // store would create .dohc/engine/engine.db for a workspace that opted out
+    // of recording anything.
+    const fixture = await createFixture({
+      prepareRunWorkspaceFailures: [
+        new Error("Chats are not enabled for this workspace."),
+      ],
+    });
+
+    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
+      ok: false,
+      detail: "Chats are not enabled for this workspace.",
+    });
+
+    expect(fixture.storeResolves).toEqual({ chat: 0, dispatch: 0 });
+    expect(fixture.spawnCalls).toEqual([]);
+    expect(fixture.attributions).toEqual([]);
+    expect(fixture.errors).toEqual([]);
+  });
+
+  it("releases the self-test run lease on every exit path", async () => {
+    const fixture = await createFixture({
+      temporaryRunActivity: true,
+      runner: { command: "" },
+    });
+
+    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
+      ok: false,
+      detail: "Configure a runner command first.",
+    });
+    expect(fixture.runActivity).toEqual({ acquires: 0, releases: 0 });
+
+    fixture.runner.command = 'claude -p "unterminated';
+    await expect(
+      fixture.service.runnerSelfTest(WORKSPACE_ID),
+    ).resolves.toMatchObject({ ok: false });
+    expect(fixture.runActivity).toEqual({ acquires: 1, releases: 1 });
+
+    fixture.runner.command = "claude -p";
+    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
+    await flushMicrotasks();
+    const call = fixture.spawnCalls[0]!;
+    const threadId = call.options.env.DOHC_CHAT_THREAD!;
+    await fixture.chat.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId,
+      author: { kind: "agent", displayName: "Ice" },
+      origin: "cli",
+      body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,
+    });
+    call.process.emitExit(0);
+
+    await expect(resultPromise).resolves.toMatchObject({ ok: true });
+    expect(fixture.runActivity).toEqual({ acquires: 2, releases: 2 });
+  });
+
   it("times out a runner self-test and escalates the same spawned group", async () => {
     vi.useFakeTimers();
     const fixture = await createFixture();

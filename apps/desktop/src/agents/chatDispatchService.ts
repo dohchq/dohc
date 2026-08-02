@@ -1616,10 +1616,26 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
     selfTestReservations.add(workspaceId);
     let reservationHeldByProcess = false;
+    let releaseWorkspace: (() => Promise<void>) | null = null;
     try {
       const runner = await options.readRunnerSettings();
       const command = runner.command.trim();
       if (!command) return { ok: false, detail: "Configure a runner command first." };
+
+      // A self-test spawns a real runner and writes a scratch thread, so it
+      // takes the same run lease and engine gate as a claimed run. An opted-out
+      // workspace refuses here, before chatStoreFor creates an engine store.
+      try {
+        releaseWorkspace = (await options.prepareRunWorkspace?.(workspace)) ?? null;
+      } catch (error) {
+        return {
+          ok: false,
+          detail:
+            error instanceof Error && error.message
+              ? error.message
+              : "This workspace cannot run agents.",
+        };
+      }
 
       const chat = options.chatStoreFor(workspace);
       const identity = await options.identityFor(workspaceId);
@@ -1815,6 +1831,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
     } finally {
       if (!reservationHeldByProcess) selfTestReservations.delete(workspaceId);
+      await releaseWorkspaceLease(releaseWorkspace);
     }
   }
 

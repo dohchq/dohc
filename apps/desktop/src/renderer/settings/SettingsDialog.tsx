@@ -560,6 +560,7 @@ export function SettingsDialog(props: {
                 })
               }
               runner={userSettings.runner}
+              engineEnabled={workspaceSettings.experimental.workspaceEngineAlpha}
               onRunnerChange={(runner) =>
                 saveUserSettings({
                   ...userSettings,

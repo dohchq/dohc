@@ -37,9 +37,12 @@ function runnerSettingsEqual(left: RunnerSettings, right: RunnerSettings): boole
 export function RunnerSettingsCard(props: {
   workspaceId: string;
   runner: RunnerSettings;
+  // The self-test spawns a runner that writes a chat thread. An opted-out
+  // workspace records nothing, so the main process refuses it there.
+  engineEnabled: boolean;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
 }) {
-  const { workspaceId, runner, onRunnerChange } = props;
+  const { workspaceId, runner, engineEnabled, onRunnerChange } = props;
   const [commandDraft, setCommandDraft] = useState(runner.command);
   const [timeoutDraft, setTimeoutDraft] = useState(String(runner.timeoutMinutes));
   const [selfTest, setSelfTest] = useState<SelfTestState>({ status: "idle" });
@@ -254,11 +257,20 @@ export function RunnerSettingsCard(props: {
             Enable the runner on one device per workspace — multiple enabled devices
             will each run tasks independently.
           </p>
+          {engineEnabled ? null : (
+            <p
+              data-testid="runner-self-test-engine-note"
+              className="m-0 mt-1 text-[10px] leading-relaxed text-subtle"
+            >
+              The workspace engine is off, so there is no chat to test. Turn it on
+              in Advanced.
+            </p>
+          )}
         </div>
         <button
           type="button"
           data-testid="runner-self-test-button"
-          disabled={!configured || selfTestRunning}
+          disabled={!engineEnabled || !configured || selfTestRunning}
           onClick={() => void runSelfTest()}
           className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
