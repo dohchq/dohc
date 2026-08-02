@@ -246,6 +246,11 @@ const CONFLICTS_RESPONSE_ROW_LIMIT: usize =
 /// retaining explicit envelope and continuation headroom.
 const CONFLICT_ROW_HARD_CAP_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+/// A hand-combined resolution arrives as one wire string in one control
+/// frame, so it gets the same frame-derived budget the conflict listing keeps
+/// for the sides that produced it: every conflict a caller can read back can
+/// be combined and applied. The store's 10 MiB text cap never binds first.
+const MAX_MERGED_RESOLUTION_TEXT_BYTES: usize = CONFLICT_ROW_HARD_CAP_BYTES;
 const SEARCH_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
 const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
@@ -7590,8 +7595,16 @@ impl EngineService {
                 let text = local
                     .merged_text
                     .ok_or_else(|| wire(ErrorCode::InvalidParams, "missing merged text"))?;
-                if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
-                    return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+                if text.len() > MAX_MERGED_RESOLUTION_TEXT_BYTES {
+                    return Err(WireError::new(
+                        ErrorCode::InvalidParams,
+                        format!(
+                            "merged-text-exceeds-wire-limit: one control frame carries a \
+                             combined resolution body of at most \
+                             {MAX_MERGED_RESOLUTION_TEXT_BYTES} bytes, observed {} bytes",
+                            text.len()
+                        ),
+                    ));
                 }
                 ResolveConflictKind::ApplyMerged { text }
             }
@@ -7629,7 +7642,7 @@ impl EngineService {
             "conflict": conflict_json(&result.conflict),
             "write": result.write.as_ref().map(|write| json!({
                 "object": file_object_json(&write.object),
-                "snapshot": snapshot_json(&write.snapshot),
+                "snapshot": settled_snapshot_json(&write.snapshot),
                 "moment": moment_json(&write.moment),
             })),
             // The preimage is described by the MOMENT, not by the text view of
@@ -10249,6 +10262,24 @@ fn snapshot_json(snapshot: &TextSnapshot) -> Value {
         "metadataSummary": snapshot.metadata_summary,
         "metadataCorrelationId": snapshot.metadata_correlation_id
     })
+}
+
+/// The body a resolution settled, WITHHELD above the in-band cap: the digest
+/// and the limit go out instead, the shape `versionedText.read` already uses,
+/// so the caller hydrates with `versionedText.readBlob`.
+///
+/// The answer must not grow with the body. A resolve answer already carries
+/// the conflict's three hydrated sides, and one control frame has to hold all
+/// of it — an echoed multi-megabyte body would exceed the frame, and the
+/// daemon's writer treats that as a fatal transport error AFTER the
+/// resolution has committed.
+fn settled_snapshot_json(snapshot: &TextSnapshot) -> Value {
+    let mut body = snapshot_json(snapshot);
+    if snapshot.text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
+        body["text"] = Value::Null;
+        body["inbandLimitBytes"] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+    }
+    body
 }
 
 fn file_object_json(object: &dohc_engine_domain::FileObjectRecord) -> Value {

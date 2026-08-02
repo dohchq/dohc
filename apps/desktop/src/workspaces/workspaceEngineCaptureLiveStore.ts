@@ -623,6 +623,36 @@ export function createCaptureLiveStores(
     });
   }
 
+  /**
+   * Restore a settled body the daemon withheld for being over-cap.
+   *
+   * `settled_snapshot_json` (lib.rs) nulls the body a resolution settled and
+   * reports its digest instead, so the answer's size never follows the body a
+   * conflict was combined from. This store promises the body — the caller
+   * mirrors it to disk — so fetch it out of band, the same hydration
+   * `readTextFile` and `hydratedMoment` already perform.
+   */
+  async function hydratedSnapshot(
+    snapshot: VersionedTextReadValue,
+  ): Promise<VersionedTextReadValue> {
+    if (snapshot.contentKind !== "text" || snapshot.text !== null) return snapshot;
+    const text = await runRead(
+      async (adapter) =>
+        await adapter.readTextBlob({
+          workspaceId: workspace.workspaceId,
+          sha256: snapshot.blobSha256,
+        }),
+    );
+    if (text === null) {
+      throw new VersionedTextStoreError(
+        "state-corrupt",
+        `Engine text blob ${snapshot.blobSha256} for ${snapshot.path} is unreadable.`,
+      );
+    }
+    const { inbandLimitBytes: _inbandLimitBytes, ...metadata } = snapshot;
+    return { ...metadata, text };
+  }
+
   const store = {
     ensureMainVersion: (input: { workspaceId: string }) =>
       runMutation(async (adapter) => await adapter.ensureMainVersion(input)),
@@ -1032,7 +1062,10 @@ export function createCaptureLiveStores(
           conflict,
           write: {
             object: fileObjectFromWire(write.object),
-            snapshot: snapshotFromWire(write.snapshot, input.metadata),
+            snapshot: snapshotFromWire(
+              await hydratedSnapshot(write.snapshot),
+              input.metadata,
+            ),
             moment: momentFromWire(
               input.workspaceId,
               await hydratedMoment(write.moment),

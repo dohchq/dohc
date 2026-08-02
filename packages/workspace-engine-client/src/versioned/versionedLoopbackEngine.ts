@@ -45,13 +45,45 @@ function refusalFrom(error: unknown): unknown {
 }
 
 const INBAND_LIMIT_BYTES = 48 * 1024;
-const MAX_DESKTOP_CAPTURE_TEXT_BYTES = 128 * 1024;
+
+/**
+ * The daemon's own names, mirrored from
+ * crates/dohc-workspace-engine/src/lib.rs. Exported because the desktop
+ * fixtures model the same contract and a hand-copied number is how the two
+ * drift apart.
+ *
+ * `MAX_DESKTOP_CAPTURE_TEXT_BYTES` is the largest text body an answer carries
+ * in band. Past it the daemon reports the digest and this limit, and the
+ * caller hydrates with `versionedText.readBlob`.
+ */
+export const MAX_DESKTOP_CAPTURE_TEXT_BYTES = 128 * 1024;
+
+/**
+ * `MAX_MERGED_RESOLUTION_TEXT_BYTES`: a hand-combined conflict resolution
+ * arrives as one wire string in one control frame, so it gets the frame
+ * budget less the envelope headroom the conflict listing keeps.
+ */
+export const MAX_MERGED_RESOLUTION_TEXT_BYTES = 8 * 1024 * 1024 - 64 * 1024;
+
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const MAX_CAPTURE_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 const COMPARE_PAGE_SIZE = 200;
 const MAX_MERGE_LINES = 2_000;
 // Mirrors MAX_METADATA_FIELD_BYTES in crates/dohc-workspace-engine/src/lib.rs.
 const MAX_METADATA_FIELD_BYTES = 16 * 1024;
+
+/**
+ * The daemon's `settled_snapshot_json` (lib.rs): a settled body past the
+ * in-band cap leaves the answer as a digest and a limit, never as text, so the
+ * answer's size never follows the body.
+ */
+export function settledSnapshotForWire(snapshot: JsonObject): JsonObject {
+  const text = snapshot.text;
+  if (typeof text !== "string" || utf8Length(text) <= MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
+    return snapshot;
+  }
+  return { ...snapshot, text: null, inbandLimitBytes: MAX_DESKTOP_CAPTURE_TEXT_BYTES };
+}
 
 const ACCEPTED_ORIGINS = new Set<string>([
   "api",
@@ -1075,6 +1107,31 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return response;
   }
 
+  /**
+   * The text write a conflict resolution settles, shaped as a
+   * `versionedText.write` request but WITHOUT that method's in-band request
+   * cap. The daemon settles a resolution inside the store
+   * (`resolve_text_conflict`), so only the store's own text cap bounds the
+   * body — a fixture that routed a resolution through the capped method would
+   * refuse work the daemon accepts.
+   */
+  protected settleTextWrite(request: Request): Response {
+    this.requests.push(request);
+    let result: JsonValue;
+    try {
+      const params = asObject(request.params, `${request.method} params`);
+      const parsed = parseTextWriteFields(params, request);
+      const workspace = this.requireWorkspaceHandle(request);
+      this.validateWorkspaceParam(params, workspace);
+      result = this.textWrite(this.workspace(workspace), workspace, params, parsed, false);
+    } catch (error) {
+      throw refusalFrom(error);
+    }
+    const response: Response = { id: request.id, result };
+    this.responses.push(response);
+    return response;
+  }
+
   private handleRequest(request: Request): JsonValue {
     const params = asObject(request.params, `${request.method} params`);
     validateVersionedParams(request.method, params, request);
@@ -1200,9 +1257,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     workspace: string,
     params: JsonObject,
     parsed: ParsedTextWriteFields,
+    inbandCapped = true,
   ): JsonValue {
     const { versionId, text } = parsed;
-    if (utf8Length(text) > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
+    if (inbandCapped && utf8Length(text) > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
       throw new Error("content-exceeds-inband-cap");
     }
     const origin = requiredOrigin(params);
@@ -1354,9 +1412,23 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return { ...metadata, text, blobSha256: sha256(text) };
   }
 
-  private textReadBlob(state: WorkspaceState, params: JsonObject): JsonValue {
-    const digest = requiredString(params, "sha256", "text readBlob").toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error("invalid-input");
+  /**
+   * The text body behind a digest this workspace still references — a head, a
+   * fork base, or a moment payload. The daemon authorizes a `readBlob` digest
+   * the same way (`read_text_blob_with_hydration`, store.rs), so a fixture
+   * that answered any digest would pin nothing about the request sent.
+   *
+   * Public because a body past the 48 KiB egress cap never rides in the
+   * result: a harness that speaks the blob capability has to deliver those
+   * bytes out of band, and this is where it reads them.
+   */
+  textBodyForDigest(workspace: string, sha256Hex: string): string | null {
+    const digest = sha256Hex.toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(digest)) return null;
+    return this.bodyForDigest(this.workspace(workspace), digest);
+  }
+
+  private bodyForDigest(state: WorkspaceState, digest: string): string | null {
     const candidates: string[] = [];
     for (const version of state.versions.values()) {
       for (const file of version.files.values()) {
@@ -1370,8 +1442,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
       if (moment.before?.contentKind === "text") candidates.push(moment.before.text ?? "");
       if (moment.after?.contentKind === "text") candidates.push(moment.after.text ?? "");
     }
-    const text = candidates.find((candidate) => sha256(candidate) === digest);
-    if (text === undefined) throw new Error("file-not-found");
+    return candidates.find((candidate) => sha256(candidate) === digest) ?? null;
+  }
+
+  private textReadBlob(state: WorkspaceState, params: JsonObject): JsonValue {
+    const digest = requiredString(params, "sha256", "text readBlob").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error("invalid-input");
+    const text = this.bodyForDigest(state, digest);
+    if (text === null) throw new Error("file-not-found");
     const bytes = [...Buffer.from(text, "utf8")];
     return bytes.length <= INBAND_LIMIT_BYTES
       ? { bytesBase64: encodeBase64(bytes) }
