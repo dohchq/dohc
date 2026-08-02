@@ -80,6 +80,64 @@ fn plaintext_update(text: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, text))
 }
 
+/// Stage the #346 interleaving: a 0-byte artifact on disk that capture has NOT
+/// yet ingested, with a live session opened over it. Returns the path it
+/// staged and the open result.
+///
+/// The order is VERIFIED, not assumed. Writing the file and opening straight
+/// after relies on the open beating the watcher's settle window, and this
+/// machine has shown 3.5x slowdowns under suite load — a paused task lets
+/// capture ingest first, `seedMarkdown` comes back "" instead of null, and the
+/// test false-fails without ever staging the race it exists to cover.
+///
+/// The capture probe cannot enforce it either: its seam holds the driver AFTER
+/// `reconcile_if_dirty` reports Completed, so the head is already minted by the
+/// time it pauses. There is no pre-apply seam, and this is not worth adding new
+/// engine surface for. So an attempt that lost the race is detected and retried
+/// on a path capture has never seen, and exhausting the attempts FAILS rather
+/// than proceeding over an unstaged interleaving.
+async fn stage_headless_session_over_an_empty_artifact(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    scratch: &ScratchDir,
+    stem: &str,
+) -> (String, Value) {
+    for attempt in 0..8 {
+        let path = format!("notes/{stem}-{attempt}.md");
+        write_file(scratch.path(), &path, b"");
+        let opened = call(
+            transport,
+            handle,
+            1_000 + attempt,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": path,
+                "contentKind": "plaintext"
+            }),
+        )
+        .await;
+        if opened["seedMarkdown"] == Value::Null {
+            // The seed comes from the HEAD, not from disk, so a null seed IS
+            // the proof that no head exists yet.
+            assert_eq!(opened["lineage"], json!("absent"));
+            return (path, opened);
+        }
+        // Capture won the race. Drop this session and stage again elsewhere;
+        // the lineage carries no durable state, so the prune-close is clean.
+        let session_id = opened["sessionId"].as_str().expect("session id");
+        call(
+            transport,
+            handle,
+            2_000 + attempt,
+            "ydoc.close",
+            json!({ "sessionId": session_id, "settle": false }),
+        )
+        .await;
+    }
+    panic!("could not open a session before capture ingested the empty artifact in 8 attempts");
+}
+
 async fn moment_count_for_object(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -1107,28 +1165,14 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-newfile", 1).await;
 
-    // Step 2: New File, exactly as `createFile` leaves it.
-    write_file(scratch.path(), "notes/untitled.md", b"");
-
-    // Step 3: the session opens before capture has ingested the artifact.
-    let opened = call(
-        &transport,
-        &handle,
-        2,
-        "ydoc.open",
-        json!({
-            "versionId": "main",
-            "path": "notes/untitled.md",
-            "contentKind": "plaintext"
-        }),
-    )
-    .await;
-    assert_eq!(opened["lineage"], json!("absent"));
-    // No head yet: the seed comes from the HEAD, not from disk. This is the
-    // window — `a_zero_byte_precreated_file_settles…` above writes its file
-    // before workspace.open, so its opening reconcile ingests the artifact
-    // first and the session opens with a head expectation that matches.
-    assert_eq!(opened["seedMarkdown"], Value::Null);
+    // Steps 2 and 3: New File exactly as `createFile` leaves it, with the
+    // session opened before capture ingests it. `a_zero_byte_precreated_file…`
+    // above writes its file before workspace.open, so its opening reconcile
+    // ingests the artifact first and its session opens with a head expectation
+    // that already matches — which is why that test never reached this bug.
+    let (path, opened) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "untitled")
+            .await;
     let session_id = opened["sessionId"].as_str().expect("session id");
 
     // Step 4: capture ingests the empty artifact under the open session.
@@ -1155,7 +1199,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
             &handle,
             200 + attempt,
             "versionedText.read",
-            json!({ "versionId": "main", "path": "notes/untitled.md" }),
+            json!({ "versionId": "main", "path": path }),
         )
         .await;
         if ingested["text"] == json!("") {
@@ -1195,7 +1239,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     .await;
     assert_eq!(settled["markdown"], json!(typed));
     assert_eq!(
-        std::fs::read_to_string(scratch.path().join("notes/untitled.md")).expect("settled"),
+        std::fs::read_to_string(scratch.path().join(&path)).expect("settled"),
         typed,
         "the first typed edit into a new document must replace its empty artifact"
     );
@@ -1229,7 +1273,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     assert!(resettled.contains("More typing. "), "{resettled}");
     assert!(resettled.contains(typed), "{resettled}");
     assert_eq!(
-        std::fs::read_to_string(scratch.path().join("notes/untitled.md")).expect("resettled"),
+        std::fs::read_to_string(scratch.path().join(&path)).expect("resettled"),
         resettled,
         "every later edit must reach disk as well"
     );
@@ -1263,28 +1307,12 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-rival", 1).await;
 
-    write_file(scratch.path(), "notes/rival.md", b"");
-    let opened = call(
-        &transport,
-        &handle,
-        2,
-        "ydoc.open",
-        json!({
-            "versionId": "main",
-            "path": "notes/rival.md",
-            "contentKind": "plaintext"
-        }),
-    )
-    .await;
-    assert_eq!(opened["seedMarkdown"], Value::Null);
+    let (path, opened) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "rival").await;
     let session_id = opened["sessionId"].as_str().expect("session id");
 
     // Content the session never saw lands on the path, and capture ingests it.
-    write_file(
-        scratch.path(),
-        "notes/rival.md",
-        b"written by something else\n",
-    );
+    write_file(scratch.path(), &path, b"written by something else\n");
     // POLL until the rival content is provably the head. One sleep plus a
     // flush is not enough: a watcher that has not yet queued the write makes
     // the flush report quiescence with no head minted, and the settle below
@@ -1306,7 +1334,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
             &handle,
             200 + attempt,
             "versionedText.read",
-            json!({ "versionId": "main", "path": "notes/rival.md" }),
+            json!({ "versionId": "main", "path": path }),
         )
         .await;
         if ingested["text"] == json!("written by something else\n") {
@@ -1344,7 +1372,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         .expect_err("a settle over ingested content must refuse");
     assert_eq!(refused.message, "conflict-stale-target");
     assert_eq!(
-        std::fs::read_to_string(scratch.path().join("notes/rival.md")).expect("intact"),
+        std::fs::read_to_string(scratch.path().join(&path)).expect("intact"),
         "written by something else\n",
         "the refused settle must leave the ingested bytes intact"
     );
