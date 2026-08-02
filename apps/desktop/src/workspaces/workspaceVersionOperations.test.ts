@@ -19,7 +19,11 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import {
+  encodedEnvelopeBytes,
+  requestEnvelope,
+  type EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 import {
@@ -444,15 +448,14 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
       // REQUEST: the same envelope carries two 16 KiB metadata fields and five
       // identifiers.
       //
-      // The SERIALIZED envelope, measured in UTF-8 bytes, is the frame’s
-      // payload. Running the serialized text back through
-      // `jsonStringEncodedLength` would count every quote and backslash a
-      // second time and refuse a newline-heavy request the transport carries
-      // comfortably.
-      const encodedRequest = Buffer.byteLength(
-        JSON.stringify({ type: "request", ...request }),
-        "utf8",
-      );
+      // The client’s own measurement, not a second model of it. Building the
+      // envelope by hand here left out the nullable fields `EngineClient`
+      // fills in — about sixty bytes — so at the frame boundary this fixture
+      // accepted requests the shipping client refuses.
+      //
+      // The wire id is this request’s own: a loopback does not renumber, so
+      // the envelope it would frame carries the id it received.
+      const encodedRequest = encodedEnvelopeBytes(requestEnvelope(request, request.id));
       if (resolution === "apply-merged" && encodedRequest > RESOLVE_REQUEST_FRAME_BYTES) {
         throw new Error(
           `merged-text-exceeds-wire-limit: one control frame carries a resolve ` +
@@ -1392,6 +1395,45 @@ describe("mergeVersionIntoMain", () => {
 
     expect(merged.conflict.resolution).toBe("applied-merged");
     expect(await readText(root, "plan.md")).toBe(combined);
+    await engine.stop();
+  });
+
+  it("refuses a request the shipping client refuses, at the boundary", async () => {
+    // The fields `EngineClient` fills in before writing — `type`,
+    // `deadlineMs`, `idempotencyKey` — are worth about sixty bytes. A fixture
+    // that measured the caller-shaped request would see room inside that gap
+    // and accept work the shipping client cannot send.
+    //
+    // The boundary body is calibrated from the request the fixture ACTUALLY
+    // received, so it does not depend on this test guessing the param shape.
+    //
+    // MUTATION: measure `request` directly instead of the envelope it becomes
+    // -> the boundary resolution is accepted and this fails.
+    const { root, engine, conflict, loopback } = await openDivergedTextConflict();
+
+    // A first, plainly over-frame attempt: refused, and it records the exact
+    // request shape this path sends.
+    const probeBody = "x".repeat(RESOLVE_REQUEST_FRAME_BYTES);
+    await expect(
+      engine.resolveConflict(conflict.id, { kind: "apply-merged", text: probeBody }),
+    ).rejects.toThrow(/merged-text-exceeds-wire-limit/);
+    const recorded = loopback.requests.findLast(
+      (request) => request.method === "conflicts.resolve",
+    );
+    expect(recorded).toBeDefined();
+
+    // Everything the envelope holds except the body itself. A plain-text body
+    // encodes to its own length plus the two quotes around it.
+    const overhead =
+      encodedEnvelopeBytes(requestEnvelope(recorded!, recorded!.id)) -
+      (probeBody.length + 2);
+    const justPast = "x".repeat(RESOLVE_REQUEST_FRAME_BYTES - overhead - 2 + 1);
+
+    await expect(
+      engine.resolveConflict(conflict.id, { kind: "apply-merged", text: justPast }),
+    ).rejects.toThrow(/merged-text-exceeds-wire-limit/);
+    expect(await readText(root, "plan.md")).toBe("current\n");
+    expect(await engine.listOpenConflicts()).toHaveLength(1);
     await engine.stop();
   });
 
