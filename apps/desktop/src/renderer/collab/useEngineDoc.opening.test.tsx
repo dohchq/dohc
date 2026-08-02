@@ -15,12 +15,14 @@ import { useEngineDoc } from "./useEngineDoc";
 // These tests own the distinguishing state: `opening` is true from the FIRST
 // render until the open resolves, whichever way it resolves.
 
-// Every render pass's `opening`, in order — the effect that issues the open
-// runs after the first pass, so only this sees what the first pass reported.
-let renderedOpening: boolean[] = [];
+// What every render pass reported, in order. The effect that issues an open
+// runs after the pass that scheduled it, so only a render log can see what
+// that pass told the caller — the settled DOM cannot.
+type RenderedState = { opening: boolean; available: boolean; hasDoc: boolean };
+let rendered: RenderedState[] = [];
 
 beforeEach(() => {
-  renderedOpening = [];
+  rendered = [];
 });
 
 afterEach(() => {
@@ -28,13 +30,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function Harness(props: { path: string; enabled?: boolean }) {
+function Harness(props: {
+  path: string;
+  enabled?: boolean;
+  reopenKey?: number;
+}) {
   const engine = useEngineDoc({
     workspaceId: "ws-1",
     path: props.path,
     enabled: props.enabled ?? true,
+    ...(props.reopenKey === undefined ? {} : { reopenKey: props.reopenKey }),
   });
-  renderedOpening.push(engine.opening);
+  rendered.push({
+    opening: engine.opening,
+    available: engine.available,
+    hasDoc: engine.doc !== null,
+  });
   return (
     <div>
       <span data-testid="opening">{String(engine.opening)}</span>
@@ -88,7 +99,7 @@ it("reports opening on the first render, before the open is even issued", () => 
   // one frame in which the caller believes this document is not engine-backed
   // and mounts its writable editor. `render` flushes effects, so the DOM alone
   // cannot see that frame — the render log can.
-  expect(renderedOpening[0]).toBe(true);
+  expect(rendered[0]?.opening).toBe(true);
   expect(screen.getByTestId("opening").textContent).toBe("true");
   expect(screen.getByTestId("available").textContent).toBe("false");
 });
@@ -150,6 +161,59 @@ it("never opens for a document the caller has gated off", () => {
   // reasons and never bind a session — they must not inherit an opening wait.
   expect(screen.getByTestId("opening").textContent).toBe("false");
   expect(bridge.api.openEngineYDocSession).not.toHaveBeenCalled();
+});
+
+it("re-enters opening on the FIRST render of a version switch, not one frame later", async () => {
+  const bridge = deferredBridge();
+  vi.stubGlobal("dohcDesktop", bridge.api);
+
+  const view = render(<Harness path="notes/a.md" reopenKey={1} />);
+  bridge.bind();
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  // The shell switches the active version under an OPEN document. It keys the
+  // inspector by tab (`DesktopWorkspaceShell.tsx`), so this is a prop change,
+  // not a remount, and the session for the previous version is already closed.
+  rendered = [];
+  view.rerender(<Harness path="notes/a.md" reopenKey={2} />);
+
+  // The very first pass after the switch. Reporting the previous version's
+  // bound doc here commits one editable frame over an obsolete session, and a
+  // keystroke in it is lost. `opening` is derived from the request, so the
+  // answer changes with the request.
+  expect(rendered[0]).toEqual({ opening: true, available: false, hasDoc: false });
+  expect(rendered.every((pass) => !pass.available)).toBe(true);
+
+  // And it stays that way until the NEW open answers.
+  expect(screen.getByTestId("opening").textContent).toBe("true");
+  bridge.bind();
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+});
+
+it("re-enters opening on the FIRST render after the gate reopens", async () => {
+  const bridge = deferredBridge();
+  vi.stubGlobal("dohcDesktop", bridge.api);
+
+  const view = render(<Harness path="notes/a.md" />);
+  bridge.bind();
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  // The caller closes the gate and opens it again on the SAME document — a
+  // truncated read that reloads whole flips `enabled` this way. The request
+  // returns to a key it held before, and the session bound above is destroyed.
+  view.rerender(<Harness path="notes/a.md" enabled={false} />);
+  rendered = [];
+  view.rerender(<Harness path="notes/a.md" />);
+
+  // Matching an OLD result would hand the caller a destroyed doc to edit.
+  expect(rendered[0]).toEqual({ opening: true, available: false, hasDoc: false });
+  expect(rendered.every((pass) => !pass.hasDoc)).toBe(true);
 });
 
 it("re-enters opening when the document switches", async () => {

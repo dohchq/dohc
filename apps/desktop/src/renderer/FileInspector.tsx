@@ -1083,7 +1083,8 @@ function MarkdownView(props: {
   }
 
   function toggleEditorMode() {
-    if (readOnly) return;
+    // `opening` too, so Ctrl+/ answers the same as the disabled button (#533).
+    if (readOnly || opening) return;
     if (mode === "read") {
       switchMode("wysiwyg");
       return;
@@ -1370,6 +1371,11 @@ function MarkdownView(props: {
               <span
                 data-testid="markdown-open-state"
                 data-state="opening"
+                // The same sentence as the disabled button's, because a
+                // browser does not reliably draw a tooltip over a DISABLED
+                // control. This span is not disabled, so hovering the state
+                // always explains it.
+                title="You can edit this document when it finishes opening."
                 className="font-mono text-[11px] text-subtle"
               >
                 Opening…

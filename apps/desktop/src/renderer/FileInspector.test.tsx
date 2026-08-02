@@ -1137,6 +1137,69 @@ describe("markdown document opening state", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  it("keeps the properties panel out of an opening document", async () => {
+    // The panel writes frontmatter through the same disk save as the body, so
+    // it is part of the refusal. It is also lazy — a bare queryByTestId would
+    // pass while the chunk was merely still loading, proving nothing. Load the
+    // module first, then absence means refusal.
+    await import("./PropertiesPanel");
+    const { bridgeMock, answerNotEngineBacked } = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-open-state");
+
+    // MUTATION: `{!readOnly && !opening ?` → `{!readOnly ?`. The panel mounts
+    // during the held open and its property edits autosave to disk. It would
+    // still be mounted at the end of this window — `opening` does not flicker.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(screen.queryByTestId("properties-panel")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
+
+    // The same surface, one state later, does show it — so the absence above
+    // was this branch refusing, not a chunk that never arrived.
+    answerNotEngineBacked();
+    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
+  });
+
+  it("gives up the bound editor the moment a version switch reopens the session", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, bind } = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
+    );
+    // The document body loads first; only then does MarkdownView mount and ask
+    // for a session. Binding before that would resolve nothing.
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bind();
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    // The shell switches the active version under the open document. It keys
+    // the inspector by tab, so this is a prop change, not a remount — and the
+    // session bound above is already settled and closed.
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={2} />,
+    );
+
+    // The obsolete session's editor is gone at once, not when the next open
+    // answers. Anything typed into it would have gone to a closed session.
+    expect(screen.queryByTestId("markdown-source-toggle")).toBeNull();
+    expect(screen.getByTestId("markdown-open-state").textContent).toBe(
+      "Opening…",
+    );
+    await attemptToType(user);
+    expect(bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
+
+    // The new version's session binds and the editor comes back.
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    bind();
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+  });
+
   it("restores the writable plain editor once the open answers 'not engine-backed'", async () => {
     const user = userEvent.setup();
     const { bridgeMock, answerNotEngineBacked } = makeHeldOpenBridge();
