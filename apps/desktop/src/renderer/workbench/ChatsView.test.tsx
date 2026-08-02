@@ -519,6 +519,98 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
 
+  // refreshOverview and refreshShares both write channelShares. Without one
+  // order over both, a share lookup issued FIRST can resolve LAST and put the
+  // pre-mutation snapshot back — the person you just invited disappearing.
+  it("does not let a slow background lookup undo a share the user just made", async () => {
+    const teamChannel = channel({
+      id: "channel-team",
+      name: "team",
+      slug: "team",
+      wireId: "wire-team",
+    });
+    const grant = (recipientEmail: string, shareId: string) => ({
+      shareId,
+      channelWireId: "wire-team",
+      access: "read-write" as const,
+      recipientEmail,
+      revokedAtMs: null,
+    });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel],
+      fileThreads: [],
+    });
+    bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
+    // Every share lookup is answered by hand, so the order is the test.
+    const answerShares: Array<(value: unknown) => void> = [];
+    bridgeMock.listChatChannelShares.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answerShares.push(resolve);
+        }),
+    );
+    const user = userEvent.setup();
+    const view = render(
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        readRevision={0}
+      />,
+    );
+
+    // Mount: one person has the channel.
+    await waitFor(() => expect(answerShares).toHaveLength(1));
+    await act(async () => {
+      answerShares[0]({ granted: [grant("ana@example.com", "share-1")], received: [], joined: [] });
+      await Promise.resolve();
+    });
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-share-channel"));
+    expect((await screen.findByTestId("chats-share-member")).textContent).toContain(
+      "ana@example.com",
+    );
+
+    // A read lands: the badge refresh issues its share lookup and stalls.
+    view.rerender(
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        readRevision={1}
+      />,
+    );
+    await waitFor(() => expect(answerShares).toHaveLength(2));
+
+    // Meanwhile the user shares the channel with someone else, and THAT
+    // lookup answers first.
+    await user.type(screen.getByTestId("chats-share-email"), "bo@example.com");
+    await user.click(screen.getByTestId("chats-share-submit"));
+    await waitFor(() => expect(answerShares).toHaveLength(3));
+    await act(async () => {
+      answerShares[2]({
+        granted: [grant("ana@example.com", "share-1"), grant("bo@example.com", "share-2")],
+        received: [],
+        joined: [],
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.getAllByTestId("chats-share-member")).toHaveLength(2),
+    );
+
+    // Now the stalled background lookup answers with its older snapshot.
+    await act(async () => {
+      answerShares[1]({ granted: [grant("ana@example.com", "share-1")], received: [], joined: [] });
+      await Promise.resolve();
+    });
+
+    // Bo is still there.
+    const members = screen.getAllByTestId("chats-share-member");
+    expect(members).toHaveLength(2);
+    expect(members.map((el) => el.textContent).join(" ")).toContain("bo@example.com");
+  });
+
   it("does not refetch while the revision stands still", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ unreadCount: 2 })],

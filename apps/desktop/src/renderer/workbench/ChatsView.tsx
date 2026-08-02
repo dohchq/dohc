@@ -1032,10 +1032,20 @@ export function ChatsView(props: {
   //  - A transient failure must not replace a working navigator with an error
   //    card (there is nothing to report to a user who asked for nothing).
   const overviewRequest = useRef(0);
+  // ONE monotonic sequence over every channelShares commit, whichever loader
+  // produces it. refreshOverview and refreshShares both write this state, and
+  // without a shared order a share lookup issued first could resolve last and
+  // put a pre-mutation snapshot back on screen — the person you just invited
+  // vanishing, or the one you just removed reappearing. Same commit-time
+  // watermark as the workspace file listing: an id is taken at issue, and a
+  // response commits only if it is newer than what is already displayed.
+  const sharesRequest = useRef(0);
+  const committedSharesRequest = useRef(0);
   const refreshOverview = useCallback(
     async (options?: { background?: boolean }): Promise<void> => {
       const token = options?.background ? liveToken.current : ++liveToken.current;
       const request = ++overviewRequest.current;
+      const sharesId = ++sharesRequest.current;
       const superseded = () =>
         token !== liveToken.current || request !== overviewRequest.current;
       setOverview((current) =>
@@ -1058,7 +1068,11 @@ export function ChatsView(props: {
         // what it already had: dropping to "unknown" would wipe the cached
         // invitations and share controls, and lock every joined channel, for
         // a refresh the user never asked for.
-        if (shares.answered || !options?.background) {
+        if (
+          (shares.answered || !options?.background) &&
+          sharesId > committedSharesRequest.current
+        ) {
+          committedSharesRequest.current = sharesId;
           setChannelShares(shares.value);
           setSharesWorkspaceId(workspaceId);
         }
@@ -2478,10 +2492,13 @@ export function ChatsView(props: {
 
   const refreshShares = useCallback(async () => {
     const token = liveToken.current;
+    const sharesId = ++sharesRequest.current;
     const shares = await bridge()
       .listChatChannelShares({ workspaceId })
       .catch(() => null);
     if (token !== liveToken.current) return;
+    if (sharesId <= committedSharesRequest.current) return;
+    committedSharesRequest.current = sharesId;
     setChannelShares(shares);
     setSharesWorkspaceId(workspaceId);
   }, [workspaceId]);
