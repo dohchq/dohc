@@ -39,7 +39,7 @@ pub use cursor::{
     read_shared_peer_position,
 };
 pub use error::{RelayError, SyncError};
-pub use hydration::{BlobContent, BlobHydration, hydrate_blob_content};
+pub use hydration::{BlobContent, BlobHydration, BlobKind, blob_ceiling, hydrate_blob_content};
 pub use journal::{
     AdoptJoinIdentityOutcome, SyncIdentity, ack_replication_peer, adopt_join_identity,
     journal_local_op_in_tx, journal_local_replication_op, list_replication_ops,

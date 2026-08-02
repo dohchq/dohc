@@ -11,8 +11,8 @@ use crate::cursor::{
 };
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::{
-    ApplyOutcome, BlobContent, BlobHydration, RelayError, ReplicationEnvelope, SyncError,
-    hydrate_blob_content,
+    ApplyOutcome, BlobContent, BlobHydration, BlobKind, RelayError, ReplicationEnvelope, SyncError,
+    blob_ceiling, hydrate_blob_content,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1271,15 +1271,31 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     missing.push(kind);
                 }
             }
-            if missing.is_empty() {
+            // The loosest ceiling any missing kind allows. An empty `missing`
+            // yields no ceiling and needs no download.
+            let Some((constraint, limit_bytes)) = missing
+                .iter()
+                .copied()
+                .map(blob_ceiling)
+                .max_by_key(|(_, limit_bytes)| *limit_bytes)
+            else {
                 continue;
-            }
+            };
             let response = self.transport.download_blob(BlobDownloadRequest {
                 workspace_id: workspace_id.to_owned(),
                 replication_epoch: identity.replication_epoch.clone(),
                 stream_identity: identity.stream_identity.clone(),
                 sha256: sha256.clone(),
             })?;
+            // Refuse before hashing and before copying: a transport is not
+            // trusted to bound its own response, and no kind can accept this.
+            if response.bytes.len() > limit_bytes {
+                return Err(RelayError::BlobTooLarge {
+                    constraint,
+                    limit_bytes,
+                    observed_bytes: response.bytes.len(),
+                });
+            }
             if hex_sha256(&response.bytes) != sha256 {
                 return Err(RelayError::BlobInvalid);
             }
@@ -1300,9 +1316,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 )
                 .map_err(|error| match error {
                     SyncError::BlobInvalid => RelayError::BlobInvalid,
-                    // Keep the named limit, unit, and observed size instead of
-                    // collapsing the refusal to its error code.
-                    SyncError::BlobTooLarge { .. } => RelayError::Local(error.to_string()),
+                    SyncError::BlobTooLarge {
+                        constraint,
+                        limit_bytes,
+                        observed_bytes,
+                    } => RelayError::BlobTooLarge {
+                        constraint,
+                        limit_bytes,
+                        observed_bytes,
+                    },
                     other => local(other),
                 })? {
                     TxnOutcome::Committed(()) => {}
@@ -1314,12 +1336,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum BlobKind {
-    Text,
-    Binary,
 }
 
 fn collect_blob_refs(

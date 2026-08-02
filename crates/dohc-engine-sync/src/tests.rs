@@ -1119,6 +1119,55 @@ fn text_blob_over_the_text_ceiling_is_refused_at_ingest() {
     assert_eq!(refused_rows, 0);
 }
 
+/// The relay pull checks the ceiling on the undecoded response, before it
+/// hashes the bytes and before it copies them into a `String`. The served
+/// bytes deliberately do NOT hash to the requested sha256, so the refusal can
+/// only be `BlobTooLarge` while the size check runs first.
+///
+/// MUTATION: move the check below `hex_sha256` and this refuses with
+/// `BlobInvalid` instead; drop it and the refusal comes from the chokepoint
+/// after the wasted hash and copy.
+#[test]
+fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let sha256 = dohc_engine_storage::hex_sha256(b"an honest sha the relay does not serve");
+    let op = version_create_with_shipped_snapshots(
+        "oversized-blob-peer",
+        "oversized-blob-version",
+        vec![shipped_text_snapshot(
+            "oversized-blob-object",
+            "oversized-blob.md",
+            &sha256,
+        )],
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![op],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256, vec![b'a'; MAX_TEXT_BYTES + 1]);
+    let client = RelaySyncClient::new(relay);
+
+    assert_eq!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        Err(RelayError::BlobTooLarge {
+            constraint: "MAX_TEXT_BYTES",
+            limit_bytes: MAX_TEXT_BYTES,
+            observed_bytes: MAX_TEXT_BYTES + 1,
+        })
+    );
+    assert!(
+        read_relay_cursor(&engine, "ws")
+            .expect("read cursor")
+            .is_none()
+    );
+}
+
 #[test]
 fn exact_duplicate_is_noop_and_gap_is_rejected() {
     let (_scratch, _path, mut engine) = store();

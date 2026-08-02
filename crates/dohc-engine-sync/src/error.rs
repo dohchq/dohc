@@ -81,6 +81,14 @@ pub enum RelayError {
     BlobReferenceMissing,
     #[error("relay blob content failed integrity validation")]
     BlobInvalid,
+    #[error(
+        "relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
+    )]
+    BlobTooLarge {
+        constraint: &'static str,
+        limit_bytes: usize,
+        observed_bytes: usize,
+    },
     #[error("relay key envelope is missing")]
     KeyEnvelopeMissing,
     #[error("share is unavailable")]

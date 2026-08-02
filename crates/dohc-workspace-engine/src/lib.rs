@@ -10743,6 +10743,11 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if matches!(&error, RuntimeError::Relay(RelayError::ShareReadOnly)) {
         return wire(ErrorCode::InvalidParams, "share-read-only");
     }
+    // The only rejection whose message carries numbers. `wire` takes a static
+    // string, so the generic tail below would replace them with a placeholder.
+    if let RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) = &error {
+        return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
+    }
     if let RuntimeError::Domain(domain) = &error {
         let message = match domain {
             DomainError::IdempotencyKeyReuseMismatch => Some("idempotency-key-reuse-mismatch"),
@@ -10824,7 +10829,7 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::IdentityNotRecognized => ErrorCode::IdentityNotRecognized,
         RelayError::ShareReadOnly => ErrorCode::ShareReadOnly,
         RelayError::ShareOperationRejected => ErrorCode::ShareOperationRejected,
-        RelayError::PayloadTooLarge => ErrorCode::PayloadTooLarge,
+        RelayError::PayloadTooLarge | RelayError::BlobTooLarge { .. } => ErrorCode::PayloadTooLarge,
         RelayError::QuotaExceeded => ErrorCode::QuotaExceeded,
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,
@@ -11057,6 +11062,31 @@ mod tests {
         // through the catch-all to Internal.
         let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
+    }
+
+    /// An ingest ceiling is useless if the caller cannot read which limit it
+    /// hit. `wire` only takes static strings, so the generic tail replaces
+    /// every message with "workspace operation failed".
+    ///
+    /// MUTATION: drop the explicit `BlobTooLarge` arm in `map_runtime` and the
+    /// numbers vanish from the surfaced error.
+    #[test]
+    fn an_oversized_blob_refusal_reaches_the_caller_naming_its_limit() {
+        let surfaced = map_runtime(RuntimeError::Relay(RelayError::BlobTooLarge {
+            constraint: "MAX_TEXT_BYTES",
+            limit_bytes: 10 * 1024 * 1024,
+            observed_bytes: 10 * 1024 * 1024 + 1,
+        }));
+        assert_eq!(surfaced.code, ErrorCode::PayloadTooLarge);
+        assert_eq!(
+            surfaced.message,
+            "relay blob exceeds MAX_TEXT_BYTES: limit 10485760 bytes, observed 10485761 bytes"
+        );
+        assert_eq!(
+            surfaced.retry,
+            dohc_engine_protocol::Retryability::No,
+            "a blob that exceeds a fixed ceiling never succeeds on retry"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

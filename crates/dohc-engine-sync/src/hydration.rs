@@ -5,10 +5,25 @@ use rusqlite::{OptionalExtension, params};
 use crate::SyncError;
 use crate::journal::crashes;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BlobKind {
+    Text,
+    Binary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobContent {
     Text(String),
     Binary(Vec<u8>),
+}
+
+impl BlobContent {
+    fn kind(&self) -> BlobKind {
+        match self {
+            BlobContent::Text(_) => BlobKind::Text,
+            BlobContent::Binary(_) => BlobKind::Binary,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,25 +32,35 @@ pub struct BlobHydration {
     pub content: BlobContent,
 }
 
+/// The store's byte ceiling for a blob kind, as a named constraint and its
+/// configured limit. Single source of truth for both ingest checks.
+pub const fn blob_ceiling(kind: BlobKind) -> (&'static str, usize) {
+    match kind {
+        BlobKind::Text => ("MAX_TEXT_BYTES", MAX_TEXT_BYTES),
+        BlobKind::Binary => (
+            "MAX_CAPTURE_BINARY_FILE_BYTES",
+            MAX_CAPTURE_BINARY_FILE_BYTES,
+        ),
+    }
+}
+
 /// Hash-verify and hydrate a bounded content-addressed blob in one transaction.
 /// Existing content is re-verified; a hash collision or poisoned row fails
 /// closed instead of being overwritten.
 ///
 /// The ceiling is enforced here, not inherited from a transport response bound,
-/// so every `RelayTransport` ingests under the same store invariants.
+/// so every caller ingests under the same store invariants. Relay pulls bail
+/// out earlier, on the undecoded response, to skip the hash and the copy.
 pub fn hydrate_blob_content(
     store: &mut EngineStore,
     blob: &BlobHydration,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<()>, SyncError> {
-    let (bytes, constraint, limit_bytes) = match &blob.content {
-        BlobContent::Text(text) => (text.as_bytes(), "MAX_TEXT_BYTES", MAX_TEXT_BYTES),
-        BlobContent::Binary(bytes) => (
-            bytes.as_slice(),
-            "MAX_CAPTURE_BINARY_FILE_BYTES",
-            MAX_CAPTURE_BINARY_FILE_BYTES,
-        ),
+    let bytes = match &blob.content {
+        BlobContent::Text(text) => text.as_bytes(),
+        BlobContent::Binary(bytes) => bytes.as_slice(),
     };
+    let (constraint, limit_bytes) = blob_ceiling(blob.content.kind());
     if bytes.len() > limit_bytes {
         return Err(SyncError::BlobTooLarge {
             constraint,
