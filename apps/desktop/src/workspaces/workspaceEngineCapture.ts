@@ -1107,7 +1107,7 @@ export function createWorkspaceEngineCapture(
 
     const rebind = async (
       failed: EngineYdocProviderSession,
-      options?: { releaseBeforeOpen?: boolean },
+      options?: { releaseBeforeOpen?: boolean; retryTransportErrors?: boolean },
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
       const doc = canonicalDoc;
@@ -1123,7 +1123,9 @@ export function createWorkspaceEngineCapture(
       }
       let replacement: EngineYdocProviderSession;
       try {
-        replacement = await openGeneration(false);
+        replacement = await openGeneration(false, {
+          retryTransportErrors: options?.retryTransportErrors,
+        });
       } catch (error) {
         markDead(failed);
         throw error;
@@ -1166,6 +1168,7 @@ export function createWorkspaceEngineCapture(
 
     const executeWithReconnect = async <T>(
       operation: (session: EngineYdocProviderSession) => Promise<T>,
+      options?: { retryTransportErrors?: boolean },
     ): Promise<T> => {
       if (closed) throw closedError();
       // Settling and closing are the paths that PERSIST. A dead session still
@@ -1185,7 +1188,9 @@ export function createWorkspaceEngineCapture(
         return await operation(generation);
       } catch (error) {
         if (!isEngineSessionReconnectError(error)) throw error;
-        await rebind(generation);
+        await rebind(generation, {
+          retryTransportErrors: options?.retryTransportErrors,
+        });
         if (current === null) throw error;
         return await operation(current);
       }
@@ -1286,9 +1291,17 @@ export function createWorkspaceEngineCapture(
             return;
           }
           try {
-            await executeWithReconnect(async (session) => {
-              await session.close(closeOptions);
-            });
+            // Bounded for the same reason reviveDeadSession is: a session
+            // still LIVE when the daemon died reaches its rebind from HERE,
+            // and the full transport ladder spends 2.5s of the 3s quit budget
+            // waiting for a daemon that cannot answer — starving the store
+            // closes and the daemon stop chained behind it.
+            await executeWithReconnect(
+              async (session) => {
+                await session.close(closeOptions);
+              },
+              { retryTransportErrors: false },
+            );
           } catch (error) {
             // A settle failure whose RELEASE still succeeded tore the daemon
             // session down — record the teardown before rethrowing, or every

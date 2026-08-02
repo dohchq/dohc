@@ -1243,7 +1243,9 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
 // in adoptGeneration is genuinely exercised. `lineage: "absent"` models a crash
 // that lost the durable lineage, where the client would otherwise seed a fresh
 // doc from the .md. Retry counts are production's; only the backoff sleep is
-// stubbed, so the transport-retry path runs for real without wall time.
+// stubbed, so the transport-retry path runs for real without wall time. Every
+// delay it asks for is recorded, so a test can price a retry path exactly
+// instead of timing it against a machine other tests are also using.
 async function daemonDeathCapture(
   prefix: string,
   workspaceId: string,
@@ -1266,7 +1268,7 @@ async function daemonDeathCapture(
     releasedGenerations: number[];
   };
   generations: Y.Doc[];
-  backoff: { real: boolean };
+  backoff: { delays: number[] };
   loseDurableLineage: () => void;
   applyDaemonSideEdit: (text: string) => void;
 }> {
@@ -1306,15 +1308,14 @@ async function daemonDeathCapture(
       return await loopback.sendRequest(request);
     },
   };
-  // Backoff is stubbed by default so the LOGIC tests do not pay for it, and
-  // switchable so a test can price a path against production wall time.
-  const backoff = { real: false };
+  // Backoff never sleeps, so no test pays wall time for it; the requested
+  // delays are the record a test asserts against.
+  const backoff = { delays: [] as number[] };
   const sessions = new EngineWorkspaceSessions(
     { currentClient: () => daemonClient },
     {
       sleep: async (delayMs) => {
-        if (!backoff.real) return;
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        backoff.delays.push(delayMs);
       },
     },
   );
@@ -1800,15 +1801,18 @@ it("a recovered session does not leave a stale release obligation behind", async
 // link, with the SQLite/WAL closes and the daemon stop chained behind them. A
 // recovery attempt on the close/settle path must therefore be BOUNDED: against
 // a daemon that is still down it cannot succeed anyway, and burning the
-// transport retry ladder (100+200+400+800+1000ms) would starve the cleanup
-// that still can. This test prices the path with production backoff.
-const QUIT_BUDGET_MS = 3_000;
-const CLOSE_PATH_BOUND_MS = 1_000;
+// transport retry ladder (100+200+400+800+1000ms = 2.5s of the 3s budget)
+// would starve the cleanup that still can.
+//
+// The tests below price that bound as the backoff the path ASKS the supervisor
+// for, not as elapsed wall time: a wall-clock bound loose enough to survive a
+// loaded suite also passes a real regression on a quiet machine.
+//
+// `retryTransportErrors: false` allows two attempts, so at most ONE gap of the
+// supervisor's initial backoff.
+const BOUNDED_CLOSE_BACKOFF_MS = 100;
 
-// Prices the DEAD-session close only. A session still live when the daemon
-// dies takes rebind's full retry ladder at quit (~2.6s) — pre-existing on
-// main and tracked separately; do not read this as covering that path.
-it("a settling close of a DEAD session against a down daemon stays well inside the quit budget", async () => {
+it("a settling close of a DEAD session against a down daemon takes one bounded backoff, not the ladder", async () => {
   const { rootPath, sessions, openProvider, state, backoff } =
     await daemonDeathCapture("dohc-ydoc-death-budget-", "ydoc-death-budget");
   const capture = createWorkspaceEngineCapture({
@@ -1827,21 +1831,50 @@ it("a settling close of a DEAD session against a down daemon stays well inside t
   typeInto(rendererDoc, session, "alive ");
   await session.settleNow();
 
-  // Drive the session dead while backoff is still stubbed: only the close is
-  // being priced here, not the set-up.
   state.daemonAlive = false;
   typeInto(rendererDoc, session, "PRE_KILL");
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
 
+  // Only the close is priced: the set-up's own retries are not the subject.
+  backoff.delays.length = 0;
   // The user quits before the supervisor's replacement is up.
-  backoff.real = true;
-  const startedAt = Date.now();
   await session.close().catch(() => undefined);
-  const elapsedMs = Date.now() - startedAt;
 
-  expect(elapsedMs).toBeLessThan(CLOSE_PATH_BOUND_MS);
-  expect(CLOSE_PATH_BOUND_MS).toBeLessThan(QUIT_BUDGET_MS);
+  expect(backoff.delays).toEqual([BOUNDED_CLOSE_BACKOFF_MS]);
   // And it never opened a generation it could not have reached.
+  expect(state.generation).toBe(1);
+});
+
+// The other half of the same quit: nothing was typed after the daemon died, so
+// the session is still on its LIVE generation and reaches its rebind from
+// close() rather than from the dead-session revive.
+it("a settling close of a session still LIVE when the daemon died takes one bounded backoff, not the ladder", async () => {
+  const { rootPath, sessions, openProvider, state, backoff } =
+    await daemonDeathCapture("dohc-ydoc-live-budget-", "ydoc-live-budget");
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-live-budget",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+
+  state.daemonAlive = false;
+  backoff.delays.length = 0;
+  await session.close().catch(() => undefined);
+
+  // Not even one gap here: the workspace binding is still cached, so the
+  // bounded rebind spends its first attempt on it and gives up. The ladder
+  // this replaces asked for 100+100+200+400+800+1000 ms.
+  expect(backoff.delays).toEqual([]);
   expect(state.generation).toBe(1);
 });
 
@@ -1868,10 +1901,9 @@ it("an explicit settle against a down daemon fails fast instead of blocking", as
   typeInto(rendererDoc, session, "PRE_KILL");
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
 
-  backoff.real = true;
-  const startedAt = Date.now();
+  backoff.delays.length = 0;
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
-  expect(Date.now() - startedAt).toBeLessThan(CLOSE_PATH_BOUND_MS);
+  expect(backoff.delays).toEqual([BOUNDED_CLOSE_BACKOFF_MS]);
 
   await session.close({ settle: false }).catch(() => undefined);
   await capture.stop();
