@@ -1655,6 +1655,15 @@ export function ChatsView(props: {
   useEffect(() => {
     return bridge().onWorkspaceActivity(() => {
       void refreshFollows();
+      if (nav.level === "channels") {
+        // The roll-up unread badge lives on this list, so a write to a chat
+        // the user does not have open is only visible here. Background mode
+        // keeps an in-flight create/join/share mutation's result (it leaves
+        // liveToken alone) while still checking the captured token and its own
+        // request sequence, so a stale or cross-workspace response is dropped.
+        void refreshOverview({ background: true });
+        return;
+      }
       if (nav.level === "feed") {
         void loadPersonalFeed();
         return;
@@ -1750,6 +1759,7 @@ export function ChatsView(props: {
     nav,
     refreshOpenDm,
     refreshFollows,
+    refreshOverview,
   ]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.

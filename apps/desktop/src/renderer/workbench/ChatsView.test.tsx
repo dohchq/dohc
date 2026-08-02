@@ -1579,6 +1579,80 @@ describe("ChatsView live activity refresh", () => {
       threadId: "thread-1",
     });
   });
+
+  // The write lands in a chat the user does NOT have open, so the roll-up
+  // badge on the channel list is the only place it shows. Without the list's
+  // own subscription the count waits for a navigation or a relaunch.
+  it("raises the channel list's roll-up badge while the list stays on screen", async () => {
+    let unreadCount = 0;
+    bridgeMock.listChatChannels.mockImplementation(() =>
+      Promise.resolve({ channels: [channel({ unreadCount })], fileThreads: [] }),
+    );
+    renderView();
+
+    await screen.findByTestId("chats-channel-name");
+    expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    expect(workspaceActivityCallbacks.size).toBeGreaterThan(0);
+
+    // An agent posts into a thread nobody opened.
+    unreadCount = 3;
+    act(() => emitWorkspaceActivity());
+
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("3");
+    // Nothing navigated: the badge appeared on the list itself.
+    expect(screen.getByTestId("chats-channels-heading")).toBeTruthy();
+    expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
+  });
+
+  it("drops a slow list refresh from the workspace the user left", async () => {
+    type ChannelListPage = {
+      channels: ChatChannelRecord[];
+      fileThreads: FileChatThreadRecord[];
+    };
+    let resolveStale!: (value: ChannelListPage) => void;
+    const staleRefresh = new Promise<ChannelListPage>((resolve) => {
+      resolveStale = resolve;
+    });
+    let oldWorkspaceReads = 0;
+    bridgeMock.listChatChannels.mockImplementation(
+      ({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId !== "workspace-old") {
+          return Promise.resolve({
+            channels: [channel({ id: "channel-new", name: "planning", slug: "planning" })],
+            fileThreads: [],
+          });
+        }
+        oldWorkspaceReads += 1;
+        return oldWorkspaceReads === 1
+          ? Promise.resolve({ channels: [channel()], fileThreads: [] })
+          : staleRefresh;
+      },
+    );
+    const view = render(
+      <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-name").textContent).toBe("general"),
+    );
+    act(() => emitWorkspaceActivity());
+
+    view.rerender(
+      <ChatsView workspaceId="workspace-new" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-name").textContent).toBe("planning"),
+    );
+
+    await act(async () => {
+      resolveStale({
+        channels: [channel({ unreadCount: 9 })],
+        fileThreads: [],
+      });
+      await staleRefresh;
+    });
+    expect(screen.getByTestId("chats-channel-name").textContent).toBe("planning");
+    expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+  });
 });
 
 describe("ChatsView decisions", () => {
