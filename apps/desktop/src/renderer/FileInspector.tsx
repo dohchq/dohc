@@ -675,6 +675,32 @@ function MarkdownView(props: {
   const [savedBody, setSavedBody] = useState(props.body);
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+
+  // WS-G2-C-2: a rich (markdown) file on an engine-flagged workspace binds
+  // Tiptap to the engine-native Y.Doc (recordUpdate + debounced settle). Solo
+  // runs entirely on the engine with no relay, and a shared workspace co-edits
+  // through the same
+  // ydoc.update replication. available:false (unflagged workspace, secret path,
+  // missing file, already live) keeps the plain local autosave editor.
+  const engine = useEngineDoc({
+    workspaceId: props.workspaceId,
+    path: props.path,
+    enabled: !props.truncated && !props.forceReadOnly,
+    reopenKey: props.reopenKey,
+  });
+  // #533. The engine open runs ON the capture chain, so a document opened
+  // while that chain is busy (startup reconciliation of a 1,000-file
+  // workspace, a version switch) waits before dohc knows whether it is
+  // engine-backed. `available: false` alone cannot tell that wait apart from
+  // "not engine-backed", so this surface used to answer it with the plain
+  // editor — writable, autosaving STRAIGHT TO DISK — while the session about
+  // to bind seeded from the engine head. Keystrokes in that window took a path
+  // that session never sees. Nothing here is writable until the open answers.
+  const opening = engine.opening;
+  // What the user SEES, as against `mode`, which is what the user CHOSE. An
+  // opening document reads; its chosen mode is kept and restored, so a
+  // document that would have opened straight into the editor still does.
+  const surfaceMode = opening ? "read" : mode;
   const editorPendingUndo = useMemo(
     () =>
       props.pendingUndo
@@ -703,7 +729,7 @@ function MarkdownView(props: {
   const wysiwygRef = useRef<MarkdownEditorHandle | null>(null);
   const latestDraft = useRef(props.body);
   const serializeDraftRef = useRef<() => string>(() => props.body);
-  const editing = mode !== "read";
+  const editing = surfaceMode !== "read";
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -711,7 +737,7 @@ function MarkdownView(props: {
     // latestDraft.current). Merge the live editor body over that frontmatter so
     // a save never emits the stale mount-time body. Source mode edits the full
     // markdown directly in the textarea, so latestDraft.current is canonical.
-    if (mode === "wysiwyg") {
+    if (surfaceMode === "wysiwyg") {
       const body = wysiwygRef.current?.getMarkdown() ?? markdownEditorBody(draft);
       return mergeMarkdownEditorBody(latestDraft.current, body);
     }
@@ -745,11 +771,11 @@ function MarkdownView(props: {
   };
 
   useEffect(() => {
-    if (mode === "read") void loadMarkdownEditor();
-  }, [mode, props.path]);
+    if (surfaceMode === "read") void loadMarkdownEditor();
+  }, [surfaceMode, props.path]);
 
   useEffect(() => {
-    if (pendingScrollLine === null || mode !== "source") return;
+    if (pendingScrollLine === null || surfaceMode !== "source") return;
     const textarea = editorRef.current;
     if (!textarea) return;
     const { start, end } = lineSpanInText(textarea.value, pendingScrollLine);
@@ -761,7 +787,7 @@ function MarkdownView(props: {
       (pendingScrollLine - 1) * lineHeight - textarea.clientHeight / 3,
     );
     setPendingScrollLine(null);
-  }, [pendingScrollLine, mode]);
+  }, [pendingScrollLine, surfaceMode]);
 
   const { onSaveStateChange } = props;
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -792,18 +818,6 @@ function MarkdownView(props: {
     ? () => props.onSharePath?.(props.path)
     : undefined;
 
-  // WS-G2-C-2: a rich (markdown) file on an engine-flagged workspace binds
-  // Tiptap to the engine-native Y.Doc (recordUpdate + debounced settle). Solo
-  // runs entirely on the engine with no relay, and a shared workspace co-edits
-  // through the same
-  // ydoc.update replication. available:false (unflagged workspace, secret path,
-  // missing file, already live) keeps the plain local autosave editor.
-  const engine = useEngineDoc({
-    workspaceId: props.workspaceId,
-    path: props.path,
-    enabled: !props.truncated && !props.forceReadOnly,
-    reopenKey: props.reopenKey,
-  });
   const readOnly = !!props.forceReadOnly || (props.truncated && !engine.available);
   const engineMode = engine.available && engine.doc !== null;
 
@@ -832,12 +846,12 @@ function MarkdownView(props: {
       setShowSource(false);
       return;
     }
-    const source = mode === "source" ? latestDraft.current : savedBody;
+    const source = surfaceMode === "source" ? latestDraft.current : savedBody;
     const markdown = markdownEditorBody(source);
     const headings = extractWorkspaceHeadings(markdown);
     const heading = resolveWorkspaceHeadingAnchorTarget(headings, props.headingTarget);
     if (!heading) return;
-    if (mode === "source") {
+    if (surfaceMode === "source") {
       // Local source is an intentional editing/viewing mode. Keep it visible
       // and select the heading's real markdown line instead of replacing it
       // with the rich editor merely to navigate.
@@ -848,7 +862,7 @@ function MarkdownView(props: {
       setPendingScrollLine(heading.line + frontmatterLineCount);
       return;
     }
-    if (readOnly || mode === "read") {
+    if (readOnly || surfaceMode === "read") {
       // Read-only documents do not mount Tiptap, so navigate the rendered
       // heading with the same document-order identity used by the parser.
       setPendingRenderedHeadingIndex(headings.indexOf(heading));
@@ -859,7 +873,7 @@ function MarkdownView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [headingTargetNonce]);
   useEffect(() => {
-    if (pendingRenderedHeadingIndex === null || mode !== "read") return;
+    if (pendingRenderedHeadingIndex === null || surfaceMode !== "read") return;
     const container = readDocumentRef.current;
     if (!container) return;
     const applyTarget = () => {
@@ -880,7 +894,7 @@ function MarkdownView(props: {
     });
     observer.observe(container, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [mode, pendingRenderedHeadingIndex]);
+  }, [surfaceMode, pendingRenderedHeadingIndex]);
   useEffect(() => {
     if (!showSource || !engine.doc) {
       setSourceMarkdown(null);
@@ -928,7 +942,7 @@ function MarkdownView(props: {
       setShowSource((current) => !current);
       return;
     }
-    if (mode === "source") {
+    if (surfaceMode === "source") {
       // Leaving editable source with an autosave still pending: flush the RAW
       // draft first (header-toggle parity). Switching mode re-points
       // serializeDraftRef at the Tiptap parse, which is lossy for constructs
@@ -1345,12 +1359,22 @@ function MarkdownView(props: {
         onShare={onShareCurrentPath}
         actions={
           <>
-            {/* Read mode hides the "Saved" idle chip, but PageIdentity stays
-                editable here and autosaves title/icon edits — so a pending or
-                failed save (saveState !== "saved") must surface even when not
+            {/* The wait has its own word (#533): an opening document is not a
+                saved one, and dohc has not decided about it yet. Read mode
+                hides the "Saved" idle chip, but PageIdentity stays editable
+                there and autosaves title/icon edits — so a pending or failed
+                save (saveState !== "saved") must surface even when not
                 `editing`, or a failed title/icon save is invisible while the
                 optimistic value keeps showing. */}
-            {editing || saveState !== "saved" ? (
+            {opening ? (
+              <span
+                data-testid="markdown-open-state"
+                data-state="opening"
+                className="font-mono text-[11px] text-subtle"
+              >
+                Opening…
+              </span>
+            ) : editing || saveState !== "saved" ? (
               <span
                 data-testid="markdown-save-state"
                 data-state={saveState}
@@ -1362,9 +1386,14 @@ function MarkdownView(props: {
             <button
               type="button"
               data-testid="markdown-edit-toggle"
-              disabled={readOnly}
+              disabled={readOnly || opening}
+              title={
+                opening
+                  ? "You can edit this document when it finishes opening."
+                  : undefined
+              }
               onClick={() => {
-                if (readOnly) return;
+                if (readOnly || opening) return;
                 if (mode === "source" && saveTimer.current) {
                   clearTimeout(saveTimer.current);
                   void saveNow();
@@ -1373,7 +1402,7 @@ function MarkdownView(props: {
               }}
               className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {mode === "read" ? "Edit" : mode === "wysiwyg" ? "Source" : "WYSIWYG"}
+              {surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG"}
             </button>
             {/* A truncated doc only loaded a bounded prefix into
                 serializeDraftRef — copying/exporting it would silently emit a
@@ -1390,7 +1419,7 @@ function MarkdownView(props: {
         }
       />
       {props.truncatedNotice}
-      {mode === "source" ? (
+      {surfaceMode === "source" ? (
         <textarea
           data-testid="markdown-editor"
           ref={editorRef}
@@ -1408,7 +1437,7 @@ function MarkdownView(props: {
           spellCheck={false}
           className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
         />
-      ) : mode === "wysiwyg" ? (
+      ) : surfaceMode === "wysiwyg" ? (
         // data-dohc-doc-pane: see the note on the engine pane above.
         <div
           data-testid="view-markdown"
@@ -1462,13 +1491,15 @@ function MarkdownView(props: {
           className="min-h-0 flex-1 overflow-auto"
         >
           <div className="dohc-page-topmatter">
+            {/* Title, icon and properties autosave through the SAME disk write
+                as the body, so the opening refusal covers them too (#533). */}
             <PageIdentity
               body={draft}
               onChange={onPropertiesDraft}
               filenameStem={filenameStem(props.path)}
-              readOnly={readOnly}
+              readOnly={readOnly || opening}
             />
-            {!readOnly ? (
+            {!readOnly && !opening ? (
               <Suspense fallback={<PropertiesFallback />}>
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
               </Suspense>

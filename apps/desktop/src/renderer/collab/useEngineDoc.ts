@@ -14,9 +14,11 @@ import {
 // token, no cloud. Solo editing runs entirely on the engine; a co-editor's edit
 // arrives as a forwarded remote delta on the same channel.
 //
-// available:false => the doc is NOT engine-backed (unflagged workspace, secret
-// path, missing file, or already live) — the caller stays on the plain local
-// autosave editor showing the real on-disk content. Undo/redo is intact: the
+// available:false AND opening:false => the doc is NOT engine-backed (unflagged
+// workspace, secret path, missing file, or already live) — the caller stays on
+// the plain local autosave editor showing the real on-disk content. While
+// opening:true the answer is not known yet and the caller must stay read-only.
+// Undo/redo is intact: the
 // Collaboration extension bundles the Yjs UndoManager binding (COLLAB_STARTER_KIT
 // disables the plain history), so Mod-z/Mod-y drive the CRDT undo stack.
 //
@@ -40,8 +42,17 @@ export type EngineDocSaveState =
 
 export type UseEngineDoc = {
   // True once the engine session is open and the mirror doc is bound. false =>
-  // fall back to the local autosave editor.
+  // fall back to the local autosave editor, but ONLY once `opening` is false.
   available: boolean;
+  // The open is still in flight: dohc does not know yet whether this document
+  // is engine-backed (#533). "Opening" and "not engine-backed" used to be the
+  // same `available: false`, so the caller showed its writable plain editor —
+  // whose autosave writes straight to disk — for the whole wait. On a workspace
+  // whose capture chain is busy (startup reconciliation, a version switch) that
+  // wait is seconds, and every keystroke in it took a path the about-to-bind
+  // session never sees: the session then seeds from a head without them.
+  // The caller must offer no writable surface while this is true.
+  opening: boolean;
   // The mirror Y.Doc Tiptap binds to; null until bound / when unavailable.
   doc: Y.Doc | null;
   // The document's REAL save state. "saving" the moment an edit is made,
@@ -123,6 +134,10 @@ export function useEngineDoc(input: {
 }): UseEngineDoc {
   const [doc, setDoc] = useState<Y.Doc | null>(null);
   const [available, setAvailable] = useState(false);
+  // Seeded from `enabled`, not false: the effect below runs AFTER the first
+  // paint, so a `useState(false)` start would paint one writable frame of the
+  // plain editor before the open it is waiting for even began.
+  const [opening, setOpening] = useState(input.enabled);
   const [saveState, setSaveState] = useState<EngineDocSaveState>("saved");
   // Monotonic per-open token: only the newest open may set state (the async-
   // state invariant — a stale workspace/path response never repaints).
@@ -131,6 +146,7 @@ export function useEngineDoc(input: {
   useEffect(() => {
     if (!input.enabled) {
       setAvailable(false);
+      setOpening(false);
       setDoc(null);
       setSaveState("saved");
       return;
@@ -143,6 +159,7 @@ export function useEngineDoc(input: {
     let unsubscribeSaveState: (() => void) | null = null;
 
     setAvailable(false);
+    setOpening(true);
     setDoc(null);
     setSaveState("saved");
 
@@ -159,6 +176,9 @@ export function useEngineDoc(input: {
           return;
         }
         binding = bound;
+        // The open resolved either way: the caller now knows whether this
+        // document is engine-backed, so it may offer the plain editor again.
+        setOpening(false);
         if (!bound.available || !bound.doc) {
           setAvailable(false);
           setDoc(null);
@@ -205,6 +225,7 @@ export function useEngineDoc(input: {
       })
       .catch(() => {
         if (cancelled || token !== openTokenRef.current) return;
+        setOpening(false);
         setAvailable(false);
         setDoc(null);
       });
@@ -228,5 +249,5 @@ export function useEngineDoc(input: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input.workspaceId, input.path, input.enabled, input.reopenKey]);
 
-  return { available, doc, saveState };
+  return { available, opening, doc, saveState };
 }
