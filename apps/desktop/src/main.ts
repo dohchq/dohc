@@ -2853,6 +2853,13 @@ function isApprovedRoot(normalized: string): boolean {
 const OPEN_WORKSPACE_ARG = "--open-workspace";
 const pendingOpenPaths: string[] = [];
 
+// `app.isReady()` turns true before the whenReady continuation finishes
+// awaiting the Rust engine daemon, so it cannot gate window creation. This
+// flag turns true only once the daemon is up, IPC is registered, and the first
+// window exists. Until then, handlers queue their paths instead of opening a
+// window the bootstrap cannot serve.
+let bootstrapComplete = false;
+
 function collectOpenWorkspaceArgs(argv: string[]): string[] {
   const paths: string[] = [];
   for (let index = 1; index < argv.length; index += 1) {
@@ -7711,19 +7718,22 @@ if (!app.requestSingleInstanceLock()) {
   app.on("open-file", (event, path) => {
     event.preventDefault();
     pendingOpenPaths.push(path);
-    if (app.isReady()) {
-      const window = targetWindow(undefined);
-      if (window) {
-        void flushPendingOpenPaths(window);
-      } else {
-        void showOrCreateMainWindow().then(() =>
-          flushPendingOpenPaths(targetWindow(undefined)),
-        );
-      }
+    if (!bootstrapComplete) return;
+    const window = targetWindow(undefined);
+    if (window) {
+      void flushPendingOpenPaths(window);
+    } else {
+      void showOrCreateMainWindow().then(() =>
+        flushPendingOpenPaths(targetWindow(undefined)),
+      );
     }
   });
 
   app.on("second-instance", (_event, argv) => {
+    if (!bootstrapComplete) {
+      pendingOpenPaths.push(...collectOpenWorkspaceArgs(argv));
+      return;
+    }
     const window = targetWindow(undefined);
     if (window) {
       if (window.isMinimized()) window.restore();
@@ -7822,14 +7832,26 @@ if (!app.requestSingleInstanceLock()) {
     refreshNativeWorkspaceSurfaces();
 
     const { createMainWindow } = await import("./window/createMainWindow");
+    // A path the handlers queued during the bootstrap is a later intent than the
+    // launch arguments, so it wins. Drain before the window exists: creating it
+    // starts the load, so a listener registered after any further await can miss
+    // did-finish-load and never send at all.
+    const drainedWorkspace = await flushPendingOpenPaths();
+    const activatedWorkspace = drainedWorkspace ?? initialActivatedWorkspace;
     const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
-    if (initialActivatedWorkspace) {
-      window.webContents.once("did-finish-load", () => {
-        sendWorkspaceActivated(window, initialActivatedWorkspace);
-      });
-    }
+    // Same tick as the window, so the load cannot finish before this listener.
+    window.webContents.once("did-finish-load", () => {
+      if (activatedWorkspace) sendWorkspaceActivated(window, activatedWorkspace);
+      // A path that arrived while the drain above was awaiting is queued behind
+      // an open gate, so no later event is guaranteed to flush it. The renderer
+      // has subscribed by now, so this one lands — and being last, it wins.
+      void flushPendingOpenPaths(window);
+    });
     launchMarks.firstWindow();
     desktopMarks.markOnce("first-window");
+    // The daemon is up, IPC is registered, and a window exists, so the deferred
+    // handlers can act directly.
+    bootstrapComplete = true;
 
     // Load persisted cloud credentials after the first window exists so local
     // workspaces do not pay credential-store I/O on the visible-launch path.
@@ -7853,6 +7875,18 @@ if (!app.requestSingleInstanceLock()) {
         broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
       })
       .catch(() => undefined);
+  }).catch((error: unknown) => {
+    // A throw after the daemon started would otherwise leave the gate closed
+    // forever: the app stays alive with no window and every handler deferring
+    // to a bootstrap that already died.
+    const message =
+      error instanceof Error ? error.message : "Unknown desktop startup error.";
+    console.error("[desktop] Desktop startup failed:", error);
+    dialog.showErrorBox(
+      "dohc failed to start",
+      `${message}\n\nRestart dohc. If it fails again, review the desktop logs.`,
+    );
+    app.quit();
   });
 
   app.on("window-all-closed", () => {
@@ -7867,6 +7901,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("activate", () => {
+    if (!bootstrapComplete) return;
     if (BrowserWindow.getAllWindows().length === 0) {
       void showOrCreateMainWindow();
     }
