@@ -3058,6 +3058,77 @@ describe("history page", () => {
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
   });
 
+  // Announcing the switch FIRST re-keys this component, and the re-key used to
+  // bump the same counter the operation checks itself against — so the switch
+  // invalidated its own token while its follow-up re-read was still pending,
+  // its finally skipped, and the selector sat disabled on "Switching…" for the
+  // rest of the session. Liveness and operation identity are different
+  // questions.
+  it("re-enables the selector when the switch re-read outlives the epoch bump", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    let switched = false;
+    // Only the mount read answers at once. Every read after it — the switch's
+    // own re-read, and the one the re-key issues — is held open, so the
+    // operation must survive the re-key to finish at all.
+    const held: Array<() => void> = [];
+    let versionReads = 0;
+    bridge.listWorkspaceVersions = vi.fn(() => {
+      const answer = () => ({
+        versions: [
+          {
+            id: "main",
+            name: "Main",
+            kind: "main" as const,
+            createdAtMs: 0,
+            canMergeIntoMain: false,
+          },
+          {
+            id: "try-1",
+            name: "Try: launch note",
+            kind: "named" as const,
+            createdAtMs: 1,
+            canMergeIntoMain: true,
+          },
+        ],
+        activeVersionId: switched ? "main" : "try-1",
+      });
+      versionReads += 1;
+      if (versionReads === 1) return Promise.resolve(answer());
+      return new Promise<ReturnType<typeof answer>>((resolveRead) => {
+        held.push(() => resolveRead(answer()));
+      });
+    });
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      switched = true;
+      return { activeVersionId: "main", changedFileCount: 0 };
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const mainItem = (await screen.findAllByTestId("version-item")).find(
+      (item) => item.dataset.versionId === "main",
+    );
+    await user.click(mainItem!);
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    // The re-key has happened by now: it is what issues the extra read.
+    await waitFor(() => expect(held.length).toBeGreaterThan(1));
+
+    await act(async () => {
+      for (const answerRead of held) answerRead();
+      await Promise.resolve();
+    });
+
+    const trigger = await screen.findByTestId("version-menu-button");
+    await waitFor(() =>
+      expect(screen.getByTestId("version-menu-active").textContent).not.toBe(
+        "Switching…",
+      ),
+    );
+    expect((trigger as HTMLButtonElement).disabled).toBe(false);
+  });
+
   // The same slip on the other flow. "Back to Main" switched, then dismissed
   // the review, and only then said where the workspace had landed — so an
   // old-version answer arriving while the dismissal was in flight met an unset

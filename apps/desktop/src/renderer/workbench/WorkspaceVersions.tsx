@@ -88,16 +88,34 @@ export function VersionMenu(props: {
   const [tryOpen, setTryOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  // Liveness token: bumped on unmount and on every new mutating operation, so
-  // a stale response can never apply state (workspace-switch race safety —
-  // the shell remounts per workspace, this guards the unmount edge and
-  // overlapping operations).
-  const liveToken = useRef(0);
+  // Two questions, and they are not the same one.
+  //
+  // May THIS read still write the snapshot? A newer read answers no — from a
+  // re-key, an unmount, or a mutation about to change what the read describes.
+  const snapshotToken = useRef(0);
+  // Is THIS mutation still the one running? Only another mutation or an
+  // unmount answers no. A re-key must NOT: the announcement that a switch
+  // succeeded is itself what re-keys this component, so a shared counter let
+  // the switch invalidate its own token — its finally then skipped, and the
+  // selector sat disabled on "Switching…" for the rest of the session.
+  const operationToken = useRef(0);
+  useEffect(
+    () => () => {
+      operationToken.current += 1;
+    },
+    [],
+  );
+  // A mutation supersedes both: it is the running operation now, and any read
+  // issued before it describes the world it is about to change.
+  const beginOperation = useCallback(() => {
+    snapshotToken.current += 1;
+    return ++operationToken.current;
+  }, []);
 
   const refresh = useCallback(async () => {
-    const token = liveToken.current;
+    const token = snapshotToken.current;
     const result = await bridge().listWorkspaceVersions({ workspaceId });
-    if (token !== liveToken.current) return null;
+    if (token !== snapshotToken.current) return null;
     setSnapshot(result);
     return result;
   }, [workspaceId]);
@@ -127,7 +145,7 @@ export function VersionMenu(props: {
     })();
     return () => {
       cancelled = true;
-      liveToken.current += 1;
+      snapshotToken.current += 1;
     };
   }, [refresh, props.refreshKey]);
 
@@ -148,7 +166,7 @@ export function VersionMenu(props: {
 
   const performSwitch = useCallback(
     async (versionId: string) => {
-      const token = ++liveToken.current;
+      const token = beginOperation();
       setBusy("switch");
       setInlineError(null);
       try {
@@ -156,9 +174,9 @@ export function VersionMenu(props: {
         // Re-check liveness after EVERY awaited step: the flush (or the
         // switch) may resolve after this panel was unmounted or superseded,
         // and a stale continuation must not mutate or repaint.
-        if (token !== liveToken.current) return;
+        if (token !== operationToken.current) return;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId });
-        if (token !== liveToken.current) return;
+        if (token !== operationToken.current) return;
         // The switch succeeded, so this IS the active version now — say so
         // before awaiting anything else. Main notifies the renderer BEFORE
         // this invoke returns, so a history refresh for the old version can
@@ -167,19 +185,19 @@ export function VersionMenu(props: {
         props.onWorkspaceStateChanged(versionId);
         await refresh();
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (token !== operationToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not switch versions."));
         // The switch may have partially applied before failing; make the
         // selector and editors reflect reality. Whatever stuck is what the
         // re-read reports, and if that read fails too, nobody knows.
         const recovered = await refresh().catch(() => null);
-        if (token !== liveToken.current) return;
+        if (token !== operationToken.current) return;
         props.onWorkspaceStateChanged(recovered?.activeVersionId);
       } finally {
-        if (token === liveToken.current) setBusy(null);
+        if (token === operationToken.current) setBusy(null);
       }
     },
-    [props, refresh, workspaceId],
+    [beginOperation, props, refresh, workspaceId],
   );
 
   const requestSwitch = useCallback(
@@ -207,29 +225,29 @@ export function VersionMenu(props: {
         setInlineError("Give the new version a name.");
         return;
       }
-      const token = ++liveToken.current;
+      const token = beginOperation();
       setBusy("create");
       setInlineError(null);
       try {
         await props.flushActiveDraft();
-        if (token !== liveToken.current) return;
+        if (token !== operationToken.current) return;
         const result = await bridge().createWorkspaceVersion({
           workspaceId,
           name: trimmed,
         });
-        if (token !== liveToken.current) return;
+        if (token !== operationToken.current) return;
         setSnapshot(result);
         // Create-and-switch: the new version is the active one.
         props.onWorkspaceStateChanged(result.activeVersionId);
         closeMenu();
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (token !== operationToken.current) return;
         setInlineError(ipcErrorMessage(error, "Could not create that version."));
       } finally {
-        if (token === liveToken.current) setBusy(null);
+        if (token === operationToken.current) setBusy(null);
       }
     },
-    [closeMenu, props, workspaceId],
+    [beginOperation, closeMenu, props, workspaceId],
   );
 
   // Keyboard-navigable menu: arrows move focus, Home/End jump, Escape closes
