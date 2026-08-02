@@ -6,6 +6,11 @@
 //! effective-policy resolution), and `searchIndex.ts`'s
 //! `readEngineSearchPolicySync` / `pathIsSearchIndexed`.
 //!
+//! The `effectivePolicy.ts` half is held to that claim by
+//! `tests/effective_policy.rs`, which asserts this port against a fixture
+//! regenerated from the live TypeScript oracle and drift-checked by the Rust
+//! gate. TypeScript is canonical: a disagreement is fixed here.
+//!
 //! ## The fail-closed contract (the hotfix this shard must preserve)
 //!
 //! An **absent** `.dohc/files.toml` / `.dohc/visibility.toml` is a valid
@@ -428,10 +433,11 @@ fn validate_top_level<'a>(
     if parsed.len() != 1 || !parsed.contains_key("rule") {
         errors.push("policy must contain exactly one top-level key: rule".to_owned());
     }
+    // An ABSENT `rule` key also earns this error, not only a present non-array
+    // one: the oracle tests `Array.isArray(parsed.rule)`, so an empty policy
+    // file reports both the missing top-level key AND the array shape.
     let rule = parsed.get("rule");
-    if let Some(value) = rule
-        && !value.is_array()
-    {
+    if !rule.is_some_and(|value| value.is_array()) {
         errors.push("rule must be an array of tables".to_owned());
     }
     rule
@@ -479,6 +485,7 @@ pub struct EffectivePolicy {
     pub tracked: bool,
     pub searchable: bool,
     pub visibility: Visibility,
+    pub export: Export,
     pub floor: PathFloor,
 }
 
@@ -497,12 +504,14 @@ pub fn resolve_effective_policy(
             tracked: false,
             searchable: false,
             visibility: Visibility::Hidden,
+            export: Export::Excluded,
             floor,
         };
     }
     let mut tracked = true;
     let mut searchable = true;
     let mut visibility = Visibility::Visible;
+    let mut export = Export::Included;
     for rule in files_policy.unwrap_or(&[]) {
         if !policy_glob_matches(&rule.path, path) {
             continue;
@@ -521,11 +530,15 @@ pub fn resolve_effective_policy(
         if let Some(v) = rule.visibility {
             visibility = v;
         }
+        if let Some(e) = rule.export {
+            export = e;
+        }
     }
     EffectivePolicy {
         tracked,
         searchable,
         visibility,
+        export,
         floor,
     }
 }

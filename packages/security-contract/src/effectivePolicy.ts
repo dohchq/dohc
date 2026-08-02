@@ -100,7 +100,14 @@ function segmentMatches(patternSegment: string, pathSegment: string): boolean {
   if (starIndex === -1) return patternSegment === pathSegment;
   const prefix = patternSegment.slice(0, starIndex);
   const suffix = patternSegment.slice(starIndex + 1);
-  return pathSegment.startsWith(prefix) && pathSegment.endsWith(suffix);
+  // The length floor makes `*` match zero or more characters, never fewer than
+  // zero: without it `draft*draft.md` matched `draft.md`, where the prefix and
+  // the suffix overlap and the star would have to consume -5 characters.
+  return (
+    pathSegment.length >= prefix.length + suffix.length &&
+    pathSegment.startsWith(prefix) &&
+    pathSegment.endsWith(suffix)
+  );
 }
 
 /**

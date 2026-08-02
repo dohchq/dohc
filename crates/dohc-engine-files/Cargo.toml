@@ -45,7 +45,12 @@ file-id = "0.2"
 # Shared `.dohc/files.toml` / `visibility.toml` parsing and search-policy
 # resolution. Both the runtime's local index path and sync's replicated index
 # path consume this one implementation.
-toml = "0.9"
+#
+# `preserve_order` keeps a parsed table in DOCUMENT order. The TypeScript oracle
+# reports one error per unknown key in the order the keys appear in the file, so
+# without it a policy with two unknown keys reported them alphabetically here and
+# the two ports disagreed about which error a user's agent reads first.
+toml = { version = "0.9", features = ["preserve_order"] }
 
 [target.'cfg(unix)'.dependencies]
 # Safe descriptor-relative filesystem operations. On Linux this also exposes
