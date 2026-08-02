@@ -41,6 +41,7 @@ import {
   scanWorkspaceFilesTolerant,
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import {
@@ -240,8 +241,15 @@ export interface WorkspaceVersionConflictResolveOutcome {
 
 // The save state of a live engine Y.Doc, derived from REAL settle outcomes.
 // "saved" means the projection committed and the .md landed — nothing else may
-// claim it.
-export type EngineYDocSaveState = "settling" | "saved" | "error";
+// claim it. "changed-on-disk" means the settle committed but the FILE holds an
+// edit made outside dohc, which the settle must not overwrite (#338); the
+// advice "error" carries (try another edit) is wrong there, so it gets its own
+// state, exactly like "read-only".
+export type EngineYDocSaveState =
+  | "settling"
+  | "saved"
+  | "error"
+  | "changed-on-disk";
 
 export interface WorkspaceEngineYDocCloseOptions {
   settle?: boolean;
@@ -485,6 +493,77 @@ function sha256Utf8(text: string): string {
 
 function sha256Bytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+// A settled projection is capped at MAX_PROJECTION_BYTES
+// (crates/dohc-engine-collab/src/limits.rs), so a file bigger than that cannot
+// be the settled artifact whatever its bytes are — the size alone answers the
+// question. Hashing it anyway would hold a close open over a read as long as
+// the file.
+export const MAX_SETTLED_FILE_BYTES = 16 * 1024 * 1024;
+
+type SettledFileDigest =
+  // The file's bytes, hashed. Compare it with the settle's sha.
+  | { kind: "sha256"; sha256: string }
+  // The file cannot BE the settled artifact: gone, not a regular file, or
+  // past the largest projection the engine can produce.
+  | { kind: "changed" }
+  // dohc could not check. This says nothing about the file's content, so the
+  // caller must not report either a save or a change from it.
+  | { kind: "unverifiable"; reason: string };
+
+// Hash the workspace file a settle claims to have written. Streamed and
+// bounded, and it refuses to read through a path that leaves the workspace.
+async function digestSettledFile(
+  rootPath: string,
+  path: string,
+): Promise<SettledFileDigest> {
+  const absolute = join(rootPath, path);
+  // Containment first, the same check the disk writer runs before it writes
+  // (createDefaultDiskWriter's assertContainedDir): a parent directory
+  // replaced by a symlink redirects this read outside the workspace, and a
+  // file out there that happened to match would report a save for an artifact
+  // that is not in the workspace at all.
+  let realRoot: string;
+  let realParent: string;
+  try {
+    [realRoot, realParent] = await Promise.all([
+      realpath(resolve(rootPath)),
+      realpath(dirname(absolute)),
+    ]);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "changed" };
+    return { kind: "unverifiable", reason: `the folder could not be read (${code ?? "unknown"})` };
+  }
+  if (realParent !== realRoot && !realParent.startsWith(realRoot + sep)) {
+    return {
+      kind: "unverifiable",
+      reason: "the folder now resolves outside the workspace",
+    };
+  }
+  try {
+    const info = await lstat(absolute);
+    // A symlink leaf is never an engine artifact — the disk writer refuses to
+    // write through one — so the artifact is not here.
+    if (info.isSymbolicLink() || !info.isFile()) return { kind: "changed" };
+    if (info.size > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
+    const hash = createHash("sha256");
+    let read = 0;
+    for await (const chunk of createReadStream(absolute)) {
+      const bytes = chunk as Uint8Array;
+      read += bytes.byteLength;
+      // The file grew past the bound after its size was taken. Same answer,
+      // and the read stops here rather than following it.
+      if (read > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
+      hash.update(bytes);
+    }
+    return { kind: "sha256", sha256: hash.digest("hex") };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "changed" };
+    return { kind: "unverifiable", reason: `the file could not be read (${code ?? "unknown"})` };
+  }
 }
 
 function pathBasename(path: string): string {
@@ -2267,10 +2346,8 @@ export function createWorkspaceEngineCapture(
       ) => {
         // The settle committed, but the engine says the FILE did not move
         // (materialization blocked by containment — a symlinked target — with
-        // the write pending a retry). Nothing below would notice: the
-        // over-cap path does not write, and the mirror write cannot rescue a
-        // target the engine already refused. Say so rather than report a save
-        // the disk never received.
+        // the write pending a retry). Say so rather than report a save the
+        // disk never received.
         if (result.materialized === false) {
           onError(
             `ydoc settle of ${input.path}`,
@@ -2281,32 +2358,54 @@ export function createWorkspaceEngineCapture(
           reportSaveState("error", token);
           return;
         }
-        // Register the settle's self-write (sha of the settled markdown) so
-        // even a watcher event that lands after the live-path guard lifts on
-        // close is recognized as our own. The ENGINE materializes the .md
-        // itself; this write is the desktop's mirror of the same bytes.
-        const cancel = registerExpectedEngineEvents([
-          { path: input.path, operation: "write", sha256: result.sha256 },
-        ]);
-        // markdown === null: the body is past the engine's in-band response
-        // cap, so it did not ride back over the wire. The engine already
-        // materialized it — writing result.markdown here would truncate the
-        // user's file, which is exactly the loss this path must prevent.
-        if (result.markdown === null) {
-          reportSaveState("saved", token);
-          return;
-        }
-        try {
-          await diskWriter.writeTextFile(
-            join(rootPath, input.path),
-            result.markdown,
+        // #338. The ENGINE owns the artifact: a settle it reports as
+        // materialized either wrote the file or found those bytes already
+        // there. The desktop used to write them AGAIN ("the mirror of the same
+        // bytes"), which was redundant every time it agreed with the engine
+        // and destructive the one time it did not — an unchanged projection is
+        // answered from the lineage without touching the file, so the mirror
+        // replaced whatever an outside writer had put there. The desktop now
+        // writes NOTHING here. It reads the file to decide what to REPORT.
+        //
+        // The digest comes from a bounded streaming hash, not from
+        // readDiskTextState: that reader answers "can capture own this?" and
+        // returns no sha at all past its 5 MiB cap, which would have read as
+        // "no proof of drift" for the largest files — the worst case to guess
+        // wrong about.
+        const digest = await digestSettledFile(rootPath, input.path);
+        if (digest.kind === "unverifiable") {
+          // dohc could not check the file, which is not the same as knowing it
+          // changed: a transient lock (a scanner holding it open) must not
+          // send the user to History for a file that probably holds exactly
+          // this document. It is the retryable failure — the next settle
+          // checks again.
+          onError(
+            `ydoc settle of ${input.path}`,
+            new Error(
+              `the engine settled the document but dohc could not check the file: ${digest.reason}`,
+            ),
           );
-        } catch (error) {
-          cancel();
-          onError(`ydoc settle disk write of ${input.path}`, error);
           reportSaveState("error", token);
           return;
         }
+        if (digest.kind === "changed" || digest.sha256 !== result.sha256) {
+          // Gone, too big to be this document, or simply different: in none of
+          // those does the file hold what the editor holds. A delete counts as
+          // changed — it is an intent, and recreating the file would be the
+          // same overwrite in reverse. The text stays in the CRDT and in
+          // History either way.
+          reportSaveState("changed-on-disk", token);
+          return;
+        }
+        // The file holds the settled bytes, so the ENGINE's write of them is
+        // ours: register it, and a watcher event that lands after the
+        // live-path guard lifts on close is recognized instead of re-journaled
+        // as an external edit. Registering on the drift path instead would arm
+        // a suppression for bytes nobody wrote, which could swallow a later
+        // genuine event carrying that same sha.
+        registerExpectedEngineEvents([
+          { path: input.path, operation: "write", sha256: result.sha256 },
+        ]);
         reportSaveState("saved", token);
       };
       const onSettleStart = (token: number) => reportSaveState("settling", token);

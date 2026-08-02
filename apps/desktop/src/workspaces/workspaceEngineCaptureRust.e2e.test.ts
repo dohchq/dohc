@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
+import * as Y from "yjs";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import {
   EngineDaemonLifecycle,
@@ -136,6 +137,88 @@ it.skipIf(engine.missing)(
       await capture.stop();
       await sessions.closeAll();
       await lifecycle.stop();
+    }
+  },
+  60_000,
+);
+
+// #338: another app (Notepad, an agent, `>>`) writes the .md WHILE the
+// document is open in dohc. The session's close runs a pre-close settle; the
+// engine answers it from the lineage's last settled content and never touches
+// the drifted file, and the desktop then mirrored those bytes over it — the
+// outside edit vanished from disk, recoverable only by knowing to open
+// History. The mirror write is the clobber, so this test reads DISK.
+it.skipIf(engine.missing)(
+  "keeps an edit made outside dohc when the open document closes",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-drift-"));
+    roots.push(root);
+    const markerDirectory = join(root, ".dohc", "engine");
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(
+      join(markerDirectory, "SHADOW_CLONE"),
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "utf8",
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-drift",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+    });
+    const outside = "written outside dohc\n";
+    try {
+      await writeFile(join(root, "note.md"), "base\n", "utf8");
+      await waitForPathMoments(capture, "note.md", 1);
+
+      const session = await capture.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+      });
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, session.initialUpdate);
+      const before = Y.encodeStateVector(editor);
+      editor.getText("plainText").insert(0, "typed in dohc\n");
+      await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+      const settled = await session.settleNow();
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(
+        settled.markdown,
+      );
+
+      // The outside writer replaces the file. Nothing is typed afterwards, so
+      // the close settle has the same projection it already settled.
+      await writeFile(join(root, "note.md"), outside, "utf8");
+      // Whether the daemon's own capture reached the outside edit before this
+      // close decides which answer the engine gives (a refused settle, or one
+      // answered from the lineage). The FILE must survive either way, so the
+      // close error — race-dependent, and its own issue — is not asserted.
+      await session.close().catch(() => undefined);
+
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+
+      // The other half of the promise: nothing the editor held is lost — the
+      // typed text stays in History.
+      const moments = await capture.listMoments({ limit: 100 });
+      const texts = await Promise.all(
+        moments.moments
+          .filter((moment) => moment.path === "note.md")
+          .map(async (moment) => {
+            const detail = await capture.readMoment(moment.id);
+            const payload = detail?.protected === false ? detail.moment.payload : undefined;
+            return payload?.after.text ?? "";
+          }),
+      );
+      expect(texts.some((text) => text.includes("typed in dohc"))).toBe(true);
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
     }
   },
   60_000,

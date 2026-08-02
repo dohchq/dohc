@@ -96,7 +96,30 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     expect(header.textContent).not.toContain("Saved");
     expect(header.textContent).toContain("Couldn't save");
     // Honest, non-alarming, and it names what actually happened.
-    expect(header.getAttribute("title")).toContain("file on disk is behind");
+    expect(header.getAttribute("title")).toContain(
+      "dohc can't confirm the file on disk matches them",
+    );
+    await waitFor(() =>
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("error"),
+    );
+  });
+
+  it("names the outside edit when the file changed on disk", async () => {
+    // #338: the settle committed, but the FILE holds an edit made outside dohc
+    // that dohc refuses to overwrite. "Couldn't save" would be wrong twice —
+    // the document IS saved, and another edit cannot help.
+    engineDocState.saveState = "changed-on-disk";
+    const onSaveStateChange = vi.fn();
+    render(
+      <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
+    );
+
+    const header = await screen.findByTestId("markdown-save-state");
+    expect(header.getAttribute("data-state")).toBe("changed-on-disk");
+    expect(header.textContent).toBe("Changed on disk");
+    expect(header.getAttribute("title")).toContain("changed outside dohc");
+    expect(header.getAttribute("title")).toContain("Open History to restore your text");
+    // The tab dot stays dirty: this document's text is not what the file holds.
     await waitFor(() =>
       expect(onSaveStateChange).toHaveBeenLastCalledWith("error"),
     );
