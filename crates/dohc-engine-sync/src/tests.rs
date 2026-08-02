@@ -7,9 +7,9 @@ use dohc_engine_domain::chats::{
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
     ChatChannelKind, ChatReactionState, CreateFileThread, FollowState, FollowTargetKind,
-    GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES, ResolveDecision,
-    SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SendMessage, SetFollow, SetReaction,
-    StartChannelThread, VersionedTextStore, attachment_id_for, channel_slug_for_name,
+    GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES, MAX_TEXT_BYTES,
+    ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SendMessage, SetFollow,
+    SetReaction, StartChannelThread, VersionedTextStore, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -1050,6 +1050,73 @@ fn fault_sync_before_blob_hydrate_commit_leaves_no_blob_or_cursor() {
         hydrate_blob_content(&mut reopened, &blob, &NoFaults).expect("retry"),
         TxnOutcome::Committed(())
     );
+}
+
+/// Ingest owns the text ceiling. Before this, `MAX_TEXT_BYTES` held on the sync
+/// path only because the HTTP transport's `MAX_BLOB_RESPONSE_BYTES` happened to
+/// equal it, so any other `RelayTransport` could store an over-cap body.
+///
+/// MUTATION: delete the ceiling check in `hydrate_blob_content` and the over-cap
+/// half of this test fails; raise the limit above `MAX_TEXT_BYTES` and the
+/// refusal message stops naming the real bound.
+#[test]
+fn text_blob_over_the_text_ceiling_is_refused_at_ingest() {
+    let (_scratch, _path, mut engine) = store();
+
+    let at_cap = "a".repeat(MAX_TEXT_BYTES);
+    let accepted = BlobHydration {
+        sha256: dohc_engine_storage::hex_sha256(at_cap.as_bytes()),
+        content: BlobContent::Text(at_cap),
+    };
+    assert_eq!(
+        hydrate_blob_content(&mut engine, &accepted, &NoFaults).expect("at-cap text hydrates"),
+        TxnOutcome::Committed(())
+    );
+
+    let over_cap = "a".repeat(MAX_TEXT_BYTES + 1);
+    let refused = BlobHydration {
+        sha256: dohc_engine_storage::hex_sha256(over_cap.as_bytes()),
+        content: BlobContent::Text(over_cap),
+    };
+    let error = hydrate_blob_content(&mut engine, &refused, &NoFaults)
+        .expect_err("over-cap text is refused");
+    assert!(
+        matches!(
+            error,
+            SyncError::BlobTooLarge {
+                constraint: "MAX_TEXT_BYTES",
+                limit_bytes: MAX_TEXT_BYTES,
+                observed_bytes,
+            } if observed_bytes == MAX_TEXT_BYTES + 1
+        ),
+        "unexpected refusal: {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "blob exceeds MAX_TEXT_BYTES: limit {MAX_TEXT_BYTES} bytes, observed {} bytes",
+            MAX_TEXT_BYTES + 1
+        )
+    );
+
+    let (stored, refused_rows) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM blobs WHERE sha256=?1",
+                    [&accepted.sha256],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM blobs WHERE sha256=?1",
+                    [&refused.sha256],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            ))
+        })
+        .expect("blob rows");
+    assert_eq!(stored, 1);
+    assert_eq!(refused_rows, 0);
 }
 
 #[test]

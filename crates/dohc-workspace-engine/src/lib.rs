@@ -10930,7 +10930,8 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         SyncError::InvalidInput { .. }
         | SyncError::UnsupportedOperation
         | SyncError::ShareBoundaryViolation
-        | SyncError::BlobInvalid => ErrorCode::InvalidParams,
+        | SyncError::BlobInvalid
+        | SyncError::BlobTooLarge { .. } => ErrorCode::InvalidParams,
     }
 }
 

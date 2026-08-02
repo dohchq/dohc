@@ -1298,12 +1298,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     },
                     faults,
                 )
-                .map_err(|error| {
-                    if matches!(error, SyncError::BlobInvalid) {
-                        RelayError::BlobInvalid
-                    } else {
-                        local(error)
-                    }
+                .map_err(|error| match error {
+                    SyncError::BlobInvalid => RelayError::BlobInvalid,
+                    // Keep the named limit, unit, and observed size instead of
+                    // collapsing the refusal to its error code.
+                    SyncError::BlobTooLarge { .. } => RelayError::Local(error.to_string()),
+                    other => local(other),
                 })? {
                     TxnOutcome::Committed(()) => {}
                     TxnOutcome::Crashed { .. } => {

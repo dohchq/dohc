@@ -20,6 +20,14 @@ pub enum SyncError {
     ShareBoundaryViolation,
     #[error("referenced blob is missing or invalid")]
     BlobInvalid,
+    #[error(
+        "blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
+    )]
+    BlobTooLarge {
+        constraint: &'static str,
+        limit_bytes: usize,
+        observed_bytes: usize,
+    },
     #[error("injected crash")]
     FaultCrash,
 }
@@ -33,7 +41,7 @@ impl SyncError {
             SyncError::RetryableState { .. } => "retryable-state",
             SyncError::UnsupportedOperation => "invalid-input",
             SyncError::ShareBoundaryViolation => "share-boundary-violation",
-            SyncError::BlobInvalid => "invalid-input",
+            SyncError::BlobInvalid | SyncError::BlobTooLarge { .. } => "invalid-input",
             SyncError::FaultCrash => "injected-crash",
         }
     }

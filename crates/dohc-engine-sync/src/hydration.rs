@@ -1,4 +1,4 @@
-use dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES;
+use dohc_engine_domain::{MAX_CAPTURE_BINARY_FILE_BYTES, MAX_TEXT_BYTES};
 use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
 use rusqlite::{OptionalExtension, params};
 
@@ -20,15 +20,29 @@ pub struct BlobHydration {
 /// Hash-verify and hydrate a bounded content-addressed blob in one transaction.
 /// Existing content is re-verified; a hash collision or poisoned row fails
 /// closed instead of being overwritten.
+///
+/// The ceiling is enforced here, not inherited from a transport response bound,
+/// so every `RelayTransport` ingests under the same store invariants.
 pub fn hydrate_blob_content(
     store: &mut EngineStore,
     blob: &BlobHydration,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<()>, SyncError> {
-    let bytes = match &blob.content {
-        BlobContent::Text(text) => text.as_bytes(),
-        BlobContent::Binary(bytes) => bytes.as_slice(),
+    let (bytes, constraint, limit_bytes) = match &blob.content {
+        BlobContent::Text(text) => (text.as_bytes(), "MAX_TEXT_BYTES", MAX_TEXT_BYTES),
+        BlobContent::Binary(bytes) => (
+            bytes.as_slice(),
+            "MAX_CAPTURE_BINARY_FILE_BYTES",
+            MAX_CAPTURE_BINARY_FILE_BYTES,
+        ),
     };
+    if bytes.len() > limit_bytes {
+        return Err(SyncError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes: bytes.len(),
+        });
+    }
     if hex_sha256(bytes) != blob.sha256 {
         return Err(SyncError::BlobInvalid);
     }
@@ -57,9 +71,6 @@ pub fn hydrate_blob_content(
                 }
             }
             BlobContent::Binary(bytes) => {
-                if bytes.len() > MAX_CAPTURE_BINARY_FILE_BYTES {
-                    return Err(SyncError::BlobInvalid);
-                }
                 let existing: Option<(i64, Vec<u8>)> = tx
                     .query_row(
                         "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",
