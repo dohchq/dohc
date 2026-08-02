@@ -229,11 +229,14 @@ function payloadSnapshot(
     : moment.afterContentKind;
   const text = before ? moment.beforeText : moment.afterText;
   // Every caller hydrates an over-cap body first (`hydratedMoment`), so a
-  // withheld text here carries no digest to hydrate it from. Fabricating "" in
-  // its place would report a wipe that never happened.
+  // withheld text reaching here is one of two different failures. Fabricating
+  // "" in either case would report a wipe that never happened.
   if (contentKind === "text" && text === null) {
+    const blobSha256 = before ? moment.beforeBlobSha256 : moment.afterBlobSha256;
     throw new Error(
-      `Engine moment ${side} text for ${moment.path} is absent and carries no text digest.`,
+      blobSha256 === null
+        ? `Engine moment ${side} text for ${moment.path} is absent and carries no text digest.`
+        : `Engine moment ${side} text for ${moment.path} was not hydrated from ${blobSha256}.`,
     );
   }
   const sha256 =
@@ -604,17 +607,21 @@ export function createCaptureLiveStores(
         }
         return text;
       };
+      const afterText = afterSha256 === null ? null : await body(afterSha256);
+      // A delete or rename records ONE digest on both sides: `delete_text_in_tx`
+      // and the rename insert (store.rs) bind the same `before.blob_sha256` to
+      // `after_blob_sha256` and `before_blob_sha256`. Resolving it twice would
+      // stream a multi-megabyte body twice for one moment.
+      const beforeText =
+        beforeSha256 === null
+          ? null
+          : beforeSha256 === afterSha256 && afterText !== null
+            ? afterText
+            : await body(beforeSha256);
       return {
         ...moment,
-        ...(afterSha256 !== null
-          ? { afterText: await body(afterSha256), afterInbandLimitBytes: null }
-          : {}),
-        ...(beforeSha256 !== null
-          ? {
-              beforeText: await body(beforeSha256),
-              beforeInbandLimitBytes: null,
-            }
-          : {}),
+        ...(afterText !== null ? { afterText } : {}),
+        ...(beforeText !== null ? { beforeText } : {}),
       };
     });
   }
