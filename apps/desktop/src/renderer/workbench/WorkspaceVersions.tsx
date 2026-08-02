@@ -14,7 +14,7 @@ import type {
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
-import { UnifiedDiffLines, buildUnifiedDiffLines } from "./unifiedDiff";
+import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 
 // Named versions surface (PR 0M-4, workspace-engine alpha). Product
 // vocabulary only: Version, Main, compare, merge, keep — never git terms.
@@ -1204,6 +1204,17 @@ function changeStatusLabel(status: WorkspaceVersionFileChange["status"]): string
   return "Changed";
 }
 
+// One compared file's text diff. Its own component so the diff is built once
+// per pair of bodies instead of on every render of the whole compare page —
+// the same bound the history diff page relies on (see unifiedDiff.tsx).
+function CompareFileDiff(props: { currentText?: string; incomingText?: string }) {
+  const lines = useMemo(
+    () => buildUnifiedDiffLines(computeTextDiff(props.currentText, props.incomingText, 800)),
+    [props.currentText, props.incomingText],
+  );
+  return <UnifiedDiffLines lines={lines} testId="version-compare-diff-lines" />;
+}
+
 // Full-page comparison of a version against Main (virtual editor tab).
 // Mirrors the history diff page's rendering so diffs look the same
 // everywhere.
@@ -1355,8 +1366,9 @@ export function VersionComparePage(props: {
                     </span>
                   </div>
                 ) : (
-                  <UnifiedDiffLines
-                    lines={buildUnifiedDiffLines(file.currentText, file.incomingText, 800)}
+                  <CompareFileDiff
+                    currentText={file.currentText}
+                    incomingText={file.incomingText}
                   />
                 )}
               </section>
