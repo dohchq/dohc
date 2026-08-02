@@ -3,6 +3,9 @@
 // vitest` at the repo root cannot resolve a local binary, so npm installs an
 // arbitrary registry version into its own cache and runs the suite with it.
 // That run collects from the npx cache instead of the repo and still exits 0.
+// A root `npx vitest run` now resolves and sweeps the whole repo, including
+// Playwright specs and node:test scripts, so it exits non-zero by design; run
+// suites through the per-package scripts.
 // See https://github.com/dohc-ai/dohc/issues/405.
 import assert from "node:assert/strict";
 import { glob, readFile } from "node:fs/promises";
@@ -24,14 +27,21 @@ function workspacePatterns(workspaceYaml) {
       continue;
     }
     if (inPackages && /^\S/.test(line)) break;
-    const entry = inPackages && line.match(/^\s+-\s+"?([^"\s#]+)"?/);
+    const entry = inPackages && line.match(/^\s+-\s+["']?([^"'\s#]+)["']?/);
     if (entry) patterns.push(entry[1]);
   }
   return patterns;
 }
 
+// autoInstallPeers is on, so a peer-declared vitest is installed like any
+// other. Every field that can put a vitest on disk has to be read here.
 function declaredVitest(pkg) {
-  return pkg.devDependencies?.vitest ?? pkg.dependencies?.vitest;
+  return (
+    pkg.devDependencies?.vitest ??
+    pkg.dependencies?.vitest ??
+    pkg.peerDependencies?.vitest ??
+    pkg.optionalDependencies?.vitest
+  );
 }
 
 function major(range) {
@@ -67,6 +77,18 @@ test("the repo root declares vitest so npx cannot substitute its own", () => {
     "the root package.json declares no vitest. `npx vitest` at the repo root " +
       "then resolves no local binary, and npm installs an unpinned registry " +
       "version into its cache and runs the suite with it.",
+  );
+});
+
+// Without this the guard can pass on nothing: if the pattern parsing ever
+// stops matching, the glob finds no package.json, and a lone root declaration
+// is trivially one major.
+test("pattern parsing finds the packages, so the check is not vacuous", () => {
+  assert.ok(
+    declarations.length > 1,
+    `found ${declarations.length} vitest declarations, expected the root plus ` +
+      "the workspace packages. Pattern parsing of pnpm-workspace.yaml matched " +
+      `no package declarations; it read patterns [${patterns.join(", ")}].`,
   );
 });
 
