@@ -167,31 +167,35 @@ fn json_string_encoded_len(text: &str) -> usize {
 }
 
 /// The encoded size of the request envelope that carried these params — what
-/// the control frame actually has to hold.
+/// the control frame actually held.
 ///
-/// The envelope around `params` is MEASURED, not assumed: the same encoder
-/// the transport uses serializes a request with the caller's own workspace
-/// handle and idempotency key and an empty params object, and the worst-case
-/// id and deadline. A reserved constant instead of this measurement is how a
-/// bound drifts away from the wire it claims to describe.
+/// Every field is the CALLER'S OWN: this request's id, deadline, workspace
+/// handle, idempotency key and params, re-encoded by the same encoder the
+/// transport uses. Nothing is reserved and nothing is substituted. A
+/// worst-case stand-in for a field the daemon can read (this one used
+/// `u64::MAX` and `u32::MAX` for the id and deadline) inflates the total by
+/// about thirty bytes, which rejects requests that DID cross the frame and
+/// reports a size that never existed — a limit must name what happened.
 fn resolve_request_encoded_bytes(
+    id: u64,
+    deadline_ms: Option<u32>,
     handle: Option<&WorkspaceHandle>,
     idempotency_key: Option<&str>,
     params: &Value,
 ) -> usize {
-    let scaffold =
+    let envelope =
         dohc_engine_protocol::wire::Envelope::Request(dohc_engine_protocol::wire::Request {
-            id: u64::MAX,
+            id,
             method: "conflicts.resolve".to_owned(),
             workspace: handle.cloned(),
-            deadline_ms: Some(u32::MAX),
+            deadline_ms,
             idempotency_key: idempotency_key.map(str::to_owned),
             params: json!({}),
         });
-    let scaffold_bytes = serde_json::to_vec(&scaffold).map_or(usize::MAX, |bytes| bytes.len());
+    let envelope_bytes = serde_json::to_vec(&envelope).map_or(usize::MAX, |bytes| bytes.len());
     let params_bytes = serde_json::to_vec(params).map_or(usize::MAX, |bytes| bytes.len());
-    // `- 2` drops the empty object the scaffold measured in the params slot.
-    scaffold_bytes
+    // `- 2` drops the empty object measured in the params slot.
+    envelope_bytes
         .saturating_sub(2)
         .saturating_add(params_bytes)
 }
@@ -925,6 +929,8 @@ impl EngineService {
             "conflicts.resolve" => {
                 self.conflicts_resolve(
                     &ctx,
+                    request.id,
+                    request.deadline_ms,
                     request.workspace,
                     request.params,
                     request.idempotency_key,
@@ -7616,12 +7622,19 @@ impl EngineService {
     async fn conflicts_resolve(
         &self,
         ctx: &RequestContext,
+        id: u64,
+        deadline_ms: Option<u32>,
         handle: Option<WorkspaceHandle>,
         params: Value,
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
-        let encoded_request =
-            resolve_request_encoded_bytes(handle.as_ref(), request_id.as_deref(), &params);
+        let encoded_request = resolve_request_encoded_bytes(
+            id,
+            deadline_ms,
+            handle.as_ref(),
+            request_id.as_deref(),
+            &params,
+        );
         let params: ConflictResolveParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);

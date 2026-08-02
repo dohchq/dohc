@@ -795,6 +795,125 @@ async fn metadata_beside_a_large_body_is_measured_against_the_same_frame() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_that_exactly_fills_the_frame_is_applied_and_one_byte_more_is_refused() {
+    // THE BOUNDARY, measured on the real envelope rather than a worst-case
+    // stand-in. This request carries the id and deadline it actually has, so
+    // the size the daemon measures is the size that crossed. Substituting
+    // `u64::MAX` and `u32::MAX` for them inflates the total by about thirty
+    // bytes, and everything inside that band is valid work refused with a size
+    // that never existed.
+    //
+    // MUTATION: substitute the worst-case id and deadline again -> the at-frame
+    // resolution is refused and this fails.
+    let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+    let (_scratch, transport, handle, workspace_id) = fixture("frame-boundary").await;
+    let path =
+        open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
+
+    // Size the body from the envelope this test will actually send: everything
+    // except the body is fixed, and each added byte of plain text adds exactly
+    // one encoded byte.
+    let envelope = |body: &str| {
+        Envelope::Request(request(
+            12,
+            "conflicts.resolve",
+            Some(handle.clone()),
+            json!({ "local": {
+                "conflictId": "conflict-000",
+                "resolution": "apply-merged",
+                "mergedText": body,
+                "objectId": "boundary-resolution-object",
+                "writeMomentId": "boundary-resolution-write",
+                "deleteMomentId": "boundary-resolution-delete",
+                "metadataOrigin": "api",
+                "nowMs": 20,
+            }}),
+        ))
+    };
+    let overhead = serde_json::to_vec(&envelope("")).expect("encode").len();
+    let merged = "x".repeat(frame - overhead);
+    let exact = serde_json::to_vec(&envelope(&merged))
+        .expect("encode")
+        .len();
+    assert_eq!(exact, frame, "the request must sit exactly on the frame");
+    encode_control(&envelope(&merged), &WireLimits::default())
+        .expect("a request at the frame crosses it");
+
+    let resolved = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": merged,
+                    "objectId": "boundary-resolution-object",
+                    "writeMomentId": "boundary-resolution-write",
+                    "deleteMomentId": "boundary-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect("a request that fills the frame exactly is work, not overflow");
+    assert_eq!(resolved.result["conflict"]["resolution"], "applied-merged");
+    assert_eq!(
+        resolved.result["write"]["snapshot"]["byteLength"],
+        json!(merged.len())
+    );
+
+    // One byte past it is refused, and the refusal names the real total.
+    let (_scratch2, transport2, handle2, workspace_id2) = fixture("frame-boundary-past").await;
+    open_conflict_against_seeded_head(&transport2, &handle2, &workspace_id2, 10, "incoming").await;
+    let refused = transport2
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle2.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": format!("{merged}x"),
+                    "objectId": "boundary-resolution-object",
+                    "writeMomentId": "boundary-resolution-write",
+                    "deleteMomentId": "boundary-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect_err("one byte past the frame must be refused");
+    assert!(
+        refused
+            .message
+            .contains(&format!("observed {} encoded bytes", frame + 1)),
+        "the refusal must name the real total: {}",
+        refused.message
+    );
+
+    let head = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                14,
+                "versionedText.read",
+                Some(handle),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await
+        .expect("read the settled head");
+    assert_eq!(head.result["byteLength"], json!(merged.len()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_largest_accepted_request_crosses_as_one_control_frame() {
     // The bound is the frame, so the largest request the daemon accepts must
     // be one the transport can carry. This pins that: a resolve request built
