@@ -763,3 +763,88 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
     assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
     assert_eq!(base_ops_in_log(&db), 1, "and close emits no second base");
 }
+
+/// A lineage that grew LOCAL-ONLY past `MAX_YDOC_UPDATE_BYTES` and then reached
+/// a synced workspace must not lose the edit that tries to promote it.
+///
+/// `claim_base_in_tx` measures the base against a cap written for one update.
+/// A base is a full state, so a big enough lineage fails that check — and the
+/// claim runs inside the append transaction, so the refusal rolls the user's
+/// valid edit back with it, permanently: `base_claimed` stays false, so every
+/// later edit takes the same branch and fails the same way.
+///
+/// Origination declines instead. The document keeps working, keeps markdown as
+/// its artifact, and #549 owns the measured base bound that lets it replicate.
+///
+/// Mutation check: drop the size check in `ydoc_originate_base_in_tx` and the
+/// promoting edit itself fails, before any assertion runs —
+/// `Collab(UpdateTooLarge { actual: 5400043, max: 5242880 })`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
+    const WS: &str = "ws-originate-oversize";
+    const PATH: &str = "notes/oversize.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+
+    // Grow the lineage past the cap while the workspace is still private. Each
+    // update stays well under it; only the accumulated full state passes it.
+    let doc = Ydoc::wire();
+    let chunk = "x".repeat(2_700_000);
+    for (index, now) in [200, 300].into_iter().enumerate() {
+        let update =
+            doc.plaintext_insert(u32::try_from(index * chunk.len()).expect("offset"), &chunk);
+        handle
+            .ydoc_record_update(
+                key.clone(),
+                PATH.to_owned(),
+                ContentKind::Plaintext,
+                Regime::LocalOnly,
+                update,
+                None,
+                false,
+                None,
+                now,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("a local-only append under the per-update cap");
+    }
+
+    // Sync turns on for a lineage that is already too large to encode as a base.
+    enable_sync(&db, WS);
+
+    let update = doc.plaintext_insert(0, "tiny");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            false,
+            None,
+            500,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the promoting edit is accepted, not rolled back");
+    supervisor.close(&db).expect("close actor");
+
+    assert!(
+        local_ops(&db).is_empty(),
+        "an oversize lineage journals nothing rather than half a base"
+    );
+    assert_eq!(
+        marker_state(&db, &key),
+        (Regime::LocalOnly, false),
+        "and it stays local-only, with markdown as its artifact"
+    );
+}

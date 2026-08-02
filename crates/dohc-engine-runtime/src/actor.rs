@@ -9091,6 +9091,18 @@ fn ydoc_originate_base_in_tx(
         // row. A later append retries once the predecessor lands.
         return Ok(None);
     };
+    // `claim_base_in_tx` measures the base against MAX_YDOC_UPDATE_BYTES, a cap
+    // written for ONE update. A base is a full state, so a lineage that grew
+    // local-only past 5 MiB and then reached a synced workspace would fail its
+    // promoting edit — and the claim runs inside the append transaction, so the
+    // refusal would roll that valid edit back, and every later one with it.
+    //
+    // Decline to originate instead. The edit commits, the lineage stays
+    // local-only, and markdown remains its artifact. #549 owns the measured
+    // base-specific bound that replaces this check.
+    if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
+        return Ok(None);
+    }
     // The marker's OWN kind, never the caller's: the kind belongs to the
     // lineage, and `claim_base_in_tx` upserts whatever it is handed. The append
     // this rides already refused a caller whose kind disagreed, so the two

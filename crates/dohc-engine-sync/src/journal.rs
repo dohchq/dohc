@@ -58,6 +58,15 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// this BEFORE it claims a base: [`journal_local_op_in_tx`] refuses without an
 /// identity, and a refusal raised inside the append transaction would roll the
 /// user's edit back with it.
+///
+/// KNOWN WINDOW. This reads past contact, not current enrolment, so a freshly
+/// enrolled workspace answers `false` until its first push or pull commits. An
+/// edit inside that window does not originate. Nothing here retries, and #548
+/// owns the retrigger. The window costs at most one edit: origination is asked
+/// again on the next append, the base is a full state that carries everything
+/// typed inside the window, and a local-only close refuses until the markdown
+/// artifact is durable (`close_session` raises `UnsettledClose`), so a reopened
+/// document seeds from that markdown and originates then.
 pub fn workspace_replicates_with_relay_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
