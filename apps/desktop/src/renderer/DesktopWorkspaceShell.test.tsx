@@ -1304,6 +1304,82 @@ describe("ui-state merge-on-load", () => {
     expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
   }, 20_000);
 
+  // The third seam of the same kind, and the reason the predicate now lives at
+  // the destination WRITE: with the Chats tab already active, moving to
+  // another channel changes the chat destination while the active tab stays
+  // put, so neither the tab check nor onChatsNav (which openChatsNavInTab
+  // bypasses by writing the ref itself) can see it.
+  it("discards an in-flight DM navigation when another channel opens in the active Chats tab", async () => {
+    const channelNode = (id: string, name: string, title: string) => ({
+      path: `chat-thread:${id}`,
+      kind: "chat-thread" as const,
+      threadId: id,
+      channelId: `channel-${id}`,
+      channelName: name,
+      channelSlug: name,
+      channelKind: "channel" as const,
+      title,
+      incoming: 1,
+      outgoing: 0,
+    });
+    const first = channelNode("thread-planning", "planning", "Planning discussion");
+    const second = channelNode("thread-hiring", "hiring", "Hiring discussion");
+    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [DM_GRAPH_NODE, first, second],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    // Open a channel conversation in the Chats TAB, with the graph still in
+    // the sidebar. Every navigation from here leaves the active tab alone.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === first.path)!);
+    const chatsTab = await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    expect(chatsTab.dataset.active).toBe("true");
+
+    // Start a canonical DM navigation and leave it in flight.
+    await user.click(
+      (await screen.findAllByTestId("graph-file-row")).find(
+        (row) => row.dataset.path === DM_GRAPH_NODE.path,
+      )!,
+    );
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    // The user moves to a different conversation. The tab never moves.
+    await user.click(
+      (await screen.findAllByTestId("graph-file-row")).find(
+        (row) => row.dataset.path === second.path,
+      )!,
+    );
+    expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe("true");
+
+    // Collapse the sidebar so the graph's own row labels stop matching, and
+    // only the Chats surface answers the queries below. Re-selecting the
+    // active view toggles the panel — a workbench write that moves no tab, so
+    // it must not cancel the navigation either.
+    await user.click(screen.getByTestId("activity-graph"));
+    expect(await screen.findByText("Hiring discussion")).toBeTruthy();
+
+    // The DM answers late. It must not remount Chats over the conversation the
+    // user chose.
+    await act(async () => {
+      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      await sync.promise;
+    });
+    expect(screen.getByText("Hiring discussion")).toBeTruthy();
+    expect(screen.queryByText(CANONICAL_DM.name)).toBeNull();
+  }, 20_000);
+
   // The positive direction, and the reason it is not optional: every
   // cancellation test above also passes when NOTHING ever lands, so a fix that
   // cancelled the navigation the moment it started would read as green.

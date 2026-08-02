@@ -1794,16 +1794,26 @@ export function DesktopWorkspaceShell(props: {
   const onChatsThreadRead = useCallback(() => {
     setChatsReadRevision((current) => current + 1);
   }, []);
-  const onChatsNav = useCallback((nav: ChatsNav) => {
-    // The panel reports its nav on every change, including ones that stay on
-    // the same conversation. Only a different destination cancels a pending
-    // DM navigation — the same predicate openChatsNavInTab already computes.
-    if (chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav)) {
-      invalidateDmNavigation(dmNavigationRequest);
-    }
+  // THE one write of the chat destination: the ref the panel reads, the state
+  // the navigator highlights, and the cancellation that choosing a different
+  // conversation implies. Both writers below open-coded these two lines, which
+  // is why the invalidation kept being missed one caller at a time — a chat
+  // destination can only change here, so this is where the rule belongs.
+  // Reports that stay on the same conversation change nothing and cancel
+  // nothing. Returns whether the destination actually moved.
+  const setChatsDestination = useCallback((nav: ChatsNav) => {
+    const changed = chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav);
+    if (changed) invalidateDmNavigation(dmNavigationRequest);
     chatsNav.current = nav;
     setSelectedChatsNav(nav);
+    return changed;
   }, []);
+  const onChatsNav = useCallback(
+    (nav: ChatsNav) => {
+      setChatsDestination(nav);
+    },
+    [setChatsDestination],
+  );
   // Unsent drafts ride the same handoff: mirrored live (a ref write per
   // keystroke, no re-render) and seeded into the next mount, so expanding
   // or collapsing chats never discards what the user typed.
@@ -1816,11 +1826,10 @@ export function DesktopWorkspaceShell(props: {
   }, [mutateWb]);
   const openChatsNavInTab = useCallback(
     (nav: ChatsNav) => {
-      const destinationChanged =
-        chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav);
+      // Read before the write: both answers are about the destination the
+      // panel is leaving.
       const shouldRemount = chatsNavigationRequiresRemount(chatsNav.current, nav);
-      chatsNav.current = nav;
-      setSelectedChatsNav(nav);
+      const destinationChanged = setChatsDestination(nav);
       if (destinationChanged) {
         // Drafts are scoped to the conversation they were typed in. Until the
         // draft store is keyed per channel/thread, never seed one into a
@@ -1832,7 +1841,7 @@ export function DesktopWorkspaceShell(props: {
       }
       mutateWb((state) => openTab(state, CHATS_TAB_PATH));
     },
-    [mutateWb],
+    [mutateWb, setChatsDestination],
   );
   const openCanonicalDmInTab = useCallback(
     async (locator: DmChatLocator) => {
