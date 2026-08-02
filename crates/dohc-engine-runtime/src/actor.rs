@@ -9109,6 +9109,23 @@ fn ydoc_settle_on_store(
     let probe_sha = head_probe
         .as_ref()
         .map(|snapshot| snapshot.blob_sha256.clone());
+    // A session that opened with NO head seeded from nothing — an empty
+    // document. A head holding the EMPTY artifact is therefore the same base,
+    // not a divergence: it is what capture mints when it ingests the 0-byte
+    // file the desktop's New File writes straight to disk. Refusing it wedged
+    // the document forever, because a refused settle records no new
+    // expectation and every retry re-read the same None (#346). A head with
+    // any CONTENT still refuses — that content the user never saw.
+    let expected_head_sha = match head_probe.as_ref() {
+        Some(snapshot)
+            if expected_head_sha.is_none()
+                && snapshot.object_id == key.object_id
+                && snapshot.blob_sha256 == dohc_engine_storage::hex_sha256(b"") =>
+        {
+            probe_sha.clone()
+        }
+        _ => expected_head_sha,
+    };
     if probe_sha != expected_head_sha {
         return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
     }
