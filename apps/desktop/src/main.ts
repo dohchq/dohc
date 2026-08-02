@@ -7820,17 +7820,22 @@ if (!app.requestSingleInstanceLock()) {
 
     const { createMainWindow } = await import("./window/createMainWindow");
     const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
-    if (initialActivatedWorkspace) {
+    // A path the handlers queued during the bootstrap is a later intent than the
+    // launch arguments, so it wins. Drain before the listener registers: the
+    // renderer only subscribes once it loads, so a send now would be dropped and
+    // the launch workspace would then override the path the user opened.
+    const drainedWorkspace = await flushPendingOpenPaths();
+    const activatedWorkspace = drainedWorkspace ?? initialActivatedWorkspace;
+    if (activatedWorkspace) {
       window.webContents.once("did-finish-load", () => {
-        sendWorkspaceActivated(window, initialActivatedWorkspace);
+        sendWorkspaceActivated(window, activatedWorkspace);
       });
     }
     launchMarks.firstWindow();
     desktopMarks.markOnce("first-window");
     // The daemon is up, IPC is registered, and a window exists, so the deferred
-    // handlers can act directly. Drain what they queued after the flush above.
+    // handlers can act directly.
     bootstrapComplete = true;
-    void flushPendingOpenPaths(window);
 
     // Load persisted cloud credentials after the first window exists so local
     // workspaces do not pay credential-store I/O on the visible-launch path.
@@ -7854,6 +7859,18 @@ if (!app.requestSingleInstanceLock()) {
         broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
       })
       .catch(() => undefined);
+  }).catch((error: unknown) => {
+    // A throw after the daemon started would otherwise leave the gate closed
+    // forever: the app stays alive with no window and every handler deferring
+    // to a bootstrap that already died.
+    const message =
+      error instanceof Error ? error.message : "Unknown desktop startup error.";
+    console.error("[desktop] Desktop startup failed:", error);
+    dialog.showErrorBox(
+      "dohc failed to start",
+      `${message}\n\nRestart dohc. If it fails again, review the desktop logs.`,
+    );
+    app.quit();
   });
 
   app.on("window-all-closed", () => {

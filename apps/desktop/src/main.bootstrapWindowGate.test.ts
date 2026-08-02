@@ -19,9 +19,12 @@ function handlerSource(event: string): string {
 const WINDOW_CREATING_HANDLERS = ["open-file", "second-instance", "activate"];
 
 describe("bootstrap window gate", () => {
-  it("tracks bootstrap completion as a single flag", () => {
+  it("tracks bootstrap completion as a single flag that only ever opens", () => {
     expect(mainSource).toContain("let bootstrapComplete = false;");
     expect(mainSource.split("bootstrapComplete = true").length - 1).toBe(1);
+    // A second `= false` write re-closes the gate for the rest of the process:
+    // on macOS, closing the last window would then kill every dock click.
+    expect(mainSource.split("bootstrapComplete = false").length - 1).toBe(1);
   });
 
   it.each(WINDOW_CREATING_HANDLERS)(
@@ -41,16 +44,21 @@ describe("bootstrap window gate", () => {
       const handler = handlerSource(event);
       const gateAt = handler.indexOf("if (!bootstrapComplete)");
       const createAt = handler.indexOf("showOrCreateMainWindow");
-      if (createAt < 0) return;
       expect(gateAt).toBeGreaterThanOrEqual(0);
+      // Every one of these handlers opens its window through this call. Skipping
+      // the assertions when it is absent would excuse a handler that switched to
+      // createMainWindow instead.
+      expect(createAt).toBeGreaterThanOrEqual(0);
 
       const returnAt = handler.indexOf("return;", gateAt);
       expect(returnAt).toBeGreaterThan(gateAt);
       expect(returnAt).toBeLessThan(createAt);
-      // Whatever the guard does before returning, it cannot open a window.
+      // Whatever the guard does before returning, it cannot open a window —
+      // by either name, including the dynamic import of the window module.
       const guardBody = handler.slice(gateAt, returnAt);
       expect(guardBody).not.toContain("showOrCreateMainWindow");
-      expect(guardBody).not.toContain("createMainWindow");
+      expect(guardBody).not.toContain("createMainWindow(");
+      expect(guardBody).not.toContain("window/createMainWindow");
     },
   );
 
@@ -92,12 +100,47 @@ describe("bootstrap window gate", () => {
     expect(openGateAt).toBeGreaterThan(createWindowAt);
   });
 
-  it("drains queued paths into the window the bootstrap created", () => {
-    const openGateAt = mainSource.indexOf("bootstrapComplete = true");
+  // Indentation is the cheap proof of nesting: four spaces is the continuation
+  // body. A gate opened inside any `if` would sit deeper, and a launch that
+  // missed that condition would never open the gate at all.
+  it("opens the gate unconditionally, not inside a branch", () => {
+    expect(mainSource).toContain("\n    bootstrapComplete = true;\n");
+  });
+
+  it("drains queued paths before the window's activation listener", () => {
+    const createWindowAt = mainSource.indexOf("createMainWindow({");
     const drainAt = mainSource.indexOf(
-      "void flushPendingOpenPaths(window);",
-      openGateAt,
+      "const drainedWorkspace = await flushPendingOpenPaths();",
+      createWindowAt,
     );
-    expect(drainAt).toBeGreaterThan(openGateAt);
+    const mergeAt = mainSource.indexOf(
+      "drainedWorkspace ?? initialActivatedWorkspace",
+      drainAt,
+    );
+    const listenerAt = mainSource.indexOf('once("did-finish-load"', mergeAt);
+    const sendAt = mainSource.indexOf(
+      "sendWorkspaceActivated(window, activatedWorkspace)",
+      listenerAt,
+    );
+    const openGateAt = mainSource.indexOf("bootstrapComplete = true", drainAt);
+
+    // The renderer subscribes when it loads, so the drained path has to reach
+    // the did-finish-load listener. Sending it earlier drops it, and the launch
+    // argument then overrides the path the user actually opened.
+    expect(drainAt).toBeGreaterThan(createWindowAt);
+    expect(mergeAt).toBeGreaterThan(drainAt);
+    expect(listenerAt).toBeGreaterThan(mergeAt);
+    expect(sendAt).toBeGreaterThan(listenerAt);
+    expect(openGateAt).toBeGreaterThan(drainAt);
+  });
+
+  it("quits with a visible error when the bootstrap continuation throws", () => {
+    const catchAt = mainSource.indexOf("}).catch((error: unknown) => {");
+    expect(catchAt).toBeGreaterThan(mainSource.indexOf("app.whenReady().then("));
+    // A throw after the daemon started leaves the gate shut forever, so the
+    // continuation must not fail silently.
+    const handler = mainSource.slice(catchAt, catchAt + 800);
+    expect(handler).toContain("dialog.showErrorBox(");
+    expect(handler).toContain("app.quit();");
   });
 });
