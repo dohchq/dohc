@@ -154,6 +154,8 @@ const bridge: DohcDesktopBridge = {
   shareChatChannel: (payload) => ipcRenderer.invoke(CHANNELS.shareChatChannel, payload),
   listChatChannelShares: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatChannelShares, payload),
+  listJoinedSharedChannels: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listJoinedSharedChannels, payload),
   joinSharedChannel: (payload) => ipcRenderer.invoke(CHANNELS.joinSharedChannel, payload),
   leaveSharedChannel: (payload) =>
     ipcRenderer.invoke(CHANNELS.leaveSharedChannel, payload),

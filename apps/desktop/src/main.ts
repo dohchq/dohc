@@ -61,6 +61,8 @@ import {
   ShareChatChannelResult,
   ListChatChannelSharesPayload,
   ListChatChannelSharesResult,
+  ListJoinedSharedChannelsPayload,
+  ListJoinedSharedChannelsResult,
   JoinSharedChannelPayload,
   JoinSharedChannelResult,
   LeaveSharedChannelPayload,
@@ -4173,17 +4175,33 @@ function registerIpcHandlers(
     return ShareChatChannelResult.parse({ shareId: created.shareId });
   });
 
-  ipcMain.handle(CHANNELS.listChatChannelShares, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChatChannelSharesPayload.parse(payload);
-    const entry = requireWorkspace(input.workspaceId);
-    const joined = (entry.sharedChannels ?? []).map((channel) => ({
+  // What THIS machine joined, straight from the registry. The grant side lives
+  // on the relay; this side does not, so asking it costs no network — and a
+  // caller that needs only this must not wait on a relay that may never answer.
+  function joinedSharedChannelRows(workspaceId: string) {
+    const entry = requireWorkspace(workspaceId);
+    return (entry.sharedChannels ?? []).map((channel) => ({
       shareId: channel.shareId,
       channelWireId: channel.channelWireId,
       access: channel.access,
       granterEmail: channel.granterEmail,
       ended: channel.ended === true,
     }));
+  }
+
+  ipcMain.handle(CHANNELS.listJoinedSharedChannels, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListJoinedSharedChannelsPayload.parse(payload);
+    return ListJoinedSharedChannelsResult.parse({
+      joined: joinedSharedChannelRows(input.workspaceId),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.listChatChannelShares, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatChannelSharesPayload.parse(payload);
+    const entry = requireWorkspace(input.workspaceId);
+    const joined = joinedSharedChannelRows(input.workspaceId);
     // Relay-side listings need a signed-in session; without one the local
     // joined set still answers (their local copies keep working offline).
     let granted: Array<Record<string, unknown>> = [];

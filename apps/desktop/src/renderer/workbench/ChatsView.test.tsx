@@ -113,6 +113,7 @@ function dm(overrides: Partial<DmRecord> = {}): DmRecord {
 const bridgeMock = {
   listChatChannels: vi.fn(),
   listChatChannelShares: vi.fn(),
+  listJoinedSharedChannels: vi.fn(),
   shareChatChannel: vi.fn(),
   joinSharedChannel: vi.fn(),
   leaveSharedChannel: vi.fn(),
@@ -171,6 +172,7 @@ beforeEach(() => {
     received: [],
     joined: [],
   });
+  bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [] });
   bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
   bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [] });
@@ -1849,18 +1851,14 @@ describe("ChatsView live activity refresh", () => {
       if (shareReads === 1) {
         return Promise.resolve({ granted: [], received: [], joined: [joinedRow] });
       }
-      if (shareReads === 2) {
-        // The readRevision refresh's full lookup: it stalls.
-        return new Promise((resolve) => {
-          answerFullRead = resolve;
-        });
-      }
-      // The badge pass's lookup, issued later: the sync recorded the revoke.
-      return Promise.resolve({
-        granted: [],
-        received: [],
-        joined: [{ ...joinedRow, ended: true }],
+      // The readRevision refresh's full lookup: it stalls.
+      return new Promise((resolve) => {
+        answerFullRead = resolve;
       });
+    });
+    // The badge pass's local read, issued later: the sync recorded the revoke.
+    bridgeMock.listJoinedSharedChannels.mockResolvedValue({
+      joined: [{ ...joinedRow, ended: true }],
     });
     const navigator = (readRevision: number) => (
       <ChatsView
@@ -1899,6 +1897,131 @@ describe("ChatsView live activity refresh", () => {
     );
   });
 
+  // The initial load holds the surface at "loading" until its share lookup
+  // answers. A badge read that lands during that wait is NEWER than the
+  // snapshot that load is carrying, and dropping it leaves the stale counts on
+  // screen until the next event.
+  it("keeps a badge result that lands while the first load is still waiting", async () => {
+    let answerFirstShares!: (value: {
+      granted: unknown[];
+      received: unknown[];
+      joined: unknown[];
+    }) => void;
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return new Promise((resolve) => {
+          answerFirstShares = resolve;
+        });
+      }
+      return Promise.resolve({ granted: [], received: [], joined: [] });
+    });
+    let reads = 0;
+    bridgeMock.listChatChannels.mockImplementation(() => {
+      reads += 1;
+      // The first load's snapshot is already old by the time it is displayed.
+      return Promise.resolve({
+        channels: [channel({ unreadCount: reads === 1 ? 2 : 5 })],
+        fileThreads: [],
+      });
+    });
+    renderView();
+    await waitFor(() => expect(reads).toBe(1));
+    expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+
+    // A write lands while the first load still waits on its share lookup.
+    act(() => emitWorkspaceActivity());
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("5");
+
+    // The first load finally answers. Its channels are older; its shares are
+    // still the only answer to a question the badge read never asked.
+    await act(async () => {
+      answerFirstShares({ granted: [], received: [], joined: [] });
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("chats-channel-unread").textContent).toBe("5");
+  });
+
+  // The badge drain must not be held by a request that may never return. The
+  // grant side lives on the relay behind an unbounded fetch; what this reader
+  // needs — which channels THIS machine joined — is local.
+  it("keeps refreshing badges while the relay-backed share lookup hangs", async () => {
+    const joinedRow = {
+      shareId: "share-joined",
+      channelWireId: "wire-joined",
+      granterEmail: "owner@example.com",
+      access: "read-write" as const,
+      ended: false,
+    };
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return Promise.resolve({ granted: [], received: [], joined: [joinedRow] });
+      }
+      // The relay stopped answering, and nothing bounds that wait.
+      return new Promise(() => {});
+    });
+    let unreadCount = 0;
+    bridgeMock.listChatChannels.mockImplementation(() =>
+      Promise.resolve({
+        channels: [channel({ wireId: "wire-joined", unreadCount })],
+        fileThreads: [],
+      }),
+    );
+    bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [joinedRow] });
+    renderView();
+    await screen.findByTestId("chats-channel-shared");
+
+    unreadCount = 1;
+    act(() => emitWorkspaceActivity());
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("1");
+
+    // The second write still gets through: no request is holding the drain.
+    unreadCount = 4;
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-unread").textContent).toBe("4"),
+    );
+    expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1);
+  });
+
+  // The channel listing itself syncs shared channels over the relay before it
+  // reads, so it can stall too. Once a navigation has moved past that read it
+  // can commit nothing, and a later write must not queue behind it.
+  it("frees the badge drain once a navigation leaves its read behind", async () => {
+    let reads = 0;
+    let unreadCount = 0;
+    bridgeMock.listChatChannels.mockImplementation(() => {
+      reads += 1;
+      if (reads === 2) return new Promise(() => {});
+      return Promise.resolve({
+        channels: [channel({ unreadCount })],
+        fileThreads: [],
+      });
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    const user = userEvent.setup();
+    renderView();
+    await screen.findByTestId("chats-channel-name");
+
+    // A write starts a badge read that never comes back.
+    act(() => emitWorkspaceActivity());
+    expect(reads).toBe(2);
+
+    // The user opens a channel and comes back. That read can commit nothing now.
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-channel-back"));
+    await waitFor(() => expect(reads).toBe(3));
+
+    // The next write is not stranded behind the abandoned read.
+    unreadCount = 9;
+    act(() => emitWorkspaceActivity());
+    expect(reads).toBe(4);
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("9");
+  });
+
   // A failed lookup learned nothing. "Unknown" is a state of the whole share
   // listing, so a response that no longer owns both lanes must not write it:
   // doing so throws away a newer joined-grant answer and locks every channel.
@@ -1928,18 +2051,14 @@ describe("ChatsView live activity refresh", () => {
       if (shareReads === 1) {
         return Promise.resolve({ granted: [], received: [], joined: [joinedRow] });
       }
-      if (shareReads === 2) {
-        // The refresh the user's back-navigation owns. It stalls, then fails.
-        return new Promise((_resolve, reject) => {
-          failFullRead = () => reject(new Error("signed out"));
-        });
-      }
-      // The badge pass's lookup, issued later: the sync recorded the revoke.
-      return Promise.resolve({
-        granted: [],
-        received: [],
-        joined: [{ ...joinedRow, ended: true }],
+      // The refresh the user's back-navigation owns. It stalls, then fails.
+      return new Promise((_resolve, reject) => {
+        failFullRead = () => reject(new Error("signed out"));
       });
+    });
+    // The badge pass's local read, issued later: the sync recorded the revoke.
+    bridgeMock.listJoinedSharedChannels.mockResolvedValue({
+      joined: [{ ...joinedRow, ended: true }],
     });
     const user = userEvent.setup();
     renderView();
@@ -2040,11 +2159,9 @@ describe("ChatsView live activity refresh", () => {
       "no longer shared",
     );
 
-    // The sync finds the grant revoked. The relay is unreachable in the same
-    // pass, so the invitation comes back empty — which is not an answer.
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
+    // The sync finds the grant revoked and records it in the registry, which
+    // is what the local read reports.
+    bridgeMock.listJoinedSharedChannels.mockResolvedValue({
       joined: [{ ...joinedRow, ended: true }],
     });
     act(() => emitWorkspaceActivity());

@@ -1181,16 +1181,14 @@ export function ChatsView(props: {
   // refreshOverview in three ways, and each one is a thing this refresh has no
   // authority to do:
   //
-  //  - It reads the channel listing, and the share lookup only to correct the
-  //    JOINED rows the listing's sync may have just changed. Joined rows are
-  //    local registry state, so that lookup answers them offline; the granted
-  //    and received rows need the relay, which answers "none" when it is
-  //    unreachable, and those stay cached here.
+  //  - It reads the channel listing, and the JOINED grants that listing's sync
+  //    may have just changed. Both are local questions: the joined rows come
+  //    from the registry, which is why they have a read of their own. The
+  //    relay-backed granted/received rows are nobody's business here.
   //  - It takes its tickets like every other reader, so it cannot discard the
   //    response of a refresh the user DID ask for (a join, a leave, a retry),
   //    and a newer commit cannot be undone by its own late answer. It captures
-  //    liveToken and commits only over a resolved overview, so a workspace
-  //    switch, a navigation, or a mutation still wins.
+  //    liveToken, so a workspace switch, a navigation, or a mutation wins.
   //  - It keeps ONE listing in flight. The activity signal fires for every
   //    settled file batch and run update, the listing syncs shared channels
   //    over the relay before it reads, and a persistent navigator plus an
@@ -1202,32 +1200,47 @@ export function ChatsView(props: {
   // pass onto a read still in flight for the workspace they LEFT: that pass
   // would carry the old workspace's id and the new workspace's liveToken, and
   // repaint one workspace's channels over the other's.
-  const badgeRead = useRef<{ workspaceId: string; pending: boolean } | null>(null);
+  const badgeRead = useRef<{
+    workspaceId: string;
+    token: number;
+    pending: boolean;
+  } | null>(null);
   const latestChannelShares = useRef(channelShares);
   latestChannelShares.current = channelShares;
   const refreshChannelBadges = useCallback(async (): Promise<void> => {
     const active = badgeRead.current;
-    if (active?.workspaceId === workspaceId) {
+    // Queue onto a read only while it can still deliver. Its listing syncs
+    // shared channels over the relay, which can stall for as long as the
+    // network wants to; once a navigation or a mutation has moved liveToken
+    // past it, that read can commit nothing, and waiting on it would strand
+    // every later badge behind a request that is never coming back.
+    if (
+      active?.workspaceId === workspaceId &&
+      active.token === liveToken.current
+    ) {
       active.pending = true;
       return;
     }
-    // Any leftover drain belongs to a workspace the user left. Taking the slot
-    // stops it: its own commits and its next pass both check this identity.
-    const mine = { workspaceId, pending: false };
+    // Any other leftover drain has nothing left to say. Taking the slot stops
+    // it: its own commits and its next pass both check this identity.
+    const mine = { workspaceId, token: liveToken.current, pending: false };
     badgeRead.current = mine;
     try {
       do {
         mine.pending = false;
-        const token = liveToken.current;
+        mine.token = liveToken.current;
+        const token = mine.token;
         const ticket = takeCommitTicket();
         const isCurrent = () =>
           token === liveToken.current && badgeRead.current === mine;
         try {
           const result = await bridge().listChatChannels({ workspaceId });
           if (!isCurrent()) return;
-          // Only over a list that is already resolved: this reader has no
-          // share metadata, so it must not be the one to settle the surface.
-          if (overviewIsReady.current && claimLanes(["overview"], ticket)) {
+          if (claimLanes(["overview"], ticket)) {
+            // Settle the surface even while the initial load is still waiting
+            // on its share lookup. This answer is newer than the one that load
+            // will bring, and the reader that owns the share lanes is still
+            // free to fill them in.
             setOverview({
               status: "ready",
               channels: result.channels,
@@ -1238,19 +1251,22 @@ export function ChatsView(props: {
           // that sync records a revoked or downgraded grant in the registry.
           // Without the correction here the composer stays enabled on a channel
           // the user can no longer post to. Ask only when this workspace has
-          // joined rows: nothing else in this refresh needs share metadata, and
-          // a joined row only ever arrives through an explicit refresh.
+          // joined rows: a joined row only ever arrives through an explicit
+          // refresh, so there is nothing to discover here.
           const cachedShares = latestChannelShares.current;
           if (cachedShares && cachedShares.joined.length > 0) {
             const sharesTicket = takeCommitTicket();
-            const refreshed = await bridge().listChatChannelShares({ workspaceId });
-            // ONLY the joined lane. The relay-backed rows are not this
-            // reader's to answer — "the relay did not answer" reaches this
-            // renderer as an empty listing, which is not an answer — and
-            // leaving their lane alone lets a full read still in flight land.
+            const refreshed = await bridge().listJoinedSharedChannels({ workspaceId });
+            // ONLY the joined lane, which is all this read answers. Leaving the
+            // relay-backed lane alone also lets a full share read still in
+            // flight land its own rows.
             if (isCurrent() && claimLanes(["joinedShares"], sharesTicket)) {
               setChannelShares((current) =>
-                mergeShareLanes(current, refreshed, { joined: true, relay: false }),
+                mergeShareLanes(
+                  current,
+                  { granted: [], received: [], joined: refreshed.joined },
+                  { joined: true, relay: false },
+                ),
               );
             }
           }
