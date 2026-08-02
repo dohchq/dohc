@@ -87,7 +87,7 @@ import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   UnifiedDiffLines,
   buildUnifiedDiffLines,
-  changedLineCounts,
+  computeTextDiff,
   type UnifiedDiffLine,
 } from "./workbench/unifiedDiff";
 import {
@@ -442,7 +442,7 @@ type ActiveUndoHandler = {
 // restore. Restore returns the file to its state BEFORE this moment and
 // records a forward "Restored <file>" moment; undo restores to before THAT
 // moment — history is never rewritten.
-function EngineMomentDiffPage({
+export function EngineMomentDiffPage({
   workspaceId,
   tabPath,
   onBeforeRestore,
@@ -507,6 +507,16 @@ function EngineMomentDiffPage({
   }, [tabPath]);
 
   const moment = state.status === "ready" ? state.moment : null;
+  // The diff is the expensive part of this page, and a moment's bodies never
+  // change while its tab is open. Build it ONCE per moment: it used to run
+  // twice per render — once for the counts, once for the lines — and a
+  // hydrated 10 MiB body cost seconds each time.
+  const prepared = useMemo(() => {
+    if (!moment) return null;
+    const sides = momentDiffSides(moment);
+    const diff = computeTextDiff(sides.before, sides.after, 800);
+    return { sides, diff, lines: buildUnifiedDiffLines(diff) };
+  }, [moment]);
   const restoreBusy =
     restoreState.status === "restoring" || restoreState.status === "undoing";
   const canRestore = moment !== null && moment.operation !== "rename" && !undoMomentId;
@@ -585,7 +595,7 @@ function EngineMomentDiffPage({
   if (state.status === "loading") {
     return <PanelLoading label="history diff" />;
   }
-  if (!moment) {
+  if (!moment || !prepared) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle">
         This change is no longer in the history record.
@@ -599,15 +609,13 @@ function EngineMomentDiffPage({
   const isProtected = moment.protected === true;
   // Each side presents by its OWN kind (see momentDiffSides).
   const {
-    before,
-    after,
     beforeIsBinary,
     afterIsBinary,
     bytesOnly,
     createdFile,
     byteLength: binaryByteLength,
-  } = momentDiffSides(moment);
-  const counts = isProtected || bytesOnly ? null : changedLineCounts(before, after);
+  } = prepared.sides;
+  const counts = isProtected || bytesOnly ? null : prepared.diff.counts;
   // Restore returns the BEFORE state, so its wording follows that side.
   const restoreDetail = createdFile
     ? "This change created the file, so restoring removes it from the folder. It stays in history and you can undo."
@@ -624,7 +632,7 @@ function EngineMomentDiffPage({
       ? false
       : moment.operation !== "delete" ||
         (restoreState.status === "restored" && restoreState.restored === "text");
-  const diffLines: UnifiedDiffLine[] = buildUnifiedDiffLines(before, after, 800);
+  const diffLines: UnifiedDiffLine[] = prepared.lines;
 
   const restoreFile = async () => {
     if (!canRestore || restoreBusy || restoreInFlight.current) return;
