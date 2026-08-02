@@ -80,6 +80,64 @@ fn plaintext_update(text: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, text))
 }
 
+/// Stage the #346 interleaving: a 0-byte artifact on disk that capture has NOT
+/// yet ingested, with a live session opened over it. Returns the path it
+/// staged and the open result.
+///
+/// The order is VERIFIED, not assumed. Writing the file and opening straight
+/// after relies on the open beating the watcher's settle window, and this
+/// machine has shown 3.5x slowdowns under suite load — a paused task lets
+/// capture ingest first, `seedMarkdown` comes back "" instead of null, and the
+/// test false-fails without ever staging the race it exists to cover.
+///
+/// The capture probe cannot enforce it either: its seam holds the driver AFTER
+/// `reconcile_if_dirty` reports Completed, so the head is already minted by the
+/// time it pauses. There is no pre-apply seam, and this is not worth adding new
+/// engine surface for. So an attempt that lost the race is detected and retried
+/// on a path capture has never seen, and exhausting the attempts FAILS rather
+/// than proceeding over an unstaged interleaving.
+async fn stage_headless_session_over_an_empty_artifact(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    scratch: &ScratchDir,
+    stem: &str,
+) -> (String, Value) {
+    for attempt in 0..8 {
+        let path = format!("notes/{stem}-{attempt}.md");
+        write_file(scratch.path(), &path, b"");
+        let opened = call(
+            transport,
+            handle,
+            1_000 + attempt,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": path,
+                "contentKind": "plaintext"
+            }),
+        )
+        .await;
+        if opened["seedMarkdown"] == Value::Null {
+            // The seed comes from the HEAD, not from disk, so a null seed IS
+            // the proof that no head exists yet.
+            assert_eq!(opened["lineage"], json!("absent"));
+            return (path, opened);
+        }
+        // Capture won the race. Drop this session and stage again elsewhere;
+        // the lineage carries no durable state, so the prune-close is clean.
+        let session_id = opened["sessionId"].as_str().expect("session id");
+        call(
+            transport,
+            handle,
+            2_000 + attempt,
+            "ydoc.close",
+            json!({ "sessionId": session_id, "settle": false }),
+        )
+        .await;
+    }
+    panic!("could not open a session before capture ingested the empty artifact in 8 attempts");
+}
+
 async fn moment_count_for_object(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -1078,6 +1136,250 @@ async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
         json!({ "sessionId": session_id }),
     )
     .await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session() {
+    // Issue #346. The desktop's New File writes "" straight to disk with no
+    // engine write, so the artifact exists with NO head. The interleaving that
+    // wedges the document — which the file-already-on-disk-at-open test above
+    // cannot reach, because nothing ingests the artifact there:
+    //
+    //   1. workspace.open starts the capture driver and its watcher.
+    //   2. createFile writes a 0-byte artifact. The watcher queues the create.
+    //   3. ydoc.open runs BEFORE that batch's debounce elapses: no head yet,
+    //      so the session's open-time head expectation is None.
+    //   4. capture ingests the 0-byte artifact and mints a head at sha("").
+    //   5. The user types; settle expects None, probes sha("") — conflict.
+    //   6. The failed settle never sets last_settled_sha, so the expectation
+    //      stays None and EVERY later settle conflicts. The document is
+    //      wedged for the life of the session.
+    //
+    // Driven deterministically (sleep past the debounce + capture.flush)
+    // rather than by hoping the scheduler interleaves.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-newfile", 1).await;
+
+    // Steps 2 and 3: New File exactly as `createFile` leaves it, with the
+    // session opened before capture ingests it. `a_zero_byte_precreated_file…`
+    // above writes its file before workspace.open, so its opening reconcile
+    // ingests the artifact first and its session opens with a head expectation
+    // that already matches — which is why that test never reached this bug.
+    let (path, opened) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "untitled")
+            .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    // Step 4: capture ingests the empty artifact under the open session.
+    // POLL until the empty head is provably there. It is what the settle must
+    // adopt, so without the proof a flush that ingested nothing would leave
+    // the expectation matching an absent head and every assertion below would
+    // pass with the adoption path never running. One sleep plus a single
+    // flush cannot carry that proof either way: a watcher that has not yet
+    // queued the create makes the flush report quiescence, and the read then
+    // returns null and FALSE-FAILS a correct implementation.
+    let mut ingested = Value::Null;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        call(
+            &transport,
+            &handle,
+            100 + attempt,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        ingested = call(
+            &transport,
+            &handle,
+            200 + attempt,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": path }),
+        )
+        .await;
+        if ingested["text"] == json!("") {
+            break;
+        }
+    }
+    assert_eq!(
+        ingested["text"],
+        json!(""),
+        "capture must mint an EMPTY head"
+    );
+    assert_eq!(
+        ingested["objectId"], opened["objectId"],
+        "and mint it on the object the session holds"
+    );
+
+    // Step 5: the first typed edit must still reach disk.
+    let typed = "The first thing typed into a brand-new document.";
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update(typed)
+        }),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "type" }),
+    )
+    .await;
+    assert_eq!(settled["markdown"], json!(typed));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(&path)).expect("settled"),
+        typed,
+        "the first typed edit into a new document must replace its empty artifact"
+    );
+
+    // Step 6: and the session is not wedged — a second edit settles too.
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update("More typing. ")
+        }),
+    )
+    .await;
+    let resettled = call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "type more" }),
+    )
+    .await;
+    let resettled = resettled["markdown"].as_str().expect("markdown");
+    // BOTH edits, not just the newest: a second settlement that dropped the
+    // first would otherwise satisfy every assertion here. Order is not
+    // asserted — two independent client ids inserting at offset 0 order by
+    // client id, which is not fixed across runs — so the disk comparison
+    // below uses what the settle REPORTED rather than a concatenation.
+    assert!(resettled.contains("More typing. "), "{resettled}");
+    assert!(resettled.contains(typed), "{resettled}");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(&path)).expect("resettled"),
+        resettled,
+        "every later edit must reach disk as well"
+    );
+
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 10, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
+    // The inverse of the test above, and the guard on its fix: the empty
+    // artifact is adopted because it IS the session's base. Content is not.
+    // Here something writes REAL bytes to the path after the session opened
+    // headless, and capture ingests them. Settling would overwrite bytes the
+    // user never saw, so it must still refuse.
+    //
+    // Mutation check: drop the empty-artifact test from the expectation
+    // adoption in `ydoc_settle_on_store` and this settle succeeds, silently
+    // destroying the ingested content.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-rival", 1).await;
+
+    let (path, opened) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "rival").await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    // Content the session never saw lands on the path, and capture ingests it.
+    write_file(scratch.path(), &path, b"written by something else\n");
+    // POLL until the rival content is provably the head. One sleep plus a
+    // flush is not enough: a watcher that has not yet queued the write makes
+    // the flush report quiescence with no head minted, and the settle below
+    // then refuses through the materialization preimage instead — passing
+    // without ever reaching the predicate this test exists to hold.
+    let mut ingested = Value::Null;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        call(
+            &transport,
+            &handle,
+            100 + attempt,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        ingested = call(
+            &transport,
+            &handle,
+            200 + attempt,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": path }),
+        )
+        .await;
+        if ingested["text"] == json!("written by something else\n") {
+            break;
+        }
+    }
+    assert_eq!(
+        ingested["text"],
+        json!("written by something else\n"),
+        "capture must mint the RIVAL head before the settle is meaningful"
+    );
+
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update("typed over the rival")
+        }),
+    )
+    .await;
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "type" }),
+            ),
+        )
+        .await
+        .expect_err("a settle over ingested content must refuse");
+    assert_eq!(refused.message, "conflict-stale-target");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(&path)).expect("intact"),
+        "written by something else\n",
+        "the refused settle must leave the ingested bytes intact"
+    );
+
+    // No ydoc.close: a wedged draft cannot be pruned (`ydoc-unsettled-close`)
+    // and settling it is what this test just refused. The workspace teardown
+    // takes the session down with it.
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }
 

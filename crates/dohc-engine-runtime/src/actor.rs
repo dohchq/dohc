@@ -9109,6 +9109,22 @@ fn ydoc_settle_on_store(
     let probe_sha = head_probe
         .as_ref()
         .map(|snapshot| snapshot.blob_sha256.clone());
+    // Adopt an EMPTY head when this lineage has no durable settle and the
+    // session saw no head at open. What the types cannot show: an empty
+    // artifact holds no bytes, so adopting one can destroy nothing, while
+    // refusing it wedges the session — a refused settle records no
+    // expectation, so every later settle refuses the same way. Capture mints
+    // such a head from the 0-byte artifact the desktop's New File leaves on
+    // disk. A head with CONTENT still refuses (#346).
+    let expected_head_sha = match head_probe.as_ref() {
+        Some(snapshot)
+            if expected_head_sha.is_none()
+                && snapshot.blob_sha256 == dohc_engine_storage::hex_sha256(b"") =>
+        {
+            probe_sha.clone()
+        }
+        _ => expected_head_sha,
+    };
     if probe_sha != expected_head_sha {
         return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
     }
