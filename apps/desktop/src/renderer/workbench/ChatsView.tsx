@@ -1017,12 +1017,27 @@ export function ChatsView(props: {
     setSending(contextIsSending);
   }, [sendContextKey]);
 
-  // `keepReadyOnError` is for BACKGROUND refreshes (the navigator's badge
-  // catch-up), where the user asked for nothing and a transient IPC failure
-  // must not replace a working navigator with an error card.
+  // `background` marks a refresh the user did not ask for (the navigator's
+  // badge catch-up). Two things follow, and both are about not stealing from
+  // whatever the user IS doing:
+  //
+  //  - It must not touch liveToken. That token means "everything in flight is
+  //    now stale", and createChannel, joinShared and shareChannel capture it
+  //    to decide whether their own completion still counts. Bumping it here
+  //    made a badge refresh landing mid-mutation throw away the mutation's
+  //    successful result, leaving the create form or the old invite on screen.
+  //    Latest-wins among overview refreshes uses its own sequence instead; the
+  //    captured token is still CHECKED, so a workspace switch or a user
+  //    navigation still discards this response.
+  //  - A transient failure must not replace a working navigator with an error
+  //    card (there is nothing to report to a user who asked for nothing).
+  const overviewRequest = useRef(0);
   const refreshOverview = useCallback(
-    async (options?: { keepReadyOnError?: boolean }): Promise<void> => {
-      const token = ++liveToken.current;
+    async (options?: { background?: boolean }): Promise<void> => {
+      const token = options?.background ? liveToken.current : ++liveToken.current;
+      const request = ++overviewRequest.current;
+      const superseded = () =>
+        token !== liveToken.current || request !== overviewRequest.current;
       setOverview((current) =>
         current.status === "ready" ? current : { status: "loading" },
       );
@@ -1035,7 +1050,7 @@ export function ChatsView(props: {
             .listChatChannelShares({ workspaceId })
             .catch(() => null),
         ]);
-        if (token !== liveToken.current) return;
+        if (superseded()) return;
         setChannelShares(shares);
         setSharesWorkspaceId(workspaceId);
         setOverview({
@@ -1044,10 +1059,10 @@ export function ChatsView(props: {
           fileThreads: result.fileThreads,
         });
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (superseded()) return;
         const message = ipcErrorMessage(error, "Could not load Chats.");
         setOverview((current) =>
-          options?.keepReadyOnError && current.status === "ready"
+          options?.background && current.status === "ready"
             ? current
             : { status: "unavailable", message },
         );
@@ -1275,10 +1290,7 @@ export function ChatsView(props: {
     const revision = props.readRevision;
     if (revision === seenReadRevision.current) return;
     seenReadRevision.current = revision;
-    // The user asked for nothing here, so a transient failure must leave the
-    // navigator standing rather than replace it with an error card. The badge
-    // catches up on the next read.
-    void refreshOverview({ keepReadyOnError: true });
+    void refreshOverview({ background: true });
   }, [props.readRevision, refreshOverview]);
 
   const loadChannelSnapshot = useCallback(

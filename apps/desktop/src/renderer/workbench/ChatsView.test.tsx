@@ -431,6 +431,54 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
   });
 
+  // liveToken means "everything in flight is now stale", and the mutations
+  // capture it to decide whether their own completion still counts. A badge
+  // refresh is not that: it must not throw away a channel the user just made.
+  it("does not discard a channel creation that a badge refresh lands on top of", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    let finishCreate!: (result: { channel: ChatChannelRecord }) => void;
+    bridgeMock.createChatChannel.mockReturnValue(
+      new Promise((resolve) => {
+        finishCreate = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    const view = render(navigator(0));
+    await screen.findByTestId("chats-channel-unread");
+
+    // Start creating a channel and leave the IPC in flight.
+    await user.click(screen.getByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    await waitFor(() => expect(bridgeMock.createChatChannel).toHaveBeenCalled());
+
+    // A read lands, so the navigator refreshes its badges underneath.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    view.rerender(navigator(1));
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+
+    // The creation now answers. Its result must still count.
+    await act(async () => {
+      finishCreate({
+        channel: channel({ id: "channel-9", name: "launch", slug: "launch" }),
+      });
+      await Promise.resolve();
+    });
+    // Straight into the new channel, and the create form is gone — neither
+    // happens if the refresh invalidated the creation.
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
+      "launch",
+    );
+    expect(screen.queryByTestId("chats-new-channel-name")).toBeNull();
+  });
+
   it("does not refetch while the revision stands still", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ unreadCount: 2 })],
