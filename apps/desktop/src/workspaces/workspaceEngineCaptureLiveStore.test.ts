@@ -790,9 +790,7 @@ describe("createCaptureLiveStores", () => {
   // `sides` is not cosmetic: a delete or rename records ONE digest on BOTH
   // sides (store.rs binds the same `before.blob_sha256` to `after_blob_sha256`
   // and `before_blob_sha256`), so those rows also pin that the body is fetched
-  // once rather than streamed twice. NOTE: the loopback engine writes
-  // `afterBlobSha256: null` for a delete and diverges from the daemon here —
-  // these rows follow the daemon.
+  // once rather than streamed twice.
   const overCapAfter = {
     ...moment,
     afterText: null,
@@ -1198,6 +1196,10 @@ describe("createCaptureLiveStores", () => {
             latestMomentId: "concurrent-moment",
             metadataOrigin: "api",
           },
+          // The daemon's delete shape: `delete_text_in_tx` (store.rs) binds the
+          // preimage digest to BOTH `after_blob_sha256` and
+          // `before_blob_sha256`, and the read joins the same blob row per
+          // side, so the removed body and its length repeat on the after side.
           moment: {
             ...moment,
             operation: "delete",
@@ -1205,9 +1207,9 @@ describe("createCaptureLiveStores", () => {
             beforeLatestMomentId: "concurrent-moment",
             beforeText: "newer content",
             beforeByteLength: 13,
-            afterBlobSha256: null,
-            afterText: "",
-            afterByteLength: 0,
+            afterBlobSha256: "c".repeat(64),
+            afterText: "newer content",
+            afterByteLength: 13,
           },
           deduped: false,
         },
@@ -1232,7 +1234,13 @@ describe("createCaptureLiveStores", () => {
         latestMomentId: "concurrent-moment",
       },
       moment: {
-        payload: { before: { text: "newer content", sha256: "c".repeat(64) } },
+        payload: {
+          before: { text: "newer content", sha256: "c".repeat(64) },
+          // Read from the record's own after side, not copied from the before
+          // side: one digest covers both, which is what earns the single blob
+          // fetch when the body is over cap (#487).
+          after: { text: "newer content", sha256: "c".repeat(64) },
+        },
       },
     });
     expect(requests).toHaveLength(1);

@@ -276,14 +276,11 @@ function momentFromWire(
     operation: moment.operation,
     payload: {
       before,
-      // The engine's delete wire record has no post-delete content fields,
-      // while the oracle deliberately repeats the deleted snapshot in
-      // payload.after. Reconstruct that compatibility shape from the atomic
-      // preimage carried by the same mutation response.
-      after:
-        moment.operation === "delete" && before !== null
-          ? { ...before }
-          : payloadSnapshot(moment, "after"),
+      // A delete repeats its preimage on the after side rather than emptying
+      // it — `delete_text_in_tx` (store.rs) binds one digest to both sides —
+      // so the after side is read from the record like any other, not
+      // reconstructed from the before side.
+      after: payloadSnapshot(moment, "after"),
     },
     metadata: metadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
