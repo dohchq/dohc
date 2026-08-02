@@ -9,6 +9,8 @@ import {
   MAX_MERGED_RESOLUTION_TEXT_BYTES,
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
+  jsonStringEncodedLength,
+  settledConflictForWire,
   settledSnapshotForWire,
   type ConflictRecord,
   type JsonObject,
@@ -331,7 +333,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         this.conflicts.set(key, resolved);
         return {
           id: request.id,
-          result: { conflict: resolved, write: null, delete: null },
+          result: { conflict: settledConflictForWire(resolved), write: null, delete: null },
         };
       }
 
@@ -378,7 +380,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         this.conflicts.set(key, resolved);
         return {
           id: request.id,
-          result: { conflict: resolved, write: null, delete: null },
+          result: { conflict: settledConflictForWire(resolved), write: null, delete: null },
         };
       }
 
@@ -405,24 +407,35 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         this.conflicts.set(key, resolved);
         return {
           id: request.id,
-          result: { conflict: resolved, write: null, delete: deletion?.result ?? null },
+          result: {
+            conflict: settledConflictForWire(resolved),
+            write: null,
+            delete: deletion?.result ?? null,
+          },
         };
       }
 
-      const text = resolution === "apply-incoming"
-        ? existing.incoming.snapshot!.text
-        : String(local.mergedText);
+      // The LEDGER holds the bodies the listing carried; only an ANSWER
+      // withholds one. A withheld side here would mean the fixture lost the
+      // body it is being asked to apply.
+      const incomingText = existing.incoming.snapshot?.text ?? null;
+      if (resolution === "apply-incoming" && incomingText === null) {
+        throw new Error("state-corrupt");
+      }
+      const text =
+        resolution === "apply-incoming"
+          ? (incomingText ?? "")
+          : String(local.mergedText);
       // Only a COMBINED body is bounded, and by the control frame that carried
       // it — the daemon puts no size check on a side choice, which sends no
       // text at all (lib.rs conflicts_resolve).
-      if (
-        resolution === "apply-merged" &&
-        Buffer.byteLength(text, "utf8") > MAX_MERGED_RESOLUTION_TEXT_BYTES
-      ) {
+      const encoded = jsonStringEncodedLength(text);
+      if (resolution === "apply-merged" && encoded > MAX_MERGED_RESOLUTION_TEXT_BYTES) {
         throw new Error(
           `merged-text-exceeds-wire-limit: one control frame carries a combined ` +
-            `resolution body of at most ${MAX_MERGED_RESOLUTION_TEXT_BYTES} bytes, ` +
-            `observed ${Buffer.byteLength(text, "utf8")} bytes`,
+            `resolution body of at most ${MAX_MERGED_RESOLUTION_TEXT_BYTES} encoded ` +
+            `bytes, observed ${encoded} encoded bytes ` +
+            `(${Buffer.byteLength(text, "utf8")} raw bytes)`,
         );
       }
       // The daemon settles inside the store, so `versionedText.write`'s in-band
@@ -451,7 +464,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
       return {
         id: request.id,
         result: {
-          conflict: resolved,
+          conflict: settledConflictForWire(resolved),
           write: {
             ...settled,
             snapshot: settledSnapshotForWire(settled.snapshot as JsonObject),
@@ -1278,12 +1291,18 @@ describe("mergeVersionIntoMain", () => {
     expect(merged.conflict.resolution).toBe("applied-merged");
     expect(await readText(root, "plan.md")).toBe(combined);
     expect(await engine.listOpenConflicts()).toHaveLength(0);
-    // The body came back out of band, not in the resolve answer.
-    expect(
-      loopback.requests.some(
-        (request) => request.method === VERSIONED_METHOD.textReadBlob,
-      ),
-    ).toBe(true);
+    // The body came back out of band, and ONCE: the settled snapshot and the
+    // moment's after-body are the same body under the same digest, so
+    // hydrating them apart would stream it twice.
+    //
+    // MUTATION: give each hydration its own reader -> two streams, not one.
+    const hydrations = loopback.requests.filter(
+      (request) => request.method === VERSIONED_METHOD.textReadBlob,
+    );
+    expect(hydrations).toHaveLength(1);
+    expect((hydrations[0]!.params as JsonObject).sha256).toBe(
+      sha256Utf8(combined),
+    );
     await engine.stop();
   });
 
@@ -1333,7 +1352,8 @@ describe("mergeVersionIntoMain", () => {
       }),
     ).rejects.toThrow(
       new RegExp(
-        `merged-text-exceeds-wire-limit:.*${MAX_MERGED_RESOLUTION_TEXT_BYTES} bytes.*observed ${MAX_MERGED_RESOLUTION_TEXT_BYTES + 1} bytes`,
+        `merged-text-exceeds-wire-limit:.*${MAX_MERGED_RESOLUTION_TEXT_BYTES} encoded ` +
+          `bytes, observed ${MAX_MERGED_RESOLUTION_TEXT_BYTES + 3} encoded bytes`,
       ),
     );
     expect(await readText(root, "plan.md")).toBe("current\n");

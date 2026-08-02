@@ -9,6 +9,7 @@ import type { Response } from "../ydoc/generated/Response";
 import type { WireError } from "../ydoc/generated/WireError";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
+import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import {
   VERSIONED_METHOD,
   type MomentRecord,
@@ -46,24 +47,13 @@ function refusalFrom(error: unknown): unknown {
 
 const INBAND_LIMIT_BYTES = 48 * 1024;
 
-/**
- * The daemon's own names, mirrored from
- * crates/dohc-workspace-engine/src/lib.rs. Exported because the desktop
- * fixtures model the same contract and a hand-copied number is how the two
- * drift apart.
- *
- * `MAX_DESKTOP_CAPTURE_TEXT_BYTES` is the largest text body an answer carries
- * in band. Past it the daemon reports the digest and this limit, and the
- * caller hydrates with `versionedText.readBlob`.
- */
-export const MAX_DESKTOP_CAPTURE_TEXT_BYTES = 128 * 1024;
-
-/**
- * `MAX_MERGED_RESOLUTION_TEXT_BYTES`: a hand-combined conflict resolution
- * arrives as one wire string in one control frame, so it gets the frame
- * budget less the envelope headroom the conflict listing keeps.
- */
-export const MAX_MERGED_RESOLUTION_TEXT_BYTES = 8 * 1024 * 1024 - 64 * 1024;
+// The limits live in a leaf module (no imports) so a renderer can read them
+// without pulling this fixture's `node:crypto` into a browser bundle.
+export {
+  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+  MAX_MERGED_RESOLUTION_TEXT_BYTES,
+  jsonStringEncodedLength,
+} from "./engineTextLimits";
 
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const MAX_CAPTURE_BINARY_FILE_BYTES = 5 * 1024 * 1024;
@@ -83,6 +73,28 @@ export function settledSnapshotForWire(snapshot: JsonObject): JsonObject {
     return snapshot;
   }
   return { ...snapshot, text: null, inbandLimitBytes: MAX_DESKTOP_CAPTURE_TEXT_BYTES };
+}
+
+/**
+ * The daemon's `settled_conflict_json` (lib.rs): the SAME withholding rule
+ * over every side of the conflict a resolution closed, so no part of that
+ * answer grows with a body.
+ */
+export function settledConflictForWire(conflict: JsonObject): JsonObject {
+  const settled = { ...conflict };
+  for (const side of ["base", "current", "incoming"] as const) {
+    const state = settled[side];
+    if (state === null || typeof state !== "object" || Array.isArray(state)) continue;
+    const snapshot = (state as JsonObject).snapshot;
+    if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+      continue;
+    }
+    settled[side] = {
+      ...(state as JsonObject),
+      snapshot: settledSnapshotForWire(snapshot as JsonObject),
+    };
+  }
+  return settled;
 }
 
 const ACCEPTED_ORIGINS = new Set<string>([

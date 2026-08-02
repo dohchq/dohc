@@ -4,7 +4,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./daemon": "./src/daemon/index.ts"
+    "./daemon": "./src/daemon/index.ts",
+    "./limits": "./src/versioned/engineTextLimits.ts"
   },
   "scripts": {
     "test": "vitest run",

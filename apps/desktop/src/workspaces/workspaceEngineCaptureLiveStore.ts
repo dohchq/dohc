@@ -383,7 +383,13 @@ function conflictStateFromWire(state: ConflictFileState): VersionedTextFileState
     contentKind: state.contentKind,
     sha256: snapshot.sha256,
     byteLength: snapshot.byteLength,
-    ...(state.contentKind === "text" ? { text: snapshot.text } : {}),
+    // A withheld body carries no text, the way a binary side carries none.
+    // Only `conflicts.resolve` withholds, and the conflict it answers with is
+    // read for identity and content kind, never for a body — the bodies a
+    // reader paints come from `conflicts.list`.
+    ...(state.contentKind === "text" && snapshot.text !== null
+      ? { text: snapshot.text }
+      : {}),
     updatedAtMs: snapshot.updatedAtMs,
     latestMomentId: snapshot.latestMomentId,
     metadata: metadataFromOrigin(snapshot.metadataOrigin, {
@@ -568,6 +574,40 @@ export function createCaptureLiveStores(
   }
 
   /**
+   * One fetch per digest, for the bodies ONE answer withheld.
+   *
+   * Digests repeat inside a single answer. A resolution’s settled snapshot and
+   * its moment’s `afterText` are the same body under the same digest, and a
+   * delete or rename binds one digest to both moment sides (`delete_text_in_tx`
+   * and the rename insert, store.rs). Hydrating them apart streams a
+   * multi-megabyte blob twice for one answer.
+   */
+  type WithheldBodyReader = (sha256: string, path: string) => Promise<string>;
+
+  function withheldBodies(): WithheldBodyReader {
+    const bodies = new Map<string, Promise<string>>();
+    return (sha256, path) => {
+      const cached = bodies.get(sha256);
+      if (cached !== undefined) return cached;
+      const body = runRead(async (adapter) => {
+        const text = await adapter.readTextBlob({
+          workspaceId: workspace.workspaceId,
+          sha256,
+        });
+        if (text === null) {
+          throw new VersionedTextStoreError(
+            "state-corrupt",
+            `Engine text blob ${sha256} for ${path} is unreadable.`,
+          );
+        }
+        return text;
+      });
+      bodies.set(sha256, body);
+      return body;
+    };
+  }
+
+  /**
    * Restore a moment payload body the daemon withheld for being over-cap.
    *
    * `moment_json` (lib.rs) nulls a payload text past the in-band limit and
@@ -578,7 +618,10 @@ export function createCaptureLiveStores(
    * A moment whose body already fits makes no extra request, and a metadata
    * listing (`listMoments`) never reaches here: it reads no payload text.
    */
-  async function hydratedMoment(moment: MomentRecord): Promise<MomentRecord> {
+  async function hydratedMoment(
+    moment: MomentRecord,
+    body: WithheldBodyReader = withheldBodies(),
+  ): Promise<MomentRecord> {
     const afterSha256 =
       moment.afterContentKind === "text" && moment.afterText === null
         ? moment.afterBlobSha256
@@ -590,37 +633,15 @@ export function createCaptureLiveStores(
         ? moment.beforeBlobSha256
         : null;
     if (afterSha256 === null && beforeSha256 === null) return moment;
-    return await runRead(async (adapter) => {
-      const body = async (sha256: string): Promise<string> => {
-        const text = await adapter.readTextBlob({
-          workspaceId: workspace.workspaceId,
-          sha256,
-        });
-        if (text === null) {
-          throw new VersionedTextStoreError(
-            "state-corrupt",
-            `Engine moment text blob ${sha256} for ${moment.path} is unreadable.`,
-          );
-        }
-        return text;
-      };
-      const afterText = afterSha256 === null ? null : await body(afterSha256);
-      // A delete or rename records ONE digest on both sides: `delete_text_in_tx`
-      // and the rename insert (store.rs) bind the same `before.blob_sha256` to
-      // `after_blob_sha256` and `before_blob_sha256`. Resolving it twice would
-      // stream a multi-megabyte body twice for one moment.
-      const beforeText =
-        beforeSha256 === null
-          ? null
-          : beforeSha256 === afterSha256 && afterText !== null
-            ? afterText
-            : await body(beforeSha256);
-      return {
-        ...moment,
-        ...(afterText !== null ? { afterText } : {}),
-        ...(beforeText !== null ? { beforeText } : {}),
-      };
-    });
+    const afterText =
+      afterSha256 === null ? null : await body(afterSha256, moment.path);
+    const beforeText =
+      beforeSha256 === null ? null : await body(beforeSha256, moment.path);
+    return {
+      ...moment,
+      ...(afterText !== null ? { afterText } : {}),
+      ...(beforeText !== null ? { beforeText } : {}),
+    };
   }
 
   /**
@@ -634,21 +655,10 @@ export function createCaptureLiveStores(
    */
   async function hydratedSnapshot(
     snapshot: VersionedTextReadValue,
+    body: WithheldBodyReader = withheldBodies(),
   ): Promise<VersionedTextReadValue> {
     if (snapshot.contentKind !== "text" || snapshot.text !== null) return snapshot;
-    const text = await runRead(
-      async (adapter) =>
-        await adapter.readTextBlob({
-          workspaceId: workspace.workspaceId,
-          sha256: snapshot.blobSha256,
-        }),
-    );
-    if (text === null) {
-      throw new VersionedTextStoreError(
-        "state-corrupt",
-        `Engine text blob ${snapshot.blobSha256} for ${snapshot.path} is unreadable.`,
-      );
-    }
+    const text = await body(snapshot.blobSha256, snapshot.path);
     const { inbandLimitBytes: _inbandLimitBytes, ...metadata } = snapshot;
     return { ...metadata, text };
   }
@@ -1051,6 +1061,7 @@ export function createCaptureLiveStores(
         throw new Error(`Engine conflict ${input.conflictId} was not resolved locally.`);
       }
       const conflict = conflictFromWire(raw.conflict as ConflictRecord);
+      const withheld = withheldBodies();
       if (raw.write !== null) {
         const write = raw.write as {
           object: unknown;
@@ -1062,13 +1073,15 @@ export function createCaptureLiveStores(
           conflict,
           write: {
             object: fileObjectFromWire(write.object),
+            // ONE reader for both: a settled body and the moment’s `afterText`
+            // are the same body under the same digest.
             snapshot: snapshotFromWire(
-              await hydratedSnapshot(write.snapshot),
+              await hydratedSnapshot(write.snapshot, withheld),
               input.metadata,
             ),
             moment: momentFromWire(
               input.workspaceId,
-              await hydratedMoment(write.moment),
+              await hydratedMoment(write.moment, withheld),
               input.metadata,
             ),
           },
@@ -1088,7 +1101,7 @@ export function createCaptureLiveStores(
             before: snapshotFromWire(deletion.before, input.metadata),
             moment: momentFromWire(
               input.workspaceId,
-              await hydratedMoment(deletion.moment),
+              await hydratedMoment(deletion.moment, withheld),
               input.metadata,
             ),
           },

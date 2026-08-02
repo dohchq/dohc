@@ -78,7 +78,13 @@ export type ConflictSnapshot = WorkspaceJsonObject & {
   versionId: string;
   objectId: string;
   path: string;
-  text: string;
+  /**
+   * `null` when the daemon withheld the body for being past the in-band cap,
+   * beside the `inbandLimitBytes` that says so. `conflicts.resolve` answers
+   * that way; `conflicts.list` always carries the bodies it returns.
+   */
+  text: string | null;
+  inbandLimitBytes?: number;
   contentKind: "text";
   sha256: string;
   byteLength: number;
@@ -391,18 +397,24 @@ function decodeSnapshot(value: JsonValue, label: string): ConflictSnapshot {
     "metadataOrigin",
     "metadataSummary",
     "metadataCorrelationId",
+    "inbandLimitBytes",
   ]);
   if (object.contentKind !== "text") {
     throw new WorkspaceProtocolShapeError(
       `${label}.contentKind must be text.`,
     );
   }
+  const inbandLimitBytes =
+    object.inbandLimitBytes === undefined || object.inbandLimitBytes === null
+      ? undefined
+      : integerValue(object, "inbandLimitBytes", label);
   return {
     workspaceId: stringValue(object, "workspaceId", label),
     versionId: stringValue(object, "versionId", label),
     objectId: stringValue(object, "objectId", label),
     path: stringValue(object, "path", label),
-    text: stringValue(object, "text", label),
+    text: object.text === null ? null : stringValue(object, "text", label),
+    ...(inbandLimitBytes === undefined ? {} : { inbandLimitBytes }),
     contentKind: "text",
     sha256: stringValue(object, "sha256", label),
     byteLength: integerValue(object, "byteLength", label),

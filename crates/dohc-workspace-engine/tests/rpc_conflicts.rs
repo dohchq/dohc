@@ -430,7 +430,8 @@ async fn over_cap_merged_resolution_applies_and_withholds_its_body() {
     // through the unclamped `snapshot_json` -> the withheld assertions fail.
     let (_scratch, service, transport, handle, workspace_id) =
         fixture_with_service("over-cap-merged").await;
-    let path = open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10).await;
+    let path =
+        open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
     // Past MAX_DESKTOP_CAPTURE_TEXT_BYTES (128 KiB). The multi-byte character
     // keeps the byte length honest against a character count.
     let merged = "combined \u{2713} line\n".repeat(12_000);
@@ -525,9 +526,50 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
     // MUTATION: drop the limit, the unit, or the observed size from the
     // message -> the refusal names nothing an agent can act on and this fails.
     let (_scratch, transport, handle, workspace_id) = fixture("past-frame-limit").await;
-    let path = open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10).await;
+    let path =
+        open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
     let limit = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+    // Every newline encodes as two bytes, so this body is 4 MiB raw and 8 MiB
+    // once encoded: under any raw-byte budget, past the frame that has to
+    // carry it. A raw-byte check would accept it here and let the client's own
+    // framer refuse it, with no limit named anywhere.
+    //
+    // MUTATION: measure `text.len()` instead of the encoded length -> the
+    // resolve is accepted and this refusal never happens.
+    let newlines = "\n".repeat(4 * 1024 * 1024);
+    let encoded_newlines = newlines.len() * 2 + 2;
+    assert!(newlines.len() < limit && encoded_newlines > limit);
+    let escaped = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                11,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": newlines,
+                    "objectId": "escape-heavy-resolution-object",
+                    "writeMomentId": "escape-heavy-resolution-write",
+                    "deleteMomentId": "escape-heavy-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect_err("an escape-heavy body past one control frame must be refused");
+    assert!(
+        escaped
+            .message
+            .contains(&format!("observed {encoded_newlines} encoded bytes")),
+        "the refusal must measure the encoded body: {}",
+        escaped.message
+    );
+
     let merged = "x".repeat(limit + 1);
+    let encoded = merged.len() + 2;
 
     let refused = transport
         .call(
@@ -559,15 +601,22 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
         refused.message
     );
     assert!(
-        refused.message.contains(&format!("{limit} bytes")),
+        refused.message.contains(&format!("{limit} encoded bytes")),
         "the refusal must name the limit and its unit: {}",
         refused.message
     );
     assert!(
         refused
             .message
-            .contains(&format!("observed {} bytes", limit + 1)),
+            .contains(&format!("observed {encoded} encoded bytes")),
         "the refusal must name the observed size: {}",
+        refused.message
+    );
+    assert!(
+        refused
+            .message
+            .contains(&format!("({} raw bytes)", merged.len())),
+        "the refusal must name the raw size the caller sent: {}",
         refused.message
     );
 
@@ -602,6 +651,165 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
     assert_eq!(conflicts.result["conflicts"][0]["status"], "open");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_near_cap_conflict_row_answers_a_resolution_inside_one_control_frame() {
+    // A conflict whose sides nearly fill the row cap the LISTING admits. Its
+    // resolve answer carries five text bodies — three sides, the settled
+    // snapshot, and the moment's before and after — and one frame has to hold
+    // all of them. Withholding the settled body alone is not enough: the two
+    // in-band residuals still push a near-cap row past the frame, and the
+    // daemon's writer treats an oversized answer as a fatal transport error
+    // AFTER the resolution has committed.
+    //
+    // MUTATION: answer with `conflict_json` instead of `settled_conflict_json`
+    // -> the response no longer encodes into one control frame.
+    let (_scratch, transport, handle, workspace_id) = fixture("near-cap-row").await;
+    let side = "s".repeat(4_100_000);
+    let path =
+        open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, &side).await;
+    // In band on purpose: a withheld body would hide the residual this test
+    // exists to measure.
+    let merged = "m".repeat(120 * 1024);
+
+    let listed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.list",
+                Some(handle.clone()),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("the row cap admits this conflict, so a caller can reach it");
+    assert_eq!(listed.result["conflicts"].as_array().unwrap().len(), 1);
+
+    let resolved = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": merged,
+                    "objectId": "near-cap-resolution-object",
+                    "writeMomentId": "near-cap-resolution-write",
+                    "deleteMomentId": "near-cap-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect("a near-cap conflict resolves");
+    for side_name in ["base", "incoming"] {
+        let snapshot = &resolved.result["conflict"][side_name]["snapshot"];
+        assert_eq!(snapshot["text"], Value::Null, "{side_name} body withheld");
+        assert_eq!(snapshot["inbandLimitBytes"], json!(128 * 1024));
+        assert_eq!(snapshot["byteLength"], json!(side.len()));
+    }
+    assert_eq!(resolved.result["write"]["snapshot"]["text"], json!(merged));
+
+    encode_control(&Envelope::Response(resolved), &WireLimits::default())
+        .expect("the resolve answer fits the negotiated control frame");
+
+    let head = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                14,
+                "versionedText.read",
+                Some(handle),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await
+        .expect("read the settled head");
+    assert_eq!(head.result["text"], json!(merged));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_largest_accepted_body_crosses_as_a_complete_request_envelope() {
+    // The budget is stated in encoded bytes and spent on the BODY, while the
+    // frame carries the whole envelope. This pins the headroom that makes the
+    // stated bound the enforced one: a body at exactly the limit, inside a
+    // real `conflicts.resolve` request, still encodes into one control frame.
+    //
+    // MUTATION: raise MAX_MERGED_RESOLUTION_TEXT_BYTES to the frame limit ->
+    // the envelope no longer encodes.
+    let limit = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+    let envelope = Envelope::Request(request(
+        12,
+        "conflicts.resolve",
+        Some(WorkspaceHandle("ws-0000000000000001".to_owned())),
+        json!({ "local": {
+            "conflictId": "conflict-000",
+            // Encoded length == raw length + the two quotes.
+            "resolution": "apply-merged",
+            "mergedText": "x".repeat(limit - 2),
+            "objectId": "largest-resolution-object",
+            "writeMomentId": "largest-resolution-write",
+            "deleteMomentId": "largest-resolution-delete",
+            "metadataOrigin": "api",
+            "nowMs": 20,
+        }}),
+    ));
+    let encoded = encode_control(&envelope, &WireLimits::default())
+        .expect("a body at the limit still crosses as one control frame");
+    assert!(encoded.len() <= WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_body_at_the_in_band_cap_is_carried_and_one_byte_more_is_withheld() {
+    // The withholding rule is `>`, not `>=`: a body of exactly
+    // MAX_DESKTOP_CAPTURE_TEXT_BYTES is IN BAND, and the next byte withholds.
+    // Both directions matter — a rule that withholds at the cap costs a
+    // hydration round trip for a body that fits.
+    //
+    // MUTATION: relax `>` to `>=` in withhold_over_cap_text -> the at-cap
+    // resolution comes back withheld and this fails.
+    let cap = 128 * 1024;
+    for (name, size, withheld) in [("at-cap", cap, false), ("past-cap", cap + 1, true)] {
+        let (_scratch, transport, handle, workspace_id) = fixture(name).await;
+        open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
+        let merged = "y".repeat(size);
+        let resolved = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    12,
+                    "conflicts.resolve",
+                    Some(handle.clone()),
+                    json!({ "local": {
+                        "conflictId": "conflict-000",
+                        "resolution": "apply-merged",
+                        "mergedText": merged,
+                        "objectId": format!("{name}-resolution-object"),
+                        "writeMomentId": format!("{name}-resolution-write"),
+                        "deleteMomentId": format!("{name}-resolution-delete"),
+                        "metadataOrigin": "api",
+                        "nowMs": 20,
+                    }}),
+                ),
+            )
+            .await
+            .expect("the resolution applies");
+        let settled = &resolved.result["write"]["snapshot"];
+        if withheld {
+            assert_eq!(settled["text"], Value::Null, "{name} must be withheld");
+            assert_eq!(settled["inbandLimitBytes"], json!(cap));
+        } else {
+            assert_eq!(settled["text"], json!(merged), "{name} must ride in band");
+            assert_eq!(settled.get("inbandLimitBytes"), None);
+        }
+        assert_eq!(settled["byteLength"], json!(size));
+    }
+}
+
 /// Seed `conflict-000.md` with a recorded current head and open a conflict
 /// against exactly that head, so a resolution passes the exact-head gate.
 async fn open_conflict_against_seeded_head(
@@ -609,6 +817,7 @@ async fn open_conflict_against_seeded_head(
     handle: &WorkspaceHandle,
     workspace_id: &str,
     request_id: u64,
+    side_text: &str,
 ) -> String {
     let path = "conflict-000.md".to_owned();
     let current = transport
@@ -633,7 +842,7 @@ async fn open_conflict_against_seeded_head(
         .await
         .expect("seed current head");
     let snapshot = &current.result["snapshot"];
-    let mut payload = conflict_payload(workspace_id, 0, "incoming");
+    let mut payload = conflict_payload(workspace_id, 0, side_text);
     payload["conflict"]["current"]["snapshot"] = json!({
         "workspaceId": snapshot["workspaceId"],
         "versionId": snapshot["versionId"],
