@@ -1132,21 +1132,36 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     let session_id = opened["sessionId"].as_str().expect("session id");
 
     // Step 4: capture ingests the empty artifact under the open session.
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    let flushed = call(&transport, &handle, 3, "capture.flush", json!({})).await;
-    assert_eq!(flushed["settled"], json!(true));
-    // PROVE the head this test exists to settle over. A flush that ingested
-    // nothing would leave the session's expectation matching an absent head,
-    // and every assertion below would pass without the adoption path ever
-    // running — green while testing nothing.
-    let ingested = call(
-        &transport,
-        &handle,
-        4,
-        "versionedText.read",
-        json!({ "versionId": "main", "path": "notes/untitled.md" }),
-    )
-    .await;
+    // POLL until the empty head is provably there. It is what the settle must
+    // adopt, so without the proof a flush that ingested nothing would leave
+    // the expectation matching an absent head and every assertion below would
+    // pass with the adoption path never running. One sleep plus a single
+    // flush cannot carry that proof either way: a watcher that has not yet
+    // queued the create makes the flush report quiescence, and the read then
+    // returns null and FALSE-FAILS a correct implementation.
+    let mut ingested = Value::Null;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        call(
+            &transport,
+            &handle,
+            100 + attempt,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        ingested = call(
+            &transport,
+            &handle,
+            200 + attempt,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": "notes/untitled.md" }),
+        )
+        .await;
+        if ingested["text"] == json!("") {
+            break;
+        }
+    }
     assert_eq!(
         ingested["text"],
         json!(""),
