@@ -72,6 +72,11 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
+// Eager on purpose. Behind lazy(), the search input did not exist until the
+// chunk resolved, and every character typed in that gap went to whatever the
+// user clicked to open the panel — queries arrived with their first letters
+// missing. The view carries no dependency the shell does not already load.
+import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
 import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
@@ -129,6 +134,7 @@ import {
   parseHistoryDiffTabPath,
   parseSiteTabPath,
   parseUiState,
+  pruneMissingTabs,
   recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
@@ -365,9 +371,6 @@ function scheduleMarkdownEditorPreload(): () => void {
     }
   };
 }
-const LazySearchView = lazy(() =>
-  import("./workbench/SearchView").then((mod) => ({ default: mod.SearchView })),
-);
 const LazyGraphView = lazy(() =>
   import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
 );
@@ -987,6 +990,10 @@ export function DesktopWorkspaceShell(props: {
   onSwitchWorkspace: (workspace: Workspace) => void;
 }) {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
+  // An empty workspace also lists zero files, so "loaded" needs its own flag —
+  // the restored-tab reconciliation below must never run against a listing
+  // that has not happened yet.
+  const [filesLoaded, setFilesLoaded] = useState(false);
   const [folders, setFolders] = useState<string[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
@@ -1337,7 +1344,26 @@ export function DesktopWorkspaceShell(props: {
     const result = await bridge().listWorkspaceFiles({ workspaceId });
     setFiles(result.files);
     setFolders(result.folders ?? []);
+    setFilesLoaded(true);
   }, [workspaceId]);
+
+  // Restore only the tabs whose files still exist. A rollback or an external
+  // delete changes the tree without an explorer op, so nothing remaps the
+  // stored tabs and Open Editors keeps a dead path across restarts. Runs ONCE
+  // per workspace, once the first listing and the stored state have both
+  // landed: a later listing can race a create, and pruning then would close a
+  // tab the user just opened.
+  const restoredTabsReconciled = useRef(false);
+  useEffect(() => {
+    if (restoredTabsReconciled.current || !filesLoaded || !uiStateLoaded.current) {
+      return;
+    }
+    restoredTabsReconciled.current = true;
+    const present = new Set(files.map((file) => file.path));
+    setWb((state) => pruneMissingTabs(state, (path) => present.has(path)));
+    // wb.tabs: the stored state arrives through setWb, so this re-runs once
+    // the restore commits when the listing won the race.
+  }, [files, filesLoaded, wb.tabs]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
     setShellError(error instanceof Error ? error.message : fallback);
@@ -1606,6 +1632,13 @@ export function DesktopWorkspaceShell(props: {
   const chatsNav = useRef<ChatsNav | null>(null);
   const [selectedChatsNav, setSelectedChatsNav] = useState<ChatsNav | null>(null);
   const [chatsPageRevision, setChatsPageRevision] = useState(0);
+  // The navigator's unread badges come from one fetch at its mount, and the
+  // editor is what performs the reads — without this the panel keeps showing
+  // counts the user already cleared until something remounts it.
+  const [chatsReadRevision, setChatsReadRevision] = useState(0);
+  const onChatsThreadRead = useCallback(() => {
+    setChatsReadRevision((current) => current + 1);
+  }, []);
   const onChatsNav = useCallback((nav: ChatsNav) => {
     dmNavigationRequest.current.sequence += 1;
     chatsNav.current = nav;
@@ -2529,6 +2562,7 @@ export function DesktopWorkspaceShell(props: {
     initialDrafts: chatsDrafts.current ?? undefined,
     onNavChange: onChatsNav,
     onDraftsChange: onChatsDrafts,
+    onThreadRead: onChatsThreadRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: setShellError,
@@ -2546,6 +2580,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
     readOnly: Boolean(shareView),
     selectedNav: selectedChatsNav ?? undefined,
+    readRevision: chatsReadRevision,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
@@ -2718,9 +2753,7 @@ export function DesktopWorkspaceShell(props: {
             {wb.activeView === "explorer" ? (
               explorerView
             ) : wb.activeView === "search" ? (
-              <Suspense fallback={<PanelLoading label="search" />}>
-                <LazySearchView search={search} onOpenResult={openSearchResult} />
-              </Suspense>
+              <SearchView search={search} onOpenResult={openSearchResult} />
             ) : wb.activeView === "graph" ? (
               <Suspense fallback={<PanelLoading label="graph" />}>
                 <LazyGraphView

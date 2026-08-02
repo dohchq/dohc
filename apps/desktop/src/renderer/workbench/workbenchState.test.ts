@@ -28,6 +28,7 @@ import {
   parseHistoryDiffTabPath,
   parseSiteTabPath,
   parseUiState,
+  pruneMissingTabs,
   serializeUiState,
   setSidebarWidth,
   setChatsWidth,
@@ -495,5 +496,50 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
     const remapped = remapWorkbenchPaths(state, () => "same.md");
     expect(remapped.tabs.map((tab) => tab.path)).toEqual(["same.md"]);
     expect(remapped.activeTab).toBe("same.md");
+  });
+});
+
+describe("pruneMissingTabs (restored tabs whose file is gone)", () => {
+  it("drops the tab for a path the workspace no longer has", () => {
+    const state = withTabs("a.md", "assets/alpha-renamed.png");
+    const pruned = pruneMissingTabs(state, (path) => path === "a.md");
+    expect(pruned.tabs.map((tab) => tab.path)).toEqual(["a.md"]);
+    expect(pruned.activeTab).toBe("a.md");
+  });
+
+  it("keeps every tab whose file is still listed (same reference)", () => {
+    const state = withTabs("a.md", "b.md");
+    expect(pruneMissingTabs(state, () => true)).toBe(state);
+  });
+
+  it("keeps virtual tabs, which have no file to look up", () => {
+    const state = withTabs(CHATS_TAB_PATH, HISTORY_TAB_PATH, "a.md");
+    const pruned = pruneMissingTabs(state, () => false);
+    expect(pruned.tabs.map((tab) => tab.path)).toEqual([
+      CHATS_TAB_PATH,
+      HISTORY_TAB_PATH,
+    ]);
+    expect(pruned.activeTab).toBe(HISTORY_TAB_PATH);
+  });
+
+  it("leaves pins, expansion, and recents alone — those name FOLDERS too", () => {
+    let state = withTabs("a.md");
+    state = setFolderExpanded(state, "assets", true);
+    state = togglePinned(state, "assets");
+    state = recordRecentFile(state, "a.md");
+    const pruned = pruneMissingTabs(state, (path) => path === "a.md");
+    expect(pruned.expandedFolders).toEqual(["assets"]);
+    expect(pruned.pinned).toEqual(["assets"]);
+    expect(pruned.recentFiles).toEqual(["a.md"]);
+  });
+
+  it("a pruned active tab hands over to the last survivor; an empty result nulls it", () => {
+    const state = withTabs("a.md", "b.md", "gone.md");
+    expect(pruneMissingTabs(state, (path) => path !== "gone.md").activeTab).toBe(
+      "b.md",
+    );
+    const empty = pruneMissingTabs(state, () => false);
+    expect(empty.tabs).toEqual([]);
+    expect(empty.activeTab).toBeNull();
   });
 });

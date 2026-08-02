@@ -396,6 +396,29 @@ export function remapWorkbenchPaths(
   };
 }
 
+// Restored tabs can outlive their files: a version rollback, an external
+// delete, or an unmounted share changes the tree without an explorer op, so
+// remapWorkbenchPaths never sees it and Open Editors keeps offering a path
+// that is gone. Drops those tabs only — pinned paths, expanded folders and
+// recent files include FOLDERS, which no file listing carries. Virtual tabs
+// (dohc://graph, chats, a moment diff) have no file and always survive.
+export function pruneMissingTabs(
+  state: WorkbenchState,
+  fileExists: (path: string) => boolean,
+): WorkbenchState {
+  const tabs = state.tabs.filter(
+    (tab) => isVirtualTabPath(tab.path) || fileExists(tab.path),
+  );
+  if (tabs.length === state.tabs.length) return state;
+  // Same rule as remapWorkbenchPaths: a surviving active tab stays active,
+  // otherwise the last remaining tab takes over.
+  const activeTab =
+    state.activeTab !== null && tabs.some((tab) => tab.path === state.activeTab)
+      ? state.activeTab
+      : (tabs[tabs.length - 1]?.path ?? null);
+  return { ...state, tabs, activeTab };
+}
+
 // Persistence (.dohc/ui-state.json via the narrow get/set IPC pair).
 // serialize produces the zod-validated wire shape; parse is TOLERANT — a
 // missing, corrupt, or foreign-shaped value yields defaults, field by field,

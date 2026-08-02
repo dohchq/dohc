@@ -872,8 +872,14 @@ export function ChatsView(props: {
   // Reports every draft edit (ref-cheap in the shell) so unsent input
   // survives the panel/tab handoff.
   onDraftsChange?: (drafts: ChatsDrafts) => void;
+  // Unread badges are the one state the two instances disagree about: the
+  // page performs every read, the panel navigator only projects counts it
+  // fetched at mount. The page reports each landed mark-read; the shell hands
+  // the panel a bumped revision so its badges catch up.
+  onThreadRead?: () => void;
+  readRevision?: number;
 }) {
-  const { workspaceId, onNavChange, onDraftsChange } = props;
+  const { workspaceId, onNavChange, onDraftsChange, onThreadRead } = props;
   const readOnly = props.readOnly === true;
   const collaboration = readOnly ? null : props.collaboration ?? null;
   const mentionCandidates = props.mentionCandidates ?? [];
@@ -1251,6 +1257,18 @@ export function ChatsView(props: {
     return () => clearInterval(interval);
   }, [refreshDms, nav.level]);
 
+  // The panel navigator hands every conversation to the page instance, so it
+  // never reaches the mark-read above and its channel and file-thread badges
+  // would keep the counts fetched at mount until it remounted. The shell bumps
+  // readRevision after each landed read; the mount value belongs to the load
+  // effect above, so only later ones refetch.
+  const seenReadRevision = useRef(props.readRevision);
+  useEffect(() => {
+    if (props.readRevision === seenReadRevision.current) return;
+    seenReadRevision.current = props.readRevision;
+    void refreshOverview();
+  }, [props.readRevision, refreshOverview]);
+
   const loadChannelSnapshot = useCallback(
     async (channelId: string): Promise<ChannelSnapshot> => {
       const result = await bridge().listChannelThreads({ workspaceId, channelId });
@@ -1470,13 +1488,18 @@ export function ChatsView(props: {
         );
         void bridge()
           .markChatThreadRead({ workspaceId, threadId, upToSequence })
-          .catch(() => {
-            // Mark-read is best-effort; the badge re-appears on next refresh if
-            // the cursor write did not land.
-          });
+          .then(
+            // Only once the cursor write LANDED: a panel refetch before that
+            // would read the same count back and look like nothing happened.
+            () => onThreadRead?.(),
+            () => {
+              // Mark-read is best-effort; the badge re-appears on next refresh
+              // if the cursor write did not land.
+            },
+          );
       }
     },
-    [workspaceId],
+    [onThreadRead, workspaceId],
   );
 
   const openThread = useCallback(

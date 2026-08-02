@@ -363,6 +363,59 @@ describe("ChatsView channels", () => {
   });
 });
 
+// Journey 3 (#337): the navigator kept an unread badge more than 30s after
+// the thread was read. It hands every conversation to the editor, so it never
+// reaches its own mark-read and had no reason to refetch the counts it loaded
+// at mount. The shell reports each landed read through readRevision.
+describe("ChatsView panel navigator unread badges", () => {
+  function navigator(readRevision: number) {
+    return (
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        onOpenInTab={vi.fn()}
+        readRevision={readRevision}
+      />
+    );
+  }
+
+  it("refetches the counts once the shell reports a landed read", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    const view = render(navigator(0));
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+
+    // The editor read the thread: the durable count is zero now.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    view.rerender(navigator(1));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+  });
+
+  it("does not refetch while the revision stands still", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    const view = render(navigator(0));
+    await screen.findByTestId("chats-channel-unread");
+    expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(1);
+
+    view.rerender(navigator(0));
+    await waitFor(() => {
+      expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
 describe("ChatsView shared-workspace read-only boundary", () => {
   it("keeps the panel navigator readable while removing every overview/channel mutation", async () => {
     const sharedChannel = channel({ wireId: "wire-1", threadCount: 1 });

@@ -739,6 +739,35 @@ describe("ui-state merge-on-load", () => {
     );
   });
 
+  // Journey 2 (#337): rolling back a rename left `assets/alpha-renamed.png`
+  // in Open Editors for a path that no longer existed — through a restart,
+  // because nothing reconciled the restored tabs against the workspace.
+  it("restores only the tabs whose files still exist", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["assets/alpha-renamed.png", "b.md"],
+        activeTab: "b.md",
+      }),
+    );
+    renderShell(bridge);
+
+    // b.md is in the listing; the rolled-back path is not.
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-assets/alpha-renamed.png")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    // And the ghost does not come back on the next launch.
+    await waitFor(() => {
+      const states = bridge.setWorkspaceUiState.mock.calls.map(
+        ([payload]) => payload.state,
+      );
+      expect(states.some((state) => state.tabs.join() === "b.md")).toBe(true);
+    });
+  });
+
   it("stored state applies when the user touched nothing before the load", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
@@ -850,6 +879,24 @@ describe("active file sharing", () => {
 });
 
 describe("content search", () => {
+  // Journey 1 (#337): queries arrived with their leading characters missing
+  // ("MBERDRAFT-8831" for "EMBERDRAFT-8831"). The panel opened, but the input
+  // only mounted when a lazy chunk resolved, so everything typed in that gap
+  // went to the activity-bar button the user had just clicked.
+  it("mounts the focused input in the same commit that opens the panel", () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    // No awaits: nothing can resolve a pending import between the click and
+    // the first keystroke, which is exactly the user's situation.
+    act(() => {
+      fireEvent.click(screen.getByTestId("activity-search"));
+    });
+
+    const input = screen.getByTestId("search-input");
+    expect(document.activeElement).toBe(input);
+  });
+
   it("clears the activity badge as soon as the query is cleared", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
