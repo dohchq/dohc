@@ -416,7 +416,9 @@ impl VersionedTextStore<'_> {
             // stays a conflict here, as it must.
             //
             // A REMOVED binary asset keeps its conflict: that seam is the text
-            // delete, whose merged record reports its preimage as text.
+            // delete, whose merged record reports its preimage as text. So does
+            // TEXT replacing an untouched binary head — this seam writes bytes,
+            // and the text fast-forward above refuses a binary current.
             if let Some(incoming) = &comparison.incoming
                 && incoming.binary
                 && comparison_sides_equal(&comparison.current, &comparison.base)

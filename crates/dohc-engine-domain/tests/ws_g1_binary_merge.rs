@@ -626,6 +626,56 @@ fn a_replayed_binary_fast_forward_reports_the_head_it_wrote() {
     );
 }
 
+/// The OTHER direction of a source-only change: the target holds bytes it has
+/// not touched since the fork, and the source replaced them with TEXT. Only the
+/// source moved, so the comparison reads `IncomingChanged` — but the merge
+/// still goes to the user, because the binary fast-forward writes BYTES and the
+/// text seams cannot be handed a binary head to overwrite.
+///
+/// MUTATION: drop the `incoming.binary` gate from the fast-forward -> the merge
+/// hands a TEXT blob address to the binary write seam and dies with
+/// `binary file write references a missing binary blob`.
+#[test]
+fn text_replacing_an_untouched_binary_head_opens_a_conflict() {
+    let (_scratch, mut store) = open();
+    write_text(&mut store, "main", "seed.md", "seed", "seed-moment");
+    let main_sha = write_binary(
+        &mut store,
+        "main",
+        "notes.md",
+        b"\x89PNG\x01",
+        "obj-notes",
+        "m-1",
+    );
+    fork(&mut store);
+    // Main keeps the bytes it forked with; the source replaces them with text.
+    write_text(&mut store, "feat", "notes.md", "feature text\n", "f-1");
+
+    let result = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(
+            &merge_input("notes.md", "merge-1", "conflict-1", "obj-merge-1"),
+            &NO_FAULTS,
+        )
+        .expect("text replacing an untouched binary head");
+    match result {
+        MergeTextFileResult::Conflict {
+            conflict,
+            comparison,
+            ..
+        } => {
+            assert_eq!(comparison.status, ComparisonStatus::IncomingChanged);
+            assert_eq!(conflict.current.content_kind, ConflictContentKind::Binary);
+            assert_eq!(conflict.incoming.content_kind, ConflictContentKind::Text);
+        }
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    assert_eq!(
+        binary_head_sha(&store, "main", "notes.md"),
+        main_sha,
+        "the target keeps its bytes until the user chooses"
+    );
+}
+
 /// The comparison RPC must report a binary head as PRESENT. Reading it through
 /// the text blob join alone reports an occupied path as empty, which is what
 /// let a text merge overwrite bytes.
