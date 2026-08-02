@@ -254,6 +254,7 @@ type DemoDesktopBridge = Pick<
   | "onWorkspaceActivity"
   | "listChatChannels"
   | "listChatChannelShares"
+  | "listJoinedSharedChannels"
   | "syncDms"
   | "listChannelThreads"
   | "listChatMessages"
@@ -614,6 +615,9 @@ const demoBridge = {
   },
   async listChatChannelShares() {
     return { granted: [], received: [], joined: [] };
+  },
+  async listJoinedSharedChannels() {
+    return { joined: [] };
   },
   async syncDms() {
     return { available: false, dms: [] };

@@ -538,6 +538,7 @@ export const CHANNELS = {
   revokeRelayShare: "desktop:revoke-relay-share",
   shareChatChannel: "desktop:share-chat-channel",
   listChatChannelShares: "desktop:list-chat-channel-shares",
+  listJoinedSharedChannels: "desktop:list-joined-shared-channels",
   joinSharedChannel: "desktop:join-shared-channel",
   leaveSharedChannel: "desktop:leave-shared-channel",
   openSharedView: "desktop:open-shared-view",

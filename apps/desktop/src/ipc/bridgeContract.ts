@@ -2401,6 +2401,24 @@ export const ListChatChannelSharesResult = z.object({
 });
 export type ListChatChannelSharesResult = z.infer<typeof ListChatChannelSharesResult>;
 
+// The joined rows alone, read from the local registry. listChatChannelShares
+// answers the same rows, but it asks the relay for the grant side first, so a
+// caller that only needs to know what THIS machine joined would wait on the
+// network for an answer the network does not hold.
+export const ListJoinedSharedChannelsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListJoinedSharedChannelsPayload = z.infer<
+  typeof ListJoinedSharedChannelsPayload
+>;
+
+export const ListJoinedSharedChannelsResult = z.object({
+  joined: z.array(JoinedSharedChannelRow).max(1000),
+});
+export type ListJoinedSharedChannelsResult = z.infer<
+  typeof ListJoinedSharedChannelsResult
+>;
+
 export const JoinSharedChannelPayload = z.object({
   workspaceId: WORKSPACE_ID,
   shareId: SHARE_ID,
@@ -3057,6 +3075,9 @@ export interface DohcDesktopBridge {
   listChatChannelShares(
     payload: ListChatChannelSharesPayload,
   ): Promise<ListChatChannelSharesResult>;
+  listJoinedSharedChannels(
+    payload: ListJoinedSharedChannelsPayload,
+  ): Promise<ListJoinedSharedChannelsResult>;
   joinSharedChannel(payload: JoinSharedChannelPayload): Promise<JoinSharedChannelResult>;
   leaveSharedChannel(payload: LeaveSharedChannelPayload): Promise<void>;
   // Relay shares (PR 18): receive side — read-only shared views.

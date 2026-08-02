@@ -119,6 +119,32 @@ type OverviewState =
       fileThreads: FileChatThreadRecord[];
     };
 
+// The independently committed parts of the Chats overview surfaces. Several
+// readers write them, each authoritative for a different subset, so each part
+// carries its own commit watermark (see commitTicket).
+type CommitLane = "overview" | "joinedShares" | "relayShares";
+
+// A share listing answers two independent questions. The JOINED rows come from
+// the local registry, so any reader that got a listing at all has the true
+// answer. The granted/received rows come from the relay, which answers "none"
+// when it is unreachable — so a reader that is not authoritative for them must
+// leave them exactly as they were.
+function mergeShareLanes(
+  current: ListChatChannelSharesResult | null,
+  next: ListChatChannelSharesResult,
+  lanes: { joined: boolean; relay: boolean },
+): ListChatChannelSharesResult | null {
+  // "Unknown" fails closed in channelIsLocked. Only a reader that answers BOTH
+  // questions may replace it; a partial answer would unlock what nothing has
+  // vouched for.
+  if (current === null) return lanes.joined && lanes.relay ? next : current;
+  return {
+    joined: lanes.joined ? next.joined : current.joined,
+    granted: lanes.relay ? next.granted : current.granted,
+    received: lanes.relay ? next.received : current.received,
+  };
+}
+
 // Exported for the shell's expand-to-tab seam: the panel reports where it is
 // (onNavChange) and a freshly expanded tab starts there (initialNav).
 export type ChatsNav =
@@ -1031,26 +1057,104 @@ export function ChatsView(props: {
   //    navigation still discards this response.
   //  - A transient failure must not replace a working navigator with an error
   //    card (there is nothing to report to a user who asked for nothing).
-  const overviewRequest = useRef(0);
-  // ONE monotonic sequence over every channelShares commit, whichever loader
-  // produces it. refreshOverview and refreshShares both write this state, and
-  // without a shared order a share lookup issued first could resolve last and
-  // put a pre-mutation snapshot back on screen — the person you just invited
-  // vanishing, or the one you just removed reappearing. Same commit-time
+  //
+  // ONE issue order over every commit into these surfaces, with a watermark
+  // per lane. A reader takes a ticket when it ISSUES its request and commits a
+  // lane only if no newer ticket landed there first. Same commit-time
   // watermark as the workspace file listing: an id is taken at issue, and a
   // response commits only if it is newer than what is already displayed.
-  const sharesRequest = useRef(0);
-  const committedSharesRequest = useRef(0);
+  //
+  // Lanes exist because these readers answer different questions.
+  // refreshOverview answers all three. refreshShares answers both share lanes.
+  // refreshChannelBadges answers the channel listing and the JOINED grants its
+  // listing just synced, and nothing about the relay-backed rows. One sequence
+  // over all of them would let a joined-only correction discard a full share
+  // read still in flight; one sequence per reader would let two readers undo
+  // each other — the person you just invited vanishing, or a cleared badge
+  // coming back.
+  const commitTicket = useRef(0);
+  const committedLane = useRef<Record<CommitLane, number>>({
+    overview: 0,
+    joinedShares: 0,
+    relayShares: 0,
+  });
+  const takeCommitTicket = useCallback(() => ++commitTicket.current, []);
+  // Claim every lane in `lanes`, or none of them. A response writes exactly
+  // what it claims, so a reader that can only speak for part of what it is
+  // about to write must not claim the rest and then write it anyway.
+  const claimLanes = useCallback(
+    (lanes: readonly CommitLane[], ticket: number): boolean => {
+      if (lanes.some((lane) => ticket <= committedLane.current[lane])) return false;
+      for (const lane of lanes) committedLane.current[lane] = ticket;
+      return true;
+    },
+    [],
+  );
+  // The one place a full share listing lands, whichever reader produced it.
+  // Success commits per lane: each takes the newest answer it has.
+  //
+  // A FAILED lookup says nothing about either lane, and "unknown" is a state
+  // of the whole listing — there is no way to store it for one lane alone. So
+  // it may commit only when it owns BOTH lanes. Otherwise a response that
+  // learned nothing would discard a newer joined-grant answer and lock every
+  // channel through channelIsLocked until some later refresh succeeded.
+  // Read the committed listing from an async callback (see latestComposerState).
+  const latestChannelShares = useRef(channelShares);
+  latestChannelShares.current = channelShares;
+  const commitShareListing = useCallback(
+    (
+      ticket: number,
+      value: ListChatChannelSharesResult | null,
+      options?: { background?: boolean },
+    ) => {
+      // A failed lookup for a refresh NOBODY ASKED FOR is not an answer. It
+      // fills in only where nothing has answered yet — so the surface resolves
+      // instead of waiting on a request that may never return — and it takes
+      // no lane, so a real answer still in flight replaces it even though it
+      // was issued earlier. Where something HAS answered, it says nothing at
+      // all and the cached rows stand.
+      if (value === null && options?.background) {
+        const answered =
+          committedLane.current.joinedShares > 0 ||
+          committedLane.current.relayShares > 0;
+        if (answered) return;
+        setChannelShares(null);
+        setSharesWorkspaceId(workspaceId);
+        return;
+      }
+      // Two commits cannot be stored one lane at a time: a failure the user
+      // asked for (its answer is "unknown", which is the whole listing) and
+      // any reader landing on nothing resolved (there is no listing to merge
+      // into). Both commit only while they own BOTH lanes — and must not claim
+      // a lane they would then leave unwritten, which would starve the reader
+      // that can answer it.
+      if (value === null || latestChannelShares.current === null) {
+        if (!claimLanes(["joinedShares", "relayShares"], ticket)) return;
+        setChannelShares(value);
+        setSharesWorkspaceId(workspaceId);
+        return;
+      }
+      const joined = claimLanes(["joinedShares"], ticket);
+      const relay = claimLanes(["relayShares"], ticket);
+      if (!joined && !relay) return;
+      setChannelShares((current) => mergeShareLanes(current, value, { joined, relay }));
+      setSharesWorkspaceId(workspaceId);
+    },
+    [claimLanes, workspaceId],
+  );
   const refreshOverview = useCallback(
     async (options?: { background?: boolean }): Promise<void> => {
       const token = options?.background ? liveToken.current : ++liveToken.current;
-      const request = ++overviewRequest.current;
-      const sharesId = ++sharesRequest.current;
-      const superseded = () =>
-        token !== liveToken.current || request !== overviewRequest.current;
-      setOverview((current) =>
-        current.status === "ready" ? current : { status: "loading" },
-      );
+      const ticket = takeCommitTicket();
+      // A refresh nobody asked for never changes what the surface says until
+      // it has an answer — and this runs before it knows anything. Taking an
+      // error card down here left no Try again to press, and by the rule in
+      // the catch below there was nothing to put back: a permanent spinner.
+      if (!options?.background) {
+        setOverview((current) =>
+          current.status === "ready" ? current : { status: "loading" },
+        );
+      }
       try {
         const [result, shares] = await Promise.all([
           bridge().listChatChannels({ workspaceId }),
@@ -1063,45 +1167,144 @@ export function ChatsView(props: {
             .then((value) => ({ answered: true, value }) as const)
             .catch(() => ({ answered: false, value: null }) as const),
         ]);
-        if (superseded()) return;
-        // A background refresh that could not reach the share metadata keeps
-        // what it already had: dropping to "unknown" would wipe the cached
-        // invitations and share controls, and lock every joined channel, for
-        // a refresh the user never asked for.
-        //
-        // Preservation only applies over state that IS resolved, which the
-        // watermark records (it only ever advances on a commit for the
-        // current workspace, and the workspace switch resets it). With
-        // nothing resolved there is nothing to keep, and this response may be
-        // the only one coming — a background refresh supersedes any initial
-        // request still in flight — so it must settle the state even with a
-        // failed lookup. That commits "unknown", which fails closed, instead
-        // of leaving presence and the share controls waiting forever.
-        const sharesResolvedForWorkspace = committedSharesRequest.current > 0;
-        const keepCached =
-          options?.background && !shares.answered && sharesResolvedForWorkspace;
-        if (!keepCached && sharesId > committedSharesRequest.current) {
-          committedSharesRequest.current = sharesId;
-          setChannelShares(shares.value);
-          setSharesWorkspaceId(workspaceId);
-        }
-        setOverview({
-          status: "ready",
-          channels: result.channels,
-          fileThreads: result.fileThreads,
+        if (token !== liveToken.current) return;
+        // Whether the lookup FAILED is kept separate from what it returned,
+        // and commitShareListing decides what a failure is worth: for a
+        // refresh nobody asked for, only a placeholder where nothing has
+        // answered yet.
+        commitShareListing(ticket, shares.value, {
+          background: options?.background === true,
         });
+        if (claimLanes(["overview"], ticket)) {
+          setOverview({
+            status: "ready",
+            channels: result.channels,
+            fileThreads: result.fileThreads,
+          });
+        }
       } catch (error) {
-        if (superseded()) return;
-        const message = ipcErrorMessage(error, "Could not load Chats.");
-        setOverview((current) =>
-          options?.background && current.status === "ready"
-            ? current
-            : { status: "unavailable", message },
-        );
+        if (token !== liveToken.current) return;
+        // A refresh nobody asked for never reports a failure. There is nothing
+        // to tell a user who asked for nothing, and a failure holds no answer
+        // for the lane — so claiming it would only discard the answer of
+        // whoever IS still in flight: a working list on screen, or the load
+        // the surface is waiting on. Someone always owns settling it, because
+        // every foreground refresh commits its own failure.
+        if (options?.background) return;
+        if (!claimLanes(["overview"], ticket)) return;
+        setOverview({
+          status: "unavailable",
+          message: ipcErrorMessage(error, "Could not load Chats."),
+        });
       }
     },
-    [workspaceId],
+    [claimLanes, commitShareListing, takeCommitTicket, workspaceId],
   );
+
+  // Badge-only refresh, for the invalidation nobody asked for. It differs from
+  // refreshOverview in three ways, and each one is a thing this refresh has no
+  // authority to do:
+  //
+  //  - It reads the channel listing, and the JOINED grants that listing's sync
+  //    may have just changed. Both are local questions: the joined rows come
+  //    from the registry, which is why they have a read of their own. The
+  //    relay-backed granted/received rows are nobody's business here.
+  //  - It takes its tickets like every other reader, so it cannot discard the
+  //    response of a refresh the user DID ask for (a join, a leave, a retry),
+  //    and a newer commit cannot be undone by its own late answer. It captures
+  //    liveToken, so a workspace switch, a navigation, or a mutation wins.
+  //  - It keeps ONE listing in flight. The activity signal fires for every
+  //    settled file batch and run update, the listing syncs shared channels
+  //    over the relay before it reads, and a persistent navigator plus an
+  //    expanded page mount two of these surfaces. Activity arriving mid-read
+  //    is not dropped: it runs exactly one more pass when the read settles.
+  //
+  // liveToken decides what a drain may do, exactly as it does for every other
+  // reader: a workspace switch, a navigation, and a mutation all move it, and
+  // a pass that captured an older value can neither commit nor run again. The
+  // record itself only says who holds the slot, which is what keeps ONE
+  // listing in flight.
+  const badgeRead = useRef<{ token: number; pending: boolean } | null>(null);
+  const refreshChannelBadges = useCallback(async (): Promise<void> => {
+    const active = badgeRead.current;
+    // Queue onto a read only while it can still deliver. Its listing syncs
+    // shared channels over the relay, which can stall for as long as the
+    // network wants to; once a navigation or a mutation has moved liveToken
+    // past it, that read can commit nothing, and waiting on it would strand
+    // every later badge behind a request that is never coming back.
+    if (active !== null && active.token === liveToken.current) {
+      active.pending = true;
+      return;
+    }
+    // Any other leftover drain has nothing left to say: whatever moved
+    // liveToken past it — a switch, a navigation, a mutation — already took
+    // away its right to commit. Take the slot.
+    const mine = { token: liveToken.current, pending: false };
+    badgeRead.current = mine;
+    try {
+      do {
+        mine.pending = false;
+        mine.token = liveToken.current;
+        const token = mine.token;
+        const ticket = takeCommitTicket();
+        const isCurrent = () => token === liveToken.current;
+        try {
+          const result = await bridge().listChatChannels({ workspaceId });
+          if (!isCurrent()) return;
+          if (claimLanes(["overview"], ticket)) {
+            // Settle the surface even while the initial load is still waiting
+            // on its share lookup. This answer is newer than the one that load
+            // will bring, and the reader that owns the share lanes is still
+            // free to fill them in.
+            setOverview({
+              status: "ready",
+              channels: result.channels,
+              fileThreads: result.fileThreads,
+            });
+          }
+          // The listing above syncs joined shared channels before it reads, and
+          // the registry it syncs into decides what this workspace joined,
+          // whether a grant was revoked, and whether one was downgraded. Every
+          // one of those reaches the list as a channel this view would
+          // otherwise read as its own: sharing offered on someone else's
+          // channel, a composer on a read-only grant.
+          //
+          // So ask every pass. The rows are local — no relay, no engine — and
+          // asking only when this view already knew of a joined channel missed
+          // the first one, which is exactly when the surface is most wrong.
+          // Only an unresolved listing is skipped: nothing to correct yet, and
+          // channelIsLocked already fails closed until its owner settles it.
+          const cachedShares = latestChannelShares.current;
+          if (cachedShares !== null) {
+            const sharesTicket = takeCommitTicket();
+            const refreshed = await bridge().listJoinedSharedChannels({ workspaceId });
+            // ONLY the joined lane, which is all this read answers. Leaving the
+            // relay-backed lane alone also lets a full share read still in
+            // flight land its own rows.
+            if (isCurrent() && claimLanes(["joinedShares"], sharesTicket)) {
+              setChannelShares((current) =>
+                mergeShareLanes(
+                  current,
+                  { granted: [], received: [], joined: refreshed.joined },
+                  { joined: true, relay: false },
+                ),
+              );
+            }
+          }
+        } catch {
+          // Nobody asked for this refresh: a stale badge beats an error card.
+        }
+        // A queued pass belongs to the token era it was queued in, and it may
+        // only run while this drain still holds the slot.
+      } while (
+        mine.pending &&
+        mine.token === liveToken.current &&
+        badgeRead.current === mine
+      );
+    } finally {
+      if (badgeRead.current === mine) badgeRead.current = null;
+    }
+  }, [claimLanes, takeCommitTicket, workspaceId]);
 
   const refreshBookmarks = useCallback(async () => {
     const workspaceGeneration = bookmarkWorkspaceGeneration.current;
@@ -1193,7 +1396,10 @@ export function ChatsView(props: {
     setCreatingChannel(null);
     setChannelShares(null);
     setSharesWorkspaceId(null);
-    committedSharesRequest.current = 0;
+    // Nothing is committed for the new workspace yet. Tickets stay monotonic:
+    // an in-flight response from the old workspace holds an older ticket AND
+    // fails the token check.
+    committedLane.current = { overview: 0, joinedShares: 0, relayShares: 0 };
     setSharePanelOpen(false);
     setShareEmail("");
     setShareReadOnly(false);
@@ -1649,12 +1855,18 @@ export function ChatsView(props: {
 
   // Main emits workspaceActivity for CLI writes, follow mutations, runner
   // reports/failures, and run-record completion. Treat it as an invalidation
-  // for every mounted Chats surface. Every response carries either the follow
-  // request sequence or both the navigation token and a per-surface request
-  // sequence so a slow refresh cannot repaint a newer one.
+  // for every mounted Chats surface. Every response carries the follow request
+  // sequence, the navigation token, or both the token and a per-surface
+  // request sequence, so a slow refresh cannot repaint a newer one.
   useEffect(() => {
     return bridge().onWorkspaceActivity(() => {
       void refreshFollows();
+      if (nav.level === "channels") {
+        // The roll-up unread badge lives on this list, so a write to a chat
+        // the user does not have open is only visible here.
+        void refreshChannelBadges();
+        return;
+      }
       if (nav.level === "feed") {
         void loadPersonalFeed();
         return;
@@ -1750,6 +1962,7 @@ export function ChatsView(props: {
     nav,
     refreshOpenDm,
     refreshFollows,
+    refreshChannelBadges,
   ]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.
@@ -2502,16 +2715,13 @@ export function ChatsView(props: {
 
   const refreshShares = useCallback(async () => {
     const token = liveToken.current;
-    const sharesId = ++sharesRequest.current;
+    const ticket = takeCommitTicket();
     const shares = await bridge()
       .listChatChannelShares({ workspaceId })
       .catch(() => null);
     if (token !== liveToken.current) return;
-    if (sharesId <= committedSharesRequest.current) return;
-    committedSharesRequest.current = sharesId;
-    setChannelShares(shares);
-    setSharesWorkspaceId(workspaceId);
-  }, [workspaceId]);
+    commitShareListing(ticket, shares);
+  }, [commitShareListing, takeCommitTicket, workspaceId]);
 
   const submitShare = useCallback(async () => {
     if (readOnly) return;
