@@ -319,7 +319,11 @@ describe("Rust engine daemon lifecycle", () => {
       await lifecycle.start();
       for (let generation = 0; generation < 3; generation += 1) {
         exits[generation]?.(1, null);
-        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2));
+        // Every relaunch runs the smoke against a real temporary directory, so
+        // waitFor's 1s default is not enough under a loaded full-suite run.
+        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
+          timeout: 5_000,
+        });
         // Outlive the healthy window by a wide multiple, as the budget-reset
         // test above does: each replacement must reset the attempt budget, or
         // maxRestarts: 1 would end this run terminal for the wrong reason.
@@ -331,7 +335,7 @@ describe("Rust engine daemon lifecycle", () => {
         timeout: 2_000,
       });
       expect(terminalFailures[0]?.message).toMatch(
-        /restarted 3 times within 60000ms, above the limit of 3 restarts per 60000ms/,
+        /crashed again after restarting 3 times in the last 60000ms; the restart limit \(3 restarts per 60000ms\) is reached, so it will not be restarted/,
       );
       expect(exits).toHaveLength(4);
     } finally {
@@ -366,7 +370,9 @@ describe("Rust engine daemon lifecycle", () => {
       await lifecycle.start();
       for (let generation = 0; generation < 3; generation += 1) {
         exits[generation]?.(1, null);
-        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2));
+        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
+          timeout: 5_000,
+        });
         await new Promise((resolve) => setTimeout(resolve, restartWindowMs * 4));
       }
 

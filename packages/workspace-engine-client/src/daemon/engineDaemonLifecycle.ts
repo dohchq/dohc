@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
+import { performance } from "node:perf_hooks";
 import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
 import type { Event } from "../ydoc/generated/Event";
 import type { Request } from "../ydoc/generated/Request";
@@ -567,13 +568,16 @@ export class EngineDaemonLifecycle {
       // `restartAttempts` bounds a burst; a healthy generation resets it. This
       // window bounds the rate, so a daemon that dies just past healthyResetMs
       // over and over still ends terminal instead of restarting forever.
-      const now = Date.now();
+      // performance.now() rather than the wall clock: an NTP or VM correction
+      // that steps the clock backwards would strand timestamps in the future
+      // and end a later restart terminal that the window should have forgotten.
+      const now = performance.now();
       this.restartTimestamps = this.restartTimestamps.filter(
         (at) => at > now - windowMs,
       );
       if (this.restartTimestamps.length >= maxPerWindow) {
         const terminal = new EngineDaemonUnavailableError(
-          `Rust engine restarted ${this.restartTimestamps.length} times within ${windowMs}ms, above the limit of ${maxPerWindow} restarts per ${windowMs}ms.`,
+          `Rust engine crashed again after restarting ${this.restartTimestamps.length} times in the last ${windowMs}ms; the restart limit (${maxPerWindow} restarts per ${windowMs}ms) is reached, so it will not be restarted.`,
           { cause: lastError },
         );
         this.reportFailure(terminal, true);
