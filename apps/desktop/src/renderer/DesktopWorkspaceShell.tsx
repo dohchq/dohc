@@ -1616,6 +1616,7 @@ export function DesktopWorkspaceShell(props: {
   // bug the watermark exists to fix, one interleaving over (#507).
   const blockedEngineHistoryRefresh = useRef<{
     token: number;
+    activeVersionId: string;
     commit: () => void;
   } | null>(null);
   // The sync, agent, and try snapshots ride the refresh response but are NOT
@@ -1627,15 +1628,34 @@ export function DesktopWorkspaceShell(props: {
   const committedSyncStatusToken = useRef(0);
   const committedAgentActiveToken = useRef(0);
   const committedTryStateToken = useRef(0);
-  // The version the DISPLAYED timeline describes, and the version answers may
-  // no longer describe. History answers carry their own `activeVersionId`, so
-  // staleness across a version switch is decided by identity rather than by
-  // arrival order — a switch does not know which requests were already in
-  // flight, and rejecting by token rejected valid NEW-version work too.
+  // The version the DISPLAYED timeline describes, so a pagination can prove
+  // its page extends the same timeline it is appending to.
   const committedEngineVersionId = useRef<string | null>(null);
-  const supersededEngineVersionId = useRef<string | null>(null);
+  // The newest authoritative statement of WHICH version is active, and the
+  // request that carried it. The engine stamps every history answer with the
+  // version it served, and a version-state change asks for it directly; both
+  // are the same kind of fact, ordered by the same issue counter, so the newer
+  // one wins. The active version is tracked here rather than inferred from the
+  // displayed page because a user can switch versions before the FIRST page
+  // commits — then there is no displayed version to name, and the old-version
+  // answer used to paint over the version they had switched to.
+  const activeEngineVersion = useRef<{ token: number; versionId: string | null }>({
+    token: 0,
+    versionId: null,
+  });
+  const noteActiveEngineVersion = useCallback((token: number, versionId: string) => {
+    if (token > activeEngineVersion.current.token) {
+      activeEngineVersion.current = { token, versionId };
+    }
+  }, []);
+  // Staleness is one question: does this answer describe a version that a NEWER
+  // statement has already replaced? An answer ISSUED after that statement can
+  // never be stale — the engine served it after the switch — which is what
+  // keeps a valid new-version refresh that raced the switch event.
   const engineHistoryAnswerIsStale = useCallback(
-    (activeVersionId: string) => activeVersionId === supersededEngineVersionId.current,
+    (token: number, activeVersionId: string) =>
+      activeVersionId !== activeEngineVersion.current.versionId &&
+      token < activeEngineVersion.current.token,
     [],
   );
   // A LOCAL write to a snapshot lane is newer information than every request
@@ -1717,7 +1737,8 @@ export function DesktopWorkspaceShell(props: {
       if (token <= committedEngineHistoryToken.current) return;
       // An answer describing the version the user left is not late — it is
       // about somewhere else.
-      if (engineHistoryAnswerIsStale(page.activeVersionId)) return;
+      if (engineHistoryAnswerIsStale(token, page.activeVersionId)) return;
+      noteActiveEngineVersion(token, page.activeVersionId);
       const commit = () => {
         committedEngineHistoryToken.current = token;
         committedEngineVersionId.current = page.activeVersionId;
@@ -1736,7 +1757,11 @@ export function DesktopWorkspaceShell(props: {
       if (token < pendingEngineHistoryPage.current) {
         const held = blockedEngineHistoryRefresh.current;
         if (!held || token > held.token) {
-          blockedEngineHistoryRefresh.current = { token, commit };
+          blockedEngineHistoryRefresh.current = {
+            token,
+            activeVersionId: page.activeVersionId,
+            commit,
+          };
         }
         return;
       }
@@ -1774,9 +1799,11 @@ export function DesktopWorkspaceShell(props: {
       // here let a newer refresh that merely FAILED throw this page away.
       // Same two questions as the refresh, plus one an append owes: the page
       // must describe the SAME version as the timeline it extends.
+      const stale = engineHistoryAnswerIsStale(token, page.activeVersionId);
+      if (!stale) noteActiveEngineVersion(token, page.activeVersionId);
       if (
         token > committedEngineHistoryToken.current &&
-        !engineHistoryAnswerIsStale(page.activeVersionId) &&
+        !stale &&
         page.activeVersionId === committedEngineVersionId.current
       ) {
         committedEngineHistoryToken.current = token;
@@ -1803,12 +1830,21 @@ export function DesktopWorkspaceShell(props: {
       // Settlement, not success, releases what this pagination held: the
       // pending slot, the refresh it blocked, and the button. A pagination
       // superseded by a newer one releases nothing — that newer one owns all
-      // three now, so nothing is left stuck either way.
+      // three now, so nothing is left stuck either way. The held answer is
+      // judged HERE, by the same two questions every answer faces, so a
+      // version switch in between drops it and a merge that never changed the
+      // version does not.
       if (pendingEngineHistoryPage.current === token) {
         pendingEngineHistoryPage.current = 0;
         const held = blockedEngineHistoryRefresh.current;
         blockedEngineHistoryRefresh.current = null;
-        if (held && held.token > committedEngineHistoryToken.current) held.commit();
+        if (
+          held &&
+          held.token > committedEngineHistoryToken.current &&
+          !engineHistoryAnswerIsStale(held.token, held.activeVersionId)
+        ) {
+          held.commit();
+        }
         setEngineHistoryLoadingMore(false);
       }
     }
@@ -1847,24 +1883,25 @@ export function DesktopWorkspaceShell(props: {
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
   const onVersionWorkspaceStateChanged = useCallback(() => {
     setVersionEpoch((epoch) => epoch + 1);
-    // A version switch changes WHICH timeline is true. Rejecting everything in
-    // flight by token was too blunt: main notifies the renderer BEFORE the
-    // switch invoke resolves, so a perfectly valid NEW-version refresh can be
-    // issued before this runs, and rejecting it left the panel on the old
-    // version whenever the refresh below failed. So name the version instead —
-    // answers carry theirs. Which version is now active is read from the
-    // workspace, not assumed: nothing left if the displayed version IS the
-    // active one, which is exactly the case where an early answer already
-    // moved the panel.
-    blockedEngineHistoryRefresh.current = null;
+    // A version switch changes WHICH timeline is true, and only the workspace
+    // can say which version that now is. Rejecting everything in flight by
+    // token was too blunt: main notifies the renderer BEFORE the switch invoke
+    // resolves, so a perfectly valid NEW-version refresh can be issued before
+    // this runs, and rejecting it left the panel on the old version whenever
+    // the refresh below failed. So ask, and let the answer take its place in
+    // the same issue order as the history answers — older answers naming
+    // another version lose to it, newer ones cannot.
+    //
+    // Nothing is discarded here. This callback also runs for merges and
+    // conflict resolutions that never changed the version at all, so a refresh
+    // held behind a pagination is judged when that pagination settles, not
+    // thrown away on the chance that a switch happened.
+    const versionToken = ++engineHistoryToken.current;
     void bridge()
       .listWorkspaceVersions({ workspaceId })
-      .then(({ activeVersionId }) => {
-        supersededEngineVersionId.current =
-          activeVersionId === committedEngineVersionId.current
-            ? null
-            : committedEngineVersionId.current;
-      })
+      .then(({ activeVersionId }) =>
+        noteActiveEngineVersion(versionToken, activeVersionId),
+      )
       .catch(() => undefined);
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
@@ -1872,7 +1909,13 @@ export function DesktopWorkspaceShell(props: {
     void refreshHistory().catch((error) =>
       reportShellError("Could not refresh history.", error),
     );
-  }, [refreshFiles, refreshHistory, reportShellError, workspaceId]);
+  }, [
+    noteActiveEngineVersion,
+    refreshFiles,
+    refreshHistory,
+    reportShellError,
+    workspaceId,
+  ]);
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
       mutateWb((state) => openTab(state, versionCompareTabPath(versionId)));
