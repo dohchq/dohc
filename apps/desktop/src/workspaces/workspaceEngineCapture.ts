@@ -1010,9 +1010,10 @@ export function createWorkspaceEngineCapture(
         materialized: boolean;
       },
       token: number,
+      generation: number,
     ) => void | Promise<void>;
-    onSettleStart: (token: number) => void;
-    onSettleError: (error: unknown, token: number) => void;
+    onSettleStart: (token: number, generation: number) => void;
+    onSettleError: (error: unknown, token: number, generation: number) => void;
   }): Promise<WorkspaceEngineYDocProviderSession> {
     const sessions = options.rustEngineSessions;
     const openProvider =
@@ -1087,6 +1088,11 @@ export function createWorkspaceEngineCapture(
     // overlap the canonical doc, so merging it would append a SECOND copy of
     // the file. The canonical doc is the renderer's truth; the replacement
     // starts empty and the replay re-establishes it.
+    // Settle tokens are minted PER GENERATION and every generation starts at 1,
+    // so a token alone does not identify a settle across a daemon restart. The
+    // generation is stamped here, where it is known, and travels with every
+    // settle callback.
+    let generations = 0;
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
@@ -1094,6 +1100,7 @@ export function createWorkspaceEngineCapture(
       await sessions.run(
         workspace,
         async (binding) => {
+          const generation = ++generations;
           if (typeof binding.client.onEvent !== "function") {
             throw new Error(
               "Rust engine client does not expose Y.Doc event delivery.",
@@ -1138,9 +1145,11 @@ export function createWorkspaceEngineCapture(
             // reconnect error, so it is NOT an error sink: every settle
             // failure also goes to onSettleError, which reports it.
             onSessionError: requestReconnect,
-            onSettleStart: input.onSettleStart,
-            onSettleError: input.onSettleError,
-            onSettled: input.onSettled,
+            onSettleStart: (token) => input.onSettleStart(token, generation),
+            onSettleError: (error, token) =>
+              input.onSettleError(error, token, generation),
+            onSettled: (result, token) =>
+              input.onSettled(result, token, generation),
           });
           openingRemoteUpdates.set(opened, opening);
           return opened;
@@ -2359,15 +2368,15 @@ export function createWorkspaceEngineCapture(
         // evidences its own claim rather than inferring it from a release whose
         // meaning depends on the regime.
         //
-        // Settles OVERLAP: runSettle announces its start before it queues, and
-        // several can be outstanding at once. So a start does not claim a slot
-        // that a later start can overwrite — it PUSHES the watermark it could
-        // carry, and each outcome consumes the oldest. Claims are ascending by
-        // construction (the watermark only grows, starts happen in order), so
-        // the oldest is also the smallest: crediting it can never credit more
-        // than the settle that just committed actually carried. Every way this
-        // can be wrong — a duplicated outcome, a lost claim — under-credits,
-        // which keeps a close LOUD.
+        // Settles OVERLAP, and they do not finish in the order they start:
+        // runSettle announces a start before it queues, and a settle that
+        // aborts on the journal reports its failure WITHOUT ever reaching the
+        // settle chain, so it can finish ahead of one queued before it. Order
+        // is therefore not a sound pairing, and neither a shared slot nor a
+        // queue can be right. Each settle's claim is keyed by the settle
+        // itself: its token, and the generation that minted the token — every
+        // daemon generation runs its own settle chain and starts counting at 1
+        // again, so the token alone repeats across a restart.
         //
         // Counting is coarse for the same reason: an update that leaves the
         // projection unchanged still marks the document unsettled, because
@@ -2375,7 +2384,9 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
-        const settleClaims: number[] = [];
+        const settleClaims = new Map<string, number>();
+        const settleId = (token: number, generation: number): string =>
+          `${generation}:${token}`;
         const noteUpdate = (): void => {
           updatesSeen += 1;
         };
@@ -2397,12 +2408,15 @@ export function createWorkspaceEngineCapture(
             materialized: boolean;
           },
           token: number,
+          generation: number,
         ) => {
           // The settle COMMITTED — every branch below is about the FILE, not
-          // the lineage — so the updates it carried are a moment in History
-          // now. Updates that arrived after its start are not: they belong to
-          // a later claim.
-          const claim = settleClaims.shift();
+          // the lineage — so the updates THIS settle carried are a moment in
+          // History now. Updates that arrived after its start are not: they
+          // belong to a later settle's claim, which only that settle can
+          // redeem.
+          const claim = settleClaims.get(settleId(token, generation));
+          settleClaims.delete(settleId(token, generation));
           if (claim !== undefined && claim > updatesSettled) updatesSettled = claim;
           lastSettledSha = result.sha256;
           // The settle committed, but the engine says the FILE did not move
@@ -2472,8 +2486,8 @@ export function createWorkspaceEngineCapture(
         // Claim exactly what this settle can carry. The daemon serves one
         // session's commands in order, so an update already sent is in the
         // settle that follows it; one sent after this point is not.
-        const onSettleStart = (token: number) => {
-          settleClaims.push(updatesSeen);
+        const onSettleStart = (token: number, generation: number) => {
+          settleClaims.set(settleId(token, generation), updatesSeen);
           reportSaveState("settling", token);
         };
         // The one place a background settle failure is observable. Log it with
@@ -2496,8 +2510,14 @@ export function createWorkspaceEngineCapture(
         // Keying on the error itself is what the close already matches on, and
         // a WeakMap keeps the record exactly as long as the error exists.
         const settleFailureTokens = new WeakMap<object, number>();
-        const onSettleError = (error: unknown, token: number) => {
-          settleClaims.shift();
+        const onSettleError = (
+          error: unknown,
+          token: number,
+          generation: number,
+        ) => {
+          // This settle carried nothing to History, so its claim is dropped
+          // unredeemed — and only ITS claim, whichever settle finishes first.
+          settleClaims.delete(settleId(token, generation));
           if (typeof error === "object" && error !== null) {
             settleFailureTokens.set(error, token);
           }
