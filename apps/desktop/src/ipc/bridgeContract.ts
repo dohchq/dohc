@@ -668,7 +668,22 @@ export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 // handler is gated in main on the workspace's engine capture — unflagged
 // workspaces reject.
 const MOMENT_ID = z.string().min(1).max(200);
-const MOMENT_TEXT = z.string().max(2_000_000);
+
+// A moment body is whatever the engine stored, and the engine accepts a text
+// write up to MAX_TEXT_BYTES — 10 MiB of UTF-8
+// (`crates/dohc-engine-domain/src/store.rs`). The bridge carries the same
+// contract, so a body the engine accepted can always reach the renderer.
+// Zod counts UTF-16 code units and UTF-8 never spends less than one byte per
+// code unit, so this character bound admits every body the engine could hold.
+export const MOMENT_TEXT_MAX_CHARS = 10 * 1024 * 1024;
+const MOMENT_TEXT = z.string().refine(
+  (text) => text.length <= MOMENT_TEXT_MAX_CHARS,
+  (text) => ({
+    message:
+      `moment body is ${text.length} characters; the IPC bridge carries at most ` +
+      `${MOMENT_TEXT_MAX_CHARS} characters (the engine's 10 MiB UTF-8 text cap)`,
+  }),
+);
 
 export const EngineMomentRecord = z.object({
   id: MOMENT_ID,
