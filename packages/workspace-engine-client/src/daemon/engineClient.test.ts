@@ -1425,6 +1425,50 @@ describe("EngineClient", () => {
     ).rejects.toMatchObject({ code: "transport-error" });
   });
 
+  // A wedge kill cannot be left on the 2-second timer that a deliberate close
+  // uses. The supervisor reports the terminal failure immediately afterwards,
+  // and the desktop answers that report with a modal; the event loop stops
+  // there, so a deferred kill would wait for the user to dismiss it while the
+  // wedged child kept running.
+  it("forces termination for a wedge kill and defers it for a deliberate close", async () => {
+    const forced: Array<boolean | undefined> = [];
+    const wedged = new FakePeerConnection();
+    const killedNow = new EngineClient(
+      wedged,
+      {
+        authToken: "parent-secret",
+        protocolVersion: 1,
+        capabilities: ["core"],
+        connectTimeoutMs: 5_000,
+        maxFrameBytes: LIMITS.maxFrameBytes,
+      },
+      (force) => forced.push(force),
+    );
+    wedged.acknowledge();
+    await killedNow.ready();
+    killedNow.closeUnresponsive();
+
+    const shutdown = new FakePeerConnection();
+    const closedNormally = new EngineClient(
+      shutdown,
+      {
+        authToken: "parent-secret",
+        protocolVersion: 1,
+        capabilities: ["core"],
+        connectTimeoutMs: 5_000,
+        maxFrameBytes: LIMITS.maxFrameBytes,
+      },
+      (force) => forced.push(force),
+    );
+    shutdown.acknowledge();
+    await closedNormally.ready();
+    closedNormally.close();
+
+    // Only the wedge kill forces it. A deliberate close still gets the stdin
+    // EOF and the grace period the Rust host needs to drain its actors.
+    expect(forced).toEqual([true, false]);
+  });
+
   it("still reports a deliberate close as closed", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);

@@ -558,7 +558,8 @@ export class EngineClient implements EngineTransport {
   constructor(
     private readonly connection: EngineClientConnection,
     private readonly connectOptions: EngineClientConnectOptions,
-    private readonly terminate: () => void = () => connection.close(),
+    private readonly terminate: (force?: boolean) => void = () =>
+      connection.close(),
     private readonly termination: Promise<void> = Promise.resolve(),
   ) {
     this.maxFrameBytes =
@@ -731,11 +732,18 @@ export class EngineClient implements EngineTransport {
   // failed across a restart that was already under way.
   closeUnresponsive(): void {
     if (this.closed) return;
+    // `force` because a wedged daemon must die NOW, not on a timer. The
+    // ordinary close ends stdin and schedules the kill 2s later, and the
+    // supervisor's next act is to report a terminal failure — which the
+    // desktop answers with a modal that blocks the event loop. A timer cannot
+    // run while that modal stands, so the deferred kill would wait for the
+    // user and the wedged child would outlive the dialog.
     this.fail(
       new EngineClientError(
         "transport-error",
         "The engine stopped answering and was killed for replacement.",
       ),
+      true,
     );
   }
 
@@ -1230,7 +1238,7 @@ export class EngineClient implements EngineTransport {
     }
   }
 
-  private fail(error: EngineClientError): void {
+  private fail(error: EngineClientError, force = false): void {
     if (this.closed) return;
     this.closed = true;
     this.closeCause = error;
@@ -1252,7 +1260,7 @@ export class EngineClient implements EngineTransport {
     this.bufferedBlobBytes = 0;
     this.bufferedBlobChunks = 0;
     try {
-      this.terminate();
+      this.terminate(force);
     } catch {
       this.connection.close();
     }
@@ -1338,12 +1346,19 @@ export async function createEngineClient(
   const client = new EngineClient(
     clientConnection,
     options,
-    () => {
+    (force) => {
       // Closing stdin lets the Rust host observe EOF, drain its workspace
       // actors, and exit normally. Keep a bounded kill fallback for a wedged
       // child so desktop shutdown cannot leak the sidecar.
       connection.end();
       if (child.exitCode !== null || child.signalCode !== null) return;
+      // A forced kill cannot wait for the timer below. The caller already
+      // proved this child answers nothing, and it is about to run code that
+      // can block the event loop, which is where that timer lives. Signal now.
+      if (force) {
+        child.kill();
+        return;
+      }
       const killTimer = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) child.kill();
       }, 2_000);

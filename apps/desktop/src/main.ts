@@ -7668,11 +7668,20 @@ async function startRustEngineDaemon(): Promise<boolean> {
         resourcesPath: process.resourcesPath,
       }),
       onFailure: (error, terminal) => {
+        // The supervisor's diagnostic is for us: it names engine.ping, probe
+        // counts and wedge budgets, which tell a developer or an agent exactly
+        // which limit was hit. It goes to the log in full.
         console.error("[desktop] Rust engine daemon:", error);
         if (terminal && !quitting) {
+          // The dialog is for the user, so it says what broke and what to do
+          // instead — no internal names, one instruction per sentence
+          // (docs/brand/copy.md).
           dialog.showErrorBox(
-            "Rust engine stopped",
-            `${error.message}\n\nRestart dohc. If the engine stops again, review the desktop logs and repair or reinstall dohc.`,
+            "dohc stopped its engine",
+            "The engine that reads and writes your files stopped answering. " +
+              "dohc stopped restarting it.\n\n" +
+              "Restart dohc. If this happens again, review the desktop logs " +
+              "and reinstall dohc.",
           );
         }
       },
