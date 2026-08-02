@@ -134,7 +134,7 @@ import {
   parseHistoryDiffTabPath,
   parseSiteTabPath,
   parseUiState,
-  pruneMissingTabs,
+  pruneMissingRestoredTabs,
   recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
@@ -1267,6 +1267,10 @@ export function DesktopWorkspaceShell(props: {
   const uiStateLoaded = useRef(false);
   const userTouchedWb = useRef(false);
   const wbRef = useRef(wb);
+  // The tab paths the stored state restored — the only ones a file listing is
+  // allowed to close. Empty until the load applies, and empty forever when the
+  // user acted first and the stored tabs were discarded.
+  const restoredTabPaths = useRef<ReadonlySet<string>>(new Set<string>());
 
   // THE one mutation seam for workbench state: every user-driven transition
   // routes through here so the touched flag is set before React even queues
@@ -1293,6 +1297,7 @@ export function DesktopWorkspaceShell(props: {
           // must flush the restored state, never the stale default.
           wbRef.current = parsed;
           setWb(parsed);
+          restoredTabPaths.current = new Set(parsed.tabs.map((tab) => tab.path));
         }
         uiStateLoaded.current = true;
         if (userTouchedWb.current) {
@@ -1347,23 +1352,26 @@ export function DesktopWorkspaceShell(props: {
     setFilesLoaded(true);
   }, [workspaceId]);
 
-  // Restore only the tabs whose files still exist. A rollback or an external
-  // delete changes the tree without an explorer op, so nothing remaps the
-  // stored tabs and Open Editors keeps a dead path across restarts. Runs ONCE
-  // per workspace, once the first listing and the stored state have both
-  // landed: a later listing can race a create, and pruning then would close a
-  // tab the user just opened.
-  const restoredTabsReconciled = useRef(false);
+  // Keep a restored tab only while the workspace still lists its file. A
+  // rollback, an external delete, or a share pull changes the tree without an
+  // explorer op, so nothing remaps the stored tabs and Open Editors keeps a
+  // dead path across restarts.
+  //
+  // Every listing is checked, not just the first. A shared workspace lists
+  // twice on open — once at mount, once after refreshShareView pulls the
+  // changed paths — and consuming whichever landed first would either miss a
+  // remote delete or judge the tabs against a pre-pull snapshot. Only the
+  // RESTORED paths are eligible (see pruneMissingRestoredTabs), so a listing
+  // that raced a create can never close a tab opened this session.
   useEffect(() => {
-    if (restoredTabsReconciled.current || !filesLoaded || !uiStateLoaded.current) {
-      return;
-    }
-    restoredTabsReconciled.current = true;
+    if (!filesLoaded || restoredTabPaths.current.size === 0) return;
     const present = new Set(files.map((file) => file.path));
-    setWb((state) => pruneMissingTabs(state, (path) => present.has(path)));
-    // wb.tabs: the stored state arrives through setWb, so this re-runs once
-    // the restore commits when the listing won the race.
-  }, [files, filesLoaded, wb.tabs]);
+    setWb((state) =>
+      pruneMissingRestoredTabs(state, restoredTabPaths.current, (path) =>
+        present.has(path),
+      ),
+    );
+  }, [files, filesLoaded]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
     setShellError(error instanceof Error ? error.message : fallback);

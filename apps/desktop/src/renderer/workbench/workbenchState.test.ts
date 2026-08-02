@@ -28,7 +28,7 @@ import {
   parseHistoryDiffTabPath,
   parseSiteTabPath,
   parseUiState,
-  pruneMissingTabs,
+  pruneMissingRestoredTabs,
   serializeUiState,
   setSidebarWidth,
   setChatsWidth,
@@ -499,22 +499,52 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
   });
 });
 
-describe("pruneMissingTabs (restored tabs whose file is gone)", () => {
+describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
+  const restored = (...paths: string[]): ReadonlySet<string> => new Set(paths);
+
   it("drops the tab for a path the workspace no longer has", () => {
     const state = withTabs("a.md", "assets/alpha-renamed.png");
-    const pruned = pruneMissingTabs(state, (path) => path === "a.md");
+    const pruned = pruneMissingRestoredTabs(
+      state,
+      restored("a.md", "assets/alpha-renamed.png"),
+      (path) => path === "a.md",
+    );
     expect(pruned.tabs.map((tab) => tab.path)).toEqual(["a.md"]);
     expect(pruned.activeTab).toBe("a.md");
   });
 
   it("keeps every tab whose file is still listed (same reference)", () => {
     const state = withTabs("a.md", "b.md");
-    expect(pruneMissingTabs(state, () => true)).toBe(state);
+    expect(pruneMissingRestoredTabs(state, restored("a.md", "b.md"), () => true)).toBe(
+      state,
+    );
+  });
+
+  // The whole point of the scoping: a listing that raced a create omits the
+  // new file, and must not be allowed to close the tab the user just opened.
+  it("never touches a tab opened this session, whatever the listing says", () => {
+    const state = withTabs("restored.md", "opened-now.md");
+    const pruned = pruneMissingRestoredTabs(
+      state,
+      restored("restored.md"),
+      () => false,
+    );
+    expect(pruned.tabs.map((tab) => tab.path)).toEqual(["opened-now.md"]);
+    expect(pruned.activeTab).toBe("opened-now.md");
+  });
+
+  it("prunes nothing when no tab was restored", () => {
+    const state = withTabs("a.md", "b.md");
+    expect(pruneMissingRestoredTabs(state, restored(), () => false)).toBe(state);
   });
 
   it("keeps virtual tabs, which have no file to look up", () => {
     const state = withTabs(CHATS_TAB_PATH, HISTORY_TAB_PATH, "a.md");
-    const pruned = pruneMissingTabs(state, () => false);
+    const pruned = pruneMissingRestoredTabs(
+      state,
+      restored(CHATS_TAB_PATH, HISTORY_TAB_PATH, "a.md"),
+      () => false,
+    );
     expect(pruned.tabs.map((tab) => tab.path)).toEqual([
       CHATS_TAB_PATH,
       HISTORY_TAB_PATH,
@@ -527,7 +557,11 @@ describe("pruneMissingTabs (restored tabs whose file is gone)", () => {
     state = setFolderExpanded(state, "assets", true);
     state = togglePinned(state, "assets");
     state = recordRecentFile(state, "a.md");
-    const pruned = pruneMissingTabs(state, (path) => path === "a.md");
+    const pruned = pruneMissingRestoredTabs(
+      state,
+      restored("a.md"),
+      (path) => path === "a.md",
+    );
     expect(pruned.expandedFolders).toEqual(["assets"]);
     expect(pruned.pinned).toEqual(["assets"]);
     expect(pruned.recentFiles).toEqual(["a.md"]);
@@ -535,10 +569,11 @@ describe("pruneMissingTabs (restored tabs whose file is gone)", () => {
 
   it("a pruned active tab hands over to the last survivor; an empty result nulls it", () => {
     const state = withTabs("a.md", "b.md", "gone.md");
-    expect(pruneMissingTabs(state, (path) => path !== "gone.md").activeTab).toBe(
-      "b.md",
-    );
-    const empty = pruneMissingTabs(state, () => false);
+    const all = restored("a.md", "b.md", "gone.md");
+    expect(
+      pruneMissingRestoredTabs(state, all, (path) => path !== "gone.md").activeTab,
+    ).toBe("b.md");
+    const empty = pruneMissingRestoredTabs(state, all, () => false);
     expect(empty.tabs).toEqual([]);
     expect(empty.activeTab).toBeNull();
   });

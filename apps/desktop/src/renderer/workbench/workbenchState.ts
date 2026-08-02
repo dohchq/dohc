@@ -397,17 +397,30 @@ export function remapWorkbenchPaths(
 }
 
 // Restored tabs can outlive their files: a version rollback, an external
-// delete, or an unmounted share changes the tree without an explorer op, so
+// delete, or a share pull changes the tree without an explorer op, so
 // remapWorkbenchPaths never sees it and Open Editors keeps offering a path
-// that is gone. Drops those tabs only — pinned paths, expanded folders and
-// recent files include FOLDERS, which no file listing carries. Virtual tabs
-// (dohc://graph, chats, a moment diff) have no file and always survive.
-export function pruneMissingTabs(
+// that is gone.
+//
+// Scoped to `restoredPaths` — the tabs that came from stored ui-state. Their
+// files all existed when the app started, so any listing that omits one is
+// reporting a real deletion, and the check can safely re-run on EVERY listing
+// (a shared workspace lists twice on open: once at mount, once after the pull
+// lands). A tab opened this session is never in the set, so a listing that
+// raced its create can never close it.
+//
+// Tabs only: pinned paths, expanded folders and recent files include FOLDERS,
+// which no file listing carries. Virtual tabs (dohc://graph, chats, a moment
+// diff) have no file and always survive.
+export function pruneMissingRestoredTabs(
   state: WorkbenchState,
+  restoredPaths: ReadonlySet<string>,
   fileExists: (path: string) => boolean,
 ): WorkbenchState {
   const tabs = state.tabs.filter(
-    (tab) => isVirtualTabPath(tab.path) || fileExists(tab.path),
+    (tab) =>
+      !restoredPaths.has(tab.path) ||
+      isVirtualTabPath(tab.path) ||
+      fileExists(tab.path),
   );
   if (tabs.length === state.tabs.length) return state;
   // Same rule as remapWorkbenchPaths: a surviving active tab stays active,

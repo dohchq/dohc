@@ -24,6 +24,7 @@ vi.setConfig({ testTimeout: 15_000 });
 import type {
   ChatChannelRecord,
   FileChatThreadRecord,
+  RefreshSharedViewResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
@@ -234,10 +235,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     openSharedView: vi.fn(async () => {
       throw new Error("not used in shell tests");
     }),
-    refreshSharedView: vi.fn(async () => ({
-      status: "unchanged" as const,
-      changedPaths: 0,
-    })),
+    // Typed to the contract, not to this one default: a test that drives a
+    // real pull ("updated") must be able to swap the implementation.
+    refreshSharedView: vi.fn(
+      async (): Promise<RefreshSharedViewResult> => ({
+        status: "unchanged",
+        changedPaths: 0,
+      }),
+    ),
     onWorkspaceActivity: vi.fn((callback: () => void) => {
       activityCallback = callback;
       return () => {
@@ -766,6 +771,75 @@ describe("ui-state merge-on-load", () => {
       );
       expect(states.some((state) => state.tabs.join() === "b.md")).toBe(true);
     });
+  });
+
+  // A shared workspace lists its files TWICE on open: once at mount, once
+  // after refreshShareView pulls the changed paths. Reconciling against
+  // whichever landed first would either miss a remote delete or judge the
+  // restored tabs against a pre-pull snapshot.
+  it("prunes a restored tab on a listing that lands after the share pull", async () => {
+    const listing = (...paths: string[]) =>
+      vi.fn(async () => ({
+        files: paths.map((path) => ({ path, kind: "file" as const })),
+        folders: [] as string[],
+      }));
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "shared-gone.md"],
+        activeTab: "b.md",
+      }),
+    );
+    // The pre-pull listing still carries the file the granter deleted.
+    bridge.listWorkspaceFiles = listing("a.md", "b.md", "shared-gone.md");
+    const pull = deferred<RefreshSharedViewResult>();
+    bridge.refreshSharedView = vi.fn(() => pull.promise);
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+    });
+
+    // It survives that listing: nothing has said the file is gone yet.
+    expect(await screen.findByTestId("tab-shared-gone.md")).toBeTruthy();
+
+    // The pull lands, and the listing it triggers no longer has the file.
+    bridge.listWorkspaceFiles = listing("a.md", "b.md");
+    await act(async () => {
+      pull.resolve({ status: "updated", changedPaths: 1 });
+      await pull.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-shared-gone.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  // The scoping earns its keep here: only stored tabs are eligible, so a
+  // listing that raced a create cannot close what the user just opened.
+  it("never prunes a tab opened this session, whatever a later listing says", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+
+    // b.md is restored; a.md is opened now.
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    fireEvent.click(await screen.findByText("a.md"));
+    expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
+
+    // A listing that knows about neither file arrives.
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: [] as Array<{ path: string; kind: "file" }>,
+      folders: [] as string[],
+    }));
+    await act(async () => {
+      bridge.emitWorkspaceActivity();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-b.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
   });
 
   it("stored state applies when the user touched nothing before the load", async () => {
