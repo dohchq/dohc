@@ -14,6 +14,12 @@ import type {
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
+import {
+  CONFLICT_COMBINED_MAX_BYTES,
+  conflictPreview,
+  exceedsUtf8Bytes,
+  utf8ByteLength,
+} from "./conflictPane";
 import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 
 // Named versions surface (PR 0M-4, workspace-engine alpha). Product
@@ -904,16 +910,13 @@ export function VersionMergeDialog(props: {
                   : `${stage.conflicts.length} files`}
                 . Choose which copy Main should keep — nothing is lost either way.
               </p>
-              <div className="mt-3 flex flex-col gap-3">
-                {stage.conflicts.map((conflict) => (
-                  <ConflictResolver
-                    key={conflict.conflictId}
-                    workspaceId={workspaceId}
-                    conflict={conflict}
-                    sourceName={source.name}
-                    onResolved={onResolved}
-                  />
-                ))}
+              <div className="mt-3">
+                <ConflictList
+                  workspaceId={workspaceId}
+                  conflicts={stage.conflicts}
+                  sourceNameFor={() => source.name}
+                  onResolved={onResolved}
+                />
               </div>
             </>
           ) : null}
@@ -964,19 +967,51 @@ function ConflictSidePane(props: {
   /// copy, or this side has no file at all.
   note: string;
 }) {
+  // How many preview windows this side is showing. One press of "Show more"
+  // adds one, so the pane paints a bounded amount per press and the rest of
+  // the side stays reachable (#536).
+  const [windows, setWindows] = useState(1);
+  const preview = useMemo(
+    () => (props.text === null ? null : conflictPreview(props.text, windows)),
+    [props.text, windows],
+  );
   return (
     <div className="flex min-w-0 flex-col overflow-hidden rounded-md border border-line">
       <div className="border-b border-line bg-panel-2 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-subtle">
         {props.heading}
       </div>
-      {props.text === null ? (
+      {preview === null ? (
         <p className="m-0 px-2 py-2 text-[11px] italic leading-4 text-subtle">
           {props.note}
         </p>
       ) : (
-        <pre className="m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words px-2 py-1.5 font-mono text-[11px] leading-4 text-muted">
-          {props.text}
-        </pre>
+        <>
+          <pre
+            data-testid="version-conflict-side-text"
+            className="m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words px-2 py-1.5 font-mono text-[11px] leading-4 text-muted"
+          >
+            {preview.text}
+          </pre>
+          {preview.hiddenChars > 0 ? (
+            <div className="flex items-center justify-between gap-2 border-t border-line bg-panel-2 px-2 py-1">
+              <span
+                data-testid="version-conflict-side-hidden"
+                className="text-[10px] leading-4 text-subtle"
+              >
+                {preview.hiddenChars.toLocaleString("en-US")} more characters
+                hidden
+              </span>
+              <button
+                type="button"
+                data-testid="version-conflict-side-show-more"
+                onClick={() => setWindows((shown) => shown + 1)}
+                className="h-5 shrink-0 cursor-pointer rounded px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+              >
+                Show more
+              </button>
+            </div>
+          ) : null}
+        </>
       )}
     </div>
   );
@@ -1028,18 +1063,44 @@ function conflictSideLabels(
   };
 }
 
+// One conflict card. Expanded, it paints two side panes; collapsed, only its
+// header row — so a workspace with many open conflicts paints two panes, not
+// two per conflict (#536). The card stays MOUNTED while collapsed, so a
+// hand-written combined copy survives being collapsed.
 function ConflictResolver(props: {
   workspaceId: string;
   conflict: WorkspaceVersionConflict;
   sourceName: string;
+  expanded: boolean;
+  onToggle: () => void;
   onResolved: (remaining: WorkspaceVersionConflict[]) => void;
 }) {
-  const { conflict, sourceName, workspaceId } = props;
+  const { conflict, expanded, sourceName, workspaceId } = props;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [combined, setCombined] = useState<string | null>(null);
   const isBinary = conflict.contentKind === "binary";
   const labels = conflictSideLabels(conflict, sourceName);
+  // "Combine by hand" seeds the textarea with a whole side and posts it back
+  // as a combined resolution, which the engine refuses above its in-band text
+  // cap. Offering an edit whose apply is already known to fail would waste the
+  // user's work, so the affordance follows what apply accepts.
+  const seed = conflict.incomingText ?? conflict.currentText ?? "";
+  // Zero when the body fits. The exact byte count is only spent on a body the
+  // user cannot apply anyway — and never on every render, which for a 10 MiB
+  // side would be the cost this whole change removes.
+  const seedOverCapBytes = useMemo(
+    () =>
+      exceedsUtf8Bytes(seed, CONFLICT_COMBINED_MAX_BYTES) ? utf8ByteLength(seed) : 0,
+    [seed],
+  );
+  const combinedOverCapBytes = useMemo(
+    () =>
+      combined !== null && exceedsUtf8Bytes(combined, CONFLICT_COMBINED_MAX_BYTES)
+        ? utf8ByteLength(combined)
+        : 0,
+    [combined],
+  );
   const liveToken = useRef(0);
   useEffect(
     () => () => {
@@ -1082,7 +1143,13 @@ function ConflictResolver(props: {
       aria-label={`Conflict in ${conflict.path}`}
       className="rounded-lg border border-line bg-bg p-2"
     >
-      <div className="flex items-center gap-1.5 pb-2">
+      <button
+        type="button"
+        data-testid="version-conflict-toggle"
+        aria-expanded={expanded}
+        onClick={props.onToggle}
+        className="flex w-full cursor-pointer items-center gap-1.5 rounded text-left hover:text-ink"
+      >
         {isBinary ? (
           <FileArchive size={12} aria-hidden className="shrink-0 text-subtle" />
         ) : (
@@ -1091,110 +1158,189 @@ function ConflictResolver(props: {
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
           {conflict.path}
         </span>
-      </div>
-      {isBinary ? (
-        <div
-          data-testid="version-conflict-binary"
-          className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
-        >
-          Binary file. Choose which copy to keep.
-        </div>
-      ) : null}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <div className="flex min-w-0 flex-col gap-1.5">
-          <ConflictSidePane
-            heading={labels.currentHeading}
-            text={conflict.currentText}
-            note={sideNote(conflict.currentBinary, labels.currentMissing)}
-          />
-          <button
-            type="button"
-            data-testid="version-conflict-keep-current"
-            disabled={busy}
-            onClick={() => void resolve({ kind: "keep-current" })}
-            className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+        {!expanded && combined !== null ? (
+          <span
+            data-testid="version-conflict-draft-marker"
+            className="shrink-0 text-[10px] text-subtle"
           >
-            {labels.keepCurrent}
-          </button>
-        </div>
-        <div className="flex min-w-0 flex-col gap-1.5">
-          <ConflictSidePane
-            heading={labels.incomingHeading}
-            text={conflict.incomingText}
-            note={sideNote(conflict.incomingBinary, labels.incomingMissing)}
-          />
-          <button
-            type="button"
-            data-testid="version-conflict-keep-incoming"
-            disabled={busy}
-            onClick={() => void resolve({ kind: "keep-incoming" })}
-            className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
-          >
-            {labels.keepIncoming}
-          </button>
-        </div>
-      </div>
-      {!isBinary && combined === null ? (
-        <button
-          type="button"
-          data-testid="version-conflict-combine"
-          disabled={busy}
-          onClick={() =>
-            setCombined(conflict.incomingText ?? conflict.currentText ?? "")
-          }
-          className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
-        >
-          Combine by hand instead…
-        </button>
-      ) : !isBinary ? (
-        <div className="mt-2 flex flex-col gap-1.5">
-          <label
-            className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
-            htmlFor={`combined-${conflict.conflictId}`}
-          >
-            Combined copy for Main
-          </label>
-          <textarea
-            id={`combined-${conflict.conflictId}`}
-            data-testid="version-conflict-combined-input"
-            value={combined ?? ""}
-            disabled={busy}
-            rows={6}
-            onChange={(event) => setCombined(event.target.value)}
-            className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
-          />
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setCombined(null)}
-              className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+            Combined copy in progress
+          </span>
+        ) : null}
+        <ChevronDown
+          size={12}
+          aria-hidden
+          className={`shrink-0 text-subtle ${expanded ? "" : "-rotate-90"}`}
+        />
+      </button>
+      {expanded ? (
+        <div className="pt-2">
+          {isBinary ? (
+            <div
+              data-testid="version-conflict-binary"
+              className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
             >
-              Cancel
-            </button>
-            <button
-              type="button"
-              data-testid="version-conflict-apply-combined"
-              disabled={busy}
-              onClick={() => void resolve({ kind: "keep-combined", text: combined ?? "" })}
-              className="h-7 cursor-pointer rounded-md bg-accent px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
-            >
-              Use this combined copy
-            </button>
+              Binary file. Choose which copy to keep.
+            </div>
+          ) : null}
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <ConflictSidePane
+                heading={labels.currentHeading}
+                text={conflict.currentText}
+                note={sideNote(conflict.currentBinary, labels.currentMissing)}
+              />
+              <button
+                type="button"
+                data-testid="version-conflict-keep-current"
+                disabled={busy}
+                onClick={() => void resolve({ kind: "keep-current" })}
+                className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+              >
+                {labels.keepCurrent}
+              </button>
+            </div>
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <ConflictSidePane
+                heading={labels.incomingHeading}
+                text={conflict.incomingText}
+                note={sideNote(conflict.incomingBinary, labels.incomingMissing)}
+              />
+              <button
+                type="button"
+                data-testid="version-conflict-keep-incoming"
+                disabled={busy}
+                onClick={() => void resolve({ kind: "keep-incoming" })}
+                className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+              >
+                {labels.keepIncoming}
+              </button>
+            </div>
           </div>
+          {!isBinary && combined === null && seedOverCapBytes > 0 ? (
+            <p
+              data-testid="version-conflict-combine-unavailable"
+              className="mb-0 mt-2 text-[11px] leading-4 text-subtle"
+            >
+              This copy is {seedOverCapBytes.toLocaleString("en-US")} bytes. dohc
+              can apply a combined copy up to{" "}
+              {CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes. Keep one
+              copy, then edit the file.
+            </p>
+          ) : !isBinary && combined === null ? (
+            <button
+              type="button"
+              data-testid="version-conflict-combine"
+              disabled={busy}
+              onClick={() => setCombined(seed)}
+              className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+            >
+              Combine by hand instead…
+            </button>
+          ) : !isBinary ? (
+            <div className="mt-2 flex flex-col gap-1.5">
+              <label
+                className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                htmlFor={`combined-${conflict.conflictId}`}
+              >
+                Combined copy for Main
+              </label>
+              <textarea
+                id={`combined-${conflict.conflictId}`}
+                data-testid="version-conflict-combined-input"
+                value={combined ?? ""}
+                disabled={busy}
+                rows={6}
+                onChange={(event) => setCombined(event.target.value)}
+                className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+              />
+              {combinedOverCapBytes > 0 ? (
+                <p
+                  data-testid="version-conflict-combined-over-cap"
+                  role="alert"
+                  className="mb-0 text-[11px] leading-4 text-danger"
+                >
+                  This combined copy is{" "}
+                  {combinedOverCapBytes.toLocaleString("en-US")} bytes.
+                  dohc can apply up to{" "}
+                  {CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes.
+                  Remove some text.
+                </p>
+              ) : null}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setCombined(null)}
+                  className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  data-testid="version-conflict-apply-combined"
+                  disabled={busy || combinedOverCapBytes > 0}
+                  onClick={() => void resolve({ kind: "keep-combined", text: combined ?? "" })}
+                  className="h-7 cursor-pointer rounded-md bg-accent px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
+                >
+                  Use this combined copy
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {error ? (
+            <p role="alert" className="mb-0 mt-2 text-[11px] leading-4 text-danger">
+              {error}
+            </p>
+          ) : null}
+          {busy ? (
+            <p role="status" className="mb-0 mt-2 text-[11px] leading-4 text-subtle">
+              Applying…
+            </p>
+          ) : null}
         </div>
-      ) : null}
-      {error ? (
-        <p role="alert" className="mb-0 mt-2 text-[11px] leading-4 text-danger">
-          {error}
-        </p>
-      ) : null}
-      {busy ? (
-        <p role="status" className="mb-0 mt-2 text-[11px] leading-4 text-subtle">
-          Applying…
-        </p>
       ) : null}
     </section>
+  );
+}
+
+// Every open conflict, one card each, ONE of them expanded (#536). Both
+// conflict surfaces render through this: the merge dialog and the standalone
+// review dialog. The list can be any length — the engine pages `conflicts.list`
+// but the desktop client drains every page into one array (#562) — so what the
+// list PAINTS must not grow with it.
+function ConflictList(props: {
+  workspaceId: string;
+  conflicts: WorkspaceVersionConflict[];
+  sourceNameFor: (conflict: WorkspaceVersionConflict) => string;
+  onResolved: (remaining: WorkspaceVersionConflict[]) => void;
+}) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // A resolved conflict leaves the list, so an id that is no longer in it
+  // falls back to the first — the next file to decide opens by itself.
+  const openId = props.conflicts.some(
+    (conflict) => conflict.conflictId === expandedId,
+  )
+    ? expandedId
+    : (props.conflicts[0]?.conflictId ?? null);
+
+  return (
+    <div className="flex flex-col gap-3">
+      {props.conflicts.map((conflict) => (
+        <ConflictResolver
+          key={conflict.conflictId}
+          workspaceId={props.workspaceId}
+          conflict={conflict}
+          sourceName={props.sourceNameFor(conflict)}
+          expanded={conflict.conflictId === openId}
+          onToggle={() =>
+            setExpandedId(
+              conflict.conflictId === openId ? null : conflict.conflictId,
+            )
+          }
+          onResolved={props.onResolved}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -1496,19 +1642,14 @@ export function ConflictReviewDialog(props: {
             </p>
           ) : null}
           {state.status === "ready" && conflicts.length > 0 ? (
-            <div className="flex flex-col gap-3">
-              {conflicts.map((conflict) => (
-                <ConflictResolver
-                  key={conflict.conflictId}
-                  workspaceId={workspaceId}
-                  conflict={conflict}
-                  sourceName={
-                    versionNames.get(conflict.sourceVersionId) ?? "the other version"
-                  }
-                  onResolved={onResolved}
-                />
-              ))}
-            </div>
+            <ConflictList
+              workspaceId={workspaceId}
+              conflicts={conflicts}
+              sourceNameFor={(conflict) =>
+                versionNames.get(conflict.sourceVersionId) ?? "the other version"
+              }
+              onResolved={onResolved}
+            />
           ) : null}
         </div>
 
