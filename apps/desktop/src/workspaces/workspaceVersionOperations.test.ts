@@ -5,8 +5,13 @@ import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+  RESOLVE_REQUEST_FRAME_BYTES,
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
+  jsonStringEncodedLength,
+  settledConflictForWire,
+  settledSnapshotForWire,
   type ConflictRecord,
   type JsonObject,
   type JsonValue,
@@ -14,7 +19,11 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import {
+  encodedEnvelopeBytes,
+  requestEnvelope,
+  type EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 import {
@@ -217,10 +226,40 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
 
   private dropHeadAfter: string | null = null;
 
+  /**
+   * Refuse every out-of-band body read. A resolution has COMMITTED before its
+   * answer is read, so anything the desktop still has to fetch to materialize
+   * is a window where the folder keeps the losing content and the conflict is
+   * already closed.
+   */
+  failEveryBlobRead = false;
+
   /// Model a head that vanished between the resolve write and the desktop's
   /// read-back: a concurrent delete, or an engine that acked a write it lost.
   dropHeadAfterBinaryResolve(path: string): void {
     this.dropHeadAfter = path;
+  }
+
+  /**
+   * Plant a body the desktop capture path cannot write. `versionedText.write`
+   * caps a REQUEST at the in-band limit, so a large file only ever reaches the
+   * store the way the daemon's own capture and a conflict resolution put it
+   * there — settled inside the store, bounded by the store's text cap.
+   */
+  seedSettledText(workspace: string, versionId: string, path: string, text: string): void {
+    this.settleTextWrite({
+      id: this.internalRequestId--,
+      method: VERSIONED_METHOD.textWrite,
+      workspace,
+      params: {
+        versionId,
+        path,
+        text,
+        objectId: `object-seeded-${path}`,
+        momentId: `moment-seeded-${this.internalRequestId}`,
+        origin: "local-file",
+      },
+    });
   }
 
   private conflictKey(workspace: string, conflictId: string): string {
@@ -235,6 +274,10 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
   }
 
   override async sendRequest(request: Request): Promise<Response> {
+    if (this.failEveryBlobRead && request.method === VERSIONED_METHOD.textReadBlob) {
+      this.requests.push(request);
+      throw new Error("blob-egress-unavailable");
+    }
     if (request.method === "conflicts.list") {
       this.requests.push(request);
       const workspace = this.requiredWorkspace(request);
@@ -306,7 +349,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         this.conflicts.set(key, resolved);
         return {
           id: request.id,
-          result: { conflict: resolved, write: null, delete: null },
+          result: { conflict: settledConflictForWire(resolved), write: null, delete: null },
         };
       }
 
@@ -353,7 +396,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         this.conflicts.set(key, resolved);
         return {
           id: request.id,
-          result: { conflict: resolved, write: null, delete: null },
+          result: { conflict: settledConflictForWire(resolved), write: null, delete: null },
         };
       }
 
@@ -380,14 +423,51 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         this.conflicts.set(key, resolved);
         return {
           id: request.id,
-          result: { conflict: resolved, write: null, delete: deletion?.result ?? null },
+          result: {
+            conflict: settledConflictForWire(resolved),
+            write: null,
+            delete: deletion?.result ?? null,
+          },
         };
       }
 
-      const text = resolution === "apply-incoming"
-        ? existing.incoming.snapshot!.text
-        : String(local.mergedText);
-      const write = await super.sendRequest({
+      // The LEDGER holds the bodies the listing carried; only an ANSWER
+      // withholds one. A withheld side here would mean the fixture lost the
+      // body it is being asked to apply.
+      const incomingText = existing.incoming.snapshot?.text ?? null;
+      if (resolution === "apply-incoming" && incomingText === null) {
+        throw new Error("state-corrupt");
+      }
+      const text =
+        resolution === "apply-incoming"
+          ? (incomingText ?? "")
+          : String(local.mergedText);
+      // Only a COMBINED body is bounded, and by the control frame that carried
+      // it — the daemon puts no size check on a side choice, which sends no
+      // text at all (lib.rs conflicts_resolve). What it measures is the whole
+      // REQUEST: the same envelope carries two 16 KiB metadata fields and five
+      // identifiers.
+      //
+      // The client’s own measurement, not a second model of it. Building the
+      // envelope by hand here left out the nullable fields `EngineClient`
+      // fills in — about sixty bytes — so at the frame boundary this fixture
+      // accepted requests the shipping client refuses.
+      //
+      // The wire id is this request’s own: a loopback does not renumber, so
+      // the envelope it would frame carries the id it received.
+      const encodedRequest = encodedEnvelopeBytes(requestEnvelope(request, request.id));
+      if (resolution === "apply-merged" && encodedRequest > RESOLVE_REQUEST_FRAME_BYTES) {
+        throw new Error(
+          `merged-text-exceeds-wire-limit: one control frame carries a resolve ` +
+            `request of at most ${RESOLVE_REQUEST_FRAME_BYTES} encoded bytes, ` +
+            `observed ${encodedRequest} encoded bytes for this request ` +
+            `(${Buffer.byteLength(text, "utf8")} raw bytes of combined body, ` +
+            `${jsonStringEncodedLength(text)} encoded)`,
+        );
+      }
+      // The daemon settles inside the store, so `versionedText.write`'s in-band
+      // request cap never bounds this body.
+      const write = this.settleTextWrite({
         id: this.internalRequestId--,
         method: VERSIONED_METHOD.textWrite,
         workspace,
@@ -406,10 +486,18 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
             : {}),
         },
       });
+      const settled = write.result as JsonObject;
       this.conflicts.set(key, resolved);
       return {
         id: request.id,
-        result: { conflict: resolved, write: write.result, delete: null },
+        result: {
+          conflict: settledConflictForWire(resolved),
+          write: {
+            ...settled,
+            snapshot: settledSnapshotForWire(settled.snapshot as JsonObject),
+          },
+          delete: null,
+        },
       };
     }
 
@@ -1208,15 +1296,161 @@ describe("mergeVersionIntoMain", () => {
     await engine.stop();
   });
 
-  it("keeps a conflict open when merged text exceeds the daemon limit", async () => {
+  it("applies a combined resolution past the in-band cap and mirrors it", async () => {
+    // The body the daemon accepts is bounded by the control frame, not by the
+    // in-band cap on an ANSWER: past that cap the resolve result carries the
+    // digest, and the desktop hydrates the body before it writes the folder.
+    //
+    // MUTATION: route the fixture's settled write back through the capped
+    // `versionedText.write` -> this refuses. MUTATION: drop hydratedSnapshot
+    // -> the mirror throws on the withheld body.
+    const { root, engine, conflict, loopback } = await openDivergedTextConflict();
+    // Every out-of-band read fails. A resolution that still needed one would
+    // commit, throw, and leave the folder on the losing content.
+    loopback.failEveryBlobRead = true;
+    const combined = `combined ✓ line\n`.repeat(12_000);
+    expect(Buffer.byteLength(combined, "utf8")).toBeGreaterThan(
+      MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+    );
+
+    const merged = await engine.resolveConflict(conflict.id, {
+      kind: "apply-merged",
+      text: combined,
+    });
+
+    expect(merged.conflict.resolution).toBe("applied-merged");
+    expect(await readText(root, "plan.md")).toBe(combined);
+    expect(await engine.listOpenConflicts()).toHaveLength(0);
+    // NOTHING was fetched to get here. The body the answer withheld is the
+    // body this call submitted, so the write materialized from what the caller
+    // already held.
+    //
+    // MUTATION: drop the offer, or give each hydration its own reader -> a
+    // post-commit read appears, and with `failEveryBlobRead` set it takes the
+    // write down with it.
+    expect(
+      loopback.requests.filter(
+        (request) => request.method === VERSIONED_METHOD.textReadBlob,
+      ),
+    ).toHaveLength(0);
+    await engine.stop();
+  });
+
+  it("applies a side choice past the in-band cap", async () => {
+    // The daemon puts NO size check on a side choice: `conflicts.resolve`
+    // sends no text for one. A fixture that capped it would refuse work the
+    // daemon accepts, and no desktop test could prove this path at all.
+    //
+    // MUTATION: cap the fixture's side-choice write -> this refuses.
+    const incoming = `draft ✓ line\n`.repeat(12_000);
+    expect(Buffer.byteLength(incoming, "utf8")).toBeGreaterThan(
+      MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+    );
+    const root = await tempRoot();
+    await write(root, "plan.md", "base\n");
+    const loopback = new ConflictLoopbackEngine();
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    const draftId = await versionIdByName(engine, "Draft");
+    await engine.switchVersion("main");
+    await write(root, "plan.md", "current\n");
+    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    await engine.flush();
+    loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incoming);
+
+    const merge = await engine.mergeVersionIntoMain(draftId);
+    expect(merge.conflicts).toHaveLength(1);
+    loopback.failEveryBlobRead = true;
+    const applied = await engine.resolveConflict(merge.conflicts[0].id, {
+      kind: "apply-incoming",
+    });
+
+    expect(applied.conflict.resolution).toBe("applied-incoming");
+    expect(await readText(root, "plan.md")).toBe(incoming);
+    expect(await engine.listOpenConflicts()).toHaveLength(0);
+    await engine.stop();
+  });
+
+  it("applies an escape-heavy combined body the frame still carries", async () => {
+    // 3 MiB of newlines is 6 MiB encoded: past half the frame, comfortably
+    // inside it. Measuring the SERIALIZED envelope a second time through the
+    // encoder would count every backslash again and refuse this at about
+    // 2.8 MiB — a limit the daemon does not have.
+    //
+    // MUTATION: measure `jsonStringEncodedLength(JSON.stringify(params))` ->
+    // the fixture refuses a request the daemon accepts.
+    const { root, engine, conflict } = await openDivergedTextConflict();
+    const combined = "\n".repeat(3 * 1024 * 1024);
+    expect(jsonStringEncodedLength(combined)).toBeGreaterThan(
+      RESOLVE_REQUEST_FRAME_BYTES / 2,
+    );
+    expect(jsonStringEncodedLength(combined)).toBeLessThan(RESOLVE_REQUEST_FRAME_BYTES);
+
+    const merged = await engine.resolveConflict(conflict.id, {
+      kind: "apply-merged",
+      text: combined,
+    });
+
+    expect(merged.conflict.resolution).toBe("applied-merged");
+    expect(await readText(root, "plan.md")).toBe(combined);
+    await engine.stop();
+  });
+
+  it("refuses a request the shipping client refuses, at the boundary", async () => {
+    // The fields `EngineClient` fills in before writing — `type`,
+    // `deadlineMs`, `idempotencyKey` — are worth about sixty bytes. A fixture
+    // that measured the caller-shaped request would see room inside that gap
+    // and accept work the shipping client cannot send.
+    //
+    // The boundary body is calibrated from the request the fixture ACTUALLY
+    // received, so it does not depend on this test guessing the param shape.
+    //
+    // MUTATION: measure `request` directly instead of the envelope it becomes
+    // -> the boundary resolution is accepted and this fails.
+    const { root, engine, conflict, loopback } = await openDivergedTextConflict();
+
+    // A first, plainly over-frame attempt: refused, and it records the exact
+    // request shape this path sends.
+    const probeBody = "x".repeat(RESOLVE_REQUEST_FRAME_BYTES);
+    await expect(
+      engine.resolveConflict(conflict.id, { kind: "apply-merged", text: probeBody }),
+    ).rejects.toThrow(/merged-text-exceeds-wire-limit/);
+    const recorded = loopback.requests.findLast(
+      (request) => request.method === "conflicts.resolve",
+    );
+    expect(recorded).toBeDefined();
+
+    // Everything the envelope holds except the body itself. A plain-text body
+    // encodes to its own length plus the two quotes around it.
+    const overhead =
+      encodedEnvelopeBytes(requestEnvelope(recorded!, recorded!.id)) -
+      (probeBody.length + 2);
+    const justPast = "x".repeat(RESOLVE_REQUEST_FRAME_BYTES - overhead - 2 + 1);
+
+    await expect(
+      engine.resolveConflict(conflict.id, { kind: "apply-merged", text: justPast }),
+    ).rejects.toThrow(/merged-text-exceeds-wire-limit/);
+    expect(await readText(root, "plan.md")).toBe("current\n");
+    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    await engine.stop();
+  });
+
+  it("keeps a conflict open when a combined body passes one control frame", async () => {
     const { root, engine, conflict } = await openDivergedTextConflict();
 
     await expect(
       engine.resolveConflict(conflict.id, {
         kind: "apply-merged",
-        text: "x".repeat(128 * 1024 + 1),
+        text: "x".repeat(RESOLVE_REQUEST_FRAME_BYTES),
       }),
-    ).rejects.toThrow(/content-exceeds-inband-cap/);
+    ).rejects.toThrow(
+      new RegExp(
+        `merged-text-exceeds-wire-limit:.*${RESOLVE_REQUEST_FRAME_BYTES} encoded ` +
+          `bytes, observed \\d+ encoded bytes for this request`,
+      ),
+    );
     expect(await readText(root, "plan.md")).toBe("current\n");
     expect(await engine.listOpenConflicts()).toHaveLength(1);
     await engine.stop();

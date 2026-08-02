@@ -1625,11 +1625,12 @@ export const WORKSPACE_VERSION_NAME_MAX = 80;
 // #517 was filed about, and it would have to move again when #537 lands.
 //
 // The combined resolution (`keep-combined` below) is the one REQUEST use, and
-// its contract is NOT this one: the engine caps a combined write at its 128 KiB
-// in-band cap and refuses above it
-// (`crates/dohc-workspace-engine/src/lib.rs:7574`). This bound only keeps an
-// unbounded string off the wire; the engine decides what applies. Raising the
-// engine to match the sides it hands out is tracked in #528.
+// its contract is NOT this one: the engine bounds a combined resolution by the
+// control frame that carries the whole request, measured in JSON-ENCODED bytes
+// (`crates/dohc-workspace-engine/src/lib.rs`, `resolve_request_encoded_bytes`).
+// Encoded, so escaping counts: a newline-heavy body is twice its raw size on
+// the wire, and this character bound cannot see that. This bound only keeps an
+// unbounded string off the wire; the engine decides what applies.
 const VERSION_TEXT = engineStoredText("version text");
 
 export const WorkspaceVersionRecord = z.object({

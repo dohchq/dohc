@@ -9,6 +9,7 @@ import type { Response } from "../ydoc/generated/Response";
 import type { WireError } from "../ydoc/generated/WireError";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
+import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import {
   VERSIONED_METHOD,
   type MomentRecord,
@@ -45,13 +46,56 @@ function refusalFrom(error: unknown): unknown {
 }
 
 const INBAND_LIMIT_BYTES = 48 * 1024;
-const MAX_DESKTOP_CAPTURE_TEXT_BYTES = 128 * 1024;
+
+// The limits live in a leaf module (no imports) so a renderer can read them
+// without pulling this fixture's `node:crypto` into a browser bundle.
+export {
+  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+  RESOLVE_REQUEST_FRAME_BYTES,
+  jsonStringEncodedLength,
+} from "./engineTextLimits";
+
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const MAX_CAPTURE_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 const COMPARE_PAGE_SIZE = 200;
 const MAX_MERGE_LINES = 2_000;
 // Mirrors MAX_METADATA_FIELD_BYTES in crates/dohc-workspace-engine/src/lib.rs.
 const MAX_METADATA_FIELD_BYTES = 16 * 1024;
+
+/**
+ * The daemon's `settled_snapshot_json` (lib.rs): a settled body past the
+ * in-band cap leaves the answer as a digest and a limit, never as text, so the
+ * answer's size never follows the body.
+ */
+export function settledSnapshotForWire(snapshot: JsonObject): JsonObject {
+  const text = snapshot.text;
+  if (typeof text !== "string" || utf8Length(text) <= MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
+    return snapshot;
+  }
+  return { ...snapshot, text: null, inbandLimitBytes: MAX_DESKTOP_CAPTURE_TEXT_BYTES };
+}
+
+/**
+ * The daemon's `settled_conflict_json` (lib.rs): the SAME withholding rule
+ * over every side of the conflict a resolution closed, so no part of that
+ * answer grows with a body.
+ */
+export function settledConflictForWire(conflict: JsonObject): JsonObject {
+  const settled = { ...conflict };
+  for (const side of ["base", "current", "incoming"] as const) {
+    const state = settled[side];
+    if (state === null || typeof state !== "object" || Array.isArray(state)) continue;
+    const snapshot = (state as JsonObject).snapshot;
+    if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+      continue;
+    }
+    settled[side] = {
+      ...(state as JsonObject),
+      snapshot: settledSnapshotForWire(snapshot as JsonObject),
+    };
+  }
+  return settled;
+}
 
 const ACCEPTED_ORIGINS = new Set<string>([
   "api",
@@ -1075,6 +1119,31 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return response;
   }
 
+  /**
+   * The text write a conflict resolution settles, shaped as a
+   * `versionedText.write` request but WITHOUT that method's in-band request
+   * cap. The daemon settles a resolution inside the store
+   * (`resolve_text_conflict`), so only the store's own text cap bounds the
+   * body — a fixture that routed a resolution through the capped method would
+   * refuse work the daemon accepts.
+   */
+  protected settleTextWrite(request: Request): Response {
+    this.requests.push(request);
+    let result: JsonValue;
+    try {
+      const params = asObject(request.params, `${request.method} params`);
+      const parsed = parseTextWriteFields(params, request);
+      const workspace = this.requireWorkspaceHandle(request);
+      this.validateWorkspaceParam(params, workspace);
+      result = this.textWrite(this.workspace(workspace), workspace, params, parsed, false);
+    } catch (error) {
+      throw refusalFrom(error);
+    }
+    const response: Response = { id: request.id, result };
+    this.responses.push(response);
+    return response;
+  }
+
   private handleRequest(request: Request): JsonValue {
     const params = asObject(request.params, `${request.method} params`);
     validateVersionedParams(request.method, params, request);
@@ -1200,9 +1269,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     workspace: string,
     params: JsonObject,
     parsed: ParsedTextWriteFields,
+    inbandCapped = true,
   ): JsonValue {
     const { versionId, text } = parsed;
-    if (utf8Length(text) > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
+    if (inbandCapped && utf8Length(text) > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
       throw new Error("content-exceeds-inband-cap");
     }
     const origin = requiredOrigin(params);
@@ -1354,9 +1424,23 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return { ...metadata, text, blobSha256: sha256(text) };
   }
 
-  private textReadBlob(state: WorkspaceState, params: JsonObject): JsonValue {
-    const digest = requiredString(params, "sha256", "text readBlob").toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error("invalid-input");
+  /**
+   * The text body behind a digest this workspace still references — a head, a
+   * fork base, or a moment payload. The daemon authorizes a `readBlob` digest
+   * the same way (`read_text_blob_with_hydration`, store.rs), so a fixture
+   * that answered any digest would pin nothing about the request sent.
+   *
+   * Public because a body past the 48 KiB egress cap never rides in the
+   * result: a harness that speaks the blob capability has to deliver those
+   * bytes out of band, and this is where it reads them.
+   */
+  textBodyForDigest(workspace: string, sha256Hex: string): string | null {
+    const digest = sha256Hex.toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(digest)) return null;
+    return this.bodyForDigest(this.workspace(workspace), digest);
+  }
+
+  private bodyForDigest(state: WorkspaceState, digest: string): string | null {
     const candidates: string[] = [];
     for (const version of state.versions.values()) {
       for (const file of version.files.values()) {
@@ -1370,8 +1454,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
       if (moment.before?.contentKind === "text") candidates.push(moment.before.text ?? "");
       if (moment.after?.contentKind === "text") candidates.push(moment.after.text ?? "");
     }
-    const text = candidates.find((candidate) => sha256(candidate) === digest);
-    if (text === undefined) throw new Error("file-not-found");
+    return candidates.find((candidate) => sha256(candidate) === digest) ?? null;
+  }
+
+  private textReadBlob(state: WorkspaceState, params: JsonObject): JsonValue {
+    const digest = requiredString(params, "sha256", "text readBlob").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error("invalid-input");
+    const text = this.bodyForDigest(state, digest);
+    if (text === null) throw new Error("file-not-found");
     const bytes = [...Buffer.from(text, "utf8")];
     return bytes.length <= INBAND_LIMIT_BYTES
       ? { bytesBase64: encodeBase64(bytes) }

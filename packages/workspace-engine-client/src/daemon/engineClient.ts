@@ -415,8 +415,37 @@ export type EngineClientErrorCode =
   | "handshake-incomplete"
   | "handshake-failed"
   | "protocol-error"
+  | "request-too-large"
   | "transport-error"
   | "wire-error";
+
+/**
+ * The envelope a caller’s request becomes on the wire.
+ *
+ * NORMALIZE BEFORE MEASURING. The client stamps its own wire id and fills
+ * every nullable field explicitly — the canonical form the wire contract
+ * requires (`wire.rs`) and the form the daemon re-encodes when it measures.
+ * A caller-shaped request measured as it stands is a DIFFERENT envelope: no
+ * `type`, no `deadlineMs: null`, no `idempotencyKey: null`, about sixty bytes
+ * short. At the frame boundary that gap is the difference between accepting a
+ * request and refusing it, so anything that models this bound builds the
+ * envelope here rather than measuring what it was handed.
+ */
+export function requestEnvelope(request: Request, wireId: number): Envelope {
+  return {
+    type: "request",
+    ...request,
+    id: wireId,
+    workspace: request.workspace ?? null,
+    deadlineMs: request.deadlineMs ?? null,
+    idempotencyKey: request.idempotencyKey ?? null,
+  };
+}
+
+/** What one control frame has to hold for this envelope. */
+export function encodedEnvelopeBytes(envelope: Envelope): number {
+  return Buffer.byteLength(JSON.stringify(envelope), "utf8");
+}
 
 export class EngineClientError extends Error {
   readonly code: EngineClientErrorCode;
@@ -656,6 +685,25 @@ export class EngineClient implements EngineTransport {
     }
 
     const wireId = this.nextRequestId++;
+    const envelope = requestEnvelope(request, wireId);
+    // MEASURED BEFORE FRAMING. `encodeFrame` refuses an oversized payload with
+    // a codec error, and every failure on the write path reads as
+    // `transport-error` — which is a lie twice over: nothing was transported,
+    // and the classification sends a healthy session into the reconnect
+    // machinery for a failure no reconnect can fix. A request that cannot be
+    // framed is the caller’s to fix, so it is refused here, by name, with the
+    // limit and the size that was asked for.
+    const encodedRequest = encodedEnvelopeBytes(envelope);
+    if (encodedRequest > this.maxFrameBytes) {
+      return Promise.reject(
+        new EngineClientError(
+          "request-too-large",
+          `request-exceeds-wire-limit: one control frame carries a request of ` +
+            `at most ${this.maxFrameBytes} encoded bytes, observed ` +
+            `${encodedRequest} encoded bytes for ${request.method}.`,
+        ),
+      );
+    }
     return new Promise<Response>((resolve, reject) => {
       const deadlineTimer =
         request.deadlineMs !== undefined && request.deadlineMs !== null
@@ -678,14 +726,7 @@ export class EngineClient implements EngineTransport {
         reject,
         ...(deadlineTimer ? { deadlineTimer } : {}),
       });
-      void this.writeEnvelope({
-        type: "request",
-        ...request,
-        id: wireId,
-        workspace: request.workspace ?? null,
-        deadlineMs: request.deadlineMs ?? null,
-        idempotencyKey: request.idempotencyKey ?? null,
-      }).catch((cause: unknown) => {
+      void this.writeEnvelope(envelope).catch((cause: unknown) => {
         const pending = this.pending.get(wireId);
         if (!pending) return;
         this.pending.delete(wireId);

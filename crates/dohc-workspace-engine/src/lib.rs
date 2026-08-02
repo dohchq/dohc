@@ -149,6 +149,57 @@ const BLOB_EGRESS_BYTE_BUDGET: usize = dohc_engine_storage::MAX_BLOB_BYTES;
 const MAX_YDOC_STATE_WIRE_BYTES: usize =
     (dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_string_bytes as usize / 4) * 3;
 
+/// How many bytes a string occupies once JSON-encoded, quotes included.
+///
+/// `check_string` bounds the DECODED length, so only the frame limit catches
+/// escaping — and escaping is not a rounding error: every newline, quote and
+/// backslash doubles, and every other control byte becomes six. A caller
+/// measured against raw bytes would be told a body fits when the encoded
+/// request cannot cross the wire at all.
+fn json_string_encoded_len(text: &str) -> usize {
+    text.bytes().fold(2, |len, byte| {
+        len + match byte {
+            b'"' | b'\\' | 0x08 | 0x09 | 0x0a | 0x0c | 0x0d => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        }
+    })
+}
+
+/// The encoded size of the request envelope that carried these params — what
+/// the control frame actually held.
+///
+/// Every field is the CALLER'S OWN: this request's id, deadline, workspace
+/// handle, idempotency key and params, re-encoded by the same encoder the
+/// transport uses. Nothing is reserved and nothing is substituted. A
+/// worst-case stand-in for a field the daemon can read (this one used
+/// `u64::MAX` and `u32::MAX` for the id and deadline) inflates the total by
+/// about thirty bytes, which rejects requests that DID cross the frame and
+/// reports a size that never existed — a limit must name what happened.
+fn resolve_request_encoded_bytes(
+    id: u64,
+    deadline_ms: Option<u32>,
+    handle: Option<&WorkspaceHandle>,
+    idempotency_key: Option<&str>,
+    params: &Value,
+) -> usize {
+    let envelope =
+        dohc_engine_protocol::wire::Envelope::Request(dohc_engine_protocol::wire::Request {
+            id,
+            method: "conflicts.resolve".to_owned(),
+            workspace: handle.cloned(),
+            deadline_ms,
+            idempotency_key: idempotency_key.map(str::to_owned),
+            params: json!({}),
+        });
+    let envelope_bytes = serde_json::to_vec(&envelope).map_or(usize::MAX, |bytes| bytes.len());
+    let params_bytes = serde_json::to_vec(params).map_or(usize::MAX, |bytes| bytes.len());
+    // `- 2` drops the empty object measured in the params slot.
+    envelope_bytes
+        .saturating_sub(2)
+        .saturating_add(params_bytes)
+}
+
 fn encode_ydoc_state_base64(full_state: &[u8]) -> Result<String, WireError> {
     if full_state.len() > MAX_YDOC_STATE_WIRE_BYTES {
         return Err(wire(ErrorCode::Internal, "ydoc-state-exceeds-wire-limit"));
@@ -246,6 +297,19 @@ const CONFLICTS_RESPONSE_ROW_LIMIT: usize =
 /// retaining explicit envelope and continuation headroom.
 const CONFLICT_ROW_HARD_CAP_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+/// What a hand-combined resolution is bounded by: the control frame that has
+/// to carry the whole REQUEST. Not the body alone, and not a fixed headroom
+/// beside it — the same request also carries two 16 KiB metadata fields, a
+/// path, four identifiers and an idempotency key, each of which can double
+/// under escaping. Every conflict a caller can list can still be combined and
+/// applied; what a body gets is whatever the rest of its request leaves.
+///
+/// MEASURED ON THE ENCODED REQUEST (`resolve_request_encoded_bytes`). The
+/// frame carries encoded bytes and `check_string` bounds decoded ones, so
+/// escaping is invisible to every other limit on this path: 4,194,304
+/// newlines are 4 MiB raw and 8 MiB encoded.
+const RESOLVE_REQUEST_FRAME_BYTES: usize =
+    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
 const SEARCH_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
 const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
@@ -865,6 +929,8 @@ impl EngineService {
             "conflicts.resolve" => {
                 self.conflicts_resolve(
                     &ctx,
+                    request.id,
+                    request.deadline_ms,
                     request.workspace,
                     request.params,
                     request.idempotency_key,
@@ -7561,10 +7627,19 @@ impl EngineService {
     async fn conflicts_resolve(
         &self,
         ctx: &RequestContext,
+        id: u64,
+        deadline_ms: Option<u32>,
         handle: Option<WorkspaceHandle>,
         params: Value,
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
+        let encoded_request = resolve_request_encoded_bytes(
+            id,
+            deadline_ms,
+            handle.as_ref(),
+            request_id.as_deref(),
+            &params,
+        );
         let params: ConflictResolveParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
@@ -7595,8 +7670,18 @@ impl EngineService {
                 let text = local
                     .merged_text
                     .ok_or_else(|| wire(ErrorCode::InvalidParams, "missing merged text"))?;
-                if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
-                    return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+                if encoded_request > RESOLVE_REQUEST_FRAME_BYTES {
+                    return Err(WireError::new(
+                        ErrorCode::InvalidParams,
+                        format!(
+                            "merged-text-exceeds-wire-limit: one control frame carries a \
+                             resolve request of at most {RESOLVE_REQUEST_FRAME_BYTES} encoded \
+                             bytes, observed {encoded_request} encoded bytes for this request \
+                             ({} raw bytes of combined body, {} encoded)",
+                            text.len(),
+                            json_string_encoded_len(&text)
+                        ),
+                    ));
                 }
                 ResolveConflictKind::ApplyMerged { text }
             }
@@ -7631,10 +7716,10 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         Ok(json!({
-            "conflict": conflict_json(&result.conflict),
+            "conflict": settled_conflict_json(&result.conflict),
             "write": result.write.as_ref().map(|write| json!({
                 "object": file_object_json(&write.object),
-                "snapshot": snapshot_json(&write.snapshot),
+                "snapshot": settled_snapshot_json(&write.snapshot),
                 "moment": moment_json(&write.moment),
             })),
             // The preimage is described by the MOMENT, not by the text view of
@@ -10263,6 +10348,54 @@ fn snapshot_json(snapshot: &TextSnapshot) -> Value {
     })
 }
 
+/// Withhold one text body past the in-band cap, in place: the digest and the
+/// limit go out, the body does not. This is the shape `versionedText.read`
+/// already uses, so the caller hydrates with `versionedText.readBlob`.
+fn withhold_over_cap_text(body: &mut Value) {
+    let over_cap = body
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+    if over_cap {
+        body["text"] = Value::Null;
+        body["inbandLimitBytes"] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+    }
+}
+
+/// The body a resolution settled, withheld past the in-band cap.
+fn settled_snapshot_json(snapshot: &TextSnapshot) -> Value {
+    let mut body = snapshot_json(snapshot);
+    withhold_over_cap_text(&mut body);
+    body
+}
+
+/// The conflict a resolution closed, with every side's body withheld past the
+/// in-band cap.
+///
+/// ONE rule bounds this whole answer, because no part of it may grow with a
+/// body. The answer carries five text bodies — three sides, the settled
+/// snapshot, and the moment's before and after — and one control frame has to
+/// hold all of them. Withholding each past 128 KiB caps the answer at five
+/// residuals plus metadata, about 640 KiB inside an 8 MiB frame. Withhold
+/// only some of them and a conflict whose row approaches
+/// `CONFLICT_ROW_HARD_CAP_BYTES` still overruns the frame — and the daemon's
+/// writer treats an oversized answer as a fatal transport error AFTER the
+/// resolution has committed.
+///
+/// The conflict LISTING is untouched: it bounds its own answer by cutting
+/// rows, and its readers paint the bodies it returns.
+fn settled_conflict_json(conflict: &TextConflict) -> Value {
+    let mut value = conflict_json(conflict);
+    for side in ["base", "current", "incoming"] {
+        if let Some(snapshot) = value[side].get_mut("snapshot")
+            && !snapshot.is_null()
+        {
+            withhold_over_cap_text(snapshot);
+        }
+    }
+    value
+}
+
 fn file_object_json(object: &dohc_engine_domain::FileObjectRecord) -> Value {
     json!({
         "id": object.object_id,
@@ -11071,6 +11204,34 @@ mod tests {
     use std::time::Duration;
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn encoded_length_agrees_with_the_encoder_that_builds_the_frame() {
+        // The merged-resolution budget is spent in ENCODED bytes, so this
+        // count must be the encoder's count, not an approximation of it. Every
+        // escape class serde_json has: the two-byte shorthands, the six-byte
+        // \u form for the other control bytes, DEL (which it does NOT escape),
+        // and multi-byte UTF-8 (which it passes through).
+        //
+        // MUTATION: change any width in the fold -> this fails on the class
+        // that moved.
+        let samples = [
+            "plain ascii".to_owned(),
+            "\"\\\n\r\t\u{08}\u{0c}".to_owned(),
+            (0u8..0x20).map(char::from).collect::<String>(),
+            "\u{7f}\u{80}\u{7ff}\u{800}\u{ffff}\u{10000}".to_owned(),
+            "é✓🙂 mixed \n with \u{0}".to_owned(),
+            String::new(),
+        ];
+        for sample in samples {
+            let encoded = serde_json::to_string(sample.as_str()).expect("encode a string");
+            assert_eq!(
+                json_string_encoded_len(&sample),
+                encoded.len(),
+                "encoded length disagrees for {sample:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn engine_events_shed_instead_of_growing_when_the_subscriber_stalls() {

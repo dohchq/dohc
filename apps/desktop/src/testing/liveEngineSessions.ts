@@ -1,5 +1,7 @@
 import {
+  VERSIONED_METHOD,
   VersionedLoopbackEngine,
+  type CompletedDaemonBlob,
   type JsonValue,
   type Request,
   type Response,
@@ -43,9 +45,20 @@ export function mockLiveSessions(
   }),
   beforeRequest?: (request: Request) => void | Promise<void>,
 ): EngineWorkspaceSessions {
+  const blobHandlers = new Set<(blob: CompletedDaemonBlob) => void>();
   const client = {
     close: () => undefined,
     onEvent: () => () => undefined,
+    // A body past the 48 KiB egress cap never rides in a result. Speaking the
+    // blob capability here is what lets a suite on this harness read back an
+    // over-cap body at all — without it every over-cap read refuses on the
+    // missing capability, and no test can reach the hydration the daemon's
+    // withheld answers require.
+    helloAck: { capabilities: ["blobs"] },
+    onBlob(handler: (blob: CompletedDaemonBlob) => void) {
+      blobHandlers.add(handler);
+      return () => blobHandlers.delete(handler);
+    },
     async sendRequest(request: Request): Promise<Response> {
       if (beforeRequest) {
         await beforeRequest(request);
@@ -73,10 +86,46 @@ export function mockLiveSessions(
           result: { running: true, degraded: false, terminal: false },
         };
       }
-      return await loopback.sendRequest(request);
+      const response = await loopback.sendRequest(request);
+      if (request.method === VERSIONED_METHOD.textReadBlob) {
+        deliverWithheldBlob(loopback, request, response, blobHandlers);
+      }
+      return response;
     },
   };
   return new EngineWorkspaceSessions({
     currentClient: () => client,
   });
+}
+
+/**
+ * Stream the body the loopback withheld, the way the daemon does: a
+ * `versionedText.readBlob` answer with `bytesBase64: null` is metadata, and
+ * the bytes arrive on the blob channel before the caller sees the response.
+ * Delivery happens here, synchronously, because `requestWithBlob` reads the
+ * correlated blob the moment its send resolves.
+ */
+function deliverWithheldBlob(
+  loopback: VersionedLoopbackEngine,
+  request: Request,
+  response: Response,
+  handlers: Set<(blob: CompletedDaemonBlob) => void>,
+): void {
+  const result = response.result as { bytesBase64?: JsonValue } | null;
+  if (result === null || result.bytesBase64 !== null) return;
+  const params = request.params as Record<string, JsonValue | undefined>;
+  const workspace = String(request.workspace);
+  const sha256 = String(params.sha256);
+  const text = loopback.textBodyForDigest(workspace, sha256);
+  if (text === null) return;
+  const bytes = new Uint8Array(Buffer.from(text, "utf8"));
+  for (const handler of [...handlers]) {
+    handler({
+      requestId: request.id,
+      streamId: request.id,
+      totalBytes: bytes.byteLength,
+      sha256,
+      bytes,
+    });
+  }
 }
