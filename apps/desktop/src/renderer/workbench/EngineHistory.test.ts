@@ -159,6 +159,22 @@ describe("groupEngineMoments", () => {
     ]);
     expect(groups).toHaveLength(2);
   });
+
+  // The history view never re-sorts: the order the merge in
+  // workspaceEngineCapture hands over is the order the user reads. Moments
+  // that share a millisecond would be free to move if it did.
+  it("shows same-millisecond moments in the order it is given", () => {
+    const tied = [
+      moment({ id: "later", momentOrder: 2, recordedAtMs: 500 }),
+      moment({ id: "earlier", momentOrder: 1, recordedAtMs: 500 }),
+    ];
+    expect(
+      groupEngineMoments(tied).map((group) => group.moments[0].id),
+    ).toEqual(["later", "earlier"]);
+    expect(
+      groupEngineMoments([...tied].reverse()).map((group) => group.moments[0].id),
+    ).toEqual(["earlier", "later"]);
+  });
 });
 
 describe("chatAuthorLabel", () => {

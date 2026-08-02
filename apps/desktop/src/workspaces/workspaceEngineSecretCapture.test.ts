@@ -327,17 +327,38 @@ describe("listMoments protected pagination", () => {
       beforeMomentOrder: middle.nextBeforeMomentOrder ?? undefined,
     });
 
+    // protected-upper ties text-50, which ends the first page, so it waits
+    // for the page that CONTAINS the end of the tie: a tie can outlast a
+    // page, and a tied protected moment placed at a page's end would jump in
+    // front of the tied text moments the next page appends.
     expect(newest.moments.map((moment) => moment.id)).toEqual([
       "text-60",
       "text-50",
-      "protected-upper",
     ]);
     expect(middle.moments.map((moment) => moment.id)).toEqual([
+      "protected-upper",
       "text-40",
       "protected-middle",
       "text-30",
     ]);
     expect(oldest.moments.map((moment) => moment.id)).toEqual([
+      "text-20",
+      "protected-lower",
+      "text-10",
+    ]);
+    // What the user reads is the pages appended in order; the split above may
+    // move, this may not.
+    expect(
+      [...newest.moments, ...middle.moments, ...oldest.moments].map(
+        (moment) => moment.id,
+      ),
+    ).toEqual([
+      "text-60",
+      "text-50",
+      "protected-upper",
+      "text-40",
+      "protected-middle",
+      "text-30",
       "text-20",
       "protected-lower",
       "text-10",
@@ -354,5 +375,127 @@ describe("listMoments protected pagination", () => {
     expect(new Set(protectedIds).size).toBe(protectedMoments.length);
     expect(secretStore.listSecretMoments).toHaveBeenCalledTimes(3);
     await engine.stop();
+  });
+
+  // One daemon reconcile pass stamps every moment it produces with the same
+  // wall clock, so a tie is the normal case, not a rarity. The merge states
+  // the order instead of inheriting it from Array#sort stability: newer
+  // recordedAtMs first, then text before protected, then higher momentOrder,
+  // then lower id. Ids here are chosen so that dropping any one rule reorders
+  // the result.
+  it("orders same-millisecond moments by the stated rule, whatever order they arrive in", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    await loopback.sendRequest({
+      id: 1,
+      method: VERSIONED_METHOD.versionsEnsureMain,
+      workspace: "engine-secret-test",
+      params: { workspaceId: "engine-secret-test" },
+    });
+    // "aaa-text" is written first, so it holds the LOWER momentOrder even
+    // though its id sorts first.
+    const textWrites: ReadonlyArray<[string, number]> = [
+      ["older-text", 400],
+      ["aaa-text", 500],
+      ["zz-text", 500],
+    ];
+    let requestId = 2;
+    for (const [momentId, nowMs] of textWrites) {
+      await loopback.sendRequest({
+        id: requestId++,
+        method: VERSIONED_METHOD.textWrite,
+        workspace: "engine-secret-test",
+        params: {
+          workspaceId: "engine-secret-test",
+          versionId: "main",
+          path: `${momentId}.md`,
+          text: momentId,
+          origin: "api",
+          momentId,
+          nowMs,
+        },
+      });
+    }
+    // Both tie the text moments AND sort before them by id, so text-before-
+    // protected has to come from the rule, not from the ids.
+    const first = secretMoment("aa-secret", 500);
+    const second = secretMoment("ab-secret", 500);
+
+    async function mergedIds(
+      order: ReadonlyArray<ReturnType<typeof secretMoment>>,
+    ): Promise<string[]> {
+      const secretStore = {
+        listSecretMoments: vi.fn(async () => [...order]),
+      } as unknown as SecretFileStore;
+      const engine = daemonCapture(root, loopback, undefined, secretStore);
+      const page = await engine.listMoments();
+      await engine.stop();
+      return page.moments.map((moment) => moment.id);
+    }
+
+    const expected = [
+      "zz-text",
+      "aaa-text",
+      "aa-secret",
+      "ab-secret",
+      "older-text",
+    ];
+    expect(await mergedIds([first, second])).toEqual(expected);
+    expect(await mergedIds([second, first])).toEqual(expected);
+  });
+
+  // The rule has to hold across the whole timeline the user reads, not only
+  // inside one page. DesktopWorkspaceShell loads 200 moments at a time and
+  // APPENDS each later page, so a tie group longer than one page would put
+  // the protected moment in front of the tied text moments still to come.
+  it("keeps tied text before a protected moment across a page boundary", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    await loopback.sendRequest({
+      id: 1,
+      method: VERSIONED_METHOD.versionsEnsureMain,
+      workspace: "engine-secret-test",
+      params: { workspaceId: "engine-secret-test" },
+    });
+    // One reconcile pass, one clock reading, one moment more than a page.
+    const tiedTextCount = 201;
+    for (let index = 0; index < tiedTextCount; index += 1) {
+      await loopback.sendRequest({
+        id: index + 2,
+        method: VERSIONED_METHOD.textWrite,
+        workspace: "engine-secret-test",
+        params: {
+          workspaceId: "engine-secret-test",
+          versionId: "main",
+          path: `tied-${index}.md`,
+          text: String(index),
+          origin: "api",
+          momentId: `tied-${index}`,
+          nowMs: 500,
+        },
+      });
+    }
+    const secretStore = {
+      listSecretMoments: vi.fn(async () => [secretMoment("tied-secret", 500)]),
+    } as unknown as SecretFileStore;
+    const engine = daemonCapture(root, loopback, undefined, secretStore);
+
+    // The shell's own paging: 200 per request, later pages appended.
+    const first = await engine.listMoments({ limit: 200 });
+    const second = await engine.listMoments({
+      limit: 200,
+      beforeMomentOrder: first.nextBeforeMomentOrder ?? undefined,
+    });
+    const timeline = [...first.moments, ...second.moments];
+    await engine.stop();
+
+    expect(timeline.filter((moment) => moment.protected)).toHaveLength(1);
+    expect(timeline.map((moment) => moment.id)).toEqual([
+      ...Array.from(
+        { length: tiedTextCount },
+        (_, index) => `tied-${tiedTextCount - 1 - index}`,
+      ),
+      "tied-secret",
+    ]);
   });
 });

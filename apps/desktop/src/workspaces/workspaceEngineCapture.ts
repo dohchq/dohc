@@ -2835,13 +2835,21 @@ export function createWorkspaceEngineCapture(
       // Interleave PROTECTED (secret) moments by recording time (PR 08).
       // Pagination stays keyed on the text timeline's momentOrder; each page
       // carries the secret moments recorded inside its half-open time window
-      // [oldest-text-moment, previous-page-cursor-moment) so pages never
+      // (oldest-text-moment, previous-page-cursor-moment] so pages never
       // duplicate or drop a protected row. The secret timeline is short by
       // nature (.env edits are rare), so it is read whole per page.
+      //
+      // The OPEN end is the older one, because a tie can outlast a page: one
+      // reconcile pass can stamp more text moments with a millisecond than a
+      // page holds, and the shell appends each later page. Holding a tied
+      // protected moment back until the page where the tie group ends keeps
+      // text before protected across the assembled timeline, not just inside
+      // one page. The last page's lower bound is -Infinity, so nothing is
+      // held back forever.
       let upperMs = Number.POSITIVE_INFINITY;
       if (input.beforeMomentOrder !== undefined) {
         // The cursor is the previous page's oldest text moment; its
-        // timestamp bounds this page's window from above (exclusive).
+        // timestamp bounds this page's window from above (inclusive).
         const cursorPage = await engine.listMoments({
           workspaceId,
           versionId: activeVersionId,
@@ -2861,7 +2869,7 @@ export function createWorkspaceEngineCapture(
       });
       const protectedInWindow: WorkspaceEngineMomentSummary[] = secretMoments
         .filter(
-          (moment) => moment.recordedAtMs >= lowerMs && moment.recordedAtMs < upperMs,
+          (moment) => moment.recordedAtMs > lowerMs && moment.recordedAtMs <= upperMs,
         )
         .map((moment) => ({
           id: moment.id,
@@ -2873,10 +2881,22 @@ export function createWorkspaceEngineCapture(
           momentOrder: moment.momentOrder,
           protected: true,
         }));
-      // Merge newest-first; ties keep text before protected (stable).
-      const merged = [...textMoments, ...protectedInWindow].sort(
-        (a, b) => b.recordedAtMs - a.recordedAtMs,
-      );
+      // Merge newest-first on a stated total order, because ties are the
+      // daemon's normal regime: one reconcile pass stamps every moment it
+      // produces with the same wall clock, and the two timelines' orders come
+      // from independent counters, so time alone cannot rank them. The rule:
+      // newer recordedAtMs first, then text before protected, then higher
+      // momentOrder (a counter each store keeps for itself, so it ranks only
+      // moments of the same kind), then lower id. The renderer shows this
+      // order as given, so it is what the user reads.
+      const merged = [...textMoments, ...protectedInWindow].sort((a, b) => {
+        if (a.recordedAtMs !== b.recordedAtMs) {
+          return b.recordedAtMs - a.recordedAtMs;
+        }
+        if (a.protected !== b.protected) return a.protected ? 1 : -1;
+        if (a.momentOrder !== b.momentOrder) return b.momentOrder - a.momentOrder;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
       return {
         moments: merged,
         nextBeforeMomentOrder: page.nextBeforeMomentOrder,
