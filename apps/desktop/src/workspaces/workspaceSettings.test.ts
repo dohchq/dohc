@@ -450,10 +450,20 @@ describe("workspace settings file store", () => {
         .refusal,
     ).toBeTruthy();
 
-    // What the Reset control does.
-    expect((await resetWorkspaceSettingsFile(root)).settings).toEqual(
-      DEFAULT_WORKSPACE_SETTINGS,
+    // What the Reset control does. The directory is MOVED, never deleted: the
+    // user asked to replace their settings, not to lose whatever sat at that
+    // path — so every descendant survives, in the workspace trash dohc already
+    // teaches for anything it removes.
+    const reset = await resetWorkspaceSettingsFile(root);
+    expect(reset.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
+    expect(reset.warning).toBe(
+      "dohc replaced workspace settings. The folder that was in their place is now in this workspace's .dohc/trash.",
     );
+    const trashed = await readdir(join(root, ".dohc", "trash"));
+    expect(trashed).toHaveLength(1);
+    expect(
+      await readFile(join(root, ".dohc", "trash", trashed[0]!, "squatter.txt"), "utf8"),
+    ).toBe("not settings");
     expect(await readWorkspaceSettingsFile(root)).toEqual({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored",

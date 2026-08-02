@@ -624,31 +624,45 @@ export async function deletePath(
     await trashItem(target);
     return { trashed: true };
   } catch {
-    const trashDir = join(await resolveWorkspaceMetadataDir(rootPath), "trash");
-    await mkdir(trashDir, { recursive: true });
-    // Validate AFTER mkdir, lstat-first (a pre-check is insufficient: mkdir
-    // {recursive} silently no-ops on an existing symlink-to-dir, so only the
-    // post-mkdir state proves where the rename would land). The check sits
-    // immediately before the rename to keep the swap window minimal; a
-    // colluding local process racing a symlink into .dohc between this check
-    // and the rename is the accepted residual (Node has no renameat dirfd).
-    const trashStat = await lstat(trashDir);
-    if (trashStat.isSymbolicLink() || !trashStat.isDirectory()) {
-      throw new Error(".dohc/trash must be a real directory inside the workspace");
-    }
-    if (!isInside(realRoot, await realpath(trashDir))) {
-      throw new Error(".dohc/trash resolves outside the workspace");
-    }
-    // Collision-resistant name: back-to-back deletes (multi-select) share a
-    // Date.now() tick, and POSIX rename silently CLOBBERS an existing
-    // destination — two same-basename deletes would destroy the first file's
-    // bytes. The per-call UUID makes every trash entry unique. The basename is
-    // decorative, so truncate it to fit NAME_MAX (255 bytes on ext4/APFS/NTFS):
-    // a long source name + the 50-odd-byte unique prefix must not ENAMETOOLONG.
-    const prefix = `${Date.now()}-${randomUUID()}-`;
-    await rename(target, join(trashDir, `${prefix}${fitWithinNameMax(basename(target), prefix)}`));
+    await moveIntoWorkspaceTrash(rootPath, target);
     return { trashed: false };
   }
+}
+
+// The workspace's own recovery location. MOVES an absolute path already proven
+// to be inside the workspace into <root>/.dohc/trash and answers where it
+// landed. Nothing here deletes: the recovery story is opening
+// <workspace>/.dohc/trash in any file manager and moving the entry back.
+export async function moveIntoWorkspaceTrash(
+  rootPath: string,
+  target: string,
+): Promise<string> {
+  const realRoot = await realpath(rootPath);
+  const trashDir = join(await resolveWorkspaceMetadataDir(rootPath), "trash");
+  await mkdir(trashDir, { recursive: true });
+  // Validate AFTER mkdir, lstat-first (a pre-check is insufficient: mkdir
+  // {recursive} silently no-ops on an existing symlink-to-dir, so only the
+  // post-mkdir state proves where the rename would land). The check sits
+  // immediately before the rename to keep the swap window minimal; a
+  // colluding local process racing a symlink into .dohc between this check
+  // and the rename is the accepted residual (Node has no renameat dirfd).
+  const trashStat = await lstat(trashDir);
+  if (trashStat.isSymbolicLink() || !trashStat.isDirectory()) {
+    throw new Error(".dohc/trash must be a real directory inside the workspace");
+  }
+  if (!isInside(realRoot, await realpath(trashDir))) {
+    throw new Error(".dohc/trash resolves outside the workspace");
+  }
+  // Collision-resistant name: back-to-back deletes (multi-select) share a
+  // Date.now() tick, and POSIX rename silently CLOBBERS an existing
+  // destination — two same-basename deletes would destroy the first file's
+  // bytes. The per-call UUID makes every trash entry unique. The basename is
+  // decorative, so truncate it to fit NAME_MAX (255 bytes on ext4/APFS/NTFS):
+  // a long source name + the 50-odd-byte unique prefix must not ENAMETOOLONG.
+  const prefix = `${Date.now()}-${randomUUID()}-`;
+  const trashed = join(trashDir, `${prefix}${fitWithinNameMax(basename(target), prefix)}`);
+  await rename(target, trashed);
+  return trashed;
 }
 
 // Export bounds: policy caps for what main will buffer into one in-memory

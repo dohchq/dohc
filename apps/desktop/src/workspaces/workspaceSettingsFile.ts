@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
@@ -8,6 +8,7 @@ import {
   type WorkspaceSettingsPatch,
   type WorkspaceSettingsResult,
 } from "./workspaceSettings";
+import { moveIntoWorkspaceTrash } from "./workspaceFiles";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 export const WORKSPACE_SETTINGS_FILE = "settings.local.json";
@@ -119,8 +120,23 @@ export function resetWorkspaceSettingsFile(
   rootPath: string,
 ): Promise<WorkspaceSettingsResult> {
   return queueWorkspaceSettingsWrite(rootPath, async () => {
-    await writeWorkspaceSettingsFile(rootPath, DEFAULT_WORKSPACE_SETTINGS);
-    return { settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" };
+    const replaced = await writeWorkspaceSettingsFile(
+      rootPath,
+      DEFAULT_WORKSPACE_SETTINGS,
+    );
+    return {
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored",
+      // A reset that moved something aside owes the user the reverse path,
+      // named where they pressed the button. The trash location is the one
+      // dohc already teaches for anything it removes, so it is named the same
+      // way the delete dialog names it, without the entry's decorated name.
+      ...(replaced
+        ? {
+            warning: `dohc replaced workspace settings. The ${replaced} that was in their place is now in this workspace's .dohc/trash.`,
+          }
+        : {}),
+    };
   });
 }
 
@@ -153,10 +169,14 @@ async function applyWorkspaceSettingsPatch(
   return { settings, source: "stored" };
 }
 
+// Answers what it had to move aside to land, so a reset can tell the user
+// where their folder went: "folder", "link", or nothing at all (the ordinary
+// case — the settings artifact itself, whose content a reset discards by
+// definition, is replaced atomically by the rename).
 export async function writeWorkspaceSettingsFile(
   rootPath: string,
   settings: WorkspaceSettings,
-): Promise<void> {
+): Promise<"folder" | "link" | null> {
   const path = await workspaceSettingsPath(rootPath);
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
@@ -164,12 +184,20 @@ export async function writeWorkspaceSettingsFile(
     // A directory or a link at the settings path reads as unreadable, and
     // Reset is what the refusal tells the user to reach for — but the atomic
     // rename cannot land on either, so the advertised way out would fail.
-    // Clear exactly that path first. The other caller (a patch save) only
+    // Move exactly that path into the workspace trash first. NEVER delete it:
+    // a folder there can hold anything, and a reset the user asked for must
+    // not destroy content it never named. The other caller (a patch save) only
     // reaches here after the file read as a regular file, so it never takes
     // this branch.
     const target = await lstat(path).catch(() => null);
-    if (target && !target.isFile()) await rm(path, { recursive: true, force: true });
+    const squatter = target && !target.isFile()
+      ? target.isSymbolicLink()
+        ? ("link" as const)
+        : ("folder" as const)
+      : null;
+    if (squatter) await moveIntoWorkspaceTrash(rootPath, path);
     await rename(tmp, path);
+    return squatter;
   } finally {
     await unlink(tmp).catch(() => undefined);
   }
