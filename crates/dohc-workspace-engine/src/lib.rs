@@ -2864,6 +2864,23 @@ impl EngineService {
                 "materialized": materialized,
                 "materializeOutcome": materialize_outcome,
             }),
+            MergeTextFileResult::BinaryWrite { comparison, write } => json!({
+                "status": "merged",
+                "comparison": comparison_json(&comparison),
+                "writeKind": "binary-write",
+                "object": file_object_json(&write.object),
+                "snapshot": snapshot_metadata_json(
+                    &write.head.snapshot,
+                    "binary",
+                    Some(&write.head.snapshot.blob_sha256),
+                    Some(write.head.byte_length),
+                ),
+                "moment": moment_json(&write.moment),
+                "deduped": write.deduped,
+                "materializeEnqueued": materialize_enqueued,
+                "materialized": materialized,
+                "materializeOutcome": materialize_outcome,
+            }),
             MergeTextFileResult::Delete { comparison, delete } => json!({
                 "status": "merged",
                 "comparison": comparison_json(&comparison),

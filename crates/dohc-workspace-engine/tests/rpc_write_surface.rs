@@ -5144,14 +5144,12 @@ async fn merge_conflict_returns_the_exact_created_conflict_id() {
 }
 
 /// WS-G1 over the wire: a path holding BYTES on one side compares as a present
-/// binary head and merges into a conflict, both carrying the content address
-/// and byte length the review surface renders.
+/// binary head, a source-only change fast-forwards through the binary write
+/// status, and divergent bytes open a conflict — each carrying the content
+/// address and byte length the review surface renders.
 ///
-/// The conflict here is the DELIBERATE deferral: `asset.bin` exists only in the
-/// source, so nothing on the target can be lost and a fast-forward would be
-/// safe. It needs a binary variant of the merged-write wire status, tracked as
-/// #497. Until then the user accepts the new file with one click, and this
-/// pins that honest behavior rather than the eventual one.
+/// `asset.bin` exists only in the source, so nothing on the target can be lost
+/// and the merge takes it (#497).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
     // MUTATION: serialize a comparison side through the text-only snapshot
@@ -5213,16 +5211,57 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
         }),
     )
     .await;
-    assert_eq!(merged["status"], "conflict");
-    let conflict_id = merged["conflictId"]
+    assert_eq!(merged["status"], "merged");
+    assert_eq!(merged["writeKind"], "binary-write");
+    assert_eq!(merged["snapshot"]["contentKind"], "binary");
+    assert_eq!(merged["snapshot"]["sha256"], sha256);
+    assert_eq!(merged["snapshot"]["byteLength"], 3);
+    assert_eq!(merged["snapshot"]["path"], "asset.bin");
+    assert_eq!(merged["snapshot"]["versionId"], "main");
+    assert!(merged["snapshot"].get("text").is_none());
+    assert!(merged["moment"]["momentId"].is_string());
+    assert_eq!(merged["deduped"], false);
+    assert_eq!(merged["conflictId"], serde_json::Value::Null);
+
+    // Divergent bytes still go to the user, with both sides addressable.
+    let other = dohc_engine_storage::hex_sha256(&[9, 9]);
+    call(
+        &transport,
+        &handle,
+        4,
+        "versionedBinary.write",
+        json!({
+            "versionId": "main",
+            "path": "asset.bin",
+            "bytes": [9, 9],
+            "origin": "api"
+        }),
+    )
+    .await;
+    let conflicted = call(
+        &transport,
+        &handle,
+        5,
+        "versionedText.merge",
+        json!({
+            "path": "asset.bin",
+            "sourceVersionId": "feature",
+            "targetVersionId": "main",
+            "origin": "api",
+            "requestId": "binary-merge-wire-conflict"
+        }),
+    )
+    .await;
+    assert_eq!(conflicted["status"], "conflict");
+    let conflict_id = conflicted["conflictId"]
         .as_str()
-        .expect("a binary merge opens a conflict")
+        .expect("a divergent binary merge opens a conflict")
         .to_owned();
 
     let conflicts = call(
         &transport,
         &handle,
-        4,
+        6,
         "conflicts.list",
         json!({ "status": "open" }),
     )
@@ -5238,7 +5277,9 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
     assert_eq!(conflict["incoming"]["binarySha256"], sha256);
     assert_eq!(conflict["incoming"]["binaryByteLength"], 3);
     assert_eq!(conflict["incoming"]["snapshot"], serde_json::Value::Null);
-    assert_eq!(conflict["current"]["contentKind"], "text");
+    assert_eq!(conflict["current"]["contentKind"], "binary");
+    assert_eq!(conflict["current"]["binarySha256"], other);
+    assert_eq!(conflict["current"]["binaryByteLength"], 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

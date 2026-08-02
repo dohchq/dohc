@@ -74,7 +74,7 @@ pub use conflicts::{
 };
 pub use error::DomainError;
 pub use merge::{
-    CompareTextFileVersions, ComparisonSide, ComparisonStatus, MAX_MERGE_LINES,
+    BinaryMergeWrite, CompareTextFileVersions, ComparisonSide, ComparisonStatus, MAX_MERGE_LINES,
     MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason,
     VersionFileChange, VersionFileChangeEntry, VersionFileChangePage, VersionFileChangeStatus,
     VersionedTextComparison, comparison_sides_equal, comparison_status, file_states_equal,

@@ -519,6 +519,15 @@ export type VersionsMergeResult =
     } & MergeMaterializationResult)
   | (JsonObject & {
       status: "merged";
+      writeKind: "binary-write";
+      object: FileObject;
+      snapshot: SnapshotMetadata;
+      moment: MomentRecord;
+      deduped: boolean;
+      comparison: VersionedComparisonRecord;
+    } & MergeMaterializationResult)
+  | (JsonObject & {
+      status: "merged";
       writeKind: "delete";
       object: FileObject;
       before: SnapshotMetadata;
@@ -1349,7 +1358,9 @@ export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult
     throw new VersionedProtocolShapeError(`${label}.status is invalid.`);
   }
   const writeKind = object.writeKind;
-  if (writeKind === "write") {
+  // A fast-forwarded binary head reports the same keys as a text one; only its
+  // snapshot's content kind differs.
+  if (writeKind === "write" || writeKind === "binary-write") {
     return {
       status,
       writeKind,

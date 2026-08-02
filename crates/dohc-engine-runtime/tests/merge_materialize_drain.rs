@@ -1,4 +1,4 @@
-use dohc_engine_domain::{CreateNamedVersion, MergeTextFileFromVersion, WriteText};
+use dohc_engine_domain::{CreateNamedVersion, MergeTextFileFromVersion, WriteBinary, WriteText};
 use dohc_engine_runtime::{
     CancellationToken, MergeTextFileResult, NoFaults, PostCommitMaterializeOutcome,
     SelfWriteRecorder, WorkspaceSupervisor,
@@ -31,6 +31,117 @@ fn write(version_id: &str, text: &str, moment_id: &str, object_id: &str) -> Writ
         now_ms: 10,
         request_id: None,
     }
+}
+
+/// A fast-forwarded BINARY head must reach the folder in the same call. Its
+/// materialization job shares the moment's id (the generation-sharing contract
+/// for a binary write), where the text seams prefix theirs.
+///
+/// MUTATION: look the job up under the text seam's `merge-mat_` prefix -> the
+/// merge reports `Error`, materializes nothing, and logo.png never lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .versioned_text_write(
+            write("main", "base", "binary-ff-base", "binary-ff-object"),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("base write");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 20,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature fork");
+    let bytes = b"\x89PNG\x0d\x0a".to_vec();
+    actor
+        .versioned_binary_write(
+            WriteBinary {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "feature".to_owned(),
+                object_id: "binary-ff-asset".to_owned(),
+                path: "logo.png".to_owned(),
+                bytes: bytes.clone(),
+                moment_id: "binary-ff-incoming".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 25,
+                request_id: None,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the source gains the asset");
+
+    let execution = actor
+        .versioned_text_merge(
+            MergeTextFileFromVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                target_version_id: "main".to_owned(),
+                source_version_id: "feature".to_owned(),
+                path: "logo.png".to_owned(),
+                object_id: "binary-ff-merged".to_owned(),
+                moment_id: "binary-ff-result".to_owned(),
+                request_id: None,
+                conflict_id: "binary-ff-conflict".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 30,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("committed merge");
+
+    assert!(matches!(
+        execution.merge,
+        MergeTextFileResult::BinaryWrite { .. }
+    ));
+    assert!(execution.materialize_enqueued);
+    assert!(execution.materialized);
+    assert_eq!(
+        execution.materialize_outcome,
+        PostCommitMaterializeOutcome::Applied
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("logo.png")).expect("merged disk head"),
+        bytes
+    );
+    supervisor.close(&db).expect("close actor");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

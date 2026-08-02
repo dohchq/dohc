@@ -1031,8 +1031,11 @@ describe("loopback contract enforcement", () => {
   it("opens a conflict when a binary head leaves the sides disagreeing", async () => {
     // Only the SOURCE side can bring something to apply. When the bytes sit on
     // the target alone, the source changed nothing and the merge is a no-op.
+    // Bytes from the source over a head the target has NOT touched since the
+    // fork fast-forward through the binary write status (#497); a base the two
+    // live sides never shared still goes to the user.
     const expected = {
-      source: "conflict",
+      source: "merged",
       target: "unchanged",
       "fork-base": "conflict",
     } as const;
@@ -1082,9 +1085,16 @@ describe("loopback contract enforcement", () => {
         origin: "api",
         requestId: `binary-${binarySide}-merge`,
       });
-      // WS-G1: bytes have no fast-forward and no line merge, so sides that
-      // differ open a conflict the caller resolves by side.
+      // WS-G1: bytes have no line merge, so sides that genuinely differ open a
+      // conflict the caller resolves by side.
       expect((merged as { status: string }).status).toBe(expected[binarySide]);
+      if (binarySide === "source") {
+        expect(decodeVersionsMergeResult(merged)).toMatchObject({
+          status: "merged",
+          writeKind: "binary-write",
+          snapshot: { contentKind: "binary", byteLength: 1 },
+        });
+      }
     }
   });
 

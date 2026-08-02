@@ -939,7 +939,9 @@ export function createCaptureLiveStores(
         if (!conflict) throw new Error(`Engine conflict for ${input.path} was not returned.`);
         return { kind: "conflict", comparison, conflict };
       }
-      if (raw.writeKind === "write") {
+      // A fast-forwarded binary head takes the same path as a text one: the
+      // head is re-read from the engine, and materializing it reads its kind.
+      if (raw.writeKind === "write" || raw.writeKind === "binary-write") {
         const snapshot = await store.readTextFile({
           workspaceId: input.workspaceId,
           versionId: input.targetVersionId,
