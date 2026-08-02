@@ -33,7 +33,16 @@ export function createEngineYDocSaveSeqState(): EngineYDocSaveSeqState {
   return { dirtySeq: 0, inFlight: new Map() };
 }
 
-/** The renderer shipped an edit. Ordering is the IPC channel's guarantee. */
+/**
+ * An edit REACHED the settle — journaled onto the session's journal chain and
+ * counted by the settle it arms. Not when the renderer shipped it: the session
+ * queues updates, and counting at hand-over lets a settle armed by an earlier
+ * update vouch for edits still waiting in that queue (#514).
+ *
+ * Ordering is the session queue's FIFO guarantee. Assignment, not a maximum:
+ * were the order ever to break, a seq that lags under-reports and the document
+ * keeps showing "Saving…", which is the safe direction for this indicator.
+ */
 export function noteLocalEdit(state: EngineYDocSaveSeqState, seq: number): void {
   state.dirtySeq = seq;
 }

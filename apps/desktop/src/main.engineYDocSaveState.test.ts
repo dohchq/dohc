@@ -41,10 +41,21 @@ describe("engine Y.Doc save-state reporting in main", () => {
     expect(handler.indexOf("return;", reportAt)).toBeLessThan(applyAt);
   });
 
-  it("advances the edit counter only on the path that actually journals", () => {
+  it("counts the edit when the session hands it to the settle, not on arrival", () => {
+    // The session QUEUES updates, so counting here — before the hand-over —
+    // credits a settle armed by an earlier update with edits still waiting in
+    // that queue, and the editor reads "Saved" over a partial file (#514).
+    // The count belongs in the hand-over callback, which fires when the
+    // update reaches the provider. What that callback promises is proved
+    // behaviorally in workspaces/workspaceEngineYDocSession.test.ts.
+    //
+    // Textual order alone would not prove it: `applyLocalUpdate(input.update)`
+    // followed on the NEXT LINE by a bare `noteLocalEdit(...)` reads as "later
+    // in the file" while reintroducing #514 exactly. So pin that noteLocalEdit
+    // IS the hand-over callback.
     const handler = handlerSource("engineYDocApplyUpdate");
-    expect(handler.indexOf("entry.dirtySeq = input.seq")).toBeLessThan(
-      handler.indexOf("entry.session.applyLocalUpdate("),
+    expect(handler).toMatch(
+      /entry\.session\.applyLocalUpdate\(\s*input\.update,\s*\(\)\s*=>\s*noteLocalEdit\(/,
     );
   });
 

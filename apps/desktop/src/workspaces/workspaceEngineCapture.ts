@@ -271,7 +271,12 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   EngineYdocProviderSession,
   "lineage" | "applyLocalUpdate" | "applyExternalMarkdownEdit" | "close"
 > & {
-  applyLocalUpdate(update: Uint8Array): void;
+  // `onArmed` fires when THIS update has reached the provider — journaled onto
+  // the session's journal chain and counted by the settle it arms. The call is
+  // queued, so that moment is later than the caller handing the update over,
+  // and a save-state bookkeeper that counts at hand-over instead vouches for
+  // edits still sitting in the queue (#514).
+  applyLocalUpdate(update: Uint8Array, onArmed?: () => void): void;
   applyExternalMarkdownEdit(markdown: string): Promise<{ supported: boolean }>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
@@ -489,6 +494,22 @@ const ENGINE_MAIN_VERSION_ID = "main";
 
 interface RegisteredExpectedEngineEvent extends ExpectedEngineEvent {
   expiresAtMs: number;
+}
+
+/**
+ * Wraps a callback so it runs at most once, and tolerates it being absent.
+ *
+ * Used for the save-state edit count: several recovery paths can each be the
+ * first to arm a settle carrying one update, so they all get the same wrapped
+ * callback and the first one there wins.
+ */
+function announceOnce(announce: (() => void) | undefined): () => void {
+  let announced = false;
+  return () => {
+    if (announced) return;
+    announced = true;
+    announce?.();
+  };
 }
 
 function sha256Utf8(text: string): string {
@@ -1166,6 +1187,14 @@ export function createWorkspaceEngineCapture(
     const adoptGeneration = async (
       doc: Y.Doc,
       replacement: EngineYdocProviderSession,
+      // Announced when the REPLAY is armed on the replacement — the moment the
+      // settle that will carry it exists. Anything later is too late: that
+      // settle can start while the replay's journal RPC is still in flight, and
+      // an edit counted after the RPC returns is missing from the seq that
+      // settle reports. The settle then succeeds carrying the edit while
+      // vouching for a seq below it, and with nothing left to arm another
+      // settle the document sits on "Saving…" for good (#514, codex P2).
+      onReplayArmed?: () => void,
     ): Promise<void> => {
       try {
         const opening = openingRemoteUpdates.get(replacement);
@@ -1184,7 +1213,13 @@ export function createWorkspaceEngineCapture(
           Y.encodeStateVector(replacement.doc),
         );
         if (replay.byteLength > 2) {
-          await replacement.applyLocalUpdate(replay);
+          const journaled = replacement.applyLocalUpdate(replay);
+          onReplayArmed?.();
+          await journaled;
+        } else {
+          // Nothing to replay: the replacement already holds this text, so
+          // every settle it runs carries it.
+          onReplayArmed?.();
         }
         current = replacement;
         if (opening) {
@@ -1212,7 +1247,15 @@ export function createWorkspaceEngineCapture(
 
     const rebind = async (
       failed: EngineYdocProviderSession,
-      options?: { releaseBeforeOpen?: boolean; retryTransportErrors?: boolean },
+      options?: {
+        releaseBeforeOpen?: boolean;
+        retryTransportErrors?: boolean;
+        // The recovery replay is an arm point like any other: when the failed
+        // generation never armed anything (a SYNCHRONOUS refusal throws before
+        // its settle exists), this replay is the first settle that will carry
+        // the edit, and the only one that will.
+        onReplayArmed?: () => void;
+      },
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
       const doc = canonicalDoc;
@@ -1235,7 +1278,7 @@ export function createWorkspaceEngineCapture(
         markDead(failed);
         throw error;
       }
-      await adoptGeneration(doc, replacement);
+      await adoptGeneration(doc, replacement, options?.onReplayArmed);
       // A reconnect-class failure means the prior daemon/workspace binding is
       // gone. Opening the replacement first is the release boundary; sending a
       // close through the broken transport can only fail and must not turn a
@@ -1257,11 +1300,15 @@ export function createWorkspaceEngineCapture(
     // died with its daemon took its lease with it, and one that died still
     // holding a LIVE lease refuses the open and stays dead for close() to
     // converge — the retained release obligation remains teardown's job.
-    const reviveDeadSession = async (doc: Y.Doc): Promise<void> => {
+    const reviveDeadSession = async (
+      doc: Y.Doc,
+      onReplayArmed?: () => void,
+    ): Promise<void> => {
       if (closed || current !== null) return;
       await adoptGeneration(
         doc,
         await openGeneration(false, { retryTransportErrors: false }),
+        onReplayArmed,
       );
     };
 
@@ -1324,7 +1371,18 @@ export function createWorkspaceEngineCapture(
       initialUpdate,
       contentKind,
       path: sessionPath,
-      applyLocalUpdate(update) {
+      applyLocalUpdate(update, onArmed) {
+        // ONE announcement per update, at the FIRST provider call that arms a
+        // settle carrying it. Three calls can be that first one — the live
+        // generation's own, a dead session's revive replay, and a failed
+        // generation's recovery replay — and which one gets there depends on
+        // how the generation failed. Handing the same once-guarded function to
+        // all three is what stops that from mattering: the count can neither
+        // lead the armed settle (a "Saved" over content it never carried) nor
+        // lag it (a settle that saves the edit while vouching for a seq below
+        // it, leaving the document on "Saving…" with nothing left to arm
+        // another settle). #514, and its two review rounds.
+        const armed = announceOnce(onArmed);
         void append(async () => {
           if (canonicalDoc === null || closed) throw closedError();
           const doc = canonicalDoc;
@@ -1335,19 +1393,35 @@ export function createWorkspaceEngineCapture(
           // once a generation died.
           if (current === null) {
             Y.applyUpdate(doc, update);
-            await reviveDeadSession(doc);
+            // The revive replays the canonical doc — this update included —
+            // into the new generation. It announces the update when that
+            // replay is ARMED, not when its journal RPC returns.
+            await reviveDeadSession(doc, armed);
             return;
           }
           const generation = current;
           try {
-            await generation.applyLocalUpdate(update);
+            // The provider journals and arms its settle SYNCHRONOUSLY inside
+            // this call, so the update is covered from here. Announce it before
+            // awaiting the journal round trip: the settle it just armed may
+            // start before that round trip returns.
+            const journaled = generation.applyLocalUpdate(update);
+            armed();
+            await journaled;
             Y.applyUpdate(doc, update);
           } catch (error) {
             // A live refusal still owns its lease and must close first; a
             // transport restart opens first because the old daemon is gone.
+            //
+            // A SYNCHRONOUS refusal threw before the line above, so nothing was
+            // armed and nothing announced. The recovery replay below is then
+            // the first and only settle that will carry this edit, and the
+            // once-guard makes announcing there a no-op when the failure was
+            // asynchronous and the count already rose.
             Y.applyUpdate(doc, update);
             await rebind(generation, {
               releaseBeforeOpen: !isEngineSessionReconnectError(error),
+              onReplayArmed: armed,
             });
           }
         }).catch((error: unknown) => {
@@ -2659,9 +2733,17 @@ export function createWorkspaceEngineCapture(
           initialUpdate: session.initialUpdate,
           contentKind: session.contentKind,
           path: session.path,
-          applyLocalUpdate: (update) => {
+          // TWO counters ride this call, and they are not the same count.
+          // `noteUpdate` is the CLOSE counter (#496): it asks whether every
+          // update is covered by a settle, counts here at hand-over, and
+          // over-counts on purpose — over-counting only costs loudness.
+          // `onArmed` is the SAVE counter (#514): it asks which edits a
+          // settle may vouch for, so it must fire at the moment a settle
+          // carrying this update is ARMED, deeper in and later. Merging them
+          // would break one or the other.
+          applyLocalUpdate: (update, onArmed) => {
             noteUpdate();
-            return session.applyLocalUpdate(update);
+            return session.applyLocalUpdate(update, onArmed);
           },
           settleNow: (opts) => session.settleNow(opts),
           applyExternalMarkdownEdit: (markdown) => {

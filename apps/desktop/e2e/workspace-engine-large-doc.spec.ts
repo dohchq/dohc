@@ -50,6 +50,15 @@ async function openEngineDoc(
 }
 
 test("a document past the in-band cap reaches disk, and the editor never claims Saved before it does", async () => {
+  // This spec does more than any other here: launch, type ~140 KiB, wait out
+  // the settle, then RESTART the app and wait for the reconcile. Measured on a
+  // saturated machine (14 busy threads, the state this repo's parallel agents
+  // actually leave it in), healthy passes ran 25.4s–58.7s — up against the
+  // config's 60s default, which then timed out 2 runs in 8 with nothing wrong.
+  // The phases keep their own bounds: the honesty loop below has a 60s deadline
+  // and every expect keeps the 30s expect timeout, so a real hang still fails
+  // as itself rather than as an opaque test timeout.
+  test.setTimeout(180_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 

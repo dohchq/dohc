@@ -23,6 +23,12 @@ import {
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { nativeTmpdir } from "./testTemp";
+import {
+  createEngineYDocSaveSeqState,
+  noteLocalEdit,
+  noteSettleOutcome,
+  noteSettleStart,
+} from "./engineYDocSaveSeq";
 
 const roots: string[] = [];
 
@@ -1950,6 +1956,403 @@ it("an explicit settle against a down daemon fails fast instead of blocking", as
   backoff.delays.length = 0;
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   expect(backoff.delays).toEqual(BOUNDED_CLOSE_BACKOFF_MS);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+// #514, codex P2. The revive path's ordering. An edit typed after the daemon
+// died is replayed into the replacement generation, and that replay ARMS a
+// settle before its journal RPC returns. The settle can therefore start while
+// the RPC is still in flight — and it snapshots the edit count at that moment.
+//
+// So the count has to be raised when the replay is armed. Raised after the
+// journal completes, it misses the settle that the replay itself armed: that
+// settle succeeds, carrying the edit, while reporting a seq below it. The
+// renderer only clears on seq >= its own, and with the user done typing
+// nothing arms another settle — the document reads "Saving…" forever over a
+// file that already holds it.
+//
+// The wiring below is main.ts's: noteLocalEdit through the hand-over callback,
+// noteSettleStart/noteSettleOutcome on the save-state channel.
+it("counts a revived edit against the settle its own replay armed", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-revive-seq-",
+    "ydoc-revive-seq",
+  );
+  // The replacement's journal RPC, held open so the settle its replay arms
+  // starts while it is still in flight — a slow daemon under load.
+  let releaseReplayJournal: (() => void) | null = null;
+  const replayJournalHeld = new Promise<void>((resolve) => {
+    releaseReplayJournal = resolve;
+  });
+  // Held on an object: a `let` assigned only inside a callback narrows to
+  // `null` for the reader below, and the non-null dance that hides costs more
+  // than it explains.
+  const armed: { settle: ((markdown: string) => Promise<void>) | null } = {
+    settle: null,
+  };
+  let replayArrived: (() => void) | null = null;
+  const replayReached = new Promise<void>((resolve) => {
+    replayArrived = resolve;
+  });
+
+  const gatedOpenProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const inner = await openProvider(options);
+    // Generation 1 behaves normally; the REPLACEMENT is the one under test.
+    if (state.generation < 2) return inner;
+    let token = 0;
+    return {
+      ...inner,
+      async applyLocalUpdate(update) {
+        // A real provider journals and arms its settle synchronously here,
+        // then awaits the RPC. Everything below the await is the RPC.
+        token += 1;
+        const settleToken = token;
+        armed.settle = async (markdown: string): Promise<void> => {
+          // The debounce fires: this settle announces itself, and only then
+          // does the journal complete and the settle land.
+          options.onSettleStart?.(settleToken);
+          releaseReplayJournal?.();
+          await replayJournalHeld;
+          await writeFile(join(rootPath, options.path), markdown, "utf8");
+          await options.onSettled?.(
+            {
+              momentId: `moment-revive-${settleToken}`,
+              path: options.path,
+              markdown,
+              sha256: createHash("sha256").update(markdown).digest("hex"),
+              materialized: true,
+              projection: {
+                contentKind: "plaintext",
+                sourceStateVectorSha256: "b".repeat(64),
+                destructive: false,
+              },
+            },
+            settleToken,
+          );
+        };
+        replayArrived?.();
+        await replayJournalHeld;
+        await inner.applyLocalUpdate(update);
+      },
+    };
+  };
+
+  const saveSeq = createEngineYDocSaveSeqState();
+  const reported: Array<{ state: string; seq: number }> = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-revive-seq",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: gatedOpenProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onSaveState: (saveState, token) => {
+      const seq =
+        saveState === "settling"
+          ? noteSettleStart(saveSeq, token)
+          : noteSettleOutcome(saveSeq, token);
+      reported.push({ state: saveState, seq });
+    },
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  // The renderer's own counter, exactly as useEngineDoc keeps it.
+  let rendererSeq = 0;
+  const type = (text: string): void => {
+    const before = Y.encodeStateVector(rendererDoc);
+    const body = rendererDoc.getText("plainText");
+    body.insert(body.length, text);
+    rendererSeq += 1;
+    const edited = rendererSeq;
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before), () =>
+      noteLocalEdit(saveSeq, edited),
+    );
+  };
+
+  type("alive ");
+  await session.settleNow();
+
+  // The daemon dies. The next edit finds no generation and must revive one.
+  state.daemonAlive = false;
+  await expect(session.settleNow()).rejects.toThrow(/closed|not available/i);
+  state.daemonAlive = true;
+
+  type("TYPED_AFTER_DEATH");
+  await replayReached;
+
+  // THE INTERLEAVING: the settle the replay armed starts now, while that
+  // replay's journal RPC has not returned.
+  expect(armed.settle, "the replay never reached the replacement").not.toBeNull();
+  await armed.settle?.("alive TYPED_AFTER_DEATH");
+
+  // The save that carried the edit must vouch for it. A lower seq leaves the
+  // renderer on "Saving…" with nothing left to arm another settle.
+  const saved = reported.filter((entry) => entry.state === "saved").at(-1);
+  expect(saved, "the revived settle never reported a save").toBeDefined();
+  expect(
+    saved?.seq,
+    `the save that carried the revived edit vouched for seq ${saved?.seq}, ` +
+      `below the renderer's ${rendererSeq} — the document sticks on "Saving…"`,
+  ).toBeGreaterThanOrEqual(rendererSeq);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+// #514, codex P2 round 2. The third arm point. A provider can refuse an edit
+// SYNCHRONOUSLY — YdocAdapterSession.assertOpen rejects a valid edit on a
+// stale or quarantined generation — and it throws before arming anything, so
+// nothing is announced there. The catch applies the edit to the canonical doc
+// and rebinds, and THAT replay is the settle which carries it. Announce
+// nothing on the recovery and the settle succeeds while vouching for the
+// previous seq: the document reads "Saving…" for good, the same stuck state
+// as the revive path, reached through a different door.
+it("counts an edit recovered from a synchronous provider refusal", async () => {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-sync-refuse-"));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "ydoc-sync-refuse" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+  await writeFile(join(rootPath, "note.md"), "", "utf8");
+
+  let generation = 0;
+  const armedSettle: {
+    fire: ((markdown: string) => Promise<void>) | null;
+  } = { fire: null };
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const opened = ++generation;
+    const doc = new Y.Doc();
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      lineage: "present",
+      applyLocalUpdate(update: Uint8Array): Promise<void> {
+        // Generation 1 refuses SYNCHRONOUSLY — no settle is armed, so the
+        // hand-over callback never runs on this path.
+        if (opened === 1) throw new Error("ydoc-session-not-open");
+        Y.applyUpdate(doc, update);
+        // The recovery replay: this call is what arms the settle that will
+        // carry the edit.
+        armedSettle.fire = async (markdown: string): Promise<void> => {
+          options.onSettleStart?.(1);
+          await writeFile(join(rootPath, options.path), markdown, "utf8");
+          await options.onSettled?.(
+            {
+              momentId: "moment-recovered",
+              path: options.path,
+              markdown,
+              sha256: createHash("sha256").update(markdown).digest("hex"),
+              materialized: true,
+              projection: {
+                contentKind: "plaintext",
+                sourceStateVectorSha256: "b".repeat(64),
+                destructive: false,
+              },
+            },
+            1,
+          );
+        };
+        return Promise.resolve();
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: `moment-${opened}`,
+          path: options.path,
+          markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext" as const,
+            sourceStateVectorSha256: "b".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+
+  const saveSeq = createEngineYDocSaveSeqState();
+  const reported: Array<{ state: string; seq: number }> = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-sync-refuse",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onSaveState: (saveState, token) => {
+      const seq =
+        saveState === "settling"
+          ? noteSettleStart(saveSeq, token)
+          : noteSettleOutcome(saveSeq, token);
+      reported.push({ state: saveState, seq });
+    },
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  let rendererSeq = 0;
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "REFUSED_THEN_RECOVERED");
+  rendererSeq += 1;
+  const edited = rendererSeq;
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before), () =>
+    noteLocalEdit(saveSeq, edited),
+  );
+
+  await expect
+    .poll(() => armedSettle.fire, { timeout: 5_000 })
+    .not.toBeNull();
+  // The recovery generation holds the edit, and its replay armed the settle
+  // that lands it.
+  await armedSettle.fire?.("REFUSED_THEN_RECOVERED");
+
+  const saved = reported.filter((entry) => entry.state === "saved").at(-1);
+  expect(saved, "the recovery settle never reported a save").toBeDefined();
+  expect(
+    saved?.seq,
+    `the settle that saved the recovered edit vouched for seq ${saved?.seq}, ` +
+      `below the renderer's ${rendererSeq} — the document sticks on "Saving…"`,
+  ).toBeGreaterThanOrEqual(rendererSeq);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+// The once-guard, pinned. An ASYNCHRONOUS refusal reaches BOTH arm points:
+// the failed generation armed a settle before its journal rejected, so the
+// edit is announced there, and the recovery replay then arms another. Both are
+// handed the same callback, so without the guard the edit is announced twice.
+//
+// Two announcements of the SAME seq are harmless only because main's callback
+// happens to be an idempotent assignment. The callback type promises nothing
+// of the sort, and a second announcement arriving late is a count moving
+// backwards. Announce exactly once, by construction.
+it("announces a recovered edit exactly once when both arm points run", async () => {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-async-refuse-"));
+  roots.push(rootPath);
+  const loopback = new VersionedLoopbackEngine();
+  const daemonClient: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "ydoc-async-refuse" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => daemonClient,
+  });
+  await writeFile(join(rootPath, "note.md"), "", "utf8");
+
+  let generation = 0;
+  let replayed = 0;
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const opened = ++generation;
+    const doc = new Y.Doc();
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      lineage: "present",
+      async applyLocalUpdate(update: Uint8Array): Promise<void> {
+        // Generation 1 arms its settle, THEN its journal rejects.
+        if (opened === 1) throw new Error("record-update-refused");
+        replayed += 1;
+        Y.applyUpdate(doc, update);
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: `moment-${opened}`,
+          path: options.path,
+          markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext" as const,
+            sourceStateVectorSha256: "b".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-async-refuse",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  let announcements = 0;
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "ASYNC_REFUSED");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before), () => {
+    announcements += 1;
+  });
+
+  // Both arm points have run once the recovery generation took the replay.
+  await expect.poll(() => replayed, { timeout: 5_000 }).toBeGreaterThan(0);
+  expect(announcements, "the edit was announced more than once").toBe(1);
 
   await session.close({ settle: false }).catch(() => undefined);
   await capture.stop();
