@@ -2239,14 +2239,15 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
         notifyCount += 1;
       },
       {
-        captureFor: (w, hooks) =>
-          createWorkspaceEngineCapture({
+        captureFor: (w, hooks) => ({
+          capture: createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
             rustEngineSessions: mockLiveSessions(loopback),
             onError: () => {},
             onCaptureOutcome: hooks.onCaptureOutcome,
           }),
+        }),
       },
     );
     await activity.open(workspace);
@@ -2284,7 +2285,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
       mode: defaultWorkspaceMode("personal"),
     };
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () => null,
+      captureFor: () => ({ capture: null }),
     });
     await activity.open(workspace);
     expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
@@ -2357,7 +2358,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
             markStopStarted?.();
             await stopCapture();
           };
-          return engineCapture;
+          return { capture: engineCapture };
         },
       },
     );
@@ -2407,12 +2408,13 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     };
     const loopback = new VersionedLoopbackEngine();
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: (w) =>
-        createWorkspaceEngineCapture({
+      captureFor: (w) => ({
+        capture: createWorkspaceEngineCapture({
           workspaceId: w.workspaceId,
           rootPath: w.rootPath,
           rustEngineSessions: mockLiveSessions(loopback),
         }),
+      }),
     });
     await activity.open(workspace);
     const cancel = activity.registerExpectedEngineEvents(workspace.workspaceId, [

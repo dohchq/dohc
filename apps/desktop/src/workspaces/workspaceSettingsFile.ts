@@ -32,11 +32,14 @@ function unreadableSettings(
   };
 }
 
+async function workspaceSettingsPath(rootPath: string): Promise<string> {
+  return join(await resolveWorkspaceMetadataDir(rootPath), WORKSPACE_SETTINGS_FILE);
+}
+
 export async function readWorkspaceSettingsFile(
   rootPath: string,
 ): Promise<WorkspaceSettingsResult> {
-  const dir = await resolveWorkspaceMetadataDir(rootPath);
-  const path = join(dir, WORKSPACE_SETTINGS_FILE);
+  const path = await workspaceSettingsPath(rootPath);
   try {
     const fileStats = await lstat(path);
     if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
@@ -62,14 +65,32 @@ export async function readWorkspaceSettingsFile(
   }
 }
 
+// Settings saves write the whole RESOLVED object. Over a file dohc cannot
+// read, the resolved object carries the fail-closed opt-out, so one unrelated
+// control would land `workspaceEngineAlpha: false` on disk as a choice the
+// user never made — and the warning would disappear with it. Refuse instead.
+// Reset stays open as the deliberate way to replace the file.
+export async function saveWorkspaceSettingsFile(
+  rootPath: string,
+  settings: WorkspaceSettings,
+): Promise<WorkspaceSettingsResult> {
+  const current = await readWorkspaceSettingsFile(rootPath);
+  if (current.source === "recovered") {
+    const path = await workspaceSettingsPath(rootPath);
+    return {
+      ...current,
+      refusal: `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file, or select Reset workspace in Advanced to replace it.`,
+    };
+  }
+  await writeWorkspaceSettingsFile(rootPath, settings);
+  return { settings, source: "stored" };
+}
+
 export async function writeWorkspaceSettingsFile(
   rootPath: string,
   settings: WorkspaceSettings,
 ): Promise<void> {
-  const path = join(
-    await resolveWorkspaceMetadataDir(rootPath),
-    WORKSPACE_SETTINGS_FILE,
-  );
+  const path = await workspaceSettingsPath(rootPath);
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
     await writeFile(tmp, `${JSON.stringify(WorkspaceSettings.parse(settings), null, 2)}\n`);

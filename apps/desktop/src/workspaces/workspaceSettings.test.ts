@@ -23,6 +23,7 @@ import {
 import {
   MAX_WORKSPACE_SETTINGS_FILE_BYTES,
   readWorkspaceSettingsFile,
+  saveWorkspaceSettingsFile,
   WORKSPACE_SETTINGS_FILE,
   writeWorkspaceSettingsFile,
 } from "./workspaceSettingsFile";
@@ -252,6 +253,64 @@ describe("workspace settings file store", () => {
 
     await writeFile(join(root, ".dohc", WORKSPACE_SETTINGS_FILE), "{not json");
     expect(await workspaceEngineEnabled(root)).toBe(false);
+  });
+
+  it("refuses to save over an unreadable file, and reset still replaces it", async () => {
+    // #483: a save writes the whole RESOLVED object, and over an unreadable
+    // file that object carries the fail-closed opt-out. Writing it would
+    // record a deliberate opt-out the user never chose, and the warning would
+    // disappear with it. The file must survive the save byte for byte.
+    const root = await tempRoot();
+    const path = join(root, ".dohc", WORKSPACE_SETTINGS_FILE);
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    await writeFile(path, "{not json");
+
+    const refused = await saveWorkspaceSettingsFile(root, {
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      files: { ...DEFAULT_WORKSPACE_SETTINGS.files, attachmentLocation: "same-folder" },
+    });
+    expect(refused.refusal).toBe(
+      `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file, or select Reset workspace in Advanced to replace it.`,
+    );
+    expect(await readFile(path, "utf8")).toBe("{not json");
+    // The refusal hands back the file's real state, warning included, so the
+    // dialog snaps its controls back instead of showing an unsaved edit.
+    expect(refused.source).toBe("recovered");
+    expect(refused.warning).toContain(path);
+    expect(refused.settings.experimental.workspaceEngineAlpha).toBe(false);
+    // The refusal crosses the IPC boundary; a path must not overflow its bound.
+    expect(WorkspaceSettingsResult.parse(refused)).toEqual(refused);
+
+    // Reset is the named way out, and it must actually work here.
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    expect((await readWorkspaceSettingsFile(root)).source).toBe("stored");
+  });
+
+  it("saves normally over a readable file", async () => {
+    const root = await tempRoot();
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    const settings = {
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      privacy: { confirmExternalLinks: false },
+    };
+    const saved = await saveWorkspaceSettingsFile(root, settings);
+    expect(saved).toEqual({ settings, source: "stored" });
+    expect(await readWorkspaceSettingsFile(root)).toEqual({
+      settings,
+      source: "stored",
+    });
+  });
+
+  it("saves over a MISSING file — a new workspace is not born refused", async () => {
+    const root = await tempRoot();
+    const settings = {
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      privacy: { confirmExternalLinks: false },
+    };
+    expect(await saveWorkspaceSettingsFile(root, settings)).toEqual({
+      settings,
+      source: "stored",
+    });
   });
 
   it("refuses to write through a symlinked .dohc and never lands files outside", async () => {

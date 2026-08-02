@@ -25,6 +25,9 @@ export const WorkspaceSettingsResult = z.object({
   // file names its own path in the warning, and the IPC contract bounds a path
   // at 4096. A shorter bound would reject the warning and fail the whole read.
   warning: z.string().min(1).max(4600).optional(),
+  // Set when a save was REFUSED because the file on disk cannot be read.
+  // Same bound as the warning, and for the same reason: it names the path.
+  refusal: z.string().min(1).max(4600).optional(),
 }).strict();
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 

@@ -651,6 +651,12 @@ export const SyncStatusResult = z.object({
   // recorder no longer exists. Drives the persistent "History is off"
   // notice. Optional so older producers/fixtures keep parsing.
   historyRecordingOff: z.boolean().optional(),
+  // Additive (#483): why main's open-time settings read could not trust the
+  // file, when it could not. The notice states this cause instead of blaming
+  // the Settings toggle. Bounded like the settings warning it carries: the
+  // sentence names a full path. Optional so older producers/fixtures keep
+  // parsing.
+  settingsWarning: z.string().min(1).max(4600).optional(),
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),

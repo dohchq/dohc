@@ -28,6 +28,11 @@ interface WatchedWorkspace {
   // records no history at all (engine opt-out, or a failed capture build).
   // Drives the persistent "History is off for this workspace" notice.
   historyRecordingOff: boolean;
+  // Why the open-time settings read could not be trusted, straight from that
+  // read. Null when the file read normally. The notice states THIS cause
+  // instead of blaming the Settings toggle, and the renderer never answers
+  // the question from a read of its own.
+  settingsWarning: string | null;
   // True while the engine capture (this workspace's SOLE history recorder)
   // is failing. Drives the persistent history-capture notice: set on the
   // first failed capture pass, cleared when a later pass succeeds, notify()
@@ -51,15 +56,15 @@ export interface WorkspaceActivityOptions {
     capture: WorkspaceEngineCapture | null,
     engineOptions?: { joinBootstrap?: boolean },
   ) => CloudSyncEngine | null;
-  // Builds the watcher->engine capture for a workspace; null (explicit
-  // engine opt-out) leaves the workspace with NO history recorder. Called
-  // once per open; main owns the flag read. The hooks are activity-owned
-  // callbacks the builder must wire into the capture it creates (they feed
-  // the workspace's history-capture notice state).
+  // Builds the watcher->engine capture for a workspace; a null capture
+  // (explicit engine opt-out) leaves the workspace with NO history recorder.
+  // Called once per open; main owns the flag read. The hooks are
+  // activity-owned callbacks the builder must wire into the capture it
+  // creates (they feed the workspace's history-capture notice state).
   captureFor?: (
     workspace: CreatedWorkspace,
     hooks: WorkspaceCaptureHooks,
-  ) => Promise<WorkspaceEngineCapture | null> | WorkspaceEngineCapture | null;
+  ) => Promise<WorkspaceCaptureDecision> | WorkspaceCaptureDecision;
   // Dormant R13b shadow observer. No shipping caller supplies it; a later
   // composition PR may use it to mirror successfully recorded activity into
   // the Rust adapter without affecting the live watcher/capture pipeline.
@@ -67,6 +72,14 @@ export interface WorkspaceActivityOptions {
     workspaceId: string;
     rootPath: string;
   }) => void | Promise<void>;
+}
+
+// What the open-time settings read decided: the recorder, and — when the file
+// could not be trusted — why. Both come from ONE read, so the notice can never
+// state a cause the capture decision did not have.
+export interface WorkspaceCaptureDecision {
+  capture: WorkspaceEngineCapture | null;
+  warning?: string;
 }
 
 export interface WorkspaceCaptureHooks {
@@ -122,6 +135,7 @@ export function createWorkspaceActivity(
       unmatchedRemoteResolves: snap?.unmatchedRemoteResolves ?? 0,
       historyCaptureFailed: w?.captureFailed ?? false,
       historyRecordingOff: w?.historyRecordingOff ?? false,
+      ...(w?.settingsWarning ? { settingsWarning: w.settingsWarning } : {}),
       syncFailing: snap?.syncFailing ?? false,
     };
   }
@@ -136,6 +150,7 @@ export function createWorkspaceActivity(
         engine: null,
         capture: null,
         historyRecordingOff: false,
+        settingsWarning: null,
         captureFailed: false,
         agentRun: null,
       };
@@ -147,8 +162,8 @@ export function createWorkspaceActivity(
       // surfaced via the history-off notice — never a failed open.
       if (options.captureFor) {
         try {
-          const capture =
-            (await options.captureFor(workspace, {
+          const decision =
+            await options.captureFor(workspace, {
               // Live slot read: the capture stamps a settled batch with
               // whatever run is active at that moment (may flip between
               // batches within one open).
@@ -162,14 +177,15 @@ export function createWorkspaceActivity(
                 entry.captureFailed = !ok;
                 notify();
               },
-            })) ?? null;
+            });
           // stopAll may have raced the capture build; stop the capture no
           // one will ever own instead of leaking its chain/store handle.
           if (watched.get(workspace.workspaceId) !== entry) {
-            await capture?.stop().catch(() => undefined);
+            await decision.capture?.stop().catch(() => undefined);
             return statusFor(workspace.workspaceId);
           }
-          entry.capture = capture;
+          entry.capture = decision.capture;
+          entry.settingsWarning = decision.warning ?? null;
         } catch (error) {
           console.error(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,

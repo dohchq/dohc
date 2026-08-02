@@ -311,8 +311,12 @@ export function SettingsDialog(props: {
         ) {
           return;
         }
+        // A refusal means main wrote nothing: it holds the settings file dohc
+        // could not read. Take main's answer — the controls snap back to what
+        // is really on disk — and never say "Saved".
         setWorkspaceResult(saved);
-        markSaved();
+        if (saved.refusal) setSaveState("error");
+        else markSaved();
       } catch (cause) {
         if (
           workspaceTokenRef.current !== token ||
@@ -429,6 +433,7 @@ export function SettingsDialog(props: {
   const warnings = [
     userResult?.warning,
     workspaceResult?.warning,
+    workspaceResult?.refusal,
     error ? `Settings error: ${error}` : null,
   ].filter((message): message is string => Boolean(message));
 

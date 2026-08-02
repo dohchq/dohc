@@ -3,7 +3,11 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
-import { DEFAULT_WORKSPACE_SETTINGS } from "../../workspaces/workspaceSettings";
+import {
+  DEFAULT_WORKSPACE_SETTINGS,
+  type WorkspaceSettings,
+  type WorkspaceSettingsResult,
+} from "../../workspaces/workspaceSettings";
 import { DesktopSettings } from "./DesktopSettings";
 
 const config = {
@@ -34,6 +38,17 @@ const readyUpdateState = {
 };
 type SettingsUpdateState = typeof idleUpdateState | typeof readyUpdateState;
 const getDefaultMcpConfig = async (_payload: { workspaceId: string }) => config;
+
+async function readWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
+  return { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" };
+}
+
+async function writeWorkspaceSettings(payload: {
+  settings: WorkspaceSettings;
+}): Promise<WorkspaceSettingsResult> {
+  return { settings: payload.settings, source: "stored" };
+}
+
 const bridge = {
   getMcpConfig: vi.fn(getDefaultMcpConfig),
   getAgentRunStatus: vi.fn(async () => ({
@@ -99,16 +114,8 @@ const bridge = {
     settings: DEFAULT_USER_SETTINGS,
     source: "stored" as const,
   })),
-  getWorkspaceSettings: vi.fn(async () => ({
-    settings: DEFAULT_WORKSPACE_SETTINGS,
-    source: "default" as const,
-  })),
-  setWorkspaceSettings: vi.fn(
-    async (payload: { settings: typeof DEFAULT_WORKSPACE_SETTINGS }) => ({
-      settings: payload.settings,
-      source: "stored" as const,
-    }),
-  ),
+  getWorkspaceSettings: vi.fn(readWorkspaceSettings),
+  setWorkspaceSettings: vi.fn(writeWorkspaceSettings),
   resetWorkspaceSettings: vi.fn(async () => ({
     settings: DEFAULT_WORKSPACE_SETTINGS,
     source: "stored" as const,
@@ -139,6 +146,10 @@ function stubClipboard() {
 beforeEach(() => {
   mcpEnabled = false;
   updateReady = false;
+  // vi.clearAllMocks() clears calls, not implementations: restore the default
+  // reads so one test's unreadable file cannot leak into the next.
+  bridge.getWorkspaceSettings.mockImplementation(readWorkspaceSettings);
+  bridge.setWorkspaceSettings.mockImplementation(writeWorkspaceSettings);
   document.documentElement.dataset.theme = "";
   document.documentElement.dataset.density = "";
   document.documentElement.dataset.reduceMotion = "";
@@ -939,6 +950,61 @@ describe("DesktopSettings", () => {
     );
     await waitFor(() =>
       expect(screen.queryByTestId("attachment-folder-input")).toBeNull(),
+    );
+  });
+
+  // #483: over a settings file dohc cannot read, saving one unrelated control
+  // would write the whole resolved object — including the fail-closed opt-out
+  // — and the workspace would look opted out forever. main refuses; the dialog
+  // must say so and must not claim a save happened.
+  it("shows the refusal when the settings file cannot be read, and never says Saved", async () => {
+    const warning =
+      "Workspace settings could not be read. dohc records no history for this workspace until you fix /x/.dohc/settings.local.json.";
+    const refusal =
+      "dohc did not save workspace settings. dohc cannot read /x/.dohc/settings.local.json. Fix that file, or select Reset workspace in Advanced to replace it.";
+    const onDisk = {
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: { workspaceEngineAlpha: false },
+      },
+      source: "recovered" as const,
+      warning,
+    };
+    bridge.getWorkspaceSettings.mockResolvedValue(onDisk);
+    bridge.setWorkspaceSettings.mockResolvedValue({ ...onDisk, refusal });
+
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="files"
+        onClose={() => {}}
+      />,
+    );
+
+    await user.selectOptions(
+      await screen.findByTestId("attachment-location-select"),
+      "global-folder",
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("settings-warning").map((node) => node.textContent),
+      ).toContain(refusal),
+    );
+    expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe(
+      "error",
+    );
+    expect(screen.getByTestId("settings-save-state").textContent).not.toContain(
+      "Saved",
+    );
+    // The control snaps back to what is really on disk instead of showing an
+    // edit that never landed.
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
+      ).toBe("per-document"),
     );
   });
 

@@ -78,9 +78,6 @@ export function NoticeCenter(props: {
   syncStatus: SyncStatusResult | null;
   agentActive: boolean;
   conflictSummaries: string[];
-  // Set when this workspace's settings file exists but cannot be read. It
-  // reads as opted out, so no history is recorded — the warning names the file.
-  settingsWarning?: string;
   onOpenHistory: () => void;
   onOpenSettings: () => void;
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
@@ -278,12 +275,17 @@ export function NoticeCenter(props: {
     // workspace open). An unreadable settings file also reads as opted out,
     // and it takes the first branch: the second names Settings as the cause,
     // which would be a lie for a file the user never edited.
-    if (props.settingsWarning) {
+    //
+    // Both facts come from ONE read — main's, at workspace open, the read
+    // that decided whether anything is recorded (#483). A second read here
+    // could name a cause that never happened, or promise "no history" for a
+    // workspace that is recording.
+    if (props.syncStatus?.settingsWarning) {
       next.push({
         id: "workspace-settings-unreadable",
         tone: "warning",
         title: "History is off for this workspace",
-        body: props.settingsWarning,
+        body: props.syncStatus.settingsWarning,
         action: { label: "Open Settings", onClick: props.onOpenSettings },
         Icon: AlertTriangle,
       });
@@ -345,7 +347,6 @@ export function NoticeCenter(props: {
     props.onOpenHistory,
     props.onOpenSettings,
     props.onDismissSyncReview,
-    props.settingsWarning,
     props.syncStatus,
     installPending,
     installUpdate,

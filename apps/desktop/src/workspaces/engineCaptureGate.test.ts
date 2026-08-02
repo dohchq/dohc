@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,7 +10,10 @@ import type { WorkspaceCaptureHooks } from "./workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { DEFAULT_WORKSPACE_SETTINGS } from "./workspaceSettings";
-import { writeWorkspaceSettingsFile } from "./workspaceSettingsFile";
+import {
+  WORKSPACE_SETTINGS_FILE,
+  writeWorkspaceSettingsFile,
+} from "./workspaceSettingsFile";
 
 // The gate now REQUIRES daemon sessions, matching production, where main.ts
 // quits the app if the daemon does not start. These tests only assert null vs
@@ -62,6 +65,50 @@ async function writeOptOut(root: string): Promise<void> {
   });
 }
 
+// #483: the capture decision and the notice's cause must come from ONE read.
+// The gate is that read, so it must hand back WHY it recorded nothing.
+describe("captureForFlaggedWorkspace decision", () => {
+  it("returns the unreadable-file reason with the null capture", async () => {
+    const root = await tempRoot();
+    const workspace = { workspaceId: "ws-gate", rootPath: root };
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    await writeFile(join(root, ".dohc", WORKSPACE_SETTINGS_FILE), "{not json");
+
+    const decision = await captureForFlaggedWorkspace(
+      workspace,
+      hooks,
+      unusedSessions,
+    );
+    expect(decision.capture).toBeNull();
+    expect(decision.warning).toContain(
+      join(root, ".dohc", WORKSPACE_SETTINGS_FILE),
+    );
+  });
+
+  it("carries no reason for a deliberate opt-out or a readable file", async () => {
+    const root = await tempRoot();
+    const workspace = { workspaceId: "ws-gate", rootPath: root };
+    await writeOptOut(root);
+    const optedOut = await captureForFlaggedWorkspace(
+      workspace,
+      hooks,
+      unusedSessions,
+    );
+    expect(optedOut.capture).toBeNull();
+    // The generic "turned off in Settings" notice is the honest one here.
+    expect(optedOut.warning).toBeUndefined();
+
+    const on = await tempRoot();
+    const recording = await captureForFlaggedWorkspace(
+      { workspaceId: "ws-gate-on", rootPath: on },
+      hooks,
+      unusedSessions,
+    );
+    expect(recording.capture).not.toBeNull();
+    expect(recording.warning).toBeUndefined();
+  });
+});
+
 describe("dispatchScanEligible", () => {
   it("an open session keeps scanning after a mid-session opt-out, and stops after reopen", async () => {
     // The flag applies at the NEXT open (SettingsDialog + captureFor both
@@ -70,7 +117,11 @@ describe("dispatchScanEligible", () => {
     // forever; only the reopen — where captureFor reads the flag — opts out.
     const root = await tempRoot();
     const workspace = { workspaceId: "ws-gate", rootPath: root };
-    const openCapture = await captureForFlaggedWorkspace(workspace, hooks, unusedSessions);
+    const { capture: openCapture } = await captureForFlaggedWorkspace(
+      workspace,
+      hooks,
+      unusedSessions,
+    );
     expect(openCapture).not.toBeNull();
 
     await writeOptOut(root);
@@ -78,7 +129,11 @@ describe("dispatchScanEligible", () => {
       dispatchScanEligible(workspace, activityWith(openCapture, ["ws-gate"])),
     ).resolves.toBe(true);
 
-    const reopenCapture = await captureForFlaggedWorkspace(workspace, hooks, unusedSessions);
+    const { capture: reopenCapture } = await captureForFlaggedWorkspace(
+      workspace,
+      hooks,
+      unusedSessions,
+    );
     expect(reopenCapture).toBeNull();
     await expect(
       dispatchScanEligible(workspace, activityWith(reopenCapture, ["ws-gate"])),

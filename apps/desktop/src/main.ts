@@ -525,6 +525,7 @@ import {
 import { DEFAULT_WORKSPACE_SETTINGS } from "./workspaces/workspaceSettings";
 import {
   readWorkspaceSettingsFile,
+  saveWorkspaceSettingsFile,
   writeWorkspaceSettingsFile,
 } from "./workspaces/workspaceSettingsFile";
 import {
@@ -1621,7 +1622,7 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   // share's filtered pull, and a watcher would re-journal materialized files.
   captureFor: async (workspace, hooks) =>
     findWorkspace(workspace.workspaceId)?.shareView
-      ? null
+      ? { capture: null }
       : captureForFlaggedWorkspace(workspace, hooks, requireEngineSessions()),
 });
 const panelAgentRunSlots = new Map<string, string>();
@@ -1963,7 +1964,7 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
   const workspace = findWorkspace(workspaceId);
   if (!workspace || sharedViewOf(workspaceId)) return false;
   const scoped = (async () => {
-    const capture = await captureForFlaggedWorkspace(
+    const { capture } = await captureForFlaggedWorkspace(
       workspace,
       {
         activeAgentRun: () => null,
@@ -7117,11 +7118,9 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = SetWorkspaceSettingsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    await writeWorkspaceSettingsFile(workspace.rootPath, input.settings);
-    return WorkspaceSettingsResult.parse({
-      settings: input.settings,
-      source: "stored",
-    });
+    return WorkspaceSettingsResult.parse(
+      await saveWorkspaceSettingsFile(workspace.rootPath, input.settings),
+    );
   });
 
   ipcMain.handle(CHANNELS.resetWorkspaceSettings, async (event, payload) => {

@@ -40,12 +40,13 @@ describe("workspaceActivity capture hooks", () => {
     });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () =>
-        ({
+      captureFor: () => ({
+        capture: {
           start: vi.fn(),
           captureBatch,
           stop: vi.fn(async () => undefined),
-        }) as never,
+        } as never,
+      }),
       onRustEngineShadowActivity,
     });
     await activity.open(workspace());
@@ -73,7 +74,7 @@ describe("workspaceActivity capture hooks", () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (_workspace, hooks) => {
         liveSlot = hooks.activeAgentRun;
-        return null;
+        return { capture: null };
       },
     });
     await activity.open(workspace());
@@ -93,7 +94,7 @@ describe("workspaceActivity capture hooks", () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (_workspace, hooks) => {
         liveSlot = hooks.activeAgentRun;
-        return null;
+        return { capture: null };
       },
     });
     await activity.open(workspace());
@@ -121,13 +122,39 @@ describe("workspaceActivity capture hooks", () => {
 describe("workspaceActivity history-off status (retirement Phase C)", () => {
   it("reports historyRecordingOff when captureFor yields no capture (engine opt-out)", async () => {
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () => null,
+      captureFor: () => ({ capture: null }),
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingOff).toBe(true);
     expect(activity.getStatus("activity-test").historyRecordingOff).toBe(true);
     // No capture also means no versions surface.
     expect(activity.engineCaptureFor("activity-test")).toBeNull();
+    await activity.stopAll();
+  });
+
+  // #483: main's open-time read is the ONLY source of the notice's cause. It
+  // rides the status the renderer already consumes, so a renderer-side read
+  // can neither invent a cause nor promise "no history" while recording.
+  it("carries the open-time read's reason into the status", async () => {
+    const warning =
+      "Workspace settings could not be read. dohc records no history for this workspace until you fix /ws/.dohc/settings.local.json.";
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => ({ capture: null, warning }),
+    });
+    const status = await activity.open(workspace());
+    expect(status.historyRecordingOff).toBe(true);
+    expect(status.settingsWarning).toBe(warning);
+    expect(activity.getStatus("activity-test").settingsWarning).toBe(warning);
+    await activity.stopAll();
+  });
+
+  it("carries no reason when the open-time read was fine", async () => {
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => ({ capture: null }),
+    });
+    const status = await activity.open(workspace());
+    expect(status.historyRecordingOff).toBe(true);
+    expect(status.settingsWarning).toBeUndefined();
     await activity.stopAll();
   });
 

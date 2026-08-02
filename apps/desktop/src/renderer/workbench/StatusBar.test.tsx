@@ -63,7 +63,6 @@ function renderBar(
       syncStatus={props.syncStatus ?? null}
       agentActive={props.agentActive ?? false}
       conflictSummaries={props.conflictSummaries ?? []}
-      {...(props.settingsWarning ? { settingsWarning: props.settingsWarning } : {})}
       onConnectCloud={() => {}}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
@@ -281,9 +280,11 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingOff: true,
+        // #483: the cause rides main's open-time read, on the same status
+        // that decided history is off. One read answers both.
+        settingsWarning:
+          "Workspace settings could not be read. dohc records no history for this workspace until you fix /ws/.dohc/settings.local.json.",
       },
-      settingsWarning:
-        "Workspace settings could not be read. dohc records no history for this workspace until you fix /ws/.dohc/settings.local.json.",
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-workspace-settings-unreadable");
