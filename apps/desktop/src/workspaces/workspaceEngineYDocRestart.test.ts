@@ -80,7 +80,8 @@ async function reconnectFailureCapture(prefix: string) {
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present" as const,
+      head: "present" as const,
+      lineage: "existing" as const,
       async applyLocalUpdate() {
         throw Object.assign(new Error("control frame encoding failed"), {
           code: "transport-error",
@@ -253,7 +254,8 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present" as const,
+      head: "present" as const,
+      lineage: "existing" as const,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
         if (generation === 2 && secondGenerationApplyCount++ === 0) {
@@ -511,7 +513,8 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present" as const,
+      head: "present" as const,
+      lineage: "existing" as const,
       async applyLocalUpdate(update) {
         if (openedGeneration === 1) throw refusal;
         Y.applyUpdate(doc, update);
@@ -610,7 +613,8 @@ it("releases a close-latched failed generation with settle true before the next 
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present" as const,
+      head: "present" as const,
+      lineage: "existing" as const,
       async applyLocalUpdate(update) {
         // Models the round-1 provider latch: once close starts, another apply
         // resolves without journaling. Capture must never leave this provider
@@ -738,7 +742,8 @@ it("defers a version switch behind a dead generation until release converges", a
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present" as const,
+      head: "present" as const,
+      lineage: "existing" as const,
       async applyLocalUpdate() {
         applyCount += 1;
         throw refusal;
@@ -890,7 +895,8 @@ it("treats typed session-not-found during release-first rebind as already releas
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present" as const,
+      head: "present" as const,
+      lineage: "existing" as const,
       async applyLocalUpdate(update) {
         if (openedGeneration === 1) throw new Error("record refusal");
         Y.applyUpdate(doc, update);
@@ -988,7 +994,8 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present",
+      head: "present",
+      lineage: "existing" as const,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
       },
@@ -1089,7 +1096,8 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present",
+      head: "present",
+      lineage: "existing" as const,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
       },
@@ -1186,7 +1194,8 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present" as const,
+      head: "present" as const,
+      lineage: "existing" as const,
       async applyLocalUpdate() {
         throw refusal;
       },
@@ -1270,6 +1279,7 @@ async function daemonDeathCapture(
     diskMarkdown: string;
     settled: string[];
     seedRequests: boolean[];
+    reportedLineage: Array<"existing" | "absent">;
     refuseApply: boolean;
     failRelease: boolean;
     releasedGenerations: number[];
@@ -1290,6 +1300,10 @@ async function daemonDeathCapture(
     diskMarkdown: "",
     settled: [] as string[],
     seedRequests: [] as boolean[],
+    // What each open REPORTED for the lineage. A fake that hardcodes this
+    // cannot be caught by any assertion about the code under test, so the
+    // fixture is asserted on directly.
+    reportedLineage: [] as Array<"existing" | "absent">,
     // A LIVE daemon refusing the write (not a transport death): the generation
     // still owns its lease, so recovery must release before reopening.
     refuseApply: false,
@@ -1361,6 +1375,11 @@ async function daemonDeathCapture(
       Y.applyUpdate(doc, Y.encodeStateAsUpdate(seed));
     }
     generations.push(doc);
+    const reportLineage = (): "existing" | "absent" => {
+      const reported = state.lineage === "present" ? "existing" : "absent";
+      state.reportedLineage.push(reported);
+      return reported;
+    };
     const settle = (): string => {
       const markdown = doc.getText("plainText").toString();
       state.settled.push(markdown);
@@ -1372,7 +1391,17 @@ async function daemonDeathCapture(
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: state.lineage,
+      // The .md exists on disk throughout this fake, so the VERSION SNAPSHOT
+      // never goes away: `head` is about that, and stays present.
+      head: "present" as const,
+      // MAPPED from the state this fake models, never hardcoded.
+      // `loseDurableLineage()` is the whole point of the fixture — it models a
+      // crash that took the durable CRDT rows — and a fake that kept reporting
+      // "existing" through it would certify the one state it exists to stage.
+      // No production read reaches this today (the guard consults `lineage`
+      // only once `head` is absent, which cannot happen here), so the fixture
+      // is asserted on DIRECTLY instead; see `state.reportedLineage`.
+      lineage: reportLineage(),
       async applyLocalUpdate(update) {
         if (!state.daemonAlive) throw transportDeath();
         if (state.refuseApply) throw new Error("record-update-refused");
@@ -1678,6 +1707,12 @@ it("does not duplicate the document when the reopen finds no durable lineage", a
   // The first open seeds; every replacement declines, because the canonical doc
   // already holds the document and will replay it.
   expect(state.seedRequests).toEqual([true, false]);
+  // The fake told the truth about the state it models: it reported an existing
+  // lineage while it had one, and an absent lineage once the modelled crash
+  // took it. A fixture that hardcoded "existing" here would keep passing every
+  // assertion above while certifying the one condition it exists to stage.
+  expect(state.reportedLineage[0]).toBe("existing");
+  expect(state.reportedLineage.at(-1)).toBe("absent");
   await capture.stop();
 });
 
@@ -2151,7 +2186,8 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present",
+      head: "present" as const,
+      lineage: "existing" as const,
       applyLocalUpdate(update: Uint8Array): Promise<void> {
         // Generation 1 refuses SYNCHRONOUSLY — no settle is armed, so the
         // hand-over callback never runs on this path.
@@ -2298,7 +2334,8 @@ it("announces a recovered edit exactly once when both arm points run", async () 
       initialUpdate: Y.encodeStateAsUpdate(doc),
       contentKind: "plaintext",
       path: options.path,
-      lineage: "present",
+      head: "present" as const,
+      lineage: "existing" as const,
       async applyLocalUpdate(update: Uint8Array): Promise<void> {
         // Generation 1 arms its settle, THEN its journal rejects.
         if (opened === 1) throw new Error("record-update-refused");

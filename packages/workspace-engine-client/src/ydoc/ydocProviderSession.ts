@@ -70,14 +70,34 @@ export interface EngineYdocProviderSession {
   readonly initialUpdate: Uint8Array;
   readonly contentKind: YdocContentKind;
   readonly path: string;
-  // "absent" means the daemon found no durable CRDT lineage for this object.
-  readonly lineage: "present" | "absent";
+  // Whether the ENTERED VERSION has a committed snapshot for this path.
+  // "absent" plus a lineage that is also absent means the daemon bound an
+  // EMPTY doc over a path the version does not contain: either the caller is
+  // creating the file (an empty artifact is on disk, not yet captured), or the
+  // path is gone and binding a writable editor to it would materialize a
+  // phantom file on the first keystroke. The consumer owns that decision; the
+  // contract is stated on `WorkspaceEngineCapture.openYDocSession`.
+  readonly head: "present" | "absent";
+  // Whether the daemon resumed durable CRDT state for this object. Read WITH
+  // `head`: head-absent plus lineage-existing is a crash-orphaned draft the
+  // daemon deliberately resurrects, and its CRDT rows are the only copy of
+  // those edits.
+  readonly lineage: "existing" | "absent";
   applyLocalUpdate(update: Uint8Array): Promise<void>;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
   applyExternalMarkdownEdit(
     markdown: string,
   ): Promise<YdocApplyExternalMarkdownEditResult>;
-  close(options?: { settle?: boolean; summary?: string }): Promise<void>;
+  // `settle: false` alone does NOT promise the file will be left alone: a
+  // release the daemon refuses as unsettled ESCALATES to a settling close, so
+  // pending edits survive a transient failure. A caller that must never
+  // materialize this path has to say so with `settleOnRefusal: false`, which
+  // turns that escalation off and surfaces the refusal instead.
+  close(options?: {
+    settle?: boolean;
+    summary?: string;
+    settleOnRefusal?: boolean;
+  }): Promise<void>;
 }
 
 export async function openEngineYdocProviderSession(
@@ -228,6 +248,7 @@ export async function openEngineYdocProviderSession(
     initialUpdate: session.initialUpdate,
     contentKind: session.contentKind,
     path: session.path,
+    head: session.head,
     lineage: session.lineage,
 
     applyLocalUpdate(update) {
@@ -297,6 +318,16 @@ export async function openEngineYdocProviderSession(
           await session.close({ settle: false });
         } catch (error) {
           if (!isYdocSessionNotFoundRefusal(error)) {
+            // The escalation preserves pending edits through a transient
+            // failure, and it is right for every ordinary teardown. It is
+            // WRONG for a caller releasing a session it is about to declare
+            // absent: the daemon refuses the release precisely BECAUSE the
+            // lineage holds content, and settling it writes the file that
+            // caller is about to say does not exist. `settleOnRefusal: false`
+            // hands the refusal back instead, and the daemon keeps the session
+            // (ydoc_close_inner reinserts it), so the caller still has a live
+            // session to decide about.
+            if (closeOptions?.settleOnRefusal === false) throw error;
             try {
               // Escalate to a settling close after a transient failure so
               // pending edits are preserved.

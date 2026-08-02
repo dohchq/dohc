@@ -121,6 +121,10 @@ async fn stage_headless_session_over_an_empty_artifact(
             // The seed comes from the HEAD, not from disk, so a null seed IS
             // the proof that no head exists yet.
             assert_eq!(opened["lineage"], json!("absent"));
+            // ...and the open reports that absence in its own right, which is
+            // what the desktop's absent-head contract (#534) reads to tell a
+            // creation apart from a path the version does not have.
+            assert_eq!(opened["head"], json!("absent"));
             return (path, opened);
         }
         // Capture won the race. Drop this session and stage again elsewhere;
@@ -217,6 +221,10 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     assert_eq!(opened["lineage"], json!("absent"));
+    // A CAPTURED file: no CRDT lineage yet, but the version HAS a snapshot for
+    // the path. The open consumer keys its refusal on `head`, not on `lineage`
+    // — reading `lineage` here would refuse every ordinary first open.
+    assert_eq!(opened["head"], json!("present"));
     assert_eq!(opened["seedMarkdown"], json!("before"));
     let session_id = opened["sessionId"].as_str().expect("session id");
     let object_id = opened["objectId"].as_str().expect("object id");

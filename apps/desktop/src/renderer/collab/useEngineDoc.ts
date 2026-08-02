@@ -15,10 +15,11 @@ import {
 // arrives as a forwarded remote delta on the same channel.
 //
 // available:false AND opening:false => the doc is NOT engine-backed (unflagged
-// workspace, secret path, missing file, or already live) — the caller stays on
-// the plain local autosave editor showing the real on-disk content. While
-// opening:true the answer is not known yet and the caller must stay read-only.
-// Undo/redo is intact: the
+// workspace, secret path, or already live) — the caller stays on the plain
+// local autosave editor showing the real on-disk content. While opening:true
+// the answer is not known yet and the caller must stay read-only. The other
+// exception is `notInVersion`, where the answer IS known and the caller must
+// stop editing rather than fall back (#534). Undo/redo is intact: the
 // Collaboration extension bundles the Yjs UndoManager binding (COLLAB_STARTER_KIT
 // disables the plain history), so Mod-z/Mod-y drive the CRDT undo stack.
 //
@@ -63,6 +64,12 @@ export type UseEngineDoc = {
   // a 1s timer that flipped to "saved" regardless of what the engine did —
   // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
   saveState: EngineDocSaveState;
+  // The path is not in the version this workspace is on: a version switch
+  // removed it while this open was queued behind that switch (#534). Unlike
+  // every other available:false the caller must NOT fall back to the writable
+  // plain editor, whose autosave would write the file back into the version the
+  // user just entered.
+  notInVersion: boolean;
 };
 
 // What ONE open answers: a workspace, a path, the gate, and the active-version
@@ -85,7 +92,11 @@ function engineDocRequestKey(input: {
 // The settled result of one open, stamped with the request it answers.
 type EngineDocOpenOutcome =
   | { key: string; kind: "bound"; doc: Y.Doc }
-  | { key: string; kind: "unavailable" };
+  | { key: string; kind: "unavailable" }
+  // Its OWN kind, not a flag on "unavailable": every other unavailable answer
+  // means "fall back to the plain editor", and this one means the opposite
+  // (#534). Collapsing them would put the two behind one branch again.
+  | { key: string; kind: "not-in-version" };
 
 let engineDocSessionCounter = 0;
 function nextSessionId(): string {
@@ -113,6 +124,7 @@ function makeTransport(
       return {
         available: result.available,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
+        ...(result.notInVersion ? { notInVersion: true } : {}),
       };
     },
     applyLocalUpdate(update) {
@@ -175,6 +187,10 @@ export function useEngineDoc(input: {
   const available = settled?.kind === "bound";
   const doc = settled?.kind === "bound" ? settled.doc : null;
   const opening = input.enabled && settled === null;
+  // Derived from the same settled result, so it is subject to the same
+  // request-identity rule: a refusal for the version the user just LEFT never
+  // repaints the document they just entered.
+  const notInVersion = settled?.kind === "not-in-version";
 
   useEffect(() => {
     setSaveState("saved");
@@ -205,8 +221,13 @@ export function useEngineDoc(input: {
         binding = bound;
         if (!bound.available || !bound.doc) {
           // Resolved: NOT engine-backed. The caller may offer the plain local
-          // editor again — that is what `opening` was holding back.
-          setOutcome({ key, kind: "unavailable" });
+          // editor again — that is what `opening` was holding back. EXCEPT
+          // when the path is not in this version, where offering it would
+          // write the phantom the engine just refused (#534).
+          setOutcome({
+            key,
+            kind: bound.notInVersion ? "not-in-version" : "unavailable",
+          });
           return;
         }
         // An edit is unsaved the instant it happens. Only main's settle report
@@ -276,5 +297,5 @@ export function useEngineDoc(input: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input.workspaceId, input.path, input.enabled, input.reopenKey]);
 
-  return { available, opening, doc, saveState };
+  return { available, opening, doc, saveState, notInVersion };
 }

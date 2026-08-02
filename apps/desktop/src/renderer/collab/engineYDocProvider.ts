@@ -23,9 +23,16 @@ const ENGINE_SOURCED_ORIGIN: unique symbol = Symbol("dohc.engineSourcedUpdate");
 
 export interface EngineYDocTransport {
   // Open the engine session in main. available:false => not an engine-backed
-  // doc (unflagged workspace, secret path, missing file, or already live) — the
-  // caller falls back to the plain local editor.
-  open(): Promise<{ available: boolean; initialUpdate?: Uint8Array }>;
+  // doc (unflagged workspace, secret path, or already live) — the caller falls
+  // back to the plain local editor. notInVersion:true is the ONE available:false
+  // that must not fall back that way: the path is not in the version this
+  // workspace is on, and the plain editor's autosave would write it back as a
+  // phantom file (#534).
+  open(): Promise<{
+    available: boolean;
+    initialUpdate?: Uint8Array;
+    notInVersion?: boolean;
+  }>;
   // Ship a local editor update to main, where it is journaled via recordUpdate.
   applyLocalUpdate(update: Uint8Array): void;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
@@ -40,6 +47,9 @@ export interface EngineYDocBinding {
   // (available:false) — the caller stays on the local autosave editor.
   readonly doc: Y.Doc | null;
   readonly available: boolean;
+  // The path is not in the version this workspace is on. The caller must stop
+  // editing the document, not downgrade it to the writable plain editor.
+  readonly notInVersion: boolean;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
   // destroy the mirror doc. Idempotent.
   destroy(): Promise<void>;
@@ -55,6 +65,7 @@ export async function bindEngineYDoc(
     return {
       doc: null,
       available: false,
+      notInVersion: opened.notInVersion === true,
       async destroy() {
         // Best-effort close even on the unavailable path: main may have taken a
         // reservation before deciding not to serve (it should not, but never
@@ -91,6 +102,7 @@ export async function bindEngineYDoc(
   return {
     doc,
     available: true,
+    notInVersion: false,
     async destroy() {
       if (destroyed) return;
       destroyed = true;

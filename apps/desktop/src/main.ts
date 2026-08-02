@@ -413,6 +413,7 @@ import type {
   WorkspaceEngineCapture,
   WorkspaceEngineYDocProviderSession,
 } from "./workspaces/workspaceEngineCapture";
+import { isYDocPathNotInVersionError } from "./workspaces/workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
   createRustEngineDaemon,
@@ -7455,8 +7456,12 @@ function registerIpcHandlers(
   // and forwards remote CRDT deltas back to the sender that opened it. No
   // websocket or token is needed. Gated on an engine-flagged workspace + a
   // rich (markdown) path; a
-  // secret/not-found/already-live throw surfaces as available:false so the
-  // renderer falls back to the plain local autosave editor.
+  // secret/already-live throw surfaces as available:false so the renderer falls
+  // back to the plain local autosave editor. The ONE refusal that must not fall
+  // back that way is path-not-in-version (#534): the plain editor is writable
+  // too, and its autosave would write the very phantom file the engine refusal
+  // prevented. That one comes back as available:false + notInVersion:true, and
+  // the renderer stops editing instead of downgrading.
   ipcMain.handle(CHANNELS.engineYDocOpen, async (event, payload) => {
     assertTrustedSender(event);
     const input = OpenEngineYDocSessionPayload.parse(payload);
@@ -7540,15 +7545,21 @@ function registerIpcHandlers(
           },
         });
       } catch (error) {
-        // Secret path, missing file, or already-live: fall back gracefully —
-        // but never silently. A refusal here downgrades the doc to the plain
-        // editor, and an unlogged permanent refusal is indistinguishable from
-        // intended fallback (it hid a dead engine editor for weeks).
+        // Secret path, already-live, or an uncaptured artifact: fall back
+        // gracefully — but never silently. A refusal here downgrades the doc to
+        // the plain editor, and an unlogged permanent refusal is
+        // indistinguishable from intended fallback (it hid a dead engine editor
+        // for weeks). Only path-not-in-version sets the flag below; an
+        // uncaptured artifact is really on disk, so claiming the version does
+        // not have it would be false.
         console.error(
           `[desktop] engine Y.Doc open refused for ${input.path}:`,
           error,
         );
-        return OpenEngineYDocSessionResult.parse({ available: false });
+        return OpenEngineYDocSessionResult.parse({
+          available: false,
+          ...(isYDocPathNotInVersionError(error) ? { notInVersion: true } : {}),
+        });
       }
       // The renderer can die or reload DURING the await above. Close the stale
       // session before crash cleanup completes so its reservation cannot block
