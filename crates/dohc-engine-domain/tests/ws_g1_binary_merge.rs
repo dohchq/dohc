@@ -629,8 +629,9 @@ fn a_replayed_binary_fast_forward_reports_the_head_it_wrote() {
 /// The OTHER direction of a source-only change: the target holds bytes it has
 /// not touched since the fork, and the source replaced them with TEXT. Only the
 /// source moved, so the comparison reads `IncomingChanged` — but the merge
-/// still goes to the user, because the binary fast-forward writes BYTES and the
-/// text seams cannot be handed a binary head to overwrite.
+/// still goes to the user: the binary fast-forward writes BYTES, and the TEXT
+/// fast-forward does not hand its seam a binary current (#491). Resolving does
+/// — one click later, `ApplyIncoming` writes the incoming text over the bytes.
 ///
 /// MUTATION: drop the `incoming.binary` gate from the fast-forward -> the merge
 /// hands a TEXT blob address to the binary write seam and dies with
