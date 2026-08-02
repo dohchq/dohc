@@ -21,6 +21,12 @@ const DEFAULT_MAX_RESTARTS = 3;
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 2_000;
 const DEFAULT_HEALTHY_RESET_MS = 30_000;
+// Ten restarts inside ten minutes is a mean generation lifetime under 60s —
+// twice DEFAULT_HEALTHY_RESET_MS, the point at which a generation is declared
+// healthy. A daemon that keeps dying just past that threshold resets the
+// attempt budget forever, so only this window can end it.
+const DEFAULT_RESTART_WINDOW_MS = 600_000;
+const DEFAULT_MAX_RESTARTS_PER_WINDOW = 10;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface EngineDaemonClient {
@@ -42,6 +48,8 @@ export interface EngineDaemonLifecycleOptions {
   initialBackoffMs?: number;
   maxBackoffMs?: number;
   healthyResetMs?: number;
+  restartWindowMs?: number;
+  maxRestartsPerWindow?: number;
   requestTimeoutMs?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
   // Fires once per launched-and-healthy daemon generation (the first launch
@@ -142,6 +150,7 @@ export class EngineDaemonLifecycle {
   private activeGeneration = 0;
   private nextRequestId = 1;
   private restartAttempts = 0;
+  private restartTimestamps: number[] = [];
   private running = false;
   private stopping = false;
   private healthyResetTimer: ReturnType<typeof setTimeout> | null = null;
@@ -548,10 +557,29 @@ export class EngineDaemonLifecycle {
 
   private async restartAfterExit(): Promise<void> {
     const maxRestarts = this.options.maxRestarts ?? DEFAULT_MAX_RESTARTS;
+    const windowMs = this.options.restartWindowMs ?? DEFAULT_RESTART_WINDOW_MS;
+    const maxPerWindow =
+      this.options.maxRestartsPerWindow ?? DEFAULT_MAX_RESTARTS_PER_WINDOW;
     let lastError: Error = new EngineDaemonUnavailableError(
       "Rust engine daemon exited unexpectedly.",
     );
     while (this.restartAttempts < maxRestarts) {
+      // `restartAttempts` bounds a burst; a healthy generation resets it. This
+      // window bounds the rate, so a daemon that dies just past healthyResetMs
+      // over and over still ends terminal instead of restarting forever.
+      const now = Date.now();
+      this.restartTimestamps = this.restartTimestamps.filter(
+        (at) => at > now - windowMs,
+      );
+      if (this.restartTimestamps.length >= maxPerWindow) {
+        const terminal = new EngineDaemonUnavailableError(
+          `Rust engine restarted ${this.restartTimestamps.length} times within ${windowMs}ms, above the limit of ${maxPerWindow} restarts per ${windowMs}ms.`,
+          { cause: lastError },
+        );
+        this.reportFailure(terminal, true);
+        throw terminal;
+      }
+      this.restartTimestamps.push(now);
       const attempt = ++this.restartAttempts;
       const delay = Math.min(
         (this.options.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS) *

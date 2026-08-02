@@ -290,6 +290,93 @@ describe("Rust engine daemon lifecycle", () => {
     }
   });
 
+  it("ends terminal when restarts keep recurring across healthy generations", async () => {
+    // The crash-every-31s daemon: every generation outlives healthyResetMs, so
+    // the attempt budget resets before it can ever be exhausted and only the
+    // rolling window can reach terminal — the one signal the desktop turns
+    // into a dialog.
+    // MUTATION: drop the window check in restartAfterExit and this test times
+    // out waiting for a terminal failure that never arrives.
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const terminalFailures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      restartWindowMs: 60_000,
+      maxRestartsPerWindow: 3,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new FakeClient();
+      },
+      onFailure: (error, terminal) => {
+        if (terminal) terminalFailures.push(error);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      for (let generation = 0; generation < 3; generation += 1) {
+        exits[generation]?.(1, null);
+        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2));
+        // Outlive the healthy window by a wide multiple, as the budget-reset
+        // test above does: each replacement must reset the attempt budget, or
+        // maxRestarts: 1 would end this run terminal for the wrong reason.
+        await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
+      }
+      exits[3]?.(1, null);
+
+      await vi.waitFor(() => expect(terminalFailures).toHaveLength(1), {
+        timeout: 2_000,
+      });
+      expect(terminalFailures[0]?.message).toMatch(
+        /restarted 3 times within 60000ms, above the limit of 3 restarts per 60000ms/,
+      );
+      expect(exits).toHaveLength(4);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("forgets restarts older than the rolling window", async () => {
+    // MUTATION: drop the timestamp pruning in restartAfterExit and restarts
+    // spaced four windows apart accumulate, so the third crash ends terminal
+    // and both assertions below fail.
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const terminalFailures: Error[] = [];
+    const restartWindowMs = HEALTHY_RESET_MS * 2;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      restartWindowMs,
+      maxRestartsPerWindow: 2,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new FakeClient();
+      },
+      onFailure: (error, terminal) => {
+        if (terminal) terminalFailures.push(error);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      for (let generation = 0; generation < 3; generation += 1) {
+        exits[generation]?.(1, null);
+        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2));
+        await new Promise((resolve) => setTimeout(resolve, restartWindowMs * 4));
+      }
+
+      expect(exits).toHaveLength(4);
+      expect(terminalFailures).toHaveLength(0);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
   it("counts a replacement that handshakes then hangs as a failed restart", async () => {
     let initialExit: EngineClientSpawnOptions["onExit"];
     let launchCount = 0;
