@@ -76,9 +76,14 @@ function schemaSettled(db: EngineDb): boolean {
     .all();
   if (ledger.length === 0) return false;
   const row = db
-    .prepare("SELECT COUNT(*) AS n FROM engine_migrations WHERE completed_at IS NULL")
-    .get() as { n: number } | undefined;
-  return Number(row?.n ?? 0) === 0;
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              COUNT(*) FILTER (WHERE completed_at IS NULL) AS pending
+       FROM engine_migrations`,
+    )
+    .get() as { total: number; pending: number } | undefined;
+  // No rows at all is a ledger that has recorded nothing, never a settled one.
+  return Number(row?.total ?? 0) > 0 && Number(row?.pending ?? 0) === 0;
 }
 
 // Once the ledger has settled, every name above MUST be there. A dropped or
