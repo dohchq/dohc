@@ -1135,13 +1135,34 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     tokio::time::sleep(Duration::from_millis(800)).await;
     let flushed = call(&transport, &handle, 3, "capture.flush", json!({})).await;
     assert_eq!(flushed["settled"], json!(true));
+    // PROVE the head this test exists to settle over. A flush that ingested
+    // nothing would leave the session's expectation matching an absent head,
+    // and every assertion below would pass without the adoption path ever
+    // running — green while testing nothing.
+    let ingested = call(
+        &transport,
+        &handle,
+        4,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "notes/untitled.md" }),
+    )
+    .await;
+    assert_eq!(
+        ingested["text"],
+        json!(""),
+        "capture must mint an EMPTY head"
+    );
+    assert_eq!(
+        ingested["objectId"], opened["objectId"],
+        "and mint it on the object the session holds"
+    );
 
     // Step 5: the first typed edit must still reach disk.
     let typed = "The first thing typed into a brand-new document.";
     call(
         &transport,
         &handle,
-        4,
+        5,
         "ydoc.recordUpdate",
         json!({
             "sessionId": session_id,
@@ -1152,7 +1173,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     let settled = call(
         &transport,
         &handle,
-        5,
+        6,
         "ydoc.settle",
         json!({ "sessionId": session_id, "summary": "type" }),
     )
@@ -1168,7 +1189,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     call(
         &transport,
         &handle,
-        6,
+        7,
         "ydoc.recordUpdate",
         json!({
             "sessionId": session_id,
@@ -1179,16 +1200,19 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     let resettled = call(
         &transport,
         &handle,
-        7,
+        8,
         "ydoc.settle",
         json!({ "sessionId": session_id, "summary": "type more" }),
     )
     .await;
     let resettled = resettled["markdown"].as_str().expect("markdown");
-    // Compare disk against what the settle REPORTED, not a hand-written
-    // concatenation: two independent client ids inserting at offset 0 order
-    // by client id, which is not fixed across runs.
-    assert!(resettled.contains("More typing. "));
+    // BOTH edits, not just the newest: a second settlement that dropped the
+    // first would otherwise satisfy every assertion here. Order is not
+    // asserted — two independent client ids inserting at offset 0 order by
+    // client id, which is not fixed across runs — so the disk comparison
+    // below uses what the settle REPORTED rather than a concatenation.
+    assert!(resettled.contains("More typing. "), "{resettled}");
+    assert!(resettled.contains(typed), "{resettled}");
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("notes/untitled.md")).expect("resettled"),
         resettled,
@@ -1198,12 +1222,12 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     call(
         &transport,
         &handle,
-        8,
+        9,
         "ydoc.close",
         json!({ "sessionId": session_id }),
     )
     .await;
-    call(&transport, &handle, 9, "workspace.close", json!({})).await;
+    call(&transport, &handle, 10, "workspace.close", json!({})).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
