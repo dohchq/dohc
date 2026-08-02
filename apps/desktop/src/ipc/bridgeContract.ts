@@ -69,16 +69,20 @@ const WORKSPACE_ID = z
   .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
 
-// Stored-body fields are the exception to the caps above: they carry text the
-// ENGINE already accepted, not text a renderer supplied. The engine accepts a
-// text write up to MAX_TEXT_BYTES — 10 MiB of UTF-8
-// (`crates/dohc-engine-domain/src/store.rs`) — and it never gates a settle on
-// the smaller in-band response cap (`crates/dohc-engine-runtime/src/actor.rs`
-// settle), so an over-cap document lands on disk like any other. The bridge
-// carries the same contract, so a body the engine stored can always reach the
-// renderer. Zod counts UTF-16 code units and UTF-8 never spends less than one
-// byte per code unit, so this character bound admits every body the engine
-// could hold.
+// Stored-body fields are the exception to the caps above. Every RESPONSE field
+// on this schema carries text the ENGINE already accepted, not text a renderer
+// supplied. The engine accepts a text write up to MAX_TEXT_BYTES — 10 MiB of
+// UTF-8 (`crates/dohc-engine-domain/src/store.rs`) — and it never gates a
+// settle on the smaller in-band response cap
+// (`crates/dohc-engine-runtime/src/actor.rs` settle), so an over-cap document
+// lands on disk like any other. The bridge carries the same contract, so a
+// body the engine stored can always reach the renderer. Zod counts UTF-16 code
+// units and UTF-8 never spends less than one byte per code unit, so this
+// character bound admits every body the engine could hold.
+//
+// One REQUEST field shares the schema — the combined conflict resolution at
+// VERSION_TEXT. There this bound is only a ceiling on what crosses IPC; the
+// engine owns the real limit and re-checks it.
 export const ENGINE_TEXT_MAX_CHARS = 10 * 1024 * 1024;
 function engineStoredText(label: string) {
   return z.string().refine(
@@ -1579,8 +1583,14 @@ const VERSION_ID = z.string().min(1).max(200);
 export const WORKSPACE_VERSION_NAME_MAX = 80;
 // Conflict and compare sides are the same hydrated stored bodies the timeline
 // carries, passed through verbatim (`engineHistoryIpc.ts` versionConflictForIpc,
-// `versionCompare.ts`), so they carry the engine's own text contract. A
-// combined resolution is written back through the same contract.
+// `versionCompare.ts`), so they carry the engine's own text contract.
+//
+// The combined resolution (`keep-combined` below) is the one REQUEST use, and
+// its contract is NOT this one: the engine caps a combined write at its 128 KiB
+// in-band cap and refuses above it
+// (`crates/dohc-workspace-engine/src/lib.rs:7574`). This bound only keeps an
+// unbounded string off the wire; the engine decides what applies. Raising the
+// engine to match the sides it hands out is tracked in #528.
 const VERSION_TEXT = engineStoredText("version text");
 
 export const WorkspaceVersionRecord = z.object({
