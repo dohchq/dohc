@@ -39,12 +39,21 @@ const { CONFLICT_COMBINED_MAX_BYTES, CONFLICT_PREVIEW_MAX_CHARS } = await import
 const { ConflictReviewDialog, openConflictId } = await import("./WorkspaceVersions");
 
 // 250,000 lines of 41 characters: over 10 MiB, the band #524 opened up.
+//
+// Built ONCE per marker and shared by every fixture that needs one. Strings
+// are immutable, so two conflicts holding the same body are indistinguishable
+// from two holding equal copies — and the twenty-card test below wanted forty
+// of these, which is 435 MiB of heap before the first render and a plausible
+// way to OOM a CI worker.
 function hugeBody(marker: string): string {
   const line = marker.repeat(40);
   const out: string[] = [];
   for (let index = 0; index < 250_000; index += 1) out.push(line);
   return out.join("\n") + "\n";
 }
+
+const HUGE_CURRENT = hugeBody("a");
+const HUGE_INCOMING = hugeBody("b");
 
 function conflict(
   overrides: Partial<WorkspaceVersionConflict> = {},
@@ -102,7 +111,7 @@ async function openReview(conflicts: WorkspaceVersionConflict[]) {
 
 describe("a conflict side pane", () => {
   it("paints one window of a 10 MiB side and says what it held back", async () => {
-    const incoming = hugeBody("b");
+    const incoming = HUGE_INCOMING;
     await openReview([
       conflict({ currentText: "main side\n", incomingText: incoming }),
     ]);
@@ -124,7 +133,7 @@ describe("a conflict side pane", () => {
   });
 
   it("shows one more window per press, and the rest stays reachable", async () => {
-    await openReview([conflict({ incomingText: hugeBody("b") })]);
+    await openReview([conflict({ incomingText: HUGE_INCOMING })]);
     const paintedLength = () =>
       (screen.getAllByTestId("version-conflict-side-text")[1].textContent ?? "")
         .length;
@@ -148,7 +157,7 @@ describe("combine by hand", () => {
     // replacement written by hand is a body the engine takes however large the
     // two sides are. Removing the affordance refused work it accepts.
     await openReview([
-      conflict({ currentText: hugeBody("a"), incomingText: hugeBody("b") }),
+      conflict({ currentText: HUGE_CURRENT, incomingText: HUGE_INCOMING }),
     ]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
@@ -187,7 +196,7 @@ describe("combine by hand", () => {
     // the user can combine by hand. Preferring the oversized side and then
     // declaring the affordance unavailable refuses work the engine accepts.
     await openReview([
-      conflict({ currentText: "main side\n", incomingText: hugeBody("b") }),
+      conflict({ currentText: "main side\n", incomingText: HUGE_INCOMING }),
     ]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
@@ -283,7 +292,7 @@ describe("combine by hand", () => {
     // A deletion against an oversized edit. The absent side is a zero-byte
     // start the engine accepts, so removing the affordance refused work.
     await openReview([
-      conflict({ currentText: null, incomingText: hugeBody("b") }),
+      conflict({ currentText: null, incomingText: HUGE_INCOMING }),
     ]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
@@ -331,8 +340,8 @@ describe("a list of open conflicts", () => {
       conflict({
         conflictId: `h-${index}`,
         path: `heavy-${index}.md`,
-        currentText: hugeBody("a"),
-        incomingText: hugeBody("b"),
+        currentText: HUGE_CURRENT,
+        incomingText: HUGE_INCOMING,
       }),
     );
     await openReview(heavy);
@@ -353,7 +362,7 @@ describe("a list of open conflicts", () => {
     // every byte of both on each one. Clicking Keep sets busy, which is a
     // local rerender.
     await openReview([
-      conflict({ currentText: hugeBody("a"), incomingText: hugeBody("b") }),
+      conflict({ currentText: HUGE_CURRENT, incomingText: HUGE_INCOMING }),
     ]);
     expect(measurements()).toBe(2);
 

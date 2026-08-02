@@ -47,34 +47,47 @@ describe("conflictPreview", () => {
     expect(preview.hiddenChars).toBe(CONFLICT_PREVIEW_MAX_CHARS * 3);
   });
 
-  // `white-space: pre-wrap` — what the pane paints with — breaks on a
-  // standalone CR too, and treats CRLF as one break. A loop that only looked
-  // for LF let a CR-only body through as ONE line, so nothing but the
-  // character bound held it: 40,000 line boxes against the 5,000 allowed.
+  // Which characters the LINE window counts is a measured fact about the
+  // renderer, not a reading of the spec — see the note on the constants. Only
+  // LF forces a line box under the pane's `white-space: pre-wrap`; CRLF does
+  // so through its LF.
   it.each([
     ["\n", 1],
-    ["\r", 1],
     ["\r\n", 2],
   ])("bounds line boxes for a body broken by %j", (lineBreak, breakUnits) => {
     const text = `${"line".repeat(4)}${lineBreak}`.repeat(
       CONFLICT_PREVIEW_MAX_LINES * 3,
     );
     const preview = conflictPreview(text, 1);
-    const boxes = preview.text.split(/\r\n|\r|\n/).length - 1;
-    expect(boxes).toBe(CONFLICT_PREVIEW_MAX_LINES);
+    expect(preview.text.split("\n").length - 1).toBe(CONFLICT_PREVIEW_MAX_LINES);
     expect(preview.text.length).toBe(
       CONFLICT_PREVIEW_MAX_LINES * (16 + breakUnits),
     );
     expect(preview.hiddenChars).toBeGreaterThan(0);
+    // CRLF must cost ONE line, not two. Counting each half separately would
+    // halve the window for every Windows document.
+    expect(preview.text.endsWith(lineBreak)).toBe(true);
   });
 
-  it("counts CRLF as one break, not two", () => {
-    // Counting each half separately would halve the window for every CRLF
-    // document — a bound that quietly does something different on Windows.
-    const crlf = conflictPreview("ab\r\n".repeat(CONFLICT_PREVIEW_MAX_LINES * 2), 1);
-    const lf = conflictPreview("ab\n".repeat(CONFLICT_PREVIEW_MAX_LINES * 2), 1);
-    expect(crlf.text.split("\r\n").length - 1).toBe(CONFLICT_PREVIEW_MAX_LINES);
-    expect(lf.text.split("\n").length - 1).toBe(CONFLICT_PREVIEW_MAX_LINES);
+  // The other side of that measurement. A character that only SOFT wraps is
+  // not a line box, so a body full of them is one line to the line window and
+  // the CHARACTER window is what holds it. Bounded either way — and cutting
+  // these at the line window would have shown far less of the file than it
+  // safely could.
+  it.each([
+    ["CR", "\r"],
+    ["U+2028 LINE SEPARATOR", "\u2028"],
+    ["U+2029 PARAGRAPH SEPARATOR", "\u2029"],
+    ["VT", "\u000b"],
+    ["FF", "\u000c"],
+    ["NEL", "\u0085"],
+  ])("holds a body separated by %s at the character window", (_label, separator) => {
+    const text = `${"line".repeat(4)}${separator}`.repeat(
+      CONFLICT_PREVIEW_MAX_LINES * 3,
+    );
+    const preview = conflictPreview(text, 1);
+    expect(preview.text).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS);
+    expect(preview.text.length + preview.hiddenChars).toBe(text.length);
   });
 
   it("stops on the line boundary the LINE window makes", () => {

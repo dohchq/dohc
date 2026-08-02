@@ -16,9 +16,33 @@
 /// One preview window: whole lines, up to whichever of the two bounds ends
 /// first. Both are needed. Characters bound the text the browser must lay out.
 /// Lines bound the line boxes it lays them out into, which characters alone do
-/// not — 200,000 breaks is 200,000 line boxes and 200,000 characters. "Line"
-/// here means what `white-space: pre-wrap` breaks on, which is LF, CRLF, and a
-/// standalone CR — see `lineEnd`.
+/// not — 200,000 line feeds is 200,000 line boxes and 200,000 characters.
+///
+/// "Line" means LF, and ONLY LF. That is not an assumption, it is a
+/// measurement: a `<pre>` with the pane's own `white-space: pre-wrap` and
+/// `overflow-wrap: break-word`, 2,000 two-character segments joined by each
+/// candidate, in the Chromium this app ships (`playwright` chromium-1223):
+///
+///   LF        2,000 line boxes   forces a break
+///   CRLF      2,000 line boxes   forces a break
+///   CR           77 line boxes   soft wrap only
+///   U+2028      118 line boxes   soft wrap only
+///   U+2029      118 line boxes   soft wrap only
+///   VT U+000B   116 line boxes   soft wrap only
+///   FF U+000C    77 line boxes   soft wrap only
+///   NEL U+0085  118 line boxes   soft wrap only
+///
+/// CSS resolves segment breaks to LF, and the CR of a CRLF is normalized away
+/// by the HTML parser — but React writes text nodes directly, so a lone CR
+/// reaching this pane stays a lone CR and lays out as an ordinary character.
+/// A body broken only by any of the "soft wrap only" rows is ONE line to the
+/// line window, and the CHARACTER window is what holds it. That is correct,
+/// not a gap: those bodies cost soft wrapping over a bounded 200,000
+/// characters, which is the thing the character window exists to bound.
+///
+/// Two earlier attempts got this wrong in opposite directions — one added CR
+/// as a boundary, one wanted U+2028 and U+2029 — both from reading the spec
+/// rather than the renderer. Measure before adding a third.
 ///
 /// MEASURED by conflictPane.measure.test.ts against this repository's tracked
 /// text (`.md`, `.ts`, `.tsx`, `.rs`; 919 files), the stand-in for the
@@ -100,18 +124,12 @@ export function conflictPreview(text: string, windows: number): ConflictPreview 
 
   let cut = 0;
   let lines = 0;
-  // Both break characters are tracked, and each is re-sought only once it has
-  // been passed. Searching for both on every line would make a body that
-  // contains none of one of them cost a full scan per line.
-  let nextLf = text.indexOf("\n");
-  let nextCr = text.indexOf("\r");
   while (cut < text.length && lines < maxLines) {
-    const end = lineEnd(text, nextLf, nextCr);
+    const newline = text.indexOf("\n", cut);
+    const end = newline === -1 ? text.length : newline + 1;
     if (end > maxChars) break;
     cut = end;
     lines += 1;
-    if (nextLf !== -1 && nextLf < cut) nextLf = text.indexOf("\n", cut);
-    if (nextCr !== -1 && nextCr < cut) nextCr = text.indexOf("\r", cut);
   }
 
   if (lines < maxLines && cut < text.length && cut < maxChars) {
@@ -129,19 +147,6 @@ function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code < 0xdc00;
 }
 
-/// Where the line starting at the current cut ends: just past its break, or at
-/// the end of the body.
-///
-/// `white-space: pre-wrap` — what the pane paints with — breaks a line on a
-/// standalone CR as well as on LF, and treats CRLF as ONE break. A loop that
-/// only looked for LF let a CR-only body through as a single line, so the
-/// character bound was the only thing holding it: 40,000 line boxes against
-/// the 5,000 this window allows.
-function lineEnd(text: string, nextLf: number, nextCr: number): number {
-  if (nextLf === -1 && nextCr === -1) return text.length;
-  if (nextCr === -1 || (nextLf !== -1 && nextLf < nextCr)) return nextLf + 1;
-  return text.charCodeAt(nextCr + 1) === 0x0a ? nextCr + 2 : nextCr + 1;
-}
 
 // One walk of the UTF-8 encoding, stopping as soon as the count passes
 // `stopAbove`. UTF-8 spends one byte per ASCII unit, two below U+0800, four
