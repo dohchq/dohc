@@ -415,6 +415,7 @@ export type EngineClientErrorCode =
   | "handshake-incomplete"
   | "handshake-failed"
   | "protocol-error"
+  | "request-too-large"
   | "transport-error"
   | "wire-error";
 
@@ -656,6 +657,32 @@ export class EngineClient implements EngineTransport {
     }
 
     const wireId = this.nextRequestId++;
+    const envelope: Envelope = {
+      type: "request",
+      ...request,
+      id: wireId,
+      workspace: request.workspace ?? null,
+      deadlineMs: request.deadlineMs ?? null,
+      idempotencyKey: request.idempotencyKey ?? null,
+    };
+    // MEASURED BEFORE FRAMING. `encodeFrame` refuses an oversized payload with
+    // a codec error, and every failure on the write path reads as
+    // `transport-error` — which is a lie twice over: nothing was transported,
+    // and the classification sends a healthy session into the reconnect
+    // machinery for a failure no reconnect can fix. A request that cannot be
+    // framed is the caller’s to fix, so it is refused here, by name, with the
+    // limit and the size that was asked for.
+    const encodedRequest = Buffer.byteLength(JSON.stringify(envelope), "utf8");
+    if (encodedRequest > this.maxFrameBytes) {
+      return Promise.reject(
+        new EngineClientError(
+          "request-too-large",
+          `request-exceeds-wire-limit: one control frame carries a request of ` +
+            `at most ${this.maxFrameBytes} encoded bytes, observed ` +
+            `${encodedRequest} encoded bytes for ${request.method}.`,
+        ),
+      );
+    }
     return new Promise<Response>((resolve, reject) => {
       const deadlineTimer =
         request.deadlineMs !== undefined && request.deadlineMs !== null
@@ -678,14 +705,7 @@ export class EngineClient implements EngineTransport {
         reject,
         ...(deadlineTimer ? { deadlineTimer } : {}),
       });
-      void this.writeEnvelope({
-        type: "request",
-        ...request,
-        id: wireId,
-        workspace: request.workspace ?? null,
-        deadlineMs: request.deadlineMs ?? null,
-        idempotencyKey: request.idempotencyKey ?? null,
-      }).catch((cause: unknown) => {
+      void this.writeEnvelope(envelope).catch((cause: unknown) => {
         const pending = this.pending.get(wireId);
         if (!pending) return;
         this.pending.delete(wireId);

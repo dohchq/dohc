@@ -3,8 +3,10 @@ import { Duplex, PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { Envelope } from "../ydoc/generated/Envelope";
 import type { Request } from "../ydoc/generated/Request";
+import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import {
   EngineClient,
+  EngineClientError,
   DuplexEngineClientConnection,
   EngineFrameError,
   EngineRequestError,
@@ -191,6 +193,59 @@ function realStreamClient(connectTimeoutMs = 5_000): {
 function nextImmediate(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+describe("a request that cannot be framed", () => {
+  it("is refused by name, is not a transport failure, and leaves the session up", async () => {
+    // A combined conflict resolution is the request that reaches this size in
+    // practice. Before this check it died inside `encodeFrame` and surfaced as
+    // `transport-error: Failed to send engine request N` — no limit, no size,
+    // and a classification that sends a HEALTHY session into the reconnect
+    // machinery for a failure no reconnect can fix.
+    //
+    // MUTATION: classify it `transport-error` again -> `isDaemonReconnectError`
+    // turns true and this fails.
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const requests: Array<Extract<Envelope, { type: "request" }>> = [];
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type === "request") requests.push(envelope);
+    };
+
+    const refusal = await transport
+      .sendRequest({
+        id: 1,
+        method: "conflicts.resolve",
+        params: { local: { mergedText: "x".repeat(LIMITS.maxFrameBytes) } },
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(refusal).toBeInstanceOf(EngineClientError);
+    const error = refusal as EngineClientError;
+    expect(error.code).toBe("request-too-large");
+    expect(error.message).toContain(
+      `at most ${LIMITS.maxFrameBytes} encoded bytes`,
+    );
+    expect(error.message).toMatch(
+      /observed \d+ encoded bytes for conflicts\.resolve/,
+    );
+    // The reconnect machinery must not read this as a daemon that went away.
+    expect(isDaemonReconnectError(error)).toBe(false);
+
+    // Nothing was written, and the session is untouched: the next request goes
+    // out and is answered.
+    expect(requests).toHaveLength(0);
+    const answered = transport.sendRequest(request(2, "engine.ping"));
+    expect(requests).toHaveLength(1);
+    peer.send({ type: "response", id: requests[0]!.id, result: { ok: true } });
+    await expect(answered).resolves.toMatchObject({ result: { ok: true } });
+    transport.close();
+  });
+});
 
 describe("R03 frame codec", () => {
   it("round-trips control payloads from zero bytes through the configured boundary", () => {
