@@ -1665,20 +1665,20 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const before = this.file(version, path);
     this.assertFreshMoment(state, momentId);
     const now = nowMs ?? this.clock++;
-    const tombstone: LoopbackFile = {
-      objectId: before.objectId,
-      contentKind: before.contentKind,
+    // The removed content, not an empty tombstone: a delete moment repeats it
+    // on the after side (store.rs `delete_text_in_tx`, the `?8` params).
+    const removed: LoopbackFile = {
+      ...copyFile(before),
       updatedAtMs: now,
       latestMomentId: momentId,
       metadataOrigin: origin,
-      momentLog: [...before.momentLog],
     };
     const moment = this.makeMoment(
       version,
       path,
       momentId,
       "delete",
-      tombstone,
+      removed,
       before,
       now,
       metadata,
@@ -2098,20 +2098,20 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (!incoming) {
       const before = this.file(target, path);
       const now = optionalNumber(params, "nowMs") ?? this.clock++;
-      const tombstone: LoopbackFile = {
-        objectId: before.objectId,
-        contentKind: before.contentKind,
+      // The removed content, as the delete moment's after side (see the delete
+      // handler above).
+      const removed: LoopbackFile = {
+        ...copyFile(before),
         updatedAtMs: now,
         latestMomentId: momentId,
         metadataOrigin: origin,
-        momentLog: [...before.momentLog],
       };
       const moment = this.makeMoment(
         target,
         path,
         momentId,
         "delete",
-        tombstone,
+        removed,
         before,
         now,
         metadata,
@@ -2917,8 +2917,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     recordedAtMs = this.clock++,
     metadata: JsonObject = {},
   ): MomentRecord {
-    const deleted = operation === "delete";
-    const afterText = !deleted && after.contentKind === "text" ? after.text ?? "" : null;
+    const afterText = after.contentKind === "text" ? after.text ?? "" : null;
     const beforeText = before?.contentKind === "text" ? before.text ?? "" : null;
     return {
       ...metadata,
@@ -2930,8 +2929,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
       recordedAtMs,
       operation,
       afterContentKind: after.contentKind,
-      afterBlobSha256: !deleted && after.contentKind === "text" ? sha256(afterText ?? "") : null,
-      afterBinarySha256: deleted ? null : after.binarySha ?? null,
+      // A delete and a rename record ONE digest on BOTH sides: `delete_text_in_tx`
+      // and the rename insert (store.rs) bind `before.blob_sha256` to
+      // `after_blob_sha256` and `before_blob_sha256` alike, so their callers pass
+      // an `after` that repeats the removed content.
+      afterBlobSha256: after.contentKind === "text" ? sha256(afterText ?? "") : null,
+      afterBinarySha256: after.binarySha ?? null,
       beforePresent: before !== undefined,
       beforeContentKind: before?.contentKind ?? "text",
       beforeBlobSha256: before?.contentKind === "text" ? sha256(beforeText ?? "") : null,
@@ -2943,9 +2946,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       author: (metadata.author as MomentRecord["author"] | undefined) ?? null,
       syncRecordOnly: false,
       afterText,
-      afterByteLength: deleted
-        ? null
-        : after.contentKind === "text"
+      afterByteLength:
+        after.contentKind === "text"
           ? utf8Length(afterText ?? "")
           : after.bytes?.length ?? null,
       afterInbandLimitBytes: null,

@@ -58,12 +58,14 @@ interface EngineMomentRow {
 
 let momentQueryId = 1;
 
-// The daemon-path reader for the same rows: `moments.list` over the wire
-// instead of engine.db, because the loopback behind the daemon harness keeps
-// its state in memory. Both differences from the SQL above are deliberate
-// mirrors of it — ascending `momentOrder` matches `ORDER BY m.moment_order`,
-// and dropping payload-less moments matches the inner JOIN on the after-text
-// blob, which excluded deletes and binary writes.
+// The daemon-path reader: `moments.list` over the wire, because the loopback
+// behind the daemon harness keeps its state in memory. Rows come back newest
+// first and are re-sorted ascending, the order a history reads in.
+//
+// It reports the text each WRITE landed, so it keeps writes alone. A delete
+// repeats its preimage on the after side (#487) and a binary write has no text
+// there at all, so keying on `afterText` by itself would report a removed body
+// as though a write had landed it.
 async function readDaemonMoments(
   loopback: VersionedLoopbackEngine,
 ): Promise<EngineMomentRow[]> {
@@ -91,7 +93,7 @@ async function readDaemonMoments(
     beforeMomentOrder = page.nextBeforeMomentOrder;
   }
   return moments
-    .filter((moment) => moment.afterText !== null)
+    .filter((moment) => moment.operation === "write" && moment.afterText !== null)
     .sort((left, right) => left.momentOrder - right.momentOrder)
     .map((moment) => ({
       versionId: moment.versionId,

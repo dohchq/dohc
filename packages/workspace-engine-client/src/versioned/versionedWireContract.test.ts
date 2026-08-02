@@ -2840,15 +2840,23 @@ describe("loopback contract enforcement", () => {
       }),
     );
 
+    // A delete repeats its preimage on the AFTER side. `delete_text_in_tx`
+    // (store.rs) binds one `?8` to both `after_blob_sha256` and
+    // `before_blob_sha256`, and `?14`/`?15` to both content kinds and both
+    // binary digests; the read joins the blob tables per digest, so the text
+    // and byte length hydrate on both sides too. The fake used to null the
+    // after side, which made the both-sides digest — and the single blob fetch
+    // it earns — unreachable through the loopback (#487).
     expect(textMoment).toMatchObject({
       beforePresent: true,
       beforeContentKind: "text",
       beforeText: "before delete",
       beforeByteLength: 13,
       beforeBlobSha256: textDelete.before.sha256,
-      afterText: null,
-      afterByteLength: null,
-      afterBlobSha256: null,
+      afterContentKind: "text",
+      afterText: "before delete",
+      afterByteLength: 13,
+      afterBlobSha256: textDelete.before.sha256,
     });
     expect(binaryMoment).toMatchObject({
       beforePresent: true,
@@ -2856,9 +2864,14 @@ describe("loopback contract enforcement", () => {
       beforeText: null,
       beforeByteLength: 3,
       beforeBinarySha256: binaryDelete.before.sha256,
+      // Bytes have no text blob on either side: a binary snapshot stores
+      // `blob_sha256 = NULL` (conflicts.rs persist_binary_head_in_tx), so `?8`
+      // carries nothing and only the binary digest repeats.
+      afterContentKind: "binary",
       afterText: null,
-      afterByteLength: null,
-      afterBinarySha256: null,
+      afterByteLength: 3,
+      afterBlobSha256: null,
+      afterBinarySha256: binaryDelete.before.sha256,
     });
     const listed = decodeMomentsListResult(
       await call(engine, 5, VERSIONED_METHOD.momentsList, { versionId: "main" }),
@@ -2871,6 +2884,74 @@ describe("loopback contract enforcement", () => {
       ["deleted.bin", 3],
       ["deleted.md", 13],
     ]);
+  });
+
+  it("records one digest on both sides of a rename moment", async () => {
+    // The rename insert (store.rs `rename_text_file_with`) binds the same `?8`
+    // and `?14`/`?15` to both sides that `delete_text_in_tx` does: a rename
+    // moves the content, so its two sides hold the same bytes under the same
+    // digest. Only the path differs — `payload_before_path` keeps where the
+    // content came from while the row's own path is where it landed.
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "from.md", text: "moved text" });
+    engine.seedBinaryFile({ workspace: WORKSPACE, path: "from.bin", bytes: [4, 5] });
+    const textRename = decodeVersionedTextRenameResult(
+      await call(engine, 1, VERSIONED_METHOD.textRename, {
+        versionId: "main",
+        fromPath: "from.md",
+        toPath: "to.md",
+        origin: "api",
+        requestId: "rename-text-digest",
+      }),
+    );
+    const binaryRename = decodeVersionedTextRenameResult(
+      await call(engine, 2, VERSIONED_METHOD.textRename, {
+        versionId: "main",
+        fromPath: "from.bin",
+        toPath: "to.bin",
+        origin: "api",
+        requestId: "rename-binary-digest",
+      }),
+    );
+
+    expect(
+      decodeMomentsGetResult(
+        await call(engine, 3, VERSIONED_METHOD.momentsGet, {
+          momentId: textRename.moment.momentId,
+        }),
+      ),
+    ).toMatchObject({
+      path: "to.md",
+      beforePath: "from.md",
+      beforePresent: true,
+      beforeContentKind: "text",
+      beforeText: "moved text",
+      beforeByteLength: 10,
+      beforeBlobSha256: textRename.before.sha256,
+      afterContentKind: "text",
+      afterText: "moved text",
+      afterByteLength: 10,
+      afterBlobSha256: textRename.before.sha256,
+    });
+    expect(
+      decodeMomentsGetResult(
+        await call(engine, 4, VERSIONED_METHOD.momentsGet, {
+          momentId: binaryRename.moment.momentId,
+        }),
+      ),
+    ).toMatchObject({
+      path: "to.bin",
+      beforePath: "from.bin",
+      beforePresent: true,
+      beforeContentKind: "binary",
+      beforeBinarySha256: binaryRename.before.sha256,
+      beforeByteLength: 2,
+      afterContentKind: "binary",
+      afterText: null,
+      afterByteLength: 2,
+      afterBlobSha256: null,
+      afterBinarySha256: binaryRename.before.sha256,
+    });
   });
 
   it("replays an exact momentId text write and rejects a changed payload", async () => {

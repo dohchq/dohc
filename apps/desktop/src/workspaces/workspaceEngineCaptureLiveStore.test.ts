@@ -790,9 +790,7 @@ describe("createCaptureLiveStores", () => {
   // `sides` is not cosmetic: a delete or rename records ONE digest on BOTH
   // sides (store.rs binds the same `before.blob_sha256` to `after_blob_sha256`
   // and `before_blob_sha256`), so those rows also pin that the body is fetched
-  // once rather than streamed twice. NOTE: the loopback engine writes
-  // `afterBlobSha256: null` for a delete and diverges from the daemon here —
-  // these rows follow the daemon.
+  // once rather than streamed twice.
   const overCapAfter = {
     ...moment,
     afterText: null,
@@ -1198,6 +1196,10 @@ describe("createCaptureLiveStores", () => {
             latestMomentId: "concurrent-moment",
             metadataOrigin: "api",
           },
+          // The daemon's delete shape: `delete_text_in_tx` (store.rs) binds the
+          // preimage digest to BOTH `after_blob_sha256` and
+          // `before_blob_sha256`, and the read joins the same blob row per
+          // side, so the removed body and its length repeat on the after side.
           moment: {
             ...moment,
             operation: "delete",
@@ -1205,9 +1207,9 @@ describe("createCaptureLiveStores", () => {
             beforeLatestMomentId: "concurrent-moment",
             beforeText: "newer content",
             beforeByteLength: 13,
-            afterBlobSha256: null,
-            afterText: "",
-            afterByteLength: 0,
+            afterBlobSha256: "c".repeat(64),
+            afterText: "newer content",
+            afterByteLength: 13,
           },
           deduped: false,
         },
@@ -1232,10 +1234,47 @@ describe("createCaptureLiveStores", () => {
         latestMomentId: "concurrent-moment",
       },
       moment: {
-        payload: { before: { text: "newer content", sha256: "c".repeat(64) } },
+        payload: {
+          before: { text: "newer content", sha256: "c".repeat(64) },
+          // One digest covers both sides, which is what earns the single blob
+          // fetch when the body is over cap (#487). This pair being equal is
+          // the daemon's shape, so it cannot show WHERE the after side came
+          // from — the test below does that.
+          after: { text: "newer content", sha256: "c".repeat(64) },
+        },
       },
     });
     expect(requests).toHaveLength(1);
+  });
+
+  it("refuses a delete whose after side is absent instead of copying its preimage", async () => {
+    // The after side is READ, never reconstructed from the before side. The two
+    // agree on every daemon-written delete, so only a record that disagrees can
+    // prove which one the store reports — and this one the daemon cannot write
+    // at all: `map_moment_row` (store.rs) fails closed on a text moment missing
+    // its after blob. Copying the preimage over it would answer with content
+    // the record does not carry.
+    const client = clientFor(async (request) => ({
+      id: request.id,
+      result: {
+        ...moment,
+        operation: "delete",
+        beforeText: "removed body",
+        beforeBlobSha256: "c".repeat(64),
+        beforeByteLength: 12,
+        afterText: null,
+        afterBlobSha256: null,
+        afterByteLength: null,
+      },
+    }));
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    await expect(
+      store.getMoment({ workspaceId: WORKSPACE_ID, momentId: "resolved-moment" }),
+    ).rejects.toThrow(/after text for note\.md is absent and carries no text digest/);
   });
 
   it("keeps digest and byte length on metadata-only listings", async () => {
