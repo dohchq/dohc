@@ -2348,25 +2348,45 @@ export function createWorkspaceEngineCapture(
             // re-enter the session or wedge the settle chain.
           }
         };
-        // Updates that entered this document and are NOT yet in a committed
-        // settle. The close downgrade below needs proof that the text SETTLED,
-        // and a successful RELEASE is not that proof: `close_session` checks
-        // `last_settled_sha` only before a local-only PRUNE, while a
-        // replicated lineage — a synced workspace, promoted by `claim_base` on
-        // the first pulled `ydoc.update` — compacts instead and never prunes,
-        // so its release succeeds over unsettled text
+        // How many updates entered this document, and how many of them a
+        // COMMITTED settle carried. The close downgrade below needs proof that
+        // the text settled, and a successful RELEASE is not that proof:
+        // `close_session` checks `last_settled_sha` only before a local-only
+        // PRUNE, while a replicated lineage — a synced workspace, promoted by
+        // `claim_base` on the first pulled `ydoc.update` — compacts instead and
+        // never prunes, so its release succeeds over unsettled text
         // (crates/dohc-engine-collab/src/durable.rs). The desktop therefore
-        // evidences its own claim rather than inferring it from a release
-        // whose meaning depends on the regime.
+        // evidences its own claim rather than inferring it from a release whose
+        // meaning depends on the regime.
         //
-        // The count is coarse on purpose: an update that leaves the projection
-        // unchanged still marks the document unsettled. Over-counting only
-        // keeps a close LOUD, which is the behavior this correction started
-        // from; under-counting would report a save that never happened.
-        let unsettledUpdates = 0;
-        let updatesInSettle = 0;
+        // Settles OVERLAP: runSettle announces its start before it queues, and
+        // several can be outstanding at once. So a start does not claim a slot
+        // that a later start can overwrite — it PUSHES the watermark it could
+        // carry, and each outcome consumes the oldest. Claims are ascending by
+        // construction (the watermark only grows, starts happen in order), so
+        // the oldest is also the smallest: crediting it can never credit more
+        // than the settle that just committed actually carried. Every way this
+        // can be wrong — a duplicated outcome, a lost claim — under-credits,
+        // which keeps a close LOUD.
+        //
+        // Counting is coarse for the same reason: an update that leaves the
+        // projection unchanged still marks the document unsettled, because
+        // over-counting only costs loudness while under-counting would report a
+        // save that never happened.
+        let updatesSeen = 0;
+        let updatesSettled = 0;
+        const settleClaims: number[] = [];
         const noteUpdate = (): void => {
-          unsettledUpdates += 1;
+          updatesSeen += 1;
+        };
+        // The sha of the last settle that committed — what the file must NOT
+        // hold for `changed-on-disk` to be true of it. An unverifiable read
+        // says nothing about the bytes, so it is not drift either.
+        let lastSettledSha: string | null = null;
+        const fileDriftedFromSettled = async (settled: string): Promise<boolean> => {
+          const digest = await digestSettledFile(rootPath, input.path);
+          if (digest.kind === "unverifiable") return false;
+          return digest.kind === "changed" || digest.sha256 !== settled;
         };
         const onSettled = async (
           result: {
@@ -2380,9 +2400,11 @@ export function createWorkspaceEngineCapture(
         ) => {
           // The settle COMMITTED — every branch below is about the FILE, not
           // the lineage — so the updates it carried are a moment in History
-          // now. Updates that arrived while it ran are not, and stay counted.
-          unsettledUpdates -= updatesInSettle;
-          updatesInSettle = 0;
+          // now. Updates that arrived after its start are not: they belong to
+          // a later claim.
+          const claim = settleClaims.shift();
+          if (claim !== undefined && claim > updatesSettled) updatesSettled = claim;
+          lastSettledSha = result.sha256;
           // The settle committed, but the engine says the FILE did not move
           // (materialization blocked by containment — a symlinked target — with
           // the write pending a retry). Say so rather than report a save the
@@ -2451,7 +2473,7 @@ export function createWorkspaceEngineCapture(
         // session's commands in order, so an update already sent is in the
         // settle that follows it; one sent after this point is not.
         const onSettleStart = (token: number) => {
-          updatesInSettle = unsettledUpdates;
+          settleClaims.push(updatesSeen);
           reportSaveState("settling", token);
         };
         // The one place a background settle failure is observable. Log it with
@@ -2465,9 +2487,20 @@ export function createWorkspaceEngineCapture(
         // until the outcome is known can be dropped, and a dropped settle
         // failure is the silent loss this callback exists to prevent. An extra
         // `error` that gets corrected cannot lose anything.
-        let lastSettleFailure: { error: unknown; token: number } | null = null;
+        //
+        // Remembered per FAILURE, not as one latest-failure slot. This session
+        // outlives the daemon generation under it, each generation runs its own
+        // settle chain, and their tokens both start at 1 — so a slot could be
+        // overwritten by an unrelated generation's failure between the close's
+        // settle and its release, and the close would then withdraw nothing.
+        // Keying on the error itself is what the close already matches on, and
+        // a WeakMap keeps the record exactly as long as the error exists.
+        const settleFailureTokens = new WeakMap<object, number>();
         const onSettleError = (error: unknown, token: number) => {
-          lastSettleFailure = { error, token };
+          settleClaims.shift();
+          if (typeof error === "object" && error !== null) {
+            settleFailureTokens.set(error, token);
+          }
           onError(`ydoc settle of ${input.path}`, error);
           reportSaveState("error", token);
         };
@@ -2535,26 +2568,44 @@ export function createWorkspaceEngineCapture(
               // release completed, so it is the one signal that the session is
               // gone and the settle was the only casualty.
               //
-              // What makes `changed-on-disk` TRUE here rather than merely quiet
-              // is the second condition: every update this document received is
-              // in a committed settle, so its text IS a settled moment in
-              // History — which is where this state sends the user. The release
-              // cannot stand in for that check, because it only proves
-              // settlement for a local-only PRUNE; a replicated lineage
-              // compacts and releases cleanly over unsettled text.
-              //
               // Being a close is structural — the provider constructs this
-              // error nowhere else — so only the refusal itself is checked, on
-              // the exact settle whose failure was reported, so the correction
-              // can never withdraw a DIFFERENT failure's `error`.
-              const failure = lastSettleFailure;
+              // error nowhere else — and the token is looked up from the exact
+              // failure this close carries, so the correction can never
+              // withdraw a DIFFERENT failure's `error`.
+              //
+              // The refusal itself is not enough to name the outcome, because
+              // it does not mean what the state would claim. `changed-on-disk`
+              // makes two assertions to the user, and each needs its own proof:
+              //
+              //  1. "your text is safe in History" — every update this document
+              //     received is in a committed settle. A release cannot stand
+              //     in for this: it proves settlement only for a local-only
+              //     PRUNE, while a replicated lineage compacts and releases
+              //     cleanly over unsettled text.
+              //  2. "the file changed outside dohc" — the file does NOT hold
+              //     this document's last settled bytes. The engine raises
+              //     ConflictStaleTarget for any divergence of the HEAD, which
+              //     includes a path rebound to another object and a settle
+              //     whose materialization was blocked or superseded
+              //     (crates/dohc-engine-runtime/src/actor.rs) — cases where the
+              //     durable head moved while the disk still holds our own
+              //     bytes. So read the file, exactly as the ordinary settled
+              //     path does.
+              //
+              // Fail either proof and the close stays loud, which is where this
+              // correction started.
+              const failedToken =
+                typeof error.cause === "object" && error.cause !== null
+                  ? settleFailureTokens.get(error.cause)
+                  : undefined;
               if (
-                failure !== null &&
-                failure.error === error.cause &&
+                failedToken !== undefined &&
                 isConflictStaleTargetRefusal(error.cause) &&
-                unsettledUpdates === 0
+                updatesSeen === updatesSettled &&
+                lastSettledSha !== null &&
+                (await fileDriftedFromSettled(lastSettledSha))
               ) {
-                reportSaveState("changed-on-disk", failure.token);
+                reportSaveState("changed-on-disk", failedToken);
                 return;
               }
               throw error;

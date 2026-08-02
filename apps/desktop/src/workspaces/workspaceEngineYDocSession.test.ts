@@ -128,6 +128,7 @@ function methodCount(method: string): number {
   return requests.filter((request) => request.method === method).length;
 }
 
+
 // The envelope EngineClient rejects a refused request with. DaemonLiveAdapter
 // re-throws it as DaemonRefusalError, which is the shape the close path's
 // discriminator reads; a bare Error never reaches that path.
@@ -296,6 +297,10 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   states.length = 0;
   captureErrors = [];
 
+  // The outside writer, on disk. The refusal alone does not make this state
+  // true — `changed-on-disk` says the FILE is not this document's, so the file
+  // has to actually hold someone else's bytes for the close to say it.
+  await writeFile(join(root, PATH), "# Solo\n\nEdited in another app.\n", "utf8");
   settleRefusal = wireRefusal("conflict-stale-target");
   await expect(session.close()).resolves.toBeUndefined();
 
@@ -364,6 +369,33 @@ it("still reports an error for a stale-target settle while the document stays op
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
   settleRefusal = null;
   await session.close({ settle: false });
+});
+
+// `changed-on-disk` promises the file is not this document's. The refusal does
+// not prove that: the engine raises ConflictStaleTarget for any divergence of
+// the head — a path rebound to another object, or a settle whose
+// materialization was blocked or superseded — and in those the durable head
+// moved while the disk still holds our own settled bytes.
+it("keeps the close loud when the file still holds this document's bytes", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed in dohc.");
+  await session.settleNow();
+  states.length = 0;
+  captureErrors = [];
+
+  // No outside writer: the file is left exactly as the settle wrote it.
+  settleRefusal = wireRefusal("conflict-stale-target");
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  expect(states).toEqual(["settling", "error"]);
 });
 
 // A RELEASE is not proof of settlement, and this is the lineage that shows it.
