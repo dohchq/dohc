@@ -1281,12 +1281,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             else {
                 continue;
             };
-            let response = self.transport.download_blob(BlobDownloadRequest {
-                workspace_id: workspace_id.to_owned(),
-                replication_epoch: identity.replication_epoch.clone(),
-                stream_identity: identity.stream_identity.clone(),
-                sha256: sha256.clone(),
-            })?;
+            let response = self
+                .transport
+                .download_blob(BlobDownloadRequest {
+                    workspace_id: workspace_id.to_owned(),
+                    replication_epoch: identity.replication_epoch.clone(),
+                    stream_identity: identity.stream_identity.clone(),
+                    sha256: sha256.clone(),
+                })
+                .map_err(|error| relabel_ceiling(error, constraint, limit_bytes))?;
             // Refuse before hashing and before copying: a transport is not
             // trusted to bound its own response, and no kind can accept this.
             if response.bytes.len() > limit_bytes {
@@ -1335,6 +1338,21 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         }
         Ok(())
+    }
+}
+
+/// A transport bounds a blob body without knowing which kind was asked for, so
+/// it names the loosest ingest ceiling. Only the caller knows the kind. Relabel
+/// the refusal with that kind's real limit: an agent told the wrong number
+/// shrinks its payload to a size that is still refused.
+fn relabel_ceiling(error: RelayError, constraint: &'static str, limit_bytes: usize) -> RelayError {
+    match error {
+        RelayError::BlobTooLarge { observed, .. } => RelayError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed,
+        },
+        other => other,
     }
 }
 
@@ -2467,12 +2485,29 @@ fn replay_share_write<T: RelayTransport>(
         );
         return Ok(());
     }
+    // The shared write lands in the store through `write_binary`/`write_text`,
+    // which never pass a blob through ingest hydration. Without this the only
+    // bound left is the generic 64 MiB blob store, so a share could persist a
+    // binary an ordinary capture refuses.
+    let (constraint, limit_bytes) = blob_ceiling(if content_kind == "binary" {
+        BlobKind::Binary
+    } else {
+        BlobKind::Text
+    });
     let bytes = transport
         .share_blob(ShareBlobRequest {
             share_id: share_id.to_owned(),
             sha256: sha256.to_owned(),
-        })?
+        })
+        .map_err(|error| relabel_ceiling(error, constraint, limit_bytes))?
         .bytes;
+    if bytes.len() > limit_bytes {
+        return Err(RelayError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed: ObservedBytes::Exact(bytes.len()),
+        });
+    }
     if hex_sha256(&bytes) != sha256 {
         return Err(RelayError::BlobInvalid);
     }

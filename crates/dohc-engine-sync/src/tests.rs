@@ -13517,3 +13517,87 @@ fn corrupt_secret_fixture_asserts_equal_lengths() {
         "MUTATION: the fixture must assert that only ciphertext content changed"
     );
 }
+
+fn share_view_binary_write_op(seq: i64, path: &str, sha256: &str) -> ShareReplicationEnvelope {
+    ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: seq,
+        op_kind: "moment.append".to_owned(),
+        payload: json!({
+            "operation": "write",
+            "path": path,
+            "payloadAfterPath": path,
+            "payloadAfterBlobSha256": sha256,
+            "payloadAfterContentKind": "binary"
+        }),
+        recorded_at_ms: 10 + seq,
+    }
+}
+
+fn share_view_binary_pull(
+    engine: &mut EngineStore,
+    path: &str,
+    bytes: Vec<u8>,
+) -> Result<ShareViewPullOutcome, RelayError> {
+    let sha256 = dohc_engine_storage::hex_sha256(&bytes);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![share_view_binary_write_op(0, path, &sha256)],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha256, bytes)]),
+    );
+    client.pull_share_view(engine, "ws", "share", &NoFaults)
+}
+
+/// A shared write reaches the store through `write_binary`, which never passes
+/// the bytes through `hydrate_blob_content`. Nothing on that path applied the
+/// binary ceiling, so the only floor left was the generic 64 MiB blob store —
+/// a share could persist a binary an ordinary capture refuses.
+///
+/// MUTATION: delete the ceiling check in `replay_share_write` and the over-cap
+/// half lands the blob; narrow it to the text ceiling and the at-cap half stops
+/// refusing.
+#[test]
+fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    let over_cap = vec![7u8; limit_bytes + 1];
+    let over_cap_sha = dohc_engine_storage::hex_sha256(&over_cap);
+    assert_eq!(
+        share_view_binary_pull(&mut engine, "docs/over-cap.bin", over_cap)
+            .expect_err("an over-cap shared binary is refused"),
+        RelayError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed: ObservedBytes::Exact(limit_bytes + 1),
+        }
+    );
+    assert!(
+        !engine
+            .has_binary_blob(&over_cap_sha)
+            .expect("binary blob presence"),
+        "an over-cap shared binary must not persist under the 64 MiB store bound"
+    );
+
+    // The ceiling must not reject work the store accepts everywhere else.
+    let at_cap = vec![7u8; limit_bytes];
+    let at_cap_sha = dohc_engine_storage::hex_sha256(&at_cap);
+    let outcome = share_view_binary_pull(&mut engine, "docs/at-cap.bin", at_cap)
+        .expect("an at-cap shared binary replays");
+    assert_eq!((outcome.fetched, outcome.applied), (1, 1));
+    assert!(
+        engine
+            .has_binary_blob(&at_cap_sha)
+            .expect("binary blob presence")
+    );
+}

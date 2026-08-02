@@ -1456,3 +1456,55 @@ fn a_blob_body_past_the_read_limit_still_names_the_ceiling() {
         )
     );
 }
+
+#[test]
+fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
+    // The transport bounds a body without knowing the kind, so it can only name
+    // the loosest ingest ceiling. The caller asked for a binary blob and knows
+    // better. Reporting 10485760 here would send an agent to shrink its payload
+    // to a size binary ingest still refuses.
+    //
+    // MUTATION: drop the relabel at the download site and this reports
+    // MAX_INGEST_BLOB_BYTES with the text limit instead.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine, &json!({}));
+    let (text_constraint, text_limit) = blob_ceiling(BlobKind::Text);
+    let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
+    assert!(
+        binary_limit < text_limit,
+        "this test is only meaningful while the binary ceiling is the tighter one"
+    );
+    let claimed = hex_sha256(b"a binary blob the relay serves far too much of");
+    let handler_claimed = claimed.clone();
+    let server = FakeServer::start(move |request| match request.path() {
+        "/sync/ws/log" => log_page(
+            vec![remote_row(
+                "peer",
+                0,
+                "ydoc.update",
+                json!({"updateBlobSha256": handler_claimed}),
+            )],
+            1,
+            false,
+        ),
+        path if path.starts_with("/sync/ws/blobs/") => {
+            TestResponse::bytes(vec![b'a'; text_limit + 4096])
+        }
+        _ => TestResponse::json(500, json!({"code": "internal_error"})),
+    });
+    let error = RelaySyncClient::new(transport(&server))
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect_err("a binary body past the read limit is refused");
+    assert_eq!(
+        error,
+        RelayError::BlobTooLarge {
+            constraint: binary_constraint,
+            limit_bytes: binary_limit,
+            observed: ObservedBytes::AtLeast(text_limit + 2),
+        }
+    );
+    assert_ne!(
+        binary_constraint, text_constraint,
+        "the refusal must not name the text ceiling"
+    );
+}
