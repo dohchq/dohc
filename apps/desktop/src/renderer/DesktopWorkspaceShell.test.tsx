@@ -2632,6 +2632,73 @@ describe("history page", () => {
     expect(screen.queryByTestId("try-review-card")).toBeNull();
   });
 
+  // One layer deeper: the dismissal happens while the refresh is still in
+  // flight. Counting only responses, that refresh is still the newest thing
+  // the snapshot watermark has seen, so its status half would undo an action
+  // the user took after it was issued — and nothing would put the card away
+  // again, because dismissing emits no replacement activity.
+  it("does not bring back a review dismissed while the refresh was still in flight", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const refreshed = deferred<ListEngineMomentsResult>();
+    let failPage!: (error: Error) => void;
+    const page = new Promise<never>((_resolve, reject) => {
+      failPage = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      refreshed.promise,
+      page,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    // The main process keeps reporting the review until it is dismissed.
+    bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve({
+        ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
+        nextBeforeMomentOrder: 1,
+      });
+      await first.promise;
+    });
+    expect(await screen.findByTestId("try-review-card")).toBeTruthy();
+
+    // A refresh is out — its try-state half has already answered, carrying the
+    // review — and a newer pagination is out behind it.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("engine-history-load-more"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+
+    // The user dismisses the card while both are still in flight.
+    await user.click(screen.getByTestId("try-review-keep-working"));
+    await waitFor(() => expect(bridge.dismissTryInVersionReview).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByTestId("try-review-card")).toBeNull());
+
+    // Now let everything settle: the refresh answers, and the pagination fails
+    // so the held timeline commits.
+    await act(async () => {
+      refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
+      await refreshed.promise;
+    });
+    await act(async () => {
+      failPage(new Error("pagination failed"));
+      await Promise.resolve();
+    });
+
+    // The timeline still lands — only the snapshot the user overruled is gone.
+    expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
+    expect(screen.queryByTestId("try-review-card")).toBeNull();
+  });
+
   // A version switch changes which timeline is true, so it is a boundary: an
   // answer describing the version the user left must never paint the one they
   // are now on, however the newest-answer race would otherwise resolve.

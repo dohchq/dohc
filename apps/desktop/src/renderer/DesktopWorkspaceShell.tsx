@@ -1104,9 +1104,6 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     setActiveTabDirty(false);
   }, [wb.activeTab]);
-  const onSettingsAgentActiveChange = useCallback((active: boolean) => {
-    setAgentActive(active);
-  }, []);
   const openSettings = useCallback(
     (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
     [],
@@ -1625,6 +1622,16 @@ export function DesktopWorkspaceShell(props: {
     committedEngineStatusToken.current = engineHistoryToken.current;
     blockedEngineHistoryRefresh.current = null;
   }, []);
+  // A LOCAL write to the snapshots is newer information than every request in
+  // flight: the user acted AFTER all of them were issued, so counting only
+  // responses would let one of those answers undo what they just did. Raising
+  // the snapshot watermark to the newest ISSUED token says so, and the losing
+  // answers lose by construction whenever they land. Dismissing a review is
+  // the case that bites: it emits no replacement activity, so a restored card
+  // would sit there until something unrelated refreshed.
+  const supersedeEngineStatusSnapshots = useCallback(() => {
+    committedEngineStatusToken.current = engineHistoryToken.current;
+  }, []);
   useEffect(
     () => () => {
       // Unmount is one such boundary. Hygiene, not a repaint guard: the shell
@@ -1645,6 +1652,21 @@ export function DesktopWorkspaceShell(props: {
   // running banner or the run's review card. Refreshed with history (the
   // manager pings the same workspace-activity channel on every transition).
   const [tryState, setTryState] = useState<TryInVersionRunState | null>(null);
+  // The two local writers on that lane. Dismissing the review card clears it
+  // here; starting or ending an agent run from Settings reports the state it
+  // just observed. Both are the user acting, and both supersede whatever a
+  // request issued earlier will eventually say.
+  const onTryReviewDismissed = useCallback(() => {
+    supersedeEngineStatusSnapshots();
+    setTryState(null);
+  }, [supersedeEngineStatusSnapshots]);
+  const onSettingsAgentActiveChange = useCallback(
+    (active: boolean) => {
+      supersedeEngineStatusSnapshots();
+      setAgentActive(active);
+    },
+    [supersedeEngineStatusSnapshots],
+  );
 
   const refreshHistory = useCallback(async () => {
     if (engineEnabled) {
@@ -3158,7 +3180,7 @@ export function DesktopWorkspaceShell(props: {
               flushActiveDraft={flushActiveDraft}
               onOpenCompare={openVersionCompareTab}
               onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-              onDismissed={() => setTryState(null)}
+              onDismissed={onTryReviewDismissed}
             />
           ) : null}
           <div
