@@ -33,17 +33,35 @@ describe("bootstrap window gate", () => {
     },
   );
 
+  // A gate that only precedes the window call is not a gate: control has to
+  // leave the handler, so the guarded branch must return.
   it.each(WINDOW_CREATING_HANDLERS)(
-    "makes the %s handler return before it can create a window",
+    "makes the %s handler return out of the closed gate, not fall through",
     (event) => {
       const handler = handlerSource(event);
       const gateAt = handler.indexOf("if (!bootstrapComplete)");
       const createAt = handler.indexOf("showOrCreateMainWindow");
       if (createAt < 0) return;
       expect(gateAt).toBeGreaterThanOrEqual(0);
-      expect(gateAt).toBeLessThan(createAt);
+
+      const returnAt = handler.indexOf("return;", gateAt);
+      expect(returnAt).toBeGreaterThan(gateAt);
+      expect(returnAt).toBeLessThan(createAt);
+      // Whatever the guard does before returning, it cannot open a window.
+      const guardBody = handler.slice(gateAt, returnAt);
+      expect(guardBody).not.toContain("showOrCreateMainWindow");
+      expect(guardBody).not.toContain("createMainWindow");
     },
   );
+
+  it("keeps an opened file's path for the deferred flush", () => {
+    const handler = handlerSource("open-file");
+    const queueAt = handler.indexOf("pendingOpenPaths.push(path)");
+    const gateAt = handler.indexOf("if (!bootstrapComplete)");
+    expect(queueAt).toBeGreaterThanOrEqual(0);
+    // Queued before the gate, so a closed gate returns having kept the path.
+    expect(queueAt).toBeLessThan(gateAt);
+  });
 
   it("keeps a second instance's workspace paths for the deferred flush", () => {
     const handler = handlerSource("second-instance");
@@ -52,21 +70,25 @@ describe("bootstrap window gate", () => {
       "pendingOpenPaths.push(...collectOpenWorkspaceArgs(argv))",
     );
     expect(queueAt).toBeGreaterThan(gateAt);
+    expect(queueAt).toBeLessThan(handler.indexOf("return;", gateAt));
     expect(queueAt).toBeLessThan(handler.indexOf("showOrCreateMainWindow"));
   });
 
-  it("opens the gate only after the daemon started and a window exists", () => {
+  it("opens the gate only after the daemon, IPC, and a window", () => {
     const whenReadyAt = mainSource.indexOf("app.whenReady().then(");
     const daemonGateAt = mainSource.indexOf(
       "if (!(await startRustEngineDaemon())) return;",
       whenReadyAt,
     );
+    const ipcAt = mainSource.indexOf("registerIpcHandlers();", daemonGateAt);
     const createWindowAt = mainSource.indexOf("createMainWindow({", daemonGateAt);
     const openGateAt = mainSource.indexOf("bootstrapComplete = true", whenReadyAt);
 
     expect(whenReadyAt).toBeGreaterThanOrEqual(0);
     expect(daemonGateAt).toBeGreaterThan(whenReadyAt);
+    expect(ipcAt).toBeGreaterThan(daemonGateAt);
     expect(createWindowAt).toBeGreaterThan(daemonGateAt);
+    expect(openGateAt).toBeGreaterThan(ipcAt);
     expect(openGateAt).toBeGreaterThan(createWindowAt);
   });
 
