@@ -4,12 +4,19 @@ use dohc_engine_storage::StorageError;
 /// holds the whole body and reports an exact size. A transport that stops
 /// reading at its own bound never learns the full size, and reports the floor
 /// it proved rather than inventing a total.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservedBytes {
-    #[error("{0} bytes")]
     Exact(usize),
-    #[error("at least {0} bytes")]
     AtLeast(usize),
+}
+
+impl std::fmt::Display for ObservedBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ObservedBytes::Exact(bytes) => write!(formatter, "{bytes} bytes"),
+            ObservedBytes::AtLeast(bytes) => write!(formatter, "at least {bytes} bytes"),
+        }
+    }
 }
 
 /// Engine-side replication failure taxonomy. Messages never include payloads,

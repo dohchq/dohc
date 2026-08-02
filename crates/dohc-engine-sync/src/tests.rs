@@ -13601,3 +13601,71 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
             .expect("binary blob presence")
     );
 }
+
+/// The binary half of the same chokepoint. The text half is pinned above; this
+/// one was not, so the ceiling could be deleted for `BlobKind::Binary` alone
+/// and every other test stayed green.
+///
+/// MUTATION: skip the ceiling for binary content in `hydrate_blob_content` and
+/// the over-cap half commits instead of refusing. The ceiling's own value is
+/// pinned below, so widening it moves no expectation with it.
+#[test]
+fn binary_blob_over_the_binary_ceiling_is_refused_at_ingest() {
+    let (_scratch, _path, mut engine) = store();
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+    // Pinned, not derived. Every other expectation here reads the ceiling from
+    // `blob_ceiling`, so without this a widened ceiling would carry the whole
+    // test with it and still report green.
+    assert_eq!(
+        (constraint, limit_bytes),
+        ("MAX_CAPTURE_BINARY_FILE_BYTES", 5 * 1024 * 1024),
+        "binary ingest is the tighter ceiling this test exists to hold"
+    );
+
+    let at_cap = vec![3u8; limit_bytes];
+    let accepted = BlobHydration {
+        sha256: dohc_engine_storage::hex_sha256(&at_cap),
+        content: BlobContent::Binary(at_cap),
+    };
+    assert_eq!(
+        hydrate_blob_content(&mut engine, &accepted, &NoFaults).expect("at-cap binary hydrates"),
+        TxnOutcome::Committed(())
+    );
+    assert!(
+        engine
+            .has_binary_blob(&accepted.sha256)
+            .expect("binary blob presence")
+    );
+
+    let over_cap = vec![3u8; limit_bytes + 1];
+    let refused = BlobHydration {
+        sha256: dohc_engine_storage::hex_sha256(&over_cap),
+        content: BlobContent::Binary(over_cap),
+    };
+    let error = hydrate_blob_content(&mut engine, &refused, &NoFaults)
+        .expect_err("over-cap binary is refused");
+    assert!(
+        matches!(
+            error,
+            SyncError::BlobTooLarge {
+                constraint: named,
+                limit_bytes: limit,
+                observed_bytes,
+            } if named == constraint && limit == limit_bytes && observed_bytes == limit_bytes + 1
+        ),
+        "unexpected refusal: {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: limit {limit_bytes} bytes, observed {} bytes",
+            limit_bytes + 1
+        )
+    );
+    assert!(
+        !engine
+            .has_binary_blob(&refused.sha256)
+            .expect("binary blob presence"),
+        "an over-cap binary must not persist"
+    );
+}

@@ -10935,8 +10935,10 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         SyncError::InvalidInput { .. }
         | SyncError::UnsupportedOperation
         | SyncError::ShareBoundaryViolation
-        | SyncError::BlobInvalid
-        | SyncError::BlobTooLarge { .. } => ErrorCode::InvalidParams,
+        | SyncError::BlobInvalid => ErrorCode::InvalidParams,
+        // Same condition as its relay twin, so the same code. A blob over a
+        // fixed ceiling is a size refusal on either path.
+        SyncError::BlobTooLarge { .. } => ErrorCode::PayloadTooLarge,
     }
 }
 
@@ -11087,6 +11089,22 @@ mod tests {
             surfaced.retry,
             dohc_engine_protocol::Retryability::No,
             "a blob that exceeds a fixed ceiling never succeeds on retry"
+        );
+        // One condition must not surface under two codes depending on which
+        // layer refused it. Latent today, because relay pulls convert the
+        // ingest refusal before it reaches here; pinned so a second caller
+        // cannot reintroduce the split.
+        assert_eq!(
+            map_sync_code(SyncError::BlobTooLarge {
+                constraint: "MAX_CAPTURE_BINARY_FILE_BYTES",
+                limit_bytes: 5 * 1024 * 1024,
+                observed_bytes: 5 * 1024 * 1024 + 1,
+            }),
+            map_relay_code(RelayError::BlobTooLarge {
+                constraint: "MAX_CAPTURE_BINARY_FILE_BYTES",
+                limit_bytes: 5 * 1024 * 1024,
+                observed: ObservedBytes::Exact(5 * 1024 * 1024 + 1),
+            })
         );
     }
 
