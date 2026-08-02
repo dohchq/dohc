@@ -17,8 +17,28 @@ export interface SearchRunOptions {
   excludeGlob?: string;
 }
 
+// What the search form holds, as the inputs show it: a run's options with the
+// glob boxes always present (an empty box is "", never absent).
+export interface SearchCriteria extends SearchRunOptions {
+  includeGlob: string;
+  excludeGlob: string;
+}
+
+function blankSearchCriteria(): SearchCriteria {
+  return {
+    query: "",
+    caseSensitive: false,
+    wholeWord: false,
+    regex: false,
+    includeGlob: "",
+    excludeGlob: "",
+  };
+}
+
 export interface WorkspaceSearchApi {
   model: SearchModel;
+  criteria: SearchCriteria;
+  setCriteria: (next: SearchCriteria) => void;
   run: (options: SearchRunOptions) => void;
   clear: () => void;
 }
@@ -32,8 +52,11 @@ let searchSequence = 0;
 // identity (applyBatch returns the same reference for a superseded search).
 // Lives in the SHELL (not the Search view) so results — and the activity-bar
 // count badge — survive switching views; the panel unmounts, the model stays.
+// The criteria live here too, beside the results they describe: a reopened
+// input that had forgotten its query sat above results it no longer named.
 export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
   const [model, setModel] = useState<SearchModel>(idleSearchModel);
+  const [criteria, setCriteria] = useState<SearchCriteria>(blankSearchCriteria);
   // Event-driven transitions read/write through the ref so a burst of IPC
   // batches between renders folds correctly (never against a stale snapshot).
   const modelRef = useRef(model);
@@ -92,5 +115,5 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
     commit(idleSearchModel());
   }, [commit]);
 
-  return { model, run, clear };
+  return { model, criteria, setCriteria, run, clear };
 }

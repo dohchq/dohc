@@ -21,7 +21,11 @@ import {
   windowPreviewForRow,
   type SearchGroup,
 } from "./search-model";
-import type { SearchRunOptions, WorkspaceSearchApi } from "./useWorkspaceSearch";
+import type {
+  SearchCriteria,
+  SearchRunOptions,
+  WorkspaceSearchApi,
+} from "./useWorkspaceSearch";
 
 // Phase E5.0 content-search panel (Cmd/Ctrl+Shift+F surface): debounced
 // search-as-you-type over the streamed ripgrep IPC, grouped-by-file results
@@ -201,14 +205,17 @@ export function SearchView(props: {
     entry?: SearchResultsEventEntry,
   ) => void;
 }) {
-  const { model } = props.search;
-  const [query, setQuery] = useState("");
-  const [caseSensitive, setCaseSensitive] = useState(false);
-  const [wholeWord, setWholeWord] = useState(false);
-  const [regex, setRegex] = useState(false);
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [includeGlob, setIncludeGlob] = useState("");
-  const [excludeGlob, setExcludeGlob] = useState("");
+  // The criteria come from the shell (see useWorkspaceSearch): this view
+  // unmounts on every panel toggle, and the form must keep describing the
+  // results it sits above. Only the presentation of those results — collapse,
+  // windowing, keyboard selection — is view-local and resets on reopen.
+  const { model, criteria, setCriteria } = props.search;
+  const { query, caseSensitive, wholeWord, regex, includeGlob, excludeGlob } = criteria;
+  // Open the filter boxes when a reopened panel carries a glob: a filter that
+  // narrows the visible results must never be invisible.
+  const [filtersOpen, setFiltersOpen] = useState(
+    () => includeGlob !== "" || excludeGlob !== "",
+  );
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [showAllGroups, setShowAllGroups] = useState<ReadonlySet<string>>(new Set());
   const [groupWindow, setGroupWindow] = useState(GROUP_WINDOW_STEP);
@@ -250,35 +257,32 @@ export function SearchView(props: {
     });
   }
 
-  function currentOptions(overrides?: Partial<SearchRunOptions>): SearchRunOptions {
-    return {
-      query,
-      caseSensitive,
-      wholeWord,
-      regex,
-      includeGlob,
-      excludeGlob,
-      ...overrides,
-    };
+  // Writes the criteria AND returns them: state set in this tick has not
+  // committed yet, so the search must read the returned values.
+  function applyCriteria(patch: Partial<SearchCriteria>): SearchCriteria {
+    const next = { ...criteria, ...patch };
+    setCriteria(next);
+    return next;
   }
 
   // Debounced search-as-you-type (Enter searches immediately, below).
   function onQueryChange(value: string): void {
-    setQuery(value);
+    const next = applyCriteria({ query: value });
     if (isBlankSearchQuery(value)) {
-      issueNow(currentOptions({ query: value }));
+      issueNow(next);
       return;
     }
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
     debounceTimer.current = setTimeout(() => {
-      issueNow(currentOptions({ query: value }));
+      issueNow(next);
     }, DEBOUNCE_MS);
   }
 
-  // A toggle/filter flip re-issues immediately (no debounce — it's a click).
-  function flipToggle(apply: () => void, overrides: Partial<SearchRunOptions>): void {
-    apply();
-    if (query.length > 0) issueNow(currentOptions(overrides));
+  // A toggle flip or a filter edit re-issues immediately (no debounce — the
+  // toggle is a click, and the filter narrows a list the user is watching).
+  function changeCriteria(patch: Partial<SearchCriteria>): void {
+    const next = applyCriteria(patch);
+    if (next.query.length > 0) issueNow(next);
   }
 
   // Performance measures (post-commit, per search): first rendered batch and
@@ -348,7 +352,7 @@ export function SearchView(props: {
           selectedFlat.entry,
         );
       } else {
-        issueNow(currentOptions());
+        issueNow(criteria);
       }
     } else if (event.key === "Escape") {
       setSelected(-1);
@@ -382,27 +386,21 @@ export function SearchView(props: {
             testId="search-toggle-case"
             label="Match case"
             pressed={caseSensitive}
-            onToggle={() =>
-              flipToggle(() => setCaseSensitive(!caseSensitive), {
-                caseSensitive: !caseSensitive,
-              })
-            }
+            onToggle={() => changeCriteria({ caseSensitive: !caseSensitive })}
             Icon={CaseSensitive}
           />
           <ToggleButton
             testId="search-toggle-word"
             label="Match whole word"
             pressed={wholeWord}
-            onToggle={() =>
-              flipToggle(() => setWholeWord(!wholeWord), { wholeWord: !wholeWord })
-            }
+            onToggle={() => changeCriteria({ wholeWord: !wholeWord })}
             Icon={WholeWord}
           />
           <ToggleButton
             testId="search-toggle-regex"
             label="Use regular expression"
             pressed={regex}
-            onToggle={() => flipToggle(() => setRegex(!regex), { regex: !regex })}
+            onToggle={() => changeCriteria({ regex: !regex })}
             Icon={Regex}
           />
           <ToggleButton
@@ -428,11 +426,7 @@ export function SearchView(props: {
                 data-testid="search-include"
                 placeholder="e.g. *.md"
                 value={includeGlob}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setIncludeGlob(value);
-                  if (query.length > 0) issueNow(currentOptions({ includeGlob: value }));
-                }}
+                onChange={(event) => changeCriteria({ includeGlob: event.target.value })}
                 spellCheck={false}
                 className="rounded border border-line bg-bg px-1.5 py-1 text-[12px] text-ink outline-none placeholder:text-subtle focus:border-ink"
               />
@@ -446,11 +440,7 @@ export function SearchView(props: {
                 data-testid="search-exclude"
                 placeholder="e.g. drafts/**"
                 value={excludeGlob}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setExcludeGlob(value);
-                  if (query.length > 0) issueNow(currentOptions({ excludeGlob: value }));
-                }}
+                onChange={(event) => changeCriteria({ excludeGlob: event.target.value })}
                 spellCheck={false}
                 className="rounded border border-line bg-bg px-1.5 py-1 text-[12px] text-ink outline-none placeholder:text-subtle focus:border-ink"
               />
