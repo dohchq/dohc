@@ -2974,12 +2974,12 @@ describe("history page", () => {
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
   });
 
-  // A boundary the shell has to AWAIT is not a boundary. When the old
-  // version's answer lands before the lookup settles, it meets a guard that
-  // knows nothing, commits, and the lookup arriving later cannot retract it —
-  // so a failed switch-triggered refresh left the previous version's moments
-  // on screen. The operation names the version it left the workspace on, so
-  // there is nothing to wait for. The lookup here never answers at all.
+  // A boundary anyone has to AWAIT is not a boundary. When the old version's
+  // answer lands first, it meets a guard that knows nothing, commits, and
+  // whatever arrives later cannot retract it — so a failed switch-triggered
+  // refresh left the previous version's moments on screen. Two awaits used to
+  // sit in front of the announcement: the shell's own lookup, and the
+  // selector's post-switch re-read. Neither answers here.
   it("rejects the old version's answer without waiting for a lookup", async () => {
     const stranded = deferred<ListEngineMomentsResult>();
     let failSwitchRefresh!: (error: Error) => void;
@@ -2994,14 +2994,15 @@ describe("history page", () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let switched = false;
-    // The selector's mount read and its post-switch re-read answer. Every read
-    // after those hangs forever — so any lookup the SHELL still had to make to
-    // learn the active version never answers, which is the whole point.
+    // Only the selector's mount read answers. Every later read hangs forever:
+    // the shell's own lookup if it still needed one, AND the selector's
+    // post-switch re-read — so a boundary announced after either of them is a
+    // boundary that never arrives.
     const hungLookup = new Promise<never>(() => {});
     let versionReads = 0;
     bridge.listWorkspaceVersions = vi.fn(() => {
       versionReads += 1;
-      if (versionReads > 2) return hungLookup;
+      if (versionReads > 1) return hungLookup;
       return Promise.resolve({
         versions: [
           {
@@ -3055,6 +3056,100 @@ describe("history page", () => {
     });
 
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+  });
+
+  // The same slip on the other flow. "Back to Main" switched, then dismissed
+  // the review, and only then said where the workspace had landed — so an
+  // old-version answer arriving while the dismissal was in flight met an unset
+  // boundary. The dismissal here never settles, which is what a slow one looks
+  // like from the timeline's side.
+  it("reports Main before the dismissal it does not wait for", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const stranded = deferred<ListEngineMomentsResult>();
+    let failSwitchRefresh!: (error: Error) => void;
+    const switchRefresh = new Promise<never>((_resolve, reject) => {
+      failSwitchRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      stranded.promise,
+      switchRefresh,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
+    let switched = false;
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "try-1",
+          name: "Try: launch note",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: switched ? "main" : "try-1",
+    }));
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      switched = true;
+      return { activeVersionId: "main", changedFileCount: 0 };
+    });
+    // The switch lands; the dismissal that follows it never does.
+    bridge.dismissTryInVersionReview = vi.fn(() => new Promise<never>(() => {}));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve(
+        historyPage(
+          [historyMoment("m-first", "Wrote the note in the try version")],
+          "try-1",
+        ),
+      );
+      await first.promise;
+    });
+    expect(await screen.findByTestId("try-review-card")).toBeTruthy();
+
+    // A try-version refresh is in flight when the user leaves.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+
+    // Set aside: switch back to Main, then hang on the dismissal.
+    await user.click(screen.getByTestId("try-review-set-aside"));
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.dismissTryInVersionReview).toHaveBeenCalled());
+
+    // The boundary's own refresh fails, so the try-version answer is the only
+    // one left — and it describes somewhere the user is no longer.
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stranded.resolve(
+        historyPage(
+          [historyMoment("m-stranded", "Edited the note in the try version")],
+          "try-1",
+        ),
+      );
+      await stranded.promise;
+    });
+
+    expect(screen.queryByText("Edited the note in the try version")).toBeNull();
   });
 
   // Statements about the active version are ordered by the ISSUE counter, and

@@ -159,11 +159,13 @@ export function VersionMenu(props: {
         if (token !== liveToken.current) return;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId });
         if (token !== liveToken.current) return;
-        await refresh();
-        if (token !== liveToken.current) return;
-        // The switch succeeded, so this IS the active version now. Naming it
-        // saves the shell a lookup it would have to await.
+        // The switch succeeded, so this IS the active version now — say so
+        // before awaiting anything else. Main notifies the renderer BEFORE
+        // this invoke returns, so a history refresh for the old version can
+        // already be in flight, and every await between here and the
+        // announcement is a window it can answer in.
         props.onWorkspaceStateChanged(versionId);
+        await refresh();
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not switch versions."));
