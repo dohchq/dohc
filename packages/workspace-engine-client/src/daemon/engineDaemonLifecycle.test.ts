@@ -650,9 +650,10 @@ describe("Rust engine daemon lifecycle", () => {
         failures.map(({ error, terminal }) => [error.message, terminal]),
       ).toEqual([
         [
-          "The Rust engine is running but stopped answering engine.ping: " +
-            "2 probes in a row got no reply within 10ms each. " +
-            "The limit is 2 silent probes. dohc is restarting it.",
+          "The Rust engine is running but sent nothing: " +
+            "2 probes in a row expired after 10ms each with no frame of any " +
+            "kind from the engine. " +
+            "The limit is 2 probes with no traffic. dohc is restarting it.",
           false,
         ],
         // The kill becomes an exit, and the exit is what carries the wedge
@@ -732,9 +733,10 @@ describe("Rust engine daemon lifecycle", () => {
       }
 
       expect(terminalFailures.map((error) => error.message)).toEqual([
-        "The Rust engine stopped answering engine.ping on 2 launches: " +
-          "3 probes in a row got no reply within 45000ms each. " +
-          "The limit is 2 wedges with no reply in between. " +
+        "The Rust engine went silent on 2 launches: " +
+          "3 probes in a row expired after 45000ms each with no frame of any " +
+          "kind from the engine. " +
+          "The limit is 2 wedges with no traffic in between. " +
           "dohc stopped restarting it.",
       ]);
       // Two generations, both wedged, both killed. A third would mean the

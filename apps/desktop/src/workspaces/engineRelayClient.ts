@@ -200,11 +200,13 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
   readonly cancelRequest?: EngineDaemonClient["cancelRequest"];
   readonly onBlob?: EngineDaemonClient["onBlob"];
   readonly onEvent?: EngineDaemonClient["onEvent"];
-  // Swallowing this one would make a wedge kill report a deliberate shutdown,
-  // and every retry-enabled caller would stay failed across the restart.
+  // These two are forwarded for completeness, NOT because anything reaches
+  // them through this wrapper today: the supervisor probes and kills the
+  // client it launched itself, never this one. Deleting them would break
+  // nothing now, which is exactly why the reason has to be written down —
+  // a wrapper that quietly models less than the client it wraps is how the
+  // next caller gets a silent downgrade instead of the real behaviour.
   readonly closeUnresponsive?: EngineDaemonClient["closeUnresponsive"];
-  // Dropping this one would make the wedge detector read a busy daemon as a
-  // silent one, because it would see no traffic it could count.
   readonly inboundActivity?: EngineDaemonClient["inboundActivity"];
   readonly waitForExit?: EngineDaemonClient["waitForExit"];
 

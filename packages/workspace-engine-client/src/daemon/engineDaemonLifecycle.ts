@@ -62,6 +62,11 @@ const DEFAULT_PING_INTERVAL_MS = 30_000;
 // output arrives with that output, and bytes for anybody prove the daemon is
 // turning; a wedged daemon sends nothing to anyone. The expiry then measures
 // what it can honestly measure — total silence.
+//
+// Scope: events count as traffic too. `event_forwarder` is a separate task
+// pushing onto the same queue, so it can emit while no request is in flight.
+// It is file-change driven, so an idle wedge still goes silent and is still
+// caught; a workspace being edited only DEFERS the verdict, never loses it.
 const DEFAULT_PING_EXPIRY_MS = 45_000;
 // Three silent probes in a row. They are one interval apart and each waits out
 // its own expiry, so a wedge verdict needs at least 2 intervals + 3 expiries —
@@ -863,7 +868,7 @@ export class EngineDaemonLifecycle {
     const maxWedges =
       this.options.maxConsecutiveWedges ?? DEFAULT_MAX_CONSECUTIVE_WEDGES;
     const expiryMs = this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS;
-    const silence = `${maxExpiries} probes in a row got no reply within ${expiryMs}ms each`;
+    const silence = `${maxExpiries} probes in a row expired after ${expiryMs}ms each with no frame of any kind from the engine`;
     // The crash window cannot end a wedge loop: one wedge cycle is longer than
     // a tenth of that window, so its count is unreachable by construction. A
     // wedge streak carries its own budget.
@@ -889,8 +894,8 @@ export class EngineDaemonLifecycle {
     this.reportFailure(
       new EngineDaemonUnavailableError(
         terminal
-          ? `The Rust engine stopped answering engine.ping on ${this.consecutiveWedges} launches: ${silence}. The limit is ${maxWedges} wedges with no reply in between. dohc stopped restarting it.`
-          : `The Rust engine is running but stopped answering engine.ping: ${silence}. The limit is ${maxExpiries} silent probes. dohc is restarting it.`,
+          ? `The Rust engine went silent on ${this.consecutiveWedges} launches: ${silence}. The limit is ${maxWedges} wedges with no traffic in between. dohc stopped restarting it.`
+          : `The Rust engine is running but sent nothing: ${silence}. The limit is ${maxExpiries} probes with no traffic. dohc is restarting it.`,
       ),
       terminal,
     );

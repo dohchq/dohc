@@ -1425,6 +1425,33 @@ describe("EngineClient", () => {
     ).rejects.toMatchObject({ code: "transport-error" });
   });
 
+  // The wedge detector's ONE production input. A daemon draining a large
+  // backlog answers no probe — the probe cannot overtake its output queue — so
+  // this counter is the only thing that tells the supervisor it is alive. If it
+  // never advanced, every busy daemon would be killed as wedged.
+  // MUTATION: delete `this.inboundFrames += 1` from receiveFrame and this
+  // fails. Nothing else in the suite notices, which is why it is asserted here.
+  it("counts every frame it receives, which is what proves a busy daemon alive", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+
+    const beforeWork = transport.inboundActivity();
+    const pending = transport.sendRequest(request(400, "bulk.work"));
+    const sent = peer.received.at(-1);
+    peer.send({
+      type: "response",
+      id: (sent as { id: number }).id,
+      result: "bulk",
+    });
+    await pending;
+
+    // Traffic for an ordinary caller, not a probe: exactly the frames that
+    // arrive while a probe waits its turn behind them.
+    expect(transport.inboundActivity()).toBeGreaterThan(beforeWork);
+  });
+
   // A wedge kill cannot be left on the 2-second timer that a deliberate close
   // uses. The supervisor reports the terminal failure immediately afterwards,
   // and the desktop answers that report with a modal; the event loop stops

@@ -7675,13 +7675,18 @@ async function startRustEngineDaemon(): Promise<boolean> {
         if (terminal && !quitting) {
           // The dialog is for the user, so it says what broke and what to do
           // instead — no internal names, one instruction per sentence
-          // (docs/brand/copy.md).
+          // (docs/brand/copy.md). "The workspace engine" is the noun the
+          // shipping UI already uses for this (SettingsDialog, StatusBar,
+          // NoticeCenter), so this must not invent another one.
+          //
+          // Cause-neutral on purpose: a terminal failure also arrives from the
+          // restart limit and the crash window, where the engine crashed
+          // rather than went silent. Every one of them ends the same way.
           dialog.showErrorBox(
-            "dohc stopped its engine",
-            "The engine that reads and writes your files stopped answering. " +
-              "dohc stopped restarting it.\n\n" +
-              "Restart dohc. If this happens again, review the desktop logs " +
-              "and reinstall dohc.",
+            "The workspace engine stopped",
+            "dohc stopped restarting the workspace engine.\n\n" +
+              "Restart dohc. If this happens again, review the desktop logs. " +
+              "If it continues, reinstall dohc.",
           );
         }
       },
