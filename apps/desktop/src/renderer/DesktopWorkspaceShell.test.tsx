@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
 import type {
+  AgentRunStatusResult,
   ChatChannelRecord,
   DmRecord,
   EngineMomentRecord,
@@ -197,11 +198,15 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     })),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
-    getAgentRunStatus: vi.fn(async () => ({
-      mcpEnabled: false,
-      activeRun: null,
-      lastRun: null,
-    })),
+    // Typed to the contract, not to this idle default: a freshness test drives
+    // a real running agent through it.
+    getAgentRunStatus: vi.fn(
+      async (): Promise<AgentRunStatusResult> => ({
+        mcpEnabled: false,
+        activeRun: null,
+        lastRun: null,
+      }),
+    ),
     getMcpConfig: vi.fn(async () => ({
       command: "dohc-mcp",
       args: ["--workspace", WORKSPACE.rootPath, "--home", "/tmp/dohc-home"],
@@ -2200,12 +2205,15 @@ describe("history page", () => {
     };
   }
 
-  function historyPage(moments: EngineMomentRecord[]): ListEngineMomentsResult {
+  function historyPage(
+    moments: EngineMomentRecord[],
+    activeVersionId = "main",
+  ): ListEngineMomentsResult {
     return {
       moments,
       nextBeforeMomentOrder: null,
       latestMomentOrder: 1,
-      activeVersionId: "main",
+      activeVersionId,
     };
   }
 
@@ -2720,6 +2728,8 @@ describe("history page", () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
+    // The workspace reports the try version until the switch runs, Main after.
+    let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
         {
@@ -2730,8 +2740,12 @@ describe("history page", () => {
           canMergeIntoMain: false,
         },
       ],
-      activeVersionId: "try-1",
+      activeVersionId: switched ? "main" : "try-1",
     }));
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      switched = true;
+      return { activeVersionId: "main", changedFileCount: 0 };
+    });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -2739,7 +2753,10 @@ describe("history page", () => {
     await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve({
-        ...historyPage([historyMoment("m-first", "Wrote the note in the try version")]),
+        ...historyPage(
+          [historyMoment("m-first", "Wrote the note in the try version")],
+          "try-1",
+        ),
         nextBeforeMomentOrder: 1,
       });
       await first.promise;
@@ -2767,19 +2784,179 @@ describe("history page", () => {
     // Both answers from the version the user left arrive too late to matter.
     await act(async () => {
       staleRefresh.resolve(
-        historyPage([historyMoment("m-stale", "Edited the note in the try version")]),
+        historyPage(
+          [historyMoment("m-stale", "Edited the note in the try version")],
+          "try-1",
+        ),
       );
       await staleRefresh.promise;
     });
     await act(async () => {
       stalePage.resolve(
-        historyPage([historyMoment("m-stale-page", "Started the try version")]),
+        historyPage(
+          [historyMoment("m-stale-page", "Started the try version")],
+          "try-1",
+        ),
       );
       await stalePage.promise;
     });
 
     expect(screen.queryByText("Edited the note in the try version")).toBeNull();
     expect(screen.queryByText("Started the try version")).toBeNull();
+  });
+
+  // The other side of that boundary. Main notifies the renderer BEFORE the
+  // switch invoke resolves, so an activity refresh can be ISSUED — and answer
+  // — for the new version before the shell hears about the switch at all.
+  // Rejecting by arrival order threw that valid answer away and left the panel
+  // on the version the user had just left.
+  it("keeps a new-version answer that raced the switch it belongs to", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const earlyRefresh = deferred<ListEngineMomentsResult>();
+    let failSwitchRefresh!: (error: Error) => void;
+    const switchRefresh = new Promise<never>((_resolve, reject) => {
+      failSwitchRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      earlyRefresh.promise,
+      switchRefresh,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
+    let switched = false;
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+      ],
+      activeVersionId: switched ? "main" : "try-1",
+    }));
+    // The switch lands in the daemon and notifies the renderer before the
+    // invoke resolves, which is the ordering this test exists for.
+    const switchInvoke = deferred<void>();
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      switched = true;
+      bridge.emitWorkspaceActivity();
+      await switchInvoke.promise;
+      return { activeVersionId: "main", changedFileCount: 0 };
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve(
+        historyPage([historyMoment("m-first", "Wrote the note in the try version")], "try-1"),
+      );
+      await first.promise;
+    });
+    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+
+    // Set aside: the daemon switches and notifies, so the activity refresh for
+    // MAIN is ISSUED before the switch invoke resolves — and it is still in
+    // flight when the shell finally hears about the switch.
+    await user.click(screen.getByTestId("try-review-set-aside"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+
+    // The switch resolves, the shell runs its boundary, and its own refresh
+    // fails — so the early answer is the only one that will ever describe Main.
+    await act(async () => {
+      switchInvoke.resolve();
+      await switchInvoke.promise;
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+
+    // It answers last, describing the version the user is now on.
+    await act(async () => {
+      earlyRefresh.resolve(
+        historyPage([historyMoment("m-early", "Back on main")], "main"),
+      );
+      await earlyRefresh.promise;
+    });
+
+    expect(await screen.findByText("Back on main")).toBeTruthy();
+    expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+  });
+
+  // Supersession is per LANE. The user dismissed a review; that says nothing
+  // about sync or agent state, and the dismiss emits no activity event, so
+  // rejecting those lanes too would strand the status bar with no other source.
+  it("suppresses only the lane the user wrote when a refresh answers late", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const refreshed = deferred<ListEngineMomentsResult>();
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      refreshed.promise,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
+    // The workspace moves on before the second refresh is issued, so that
+    // refresh carries fresh news on the two lanes the user did not write.
+    let movedOn = false;
+    bridge.getSyncStatus = vi.fn(async () =>
+      movedOn ? { ...SYNC_STATUS, state: "syncing" as const } : SYNC_STATUS,
+    );
+    bridge.getAgentRunStatus = vi.fn(async () => ({
+      mcpEnabled: false,
+      activeRun: movedOn
+        ? {
+            id: "run-1",
+            startedAt: 1,
+            agentId: "agent-1",
+            onBehalfOf: "ice",
+            status: "running" as const,
+          }
+        : null,
+      lastRun: null,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve(historyPage([historyMoment("m-first", "Added the launch checklist")]));
+      await first.promise;
+    });
+    expect(await screen.findByTestId("try-review-card")).toBeTruthy();
+    expect(screen.getByTestId("sync-status").dataset.state).toBe("synced");
+    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
+
+    // A refresh is in flight when the user dismisses the review.
+    movedOn = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("try-review-keep-working"));
+    await waitFor(() => expect(screen.queryByTestId("try-review-card")).toBeNull());
+
+    await act(async () => {
+      refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
+      await refreshed.promise;
+    });
+
+    // The lane the user wrote stays written; the lanes they did not, update.
+    expect(screen.queryByTestId("try-review-card")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
+    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
   });
 });
 

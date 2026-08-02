@@ -202,6 +202,19 @@ export function chatsNavigationChangesDestination(
   );
 }
 
+// One lane of the snapshot group. It accepts an answer only if that answer is
+// newer than whatever last wrote the lane — a response, or a local action by
+// the user, which counts as newer than every request already issued.
+function commitSnapshotLane(
+  lane: { current: number },
+  token: number,
+  apply: () => void,
+): void {
+  if (token <= lane.current) return;
+  lane.current = token;
+  apply();
+}
+
 export function chatsNavigationRequiresRemount(
   current: ChatsNav | null,
   next: ChatsNav,
@@ -1605,41 +1618,51 @@ export function DesktopWorkspaceShell(props: {
     token: number;
     commit: () => void;
   } | null>(null);
-  // The sync/agent/try snapshots ride the refresh response but are NOT the
-  // timeline: no pagination competes for them, so they apply as soon as they
-  // arrive, on their own newest-wins watermark. Holding them with the timeline
-  // is what let a review the user had already dismissed come back when the
-  // held answer finally committed.
-  const committedEngineStatusToken = useRef(0);
-  // Everything in flight describes a state of the world that is no longer
-  // true. Raise both watermarks so no answer already issued can win the
-  // newest-answer race, and drop anything held for a settlement that would now
-  // mean the wrong thing. The pending pagination is deliberately left alone:
-  // it still owns the Load-more button, and its settlement is what releases it.
-  const invalidateEngineHistoryLoads = useCallback(() => {
-    engineHistoryToken.current += 1;
-    committedEngineHistoryToken.current = engineHistoryToken.current;
-    committedEngineStatusToken.current = engineHistoryToken.current;
-    blockedEngineHistoryRefresh.current = null;
-  }, []);
-  // A LOCAL write to the snapshots is newer information than every request in
-  // flight: the user acted AFTER all of them were issued, so counting only
+  // The sync, agent, and try snapshots ride the refresh response but are NOT
+  // the timeline: no pagination competes for them, so they apply as soon as
+  // they arrive. Each is its OWN lane with its own watermark, because a local
+  // write only ever knows about the lane it wrote — dismissing a review says
+  // nothing about sync state, and rejecting all three would strand a status
+  // bar that has no other source (the dismiss emits no activity event).
+  const committedSyncStatusToken = useRef(0);
+  const committedAgentActiveToken = useRef(0);
+  const committedTryStateToken = useRef(0);
+  // The version the DISPLAYED timeline describes, and the version answers may
+  // no longer describe. History answers carry their own `activeVersionId`, so
+  // staleness across a version switch is decided by identity rather than by
+  // arrival order — a switch does not know which requests were already in
+  // flight, and rejecting by token rejected valid NEW-version work too.
+  const committedEngineVersionId = useRef<string | null>(null);
+  const supersededEngineVersionId = useRef<string | null>(null);
+  const engineHistoryAnswerIsStale = useCallback(
+    (activeVersionId: string) => activeVersionId === supersededEngineVersionId.current,
+    [],
+  );
+  // A LOCAL write to a snapshot lane is newer information than every request
+  // in flight: the user acted AFTER all of them were issued, so counting only
   // responses would let one of those answers undo what they just did. Raising
-  // the snapshot watermark to the newest ISSUED token says so, and the losing
+  // that lane's watermark to the newest ISSUED token says so, and the losing
   // answers lose by construction whenever they land. Dismissing a review is
   // the case that bites: it emits no replacement activity, so a restored card
   // would sit there until something unrelated refreshed.
-  const supersedeEngineStatusSnapshots = useCallback(() => {
-    committedEngineStatusToken.current = engineHistoryToken.current;
+  const supersedeSnapshotLane = useCallback((lane: { current: number }) => {
+    lane.current = engineHistoryToken.current;
   }, []);
   useEffect(
     () => () => {
-      // Unmount is one such boundary. Hygiene, not a repaint guard: the shell
-      // is keyed by workspace, so a late response has no mounted state to
-      // reach. It keeps the invalidation true to what it claims.
-      invalidateEngineHistoryLoads();
+      // Unmount invalidates every load in flight, on every lane. Hygiene, not
+      // a repaint guard: the shell is keyed by workspace, so a late response
+      // has no mounted state to reach. It keeps the invalidation true to what
+      // it claims, now that the issue counter alone no longer stops a response
+      // from committing.
+      engineHistoryToken.current += 1;
+      committedEngineHistoryToken.current = engineHistoryToken.current;
+      committedSyncStatusToken.current = engineHistoryToken.current;
+      committedAgentActiveToken.current = engineHistoryToken.current;
+      committedTryStateToken.current = engineHistoryToken.current;
+      blockedEngineHistoryRefresh.current = null;
     },
-    [invalidateEngineHistoryLoads],
+    [],
   );
   // Which surface the right-hand Chats panel shows (all chats vs the active
   // file's). Runtime-only — not persisted.
@@ -1657,15 +1680,15 @@ export function DesktopWorkspaceShell(props: {
   // just observed. Both are the user acting, and both supersede whatever a
   // request issued earlier will eventually say.
   const onTryReviewDismissed = useCallback(() => {
-    supersedeEngineStatusSnapshots();
+    supersedeSnapshotLane(committedTryStateToken);
     setTryState(null);
-  }, [supersedeEngineStatusSnapshots]);
+  }, [supersedeSnapshotLane]);
   const onSettingsAgentActiveChange = useCallback(
     (active: boolean) => {
-      supersedeEngineStatusSnapshots();
+      supersedeSnapshotLane(committedAgentActiveToken);
       setAgentActive(active);
     },
-    [supersedeEngineStatusSnapshots],
+    [supersedeSnapshotLane],
   );
 
   const refreshHistory = useCallback(async () => {
@@ -1681,18 +1704,23 @@ export function DesktopWorkspaceShell(props: {
         bridge().getAgentRunStatus({ workspaceId }),
         bridge().getTryInVersionState({ workspaceId }),
       ]);
-      // The snapshots settle here and now: nothing can block them, and holding
-      // them for a later commit would republish a world the user has already
-      // acted on — a dismissed review card, most visibly.
-      if (token > committedEngineStatusToken.current) {
-        committedEngineStatusToken.current = token;
-        setSyncStatus(status);
-        setAgentActive(agent.activeRun !== null);
-        setTryState(trySession.state);
-      }
+      // The snapshots settle here and now, lane by lane: nothing can block
+      // them, and holding them for a later commit would republish a world the
+      // user has already acted on — a dismissed review card, most visibly.
+      commitSnapshotLane(committedSyncStatusToken, token, () => setSyncStatus(status));
+      commitSnapshotLane(committedAgentActiveToken, token, () =>
+        setAgentActive(agent.activeRun !== null),
+      );
+      commitSnapshotLane(committedTryStateToken, token, () =>
+        setTryState(trySession.state),
+      );
       if (token <= committedEngineHistoryToken.current) return;
+      // An answer describing the version the user left is not late — it is
+      // about somewhere else.
+      if (engineHistoryAnswerIsStale(page.activeVersionId)) return;
       const commit = () => {
         committedEngineHistoryToken.current = token;
+        committedEngineVersionId.current = page.activeVersionId;
         // A refresh returns to the newest page; older pages reload on demand,
         // so any load-more it supersedes is over.
         setEngineHistoryLoadingMore(false);
@@ -1744,7 +1772,13 @@ export function DesktopWorkspaceShell(props: {
       // The committed-answer rule, applied to this page as well: display it
       // unless a NEWER answer already took the timeline. Superseding on issue
       // here let a newer refresh that merely FAILED throw this page away.
-      if (token > committedEngineHistoryToken.current) {
+      // Same two questions as the refresh, plus one an append owes: the page
+      // must describe the SAME version as the timeline it extends.
+      if (
+        token > committedEngineHistoryToken.current &&
+        !engineHistoryAnswerIsStale(page.activeVersionId) &&
+        page.activeVersionId === committedEngineVersionId.current
+      ) {
         committedEngineHistoryToken.current = token;
         setEngineHistory((current) =>
           current
@@ -1813,19 +1847,32 @@ export function DesktopWorkspaceShell(props: {
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
   const onVersionWorkspaceStateChanged = useCallback(() => {
     setVersionEpoch((epoch) => epoch + 1);
-    // A version switch changes WHICH timeline is true, so it is an
-    // invalidation boundary: every history answer in flight describes the
-    // version the user left, and the newest-answer rule would otherwise let
-    // one paint the version they are now on — a failed refresh below is all it
-    // takes. Every surface that changes the active version reports here.
-    invalidateEngineHistoryLoads();
+    // A version switch changes WHICH timeline is true. Rejecting everything in
+    // flight by token was too blunt: main notifies the renderer BEFORE the
+    // switch invoke resolves, so a perfectly valid NEW-version refresh can be
+    // issued before this runs, and rejecting it left the panel on the old
+    // version whenever the refresh below failed. So name the version instead —
+    // answers carry theirs. Which version is now active is read from the
+    // workspace, not assumed: nothing left if the displayed version IS the
+    // active one, which is exactly the case where an early answer already
+    // moved the panel.
+    blockedEngineHistoryRefresh.current = null;
+    void bridge()
+      .listWorkspaceVersions({ workspaceId })
+      .then(({ activeVersionId }) => {
+        supersededEngineVersionId.current =
+          activeVersionId === committedEngineVersionId.current
+            ? null
+            : committedEngineVersionId.current;
+      })
+      .catch(() => undefined);
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
     );
     void refreshHistory().catch((error) =>
       reportShellError("Could not refresh history.", error),
     );
-  }, [invalidateEngineHistoryLoads, refreshFiles, refreshHistory, reportShellError]);
+  }, [refreshFiles, refreshHistory, reportShellError, workspaceId]);
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
       mutateWb((state) => openTab(state, versionCompareTabPath(versionId)));
