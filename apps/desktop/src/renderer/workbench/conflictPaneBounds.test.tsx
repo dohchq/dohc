@@ -176,34 +176,90 @@ describe("combine by hand", () => {
     ).toBe(false);
   });
 
-  it("refuses to apply a combined copy typed past the cap, and names the limit", async () => {
+  it("keeps an over-cap paste out of the box, and names the size that was tried", async () => {
     await openReview([conflict()]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
-    const input = screen.getByTestId("version-conflict-combined-input");
-    const overCap = "x".repeat(CONFLICT_COMBINED_MAX_BYTES + 1);
-    fireEvent.change(input, { target: { value: overCap } });
+    const input = screen.getByTestId(
+      "version-conflict-combined-input",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "my own draft\n" } });
 
-    const apply = screen.getByTestId(
-      "version-conflict-apply-combined",
-    ) as HTMLButtonElement;
-    expect(apply.disabled).toBe(true);
-    const alert = screen.getByTestId("version-conflict-combined-over-cap");
-    expect(alert.textContent).toContain(
-      (CONFLICT_COMBINED_MAX_BYTES + 1).toLocaleString("en-US"),
-    );
+    // A 10 MiB paste. Stored first and checked afterwards, this both counted
+    // every byte on the next render AND handed the whole string to a
+    // CONTROLLED textarea — the stall this surface exists to prevent.
+    const paste = "x".repeat(10 * 1024 * 1024);
+    fireEvent.change(input, { target: { value: paste } });
+
+    const box = screen.getByTestId(
+      "version-conflict-combined-input",
+    ) as HTMLTextAreaElement;
+    expect(box.value).toBe("my own draft\n");
+    expect(box.value.length).toBeLessThanOrEqual(CONFLICT_COMBINED_MAX_BYTES);
+    const alert = screen.getByTestId("version-conflict-combined-too-large");
+    expect(alert.textContent).toContain(paste.length.toLocaleString("en-US"));
     expect(alert.textContent).toContain(
       CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US"),
     );
-    fireEvent.click(apply);
-    expect(bridgeMock.resolveWorkspaceVersionConflict).not.toHaveBeenCalled();
+    expect(alert.textContent).toContain("Add less text.");
 
-    // Back under the cap, the apply works again.
-    fireEvent.change(input, { target: { value: "combined\n" } });
+    // The next change that fits is accepted, and the refusal goes away.
+    fireEvent.change(box, { target: { value: "combined\n" } });
     expect(
-      (screen.getByTestId("version-conflict-apply-combined") as HTMLButtonElement)
-        .disabled,
-    ).toBe(false);
-    expect(screen.queryByTestId("version-conflict-combined-over-cap")).toBeNull();
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
+        .value,
+    ).toBe("combined\n");
+    expect(screen.queryByTestId("version-conflict-combined-too-large")).toBeNull();
+  });
+
+  it("accepts a change exactly at the cap and refuses one byte more", async () => {
+    await openReview([conflict()]);
+    fireEvent.click(screen.getByTestId("version-conflict-combine"));
+    const input = screen.getByTestId("version-conflict-combined-input");
+
+    const atCap = "x".repeat(CONFLICT_COMBINED_MAX_BYTES);
+    fireEvent.change(input, { target: { value: atCap } });
+    expect((input as HTMLTextAreaElement).value).toHaveLength(
+      CONFLICT_COMBINED_MAX_BYTES,
+    );
+    expect(screen.queryByTestId("version-conflict-combined-too-large")).toBeNull();
+
+    fireEvent.change(input, { target: { value: `${atCap}x` } });
+    expect((input as HTMLTextAreaElement).value).toHaveLength(
+      CONFLICT_COMBINED_MAX_BYTES,
+    );
+    expect(
+      screen.getByTestId("version-conflict-combined-too-large").textContent,
+    ).toContain((CONFLICT_COMBINED_MAX_BYTES + 1).toLocaleString("en-US"));
+  });
+
+  it("starts empty when one side has no file and the other is over the cap", async () => {
+    // A deletion against an oversized edit. The absent side is a zero-byte
+    // start the engine accepts, so removing the affordance refused work.
+    await openReview([
+      conflict({ currentText: null, incomingText: hugeBody("b") }),
+    ]);
+    expect(screen.queryByTestId("version-conflict-combine-unavailable")).toBeNull();
+    fireEvent.click(screen.getByTestId("version-conflict-combine"));
+    expect(
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
+        .value,
+    ).toBe("");
+    expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
+      "Main doesn't have this file. This starts empty.",
+    );
+  });
+
+  it("prefers a present copy that fits over an absent side", async () => {
+    // Starting empty must never beat starting from a copy the user could edit.
+    await openReview([conflict({ incomingText: null })]);
+    fireEvent.click(screen.getByTestId("version-conflict-combine"));
+    expect(
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
+        .value,
+    ).toBe("main side\n");
+    expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
+      "Started from Main's copy.",
+    );
   });
 });
 
@@ -236,12 +292,63 @@ describe("a list of open conflicts", () => {
     await openReview(heavy);
     // The open card measures its two over-cap sides. The nineteen collapsed
     // ones measure nothing.
-    expect(utf8ByteLengthSpy).toHaveBeenCalledTimes(2);
+    expect(utf8ByteLengthSpy.mock.calls.length).toBe(2);
 
     utf8ByteLengthSpy.mockClear();
     const cards = screen.getAllByTestId("version-conflict");
     fireEvent.click(within(cards[7]).getByTestId("version-conflict-toggle"));
-    expect(utf8ByteLengthSpy).toHaveBeenCalledTimes(2);
+    expect(utf8ByteLengthSpy.mock.calls.length).toBe(2);
+  });
+
+  it("never re-measures a side when a local rerender happens", async () => {
+    // `labels` is rebuilt every render, so a memo depending on it recomputed
+    // every render — and with both sides over the cap that meant rescanning
+    // every byte of both on each one. Clicking Keep sets busy, which is a
+    // local rerender.
+    await openReview([
+      conflict({ currentText: hugeBody("a"), incomingText: hugeBody("b") }),
+    ]);
+    expect(utf8ByteLengthSpy.mock.calls.length).toBe(2);
+
+    let reject: (error: Error) => void = () => {};
+    bridgeMock.resolveWorkspaceVersionConflict.mockReturnValue(
+      new Promise((_resolve, rejectPromise) => {
+        reject = rejectPromise;
+      }),
+    );
+    utf8ByteLengthSpy.mockClear();
+    fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
+    expect(screen.getByTestId("version-conflict-busy")).not.toBeNull();
+    reject(new Error("nope"));
+    await screen.findByTestId("version-conflict-error");
+    // Two rerenders, no rescans.
+    expect(utf8ByteLengthSpy.mock.calls.length).toBe(0);
+  });
+
+  it("shows a failure even when the card was collapsed while it ran", async () => {
+    // Nothing stops the user opening another conflict mid-request, and a
+    // refusal that renders only inside the expanded body tells them nothing.
+    await openReview(many);
+    const cards = screen.getAllByTestId("version-conflict");
+    let reject: (error: Error) => void = () => {};
+    bridgeMock.resolveWorkspaceVersionConflict.mockReturnValue(
+      new Promise((_resolve, rejectPromise) => {
+        reject = rejectPromise;
+      }),
+    );
+
+    fireEvent.click(within(cards[0]).getByTestId("version-conflict-keep-current"));
+    expect(within(cards[0]).getByTestId("version-conflict-busy")).not.toBeNull();
+
+    // Move to another conflict while the first is still running.
+    fireEvent.click(within(cards[4]).getByTestId("version-conflict-toggle"));
+    expect(within(cards[0]).queryAllByTestId("version-conflict-side-text")).toHaveLength(0);
+    expect(within(cards[0]).getByTestId("version-conflict-busy")).not.toBeNull();
+
+    reject(new Error("Could not reach the engine."));
+    const failure = await within(cards[0]).findByTestId("version-conflict-error");
+    expect(failure.textContent).toContain("Could not reach the engine.");
+    expect(within(cards[0]).queryByTestId("version-conflict-busy")).toBeNull();
   });
 
   it("lets the open conflict be collapsed, and leaves the others closed", async () => {

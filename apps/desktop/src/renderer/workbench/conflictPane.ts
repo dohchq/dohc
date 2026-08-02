@@ -16,7 +16,9 @@
 /// One preview window: whole lines, up to whichever of the two bounds ends
 /// first. Both are needed. Characters bound the text the browser must lay out.
 /// Lines bound the line boxes it lays them out into, which characters alone do
-/// not — 200,000 newlines is 200,000 line boxes and 200,000 characters.
+/// not — 200,000 breaks is 200,000 line boxes and 200,000 characters. "Line"
+/// here means what `white-space: pre-wrap` breaks on, which is LF, CRLF, and a
+/// standalone CR — see `lineEnd`.
 ///
 /// MEASURED by conflictPane.measure.test.ts against this repository's tracked
 /// text (`.md`, `.ts`, `.tsx`, `.rs`; 919 files), the stand-in for the
@@ -37,12 +39,28 @@
 export const CONFLICT_PREVIEW_MAX_CHARS = 200_000;
 export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 
-/// The engine's in-band text cap: `MAX_DESKTOP_CAPTURE_TEXT_BYTES` in
-/// `crates/dohc-workspace-engine/src/lib.rs`, which the engine re-checks on
-/// every `apply-merged`. Held here as well because a surface must not offer an
-/// editing affordance whose apply the engine will refuse.
-/// `engineTextLimits.test.ts` fails when this number and the Rust one drift
-/// apart.
+/// The largest combined copy this surface will edit and post, in UTF-8 bytes.
+///
+/// TODAY this is the engine's own limit: the `apply-merged` arm in
+/// `crates/dohc-workspace-engine/src/lib.rs` refuses a merged text over
+/// `MAX_DESKTOP_CAPTURE_TEXT_BYTES`, and a surface must not offer an editing
+/// affordance whose apply the engine will refuse. The number is copied rather
+/// than imported because the engine's TypeScript twin lives in
+/// `versionedLoopbackEngine.ts`, whose first line is `import { createHash }
+/// from "node:crypto"` — importing it from the renderer would pull a Node
+/// builtin into the browser bundle, which neither the typecheck nor the test
+/// suite would notice. `engineTextLimits.test.ts` is what holds the copy
+/// honest; it reads the arm and fails when the two drift.
+///
+/// THIS NUMBER IS ABOUT TO STOP BEING THE ENGINE'S (#528 / PR #569). That PR
+/// raises the merged-resolution cap to 8,323,072 bytes — the conflict
+/// listing's own frame budget — so every side the surface can display becomes
+/// a side the engine would accept back. When it lands, this constant stops
+/// mirroring the engine and becomes what it always also was: the largest body
+/// this surface will hold in a CONTROLLED textarea that re-renders per
+/// keystroke. At that point it needs its own measured bound, set above the
+/// largest healthy document (469,068 characters — see the corpus above), not
+/// this number. See #566 and the note in engineTextLimits.test.ts.
 export const CONFLICT_COMBINED_MAX_BYTES = 128 * 1024;
 
 export type ConflictPreview = {
@@ -82,12 +100,18 @@ export function conflictPreview(text: string, windows: number): ConflictPreview 
 
   let cut = 0;
   let lines = 0;
+  // Both break characters are tracked, and each is re-sought only once it has
+  // been passed. Searching for both on every line would make a body that
+  // contains none of one of them cost a full scan per line.
+  let nextLf = text.indexOf("\n");
+  let nextCr = text.indexOf("\r");
   while (cut < text.length && lines < maxLines) {
-    const newline = text.indexOf("\n", cut);
-    const end = newline === -1 ? text.length : newline + 1;
+    const end = lineEnd(text, nextLf, nextCr);
     if (end > maxChars) break;
     cut = end;
     lines += 1;
+    if (nextLf !== -1 && nextLf < cut) nextLf = text.indexOf("\n", cut);
+    if (nextCr !== -1 && nextCr < cut) nextCr = text.indexOf("\r", cut);
   }
 
   if (lines < maxLines && cut < text.length && cut < maxChars) {
@@ -103,6 +127,20 @@ export function conflictPreview(text: string, windows: number): ConflictPreview 
 
 function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code < 0xdc00;
+}
+
+/// Where the line starting at the current cut ends: just past its break, or at
+/// the end of the body.
+///
+/// `white-space: pre-wrap` — what the pane paints with — breaks a line on a
+/// standalone CR as well as on LF, and treats CRLF as ONE break. A loop that
+/// only looked for LF let a CR-only body through as a single line, so the
+/// character bound was the only thing holding it: 40,000 line boxes against
+/// the 5,000 this window allows.
+function lineEnd(text: string, nextLf: number, nextCr: number): number {
+  if (nextLf === -1 && nextCr === -1) return text.length;
+  if (nextCr === -1 || (nextLf !== -1 && nextLf < nextCr)) return nextLf + 1;
+  return text.charCodeAt(nextCr + 1) === 0x0a ? nextCr + 2 : nextCr + 1;
 }
 
 // One walk of the UTF-8 encoding, stopping as soon as the count passes

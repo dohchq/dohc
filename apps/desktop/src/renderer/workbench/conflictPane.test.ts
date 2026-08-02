@@ -47,6 +47,36 @@ describe("conflictPreview", () => {
     expect(preview.hiddenChars).toBe(CONFLICT_PREVIEW_MAX_CHARS * 3);
   });
 
+  // `white-space: pre-wrap` — what the pane paints with — breaks on a
+  // standalone CR too, and treats CRLF as one break. A loop that only looked
+  // for LF let a CR-only body through as ONE line, so nothing but the
+  // character bound held it: 40,000 line boxes against the 5,000 allowed.
+  it.each([
+    ["\n", 1],
+    ["\r", 1],
+    ["\r\n", 2],
+  ])("bounds line boxes for a body broken by %j", (lineBreak, breakUnits) => {
+    const text = `${"line".repeat(4)}${lineBreak}`.repeat(
+      CONFLICT_PREVIEW_MAX_LINES * 3,
+    );
+    const preview = conflictPreview(text, 1);
+    const boxes = preview.text.split(/\r\n|\r|\n/).length - 1;
+    expect(boxes).toBe(CONFLICT_PREVIEW_MAX_LINES);
+    expect(preview.text.length).toBe(
+      CONFLICT_PREVIEW_MAX_LINES * (16 + breakUnits),
+    );
+    expect(preview.hiddenChars).toBeGreaterThan(0);
+  });
+
+  it("counts CRLF as one break, not two", () => {
+    // Counting each half separately would halve the window for every CRLF
+    // document — a bound that quietly does something different on Windows.
+    const crlf = conflictPreview("ab\r\n".repeat(CONFLICT_PREVIEW_MAX_LINES * 2), 1);
+    const lf = conflictPreview("ab\n".repeat(CONFLICT_PREVIEW_MAX_LINES * 2), 1);
+    expect(crlf.text.split("\r\n").length - 1).toBe(CONFLICT_PREVIEW_MAX_LINES);
+    expect(lf.text.split("\n").length - 1).toBe(CONFLICT_PREVIEW_MAX_LINES);
+  });
+
   it("stops on the line boundary the LINE window makes", () => {
     // The line window bounds line boxes, so filling past it would paint the
     // very thing it exists to bound. It is the one cut that stays on a
@@ -95,6 +125,8 @@ describe("conflictPreview", () => {
     ["a header then a 1 MiB line", `# header\n${"y".repeat(1024 * 1024)}`],
     ["long lines", lines(60, 20_000)],
     ["10 MiB, newline-heavy", lines(250_000, 41)],
+    ["a CR-only body", "line\r".repeat(300_000)],
+    ["a CRLF body", "line\r\n".repeat(200_000)],
   ];
 
   it.each(shapes)("every press of Show more reveals more of %s", (_label, text) => {

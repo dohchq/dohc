@@ -1032,8 +1032,11 @@ function sideNote(
 // the versions ("On Main" / "In Client Draft"); a sync divergence names the
 // machines ("On this machine" / "On your other machine") — never sync
 // jargon, and never a misleading version name for a two-machine conflict.
+// Takes the ORIGIN, not the whole conflict, because it is the only field that
+// decides the labels — and because a caller memoizing on the whole conflict
+// object would recompute on every render for no reason.
 function conflictSideLabels(
-  conflict: WorkspaceVersionConflict,
+  origin: WorkspaceVersionConflict["origin"],
   sourceName: string,
 ): {
   currentHeading: string;
@@ -1048,7 +1051,7 @@ function conflictSideLabels(
   currentMissing: string;
   incomingMissing: string;
 } {
-  if (conflict.origin === "sync") {
+  if (origin === "sync") {
     return {
       currentHeading: "On this machine",
       incomingHeading: "On your other machine",
@@ -1072,32 +1075,56 @@ function conflictSideLabels(
   };
 }
 
+/// One side, as a candidate to start a hand-written combined copy from.
+type SeedCandidate = {
+  /// null means the side has no file at all, which is a legitimate — and
+  /// zero-byte — place to start from.
+  text: string | null;
+  /// Whose copy it is, for "Started from Main's copy."
+  name: string;
+  /// What that side says when it has no file, for the sentence that explains
+  /// an empty start.
+  missing: string;
+};
+
 type CombineSeed =
-  /// The copy the textarea starts from, and whose copy it is. `name` is null
-  /// only when neither side holds text, which seeds an empty combined copy.
-  | { available: true; text: string; name: string | null }
-  /// Neither side is small enough for the engine to apply. `smallestBytes` is
-  /// the closest any of them came.
+  /// The copy the textarea starts from, and the line that says where it came
+  /// from.
+  | { available: true; text: string; startedFrom: string }
+  /// No side is small enough for the engine to apply. `smallestBytes` is the
+  /// closest any of them came.
   | { available: false; smallestBytes: number };
 
-/// Pick the side "Combine by hand" starts from: the first one in preference
-/// order that the engine could actually apply.
+/// Pick where "Combine by hand" starts: the first side, in preference order,
+/// that the engine could actually apply.
 ///
-/// A side over the in-band cap is not a usable seed, but its SIBLING may be —
-/// a 5 MiB incoming copy beside a 3 KB copy on Main is a conflict a user can
-/// still combine by hand. Preferring the oversized side and then declaring the
-/// whole affordance unavailable would refuse work the engine accepts.
-function chooseCombineSeed(
-  candidates: { text: string | null; name: string }[],
-): CombineSeed {
+/// Two ways a preferred side loses. It can be over the in-band cap while its
+/// SIBLING is not — a 5 MiB incoming copy beside a 3 KB copy on Main is still
+/// a conflict a user can combine by hand. And it can be ABSENT, which is not
+/// the same as unusable: a side with no file is a zero-byte start, and the
+/// engine takes an empty combined copy like any other. Both used to remove the
+/// affordance entirely, refusing work the engine accepts.
+function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
   const present = candidates.filter(
-    (candidate): candidate is { text: string; name: string } => candidate.text !== null,
+    (candidate): candidate is SeedCandidate & { text: string } => candidate.text !== null,
   );
-  if (present.length === 0) return { available: true, text: "", name: null };
   const fitting = present.find(
     (candidate) => !exceedsUtf8Bytes(candidate.text, CONFLICT_COMBINED_MAX_BYTES),
   );
-  if (fitting) return { available: true, text: fitting.text, name: fitting.name };
+  if (fitting) {
+    return {
+      available: true,
+      text: fitting.text,
+      startedFrom: `Started from ${fitting.name}'s copy.`,
+    };
+  }
+  // No copy fits, but a side with no file is a start that always fits. Ranked
+  // below every present side: starting empty must never beat starting from a
+  // copy the user could have edited.
+  const absent = candidates.find((candidate) => candidate.text === null);
+  if (absent) {
+    return { available: true, text: "", startedFrom: `${absent.missing} This starts empty.` };
+  }
   return {
     available: false,
     smallestBytes: Math.min(...present.map((candidate) => utf8ByteLength(candidate.text))),
@@ -1120,35 +1147,51 @@ function ConflictResolver(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [combined, setCombined] = useState<string | null>(null);
+  // The last change refused for being over the apply cap, in bytes. See the
+  // change handler: the combined copy in state is never over the cap, so this
+  // is how the attempt is reported.
+  const [refusedBytes, setRefusedBytes] = useState<number | null>(null);
   const isBinary = conflict.contentKind === "binary";
-  const labels = conflictSideLabels(conflict, sourceName);
+  const labels = conflictSideLabels(conflict.origin, sourceName);
+  const { currentName, incomingName, currentMissing, incomingMissing } = labels;
   // What "Combine by hand" would start from, and whether the engine could
   // apply it. The seed prefers the incoming side, as it always has, but a side
   // the engine would refuse is not a usable seed — so a side that FITS wins
-  // over the preference, and the affordance only disappears when neither side
-  // fits.
+  // over the preference, and the affordance only disappears when no side does.
   //
   // Gated on `expanded` because it is only read there, and because it is not
   // free: an over-cap side needs an exact byte count for its message, and a
   // dialog can hold hundreds of collapsed cards. Counting all of them on mount
   // was 750 ms for twenty 10 MiB sides against 79 ms for this — the cost this
   // whole change exists to remove, reintroduced one layer up.
+  //
+  // The dependencies are the PRIMITIVES this reads, never the labels object:
+  // that object is rebuilt every render, so depending on it made every local
+  // rerender — the one after "Keep Main's copy" sets busy, the one after a
+  // refusal — rescan every byte of both sides. A memo that recomputes every
+  // render is not a memo.
   const combineSeed = useMemo<CombineSeed | null>(
     () =>
       expanded && !isBinary
         ? chooseCombineSeed([
-            { text: conflict.incomingText, name: labels.incomingName },
-            { text: conflict.currentText, name: labels.currentName },
+            {
+              text: conflict.incomingText,
+              name: incomingName,
+              missing: incomingMissing,
+            },
+            { text: conflict.currentText, name: currentName, missing: currentMissing },
           ])
         : null,
-    [conflict.currentText, conflict.incomingText, expanded, isBinary, labels],
-  );
-  const combinedOverCapBytes = useMemo(
-    () =>
-      combined !== null && exceedsUtf8Bytes(combined, CONFLICT_COMBINED_MAX_BYTES)
-        ? utf8ByteLength(combined)
-        : 0,
-    [combined],
+    [
+      conflict.currentText,
+      conflict.incomingText,
+      expanded,
+      isBinary,
+      currentName,
+      incomingName,
+      currentMissing,
+      incomingMissing,
+    ],
   );
   const liveToken = useRef(0);
   useEffect(
@@ -1157,6 +1200,25 @@ function ConflictResolver(props: {
     },
     [],
   );
+
+  // The combined copy in state is NEVER over the apply cap. Every value it can
+  // hold comes from here or from a seed that already fits, so the controlled
+  // textarea can never be handed a body larger than the cap.
+  //
+  // This is what stops a paste from recreating the whole defect: an unguarded
+  // handler stored a multi-megabyte paste first, and the next render both
+  // counted every byte of it and assigned the whole string to the textarea's
+  // value. Refusing the change keeps the box at its last good content, so
+  // nothing the user already wrote is lost, and names the size they tried.
+  const onCombinedChange = useCallback((next: string) => {
+    if (exceedsUtf8Bytes(next, CONFLICT_COMBINED_MAX_BYTES)) {
+      // One walk of the refused body, in the handler rather than the render.
+      setRefusedBytes(utf8ByteLength(next));
+      return;
+    }
+    setRefusedBytes(null);
+    setCombined(next);
+  }, []);
 
   const resolve = useCallback(
     async (
@@ -1294,12 +1356,12 @@ function ConflictResolver(props: {
               >
                 Combined copy for Main
               </label>
-              {combineSeed?.available === true && combineSeed.name !== null ? (
+              {combineSeed?.available === true ? (
                 <p
                   data-testid="version-conflict-combined-source"
                   className="m-0 text-[11px] leading-4 text-subtle"
                 >
-                  Started from {combineSeed.name}'s copy.
+                  {combineSeed.startedFrom}
                 </p>
               ) : null}
               <textarea
@@ -1308,20 +1370,19 @@ function ConflictResolver(props: {
                 value={combined ?? ""}
                 disabled={busy}
                 rows={6}
-                onChange={(event) => setCombined(event.target.value)}
+                onChange={(event) => onCombinedChange(event.target.value)}
                 className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
               />
-              {combinedOverCapBytes > 0 ? (
+              {refusedBytes !== null ? (
                 <p
-                  data-testid="version-conflict-combined-over-cap"
+                  data-testid="version-conflict-combined-too-large"
                   role="alert"
                   className="mb-0 text-[11px] leading-4 text-danger"
                 >
-                  This combined copy is{" "}
-                  {combinedOverCapBytes.toLocaleString("en-US")} bytes.
-                  dohc can apply up to{" "}
-                  {CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes.
-                  Remove some text.
+                  That change would make the combined copy{" "}
+                  {refusedBytes.toLocaleString("en-US")} bytes. dohc can apply up
+                  to {CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes.
+                  Add less text.
                 </p>
               ) : null}
               <div className="flex justify-end gap-2">
@@ -1336,7 +1397,7 @@ function ConflictResolver(props: {
                 <button
                   type="button"
                   data-testid="version-conflict-apply-combined"
-                  disabled={busy || combinedOverCapBytes > 0}
+                  disabled={busy}
                   onClick={() => void resolve({ kind: "keep-combined", text: combined ?? "" })}
                   className="h-7 cursor-pointer rounded-md bg-accent px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
                 >
@@ -1345,17 +1406,31 @@ function ConflictResolver(props: {
               </div>
             </div>
           ) : null}
-          {error ? (
-            <p role="alert" className="mb-0 mt-2 text-[11px] leading-4 text-danger">
-              {error}
-            </p>
-          ) : null}
-          {busy ? (
-            <p role="status" className="mb-0 mt-2 text-[11px] leading-4 text-subtle">
-              Applying…
-            </p>
-          ) : null}
         </div>
+      ) : null}
+      {/*
+        OUTSIDE the collapsible region on purpose. A resolution can be running,
+        or can have failed, while the card is collapsed — nothing stops the
+        user opening another conflict mid-request — and a refusal that renders
+        only inside the expanded body tells them nothing at all.
+      */}
+      {error ? (
+        <p
+          data-testid="version-conflict-error"
+          role="alert"
+          className="mb-0 mt-2 text-[11px] leading-4 text-danger"
+        >
+          {error}
+        </p>
+      ) : null}
+      {busy ? (
+        <p
+          data-testid="version-conflict-busy"
+          role="status"
+          className="mb-0 mt-2 text-[11px] leading-4 text-subtle"
+        >
+          Applying…
+        </p>
       ) : null}
     </section>
   );

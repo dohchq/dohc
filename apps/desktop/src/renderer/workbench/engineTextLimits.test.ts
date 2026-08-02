@@ -46,33 +46,46 @@ describe("the in-band text cap the combine affordance is gated on", () => {
     expect(CONFLICT_COMBINED_MAX_BYTES).toBe(loopback);
   });
 
-  it("still guards the apply-merged arm the affordance posts to", () => {
-    // A gate on a check that moved is a gate on nothing. Pin that the daemon
-    // still measures apply-merged against this constant.
+  it("gates on the constant the apply-merged arm ACTUALLY measures", () => {
+    // Pinning the constant by NAME would be fooled by a rename, and pinning
+    // only its value would be fooled by the arm being pointed at a different
+    // constant. So read whichever identifier the arm compares against, then
+    // resolve THAT one.
+    //
+    // This is the assertion PR #569 (issue #528) is expected to fail. It moves
+    // the arm onto `MAX_MERGED_RESOLUTION_TEXT_BYTES` = 8,323,072 bytes — the
+    // conflict listing's own frame budget — which makes every side this
+    // surface can display a side the engine would accept back.
+    //
+    // WHEN IT FAILS, THE FIX IS NOT A BIGGER NUMBER HERE. At 8,323,072 the
+    // engine's cap stops being the binding one, and what is left is a
+    // renderer-owned bound: the largest body this surface will hold in a
+    // CONTROLLED textarea that re-renders per keystroke. That bound has to be
+    // measured and set above the largest healthy document (469,068
+    // characters — conflictPane.measure.test.ts), which 131,072 bytes is not.
+    // See #566 and the note on CONFLICT_COMBINED_MAX_BYTES.
     const rust = readRepoFile("crates/dohc-workspace-engine/src/lib.rs");
-    const applyMerged = rust.slice(rust.indexOf('"apply-merged" => {'));
-    expect(applyMerged.slice(0, 600)).toContain(
-      "text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES",
+    const applyMerged = rust.slice(rust.indexOf('"apply-merged" => {'), 600 + rust.indexOf('"apply-merged" => {'));
+    const measured = applyMerged.match(/text\.len\(\) > ([A-Z_]+)/);
+    expect(measured, "the apply-merged arm no longer measures its text").not.toBeNull();
+    const applied = constantValue(
+      rust,
+      new RegExp(`const ${measured?.[1]}: usize = ([^;]+);`),
     );
+    expect(CONFLICT_COMBINED_MAX_BYTES).toBe(applied);
   });
 
   it("is still the only route a combined resolution can take", () => {
-    // The two assertions above catch the number MOVING. They cannot catch it
-    // ceasing to APPLY, which is exactly what #528 will do: it adds a blob
-    // route for an over-cap combined resolution, and on that day the daemon
-    // accepts a copy this surface still refuses — with both drift assertions
-    // green.
+    // The assertions above catch the number MOVING. They cannot catch a SECOND
+    // route appearing beside it — a blob handle for an over-cap combined
+    // resolution — which would let the daemon accept a copy this surface still
+    // refuses with every drift assertion green.
     //
-    // The obvious fix is not a bigger constant here. It is for the conflict
-    // listing to REPORT the limit that applies to a combined resolution, the
-    // way `versionedText.read` already reports `inbandLimitBytes` beside an
-    // over-cap body (`lib.rs:3324`), and for this surface to gate on the
-    // reported number. Then #528 lifts the UI with no renderer change. That is
-    // a daemon wire change in the handler #528's lane is rewriting, so it is
-    // filed as #566 rather than taken here.
-    //
-    // Until then this tripwire fails the moment a second route appears, so
-    // #528 cannot land while this surface still refuses what the engine takes.
+    // PR #569 does NOT add one: it raises the in-band cap to the frame budget
+    // and withholds the over-cap ANSWER instead, so the request still carries
+    // its text as one wire string. This tripwire therefore stays true across
+    // that change, and keeps failing if a blob route is ever added to the
+    // request without this surface learning about it.
     const rust = readRepoFile("crates/dohc-workspace-engine/src/lib.rs");
     const resolveDto = rust.slice(
       rust.indexOf("struct LocalResolveDto {"),
