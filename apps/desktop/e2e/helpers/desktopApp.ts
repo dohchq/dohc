@@ -5,8 +5,10 @@ import {
 } from "playwright";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { electronLaunchArgs } from "../../src/testing/electronLaunchArgs";
 import type { TempWorkspace } from "./workspace";
 
 export interface DesktopLogEntry {
@@ -39,10 +41,21 @@ function requireBuiltDesktopApp(): void {
   }
 }
 
-function electronArgs(): string[] {
-  return process.platform === "linux"
-    ? ["--no-sandbox", mainEntry]
-    : [mainEntry];
+// Each run gets its own Electron profile inside the temp workspace sandbox. A
+// relaunch inside one spec reuses that spec's profile on purpose, exactly as a
+// user relaunching the app keeps theirs.
+//
+// The sandbox is already unique per run (mkdtemp under the OS temp dir) and
+// its teardown already survives Windows' refusal to unlink an open file:
+// removeTempTree retries EBUSY/EPERM, and cleanupDesktopWorkspace logs a
+// failure rather than failing the spec. A leaked profile under the temp dir
+// costs disk; a shared one costs the run (#530).
+async function createUserDataDir(
+  workspace: Pick<TempWorkspace, "baseDir">,
+): Promise<string> {
+  const dir = join(workspace.baseDir, "electron-user-data");
+  await mkdir(dir, { recursive: true });
+  return dir;
 }
 
 function launchEnv(input: {
@@ -69,10 +82,11 @@ function launchEnv(input: {
 }
 
 export async function launchDesktopApp(input: {
-  workspace: Pick<TempWorkspace, "homeDir" | "rootPath">;
+  workspace: Pick<TempWorkspace, "baseDir" | "homeDir" | "rootPath">;
   env?: NodeJS.ProcessEnv;
 }): Promise<LaunchedDesktopApp> {
   requireBuiltDesktopApp();
+  const userDataDir = await createUserDataDir(input.workspace);
 
   const logs: DesktopLogEntry[] = [];
   const onStdoutData = (chunk: Buffer) => {
@@ -87,7 +101,7 @@ export async function launchDesktopApp(input: {
   try {
     app = await electron.launch({
       executablePath: electronExecutable,
-      args: electronArgs(),
+      args: electronLaunchArgs({ mainEntry, userDataDir }),
       cwd: desktopRoot,
       env: launchEnv(input),
     });
