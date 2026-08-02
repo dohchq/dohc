@@ -242,6 +242,11 @@ fn has_ignored_segment(path: &str) -> bool {
 /// the same secrets. They did, in two copies, by coincidence — a class added
 /// here alone made deletes of it replayable (#484). One rule, one place, so a
 /// new class reaches both callers at once.
+///
+/// One restatement remains: `search_policy.rs` carries its own copy of these
+/// rules for the search floor and does NOT read this predicate. A class added
+/// here alone still leaves already-indexed rows of it searchable until that
+/// copy moves too.
 pub fn normalized_path_is_secret(path: &str) -> bool {
     let segments: Vec<String> = path
         .split('/')
