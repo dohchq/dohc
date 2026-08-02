@@ -82,12 +82,16 @@ function engineSnapshotBytes(
   return withEngineDb(rootPath, (db) => {
     const row = db
       .prepare(
-        `SELECT bb.content AS content
-         FROM snapshots s JOIN binary_blobs bb ON bb.sha256 = s.blob_sha256
+        // A binary head keeps its content address in binary_sha256, and
+        // blob_sha256 is NULL for it, so the join has to use that column. The
+        // previous query also selected `bb.content`, which binary_blobs does
+        // not have: every call THREW, so this spec was red, not weak.
+        `SELECT bb.bytes AS bytes
+         FROM snapshots s JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256
          WHERE s.version_id = ? AND s.path = ?`,
       )
       .get(versionId, path);
-    return row ? Buffer.from(row.content as Uint8Array) : null;
+    return row ? Buffer.from(row.bytes as Uint8Array) : null;
   });
 }
 
@@ -341,13 +345,26 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
       .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
       .toEqual(draftBytes);
 
+    // Diverge the two sides. Each edit must be waited out twice over: a switch
+    // materializes the version being entered, so an edit racing it is lost
+    // under the bytes the switch is mirroring, and the merge reads HEADS, so an
+    // edit the watcher has not captured yet merges the previous bytes.
     await switchVersionViaMenu(page, "Main");
-    await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: mainConflictBytes }]);
     await expect
       .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .toEqual(mainBytes);
+    await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: mainConflictBytes }]);
+    await expect
+      .poll(() => engineSnapshotBytes(temp.rootPath, "main", "logo.png"), { timeout: 30_000 })
       .toEqual(mainConflictBytes);
     await switchVersionViaMenu(page, "Binary Draft");
+    await expect
+      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .toEqual(draftBytes);
     await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: draftConflictBytes }]);
+    await expect
+      .poll(() => engineSnapshotBytes(temp.rootPath, draftId ?? "", "logo.png"), { timeout: 30_000 })
+      .toEqual(draftConflictBytes);
 
     await openVersionMenu(page);
     await page.getByTestId("version-merge").click();
@@ -376,10 +393,16 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
     const draftKeepBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xdd, 0x02]);
     await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: mainKeepBytes }]);
     await expect
-      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .poll(() => engineSnapshotBytes(temp.rootPath, "main", "logo.png"), { timeout: 30_000 })
       .toEqual(mainKeepBytes);
     await switchVersionViaMenu(page, "Binary Draft");
+    await expect
+      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .toEqual(draftConflictBytes);
     await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: draftKeepBytes }]);
+    await expect
+      .poll(() => engineSnapshotBytes(temp.rootPath, draftId ?? "", "logo.png"), { timeout: 30_000 })
+      .toEqual(draftKeepBytes);
 
     await openVersionMenu(page);
     await page.getByTestId("version-merge").click();

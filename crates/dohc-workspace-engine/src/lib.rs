@@ -7613,9 +7613,18 @@ impl EngineService {
                 "snapshot": snapshot_json(&write.snapshot),
                 "moment": moment_json(&write.moment),
             })),
+            // The preimage is described by the MOMENT, not by the text view of
+            // the head it removed. A resolution can remove a binary head, whose
+            // view carries empty text and the binary hash in `blob_sha256` —
+            // `snapshot_json` would report that as an empty TEXT file.
             "delete": result.delete.as_ref().map(|delete| json!({
                 "object": file_object_json(&delete.object),
-                "before": snapshot_json(&delete.before),
+                "before": snapshot_metadata_json(
+                    &delete.before,
+                    &delete.moment.before_content_kind,
+                    delete.moment.before_binary_sha256.as_deref(),
+                    delete.moment.before_byte_length,
+                ),
                 "moment": moment_json(&delete.moment),
             })),
         }))
@@ -10258,15 +10267,40 @@ fn snapshot_metadata_json(
     })
 }
 
+/// One comparison side as a versioned read value. A binary side reports the
+/// same shape `versionedText.read` gives a binary head: empty text, the binary
+/// content address in both hash fields, and the blob's byte length.
+fn comparison_side_json(side: &dohc_engine_domain::ComparisonSide) -> Value {
+    if !side.binary {
+        return snapshot_json(&side.snapshot);
+    }
+    json!({
+        "workspaceId": side.snapshot.workspace_id,
+        "versionId": side.snapshot.version_id,
+        "objectId": side.snapshot.object_id,
+        "path": side.snapshot.path,
+        "text": "",
+        "contentKind": "binary",
+        "sha256": side.snapshot.blob_sha256,
+        "byteLength": side.byte_length,
+        "blobSha256": side.snapshot.blob_sha256,
+        "updatedAtMs": side.snapshot.updated_at_ms,
+        "latestMomentId": side.snapshot.latest_moment_id,
+        "metadataOrigin": side.snapshot.metadata_origin,
+        "metadataSummary": side.snapshot.metadata_summary,
+        "metadataCorrelationId": side.snapshot.metadata_correlation_id
+    })
+}
+
 fn comparison_json(comparison: &dohc_engine_domain::VersionedTextComparison) -> Value {
     json!({
         "workspaceId": comparison.workspace_id,
         "path": comparison.path,
         "targetVersionId": comparison.target_version_id,
         "sourceVersionId": comparison.source_version_id,
-        "base": comparison.base.as_ref().map(snapshot_json),
-        "current": comparison.current.as_ref().map(snapshot_json),
-        "incoming": comparison.incoming.as_ref().map(snapshot_json),
+        "base": comparison.base.as_ref().map(comparison_side_json),
+        "current": comparison.current.as_ref().map(comparison_side_json),
+        "incoming": comparison.incoming.as_ref().map(comparison_side_json),
         "status": match comparison.status {
             ComparisonStatus::Same => "same",
             ComparisonStatus::IncomingChanged => "incoming-changed",

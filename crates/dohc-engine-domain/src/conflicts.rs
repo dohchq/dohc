@@ -309,7 +309,27 @@ pub struct ResolveTextConflictResult {
     pub conflict: TextConflict,
     pub write: Option<WriteResult>,
     pub delete: Option<DeleteResult>,
+    /// The BINARY head an `apply-incoming` resolution wrote. Bytes never ride
+    /// in a result record, so this reports the write itself: `write` stays
+    /// `None` for bytes, and a caller that cannot tell the two apart would
+    /// read a byte-for-byte replacement as "nothing happened".
+    pub binary_write: Option<BinaryResolveWrite>,
 }
+
+/// What a resolution wrote when the winning side was binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryResolveWrite {
+    pub path: String,
+    pub binary_sha256: String,
+    /// Doubles as the materialization job id (the BINHEAD moment/job
+    /// generation-sharing contract in [`write_binary_file_in_tx`]).
+    pub moment_id: String,
+}
+
+/// Why combined text cannot resolve a conflict whose live sides hold bytes.
+/// Exported so the probe asserting it cannot drift from the message shipped.
+pub const BINARY_COMBINED_TEXT_REFUSAL: &str =
+    "a binary conflict cannot be resolved with combined text";
 
 /// Exact live-head gate shared by local resolution and R10 mirror apply.
 pub fn live_state_matches_conflict_current(
@@ -622,20 +642,29 @@ impl VersionedTextStore<'_> {
                     conflict,
                     write: None,
                     delete: None,
+                    binary_write: None,
                 });
             }
             let mut conflict =
                 load_text_conflict_in_tx(tx, &input.workspace_id, &input.conflict_id)?
                     .ok_or(DomainError::ConflictNotFound)?;
-            // BINCONFLICT opens/persists binary sides; RESOLVE of any conflict
-            // touching a binary side stays fail-closed until
-            // R10-CONFLICT-COMPLETE (mirrors the sync path's has_binary_side
-            // deferral).
-            if [&conflict.base, &conflict.current, &conflict.incoming]
+            // Only the two LIVE sides decide what a resolution can do. The BASE
+            // is history: bytes at the fork point neither block combining two
+            // texts nor moving one, and treating them as if they did would
+            // refuse work the review panel correctly offers.
+            let live_sides_binary = [&conflict.current, &conflict.incoming]
                 .iter()
-                .any(|side| side.content_kind == ConflictContentKind::Binary)
+                .any(|side| side.content_kind == ConflictContentKind::Binary);
+            // Combined text has no meaning for bytes: a binary CURRENT would be
+            // clobbered by text, and a binary INCOMING has no text to combine.
+            // Refuse before measuring the live head, so the caller hears WHY
+            // instead of a stale-target answer that would send it back to retry.
+            if live_sides_binary
+                && matches!(input.resolution, ResolveConflictKind::ApplyMerged { .. })
             {
-                return Err(binary_conflicts_unsupported());
+                return Err(DomainError::InvalidInput {
+                    reason: BINARY_COMBINED_TEXT_REFUSAL,
+                });
             }
             // Binary-head-aware live read: a binary head that appeared at the
             // path after a (text) conflict was opened must fail the exact-head
@@ -653,14 +682,25 @@ impl VersionedTextStore<'_> {
 
             let mut write = None;
             let mut deletion = None;
+            let mut binary_write = None;
             let (choice, resolution) = match &input.resolution {
                 ResolveConflictKind::KeepCurrent => {
                     (ConflictChoice::Current, ConflictResolution::KeptCurrent)
                 }
                 ResolveConflictKind::ApplyIncoming => {
-                    if let Some(incoming) = &conflict.incoming.snapshot {
+                    if conflict.incoming.is_present() {
                         let destination = conflict.incoming.path.clone();
                         if destination != conflict.path {
+                            // A divergent move only reaches here from a
+                            // replicated open. Its source-side removal runs
+                            // through the TEXT delete seam, so keep it closed
+                            // when either live side holds bytes.
+                            if live_sides_binary {
+                                return Err(DomainError::InvalidInput {
+                                    reason: "a binary conflict side cannot be applied to a \
+                                             different path",
+                                });
+                            }
                             // Occupied-destination check must see a binary head
                             // too: writing the incoming text onto a path already
                             // held by a binary head would clobber it.
@@ -686,34 +726,55 @@ impl VersionedTextStore<'_> {
                                 deletion = Some(result);
                             }
                         }
-                        let write_input = write_input(
-                            input,
-                            &conflict.target_version_id,
-                            &destination,
-                            &incoming.text,
-                            &input.write_moment_id,
-                        );
-                        validate_write_input(&write_input)?;
-                        let result = write_text_in_tx(tx, &write_input)?;
-                        let preimage = if destination == conflict.path {
-                            conflict
-                                .current
-                                .snapshot
-                                .as_ref()
-                                .map_or(Preimage::Absent, |snapshot| {
-                                    Preimage::Present(snapshot.blob_sha256.clone())
-                                })
-                        } else {
-                            Preimage::Absent
-                        };
-                        enqueue_write(tx, &result, preimage, "resolve")?;
-                        write = Some(result);
-                    } else if conflict.current.snapshot.is_some() {
+                        if let Some(binary_sha256) = conflict.incoming.binary_sha256.clone() {
+                            let binary_input = WriteBinaryFile {
+                                workspace_id: conflict.workspace_id.clone(),
+                                version_id: conflict.target_version_id.clone(),
+                                object_id: input.object_id.clone(),
+                                path: destination.clone(),
+                                binary_sha256: binary_sha256.clone(),
+                                moment_id: input.write_moment_id.clone(),
+                                metadata_origin: input.metadata_origin.clone(),
+                                metadata_summary: input.metadata_summary.clone(),
+                                metadata_correlation_id: input.metadata_correlation_id.clone(),
+                                author_json: input.author_json.clone(),
+                                materialize: Some(conflict_state_preimage(&conflict.current)),
+                                now_ms: input.now_ms,
+                            };
+                            write_binary_file_in_tx(tx, &binary_input)?;
+                            binary_write = Some(BinaryResolveWrite {
+                                path: destination,
+                                binary_sha256,
+                                moment_id: input.write_moment_id.clone(),
+                            });
+                        } else if let Some(incoming) = &conflict.incoming.snapshot {
+                            let write_input = write_input(
+                                input,
+                                &conflict.target_version_id,
+                                &destination,
+                                &incoming.text,
+                                &input.write_moment_id,
+                            );
+                            validate_write_input(&write_input)?;
+                            let result = write_text_in_tx(tx, &write_input)?;
+                            let preimage = if destination == conflict.path {
+                                conflict_state_preimage(&conflict.current)
+                            } else {
+                                Preimage::Absent
+                            };
+                            enqueue_write(tx, &result, preimage, "resolve")?;
+                            write = Some(result);
+                        }
+                    } else if conflict.current.is_present() {
                         let delete_input =
                             delete_input(input, &conflict.target_version_id, &conflict.path);
                         validate_delete_input(&delete_input)?;
                         let result = delete_text_in_tx(tx, &delete_input)?;
-                        enqueue_delete(tx, &result, "resolve")?;
+                        // A binary head's removal carries its own preimage and
+                        // job id; the text enqueue would hash an empty body.
+                        if !enqueue_binary_delete(tx, &result)? {
+                            enqueue_delete(tx, &result, "resolve")?;
+                        }
                         deletion = Some(result);
                     }
                     (
@@ -774,6 +835,7 @@ impl VersionedTextStore<'_> {
                 conflict,
                 write,
                 delete: deletion,
+                binary_write,
             };
             after(tx, &result)?;
             Ok::<_, DomainError>(result)
@@ -1592,9 +1654,20 @@ fn row_ms(row: &rusqlite::Row<'_>, column: &str) -> Result<i64, DomainError> {
     row.get::<_, i64>(column).map_err(DomainError::sql_corrupt)
 }
 
-fn binary_conflicts_unsupported() -> DomainError {
-    DomainError::InvalidInput {
-        reason: "binary conflict sides are not supported yet",
+/// The disk preimage a resolution overwrites: whichever content address the
+/// side already holds, whatever its kind.
+pub fn conflict_state_preimage(state: &ConflictFileState) -> Preimage {
+    match state.content_kind {
+        ConflictContentKind::Text => state
+            .snapshot
+            .as_ref()
+            .map_or(Preimage::Absent, |snapshot| {
+                Preimage::Present(snapshot.blob_sha256.clone())
+            }),
+        ConflictContentKind::Binary => state
+            .binary_sha256
+            .as_ref()
+            .map_or(Preimage::Absent, |sha256| Preimage::Present(sha256.clone())),
     }
 }
 

@@ -5143,10 +5143,19 @@ async fn merge_conflict_returns_the_exact_created_conflict_id() {
     );
 }
 
+/// WS-G1 over the wire: a path holding BYTES on one side compares as a present
+/// binary head and merges into a conflict, both carrying the content address
+/// and byte length the review surface renders.
+///
+/// The conflict here is the DELIBERATE deferral: `asset.bin` exists only in the
+/// source, so nothing on the target can be lost and a fast-forward would be
+/// safe. It needs a binary variant of the merged-write wire status, tracked as
+/// #497. Until then the user accepts the new file with one click, and this
+/// pins that honest behavior rather than the eventual one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn compare_and_merge_map_binary_heads_to_the_stable_wire_error() {
-    // MUTATION: omit BinaryHeadNotText from map_runtime -> both calls fall
-    // through to the generic "workspace operation failed" wire message.
+async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
+    // MUTATION: serialize a comparison side through the text-only snapshot
+    // encoder -> the binary side reports contentKind "text" with a text body.
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     seed_versions(scratch.path(), "ws-rpcd-binary-merge-wire");
@@ -5169,38 +5178,67 @@ async fn compare_and_merge_map_binary_heads_to_the_stable_wire_error() {
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
 
-    for (id, method, params) in [
-        (
-            2,
-            "versionedText.compare",
-            json!({
-                "path": "asset.bin",
-                "sourceVersionId": "feature",
-                "targetVersionId": "main"
-            }),
-        ),
-        (
-            3,
-            "versionedText.merge",
-            json!({
-                "path": "asset.bin",
-                "sourceVersionId": "feature",
-                "targetVersionId": "main",
-                "origin": "api",
-                "requestId": "binary-merge-wire"
-            }),
-        ),
-    ] {
-        let error = transport
-            .call(
-                RequestContext::unbounded(),
-                request(id, method, Some(handle.clone()), params),
-            )
-            .await
-            .expect_err("binary head must refuse the text operation");
-        assert_eq!(error.code, ErrorCode::InvalidParams);
-        assert_eq!(error.message, "binary-head-not-text");
-    }
+    let sha256 = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
+    let compared = call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.compare",
+        json!({
+            "path": "asset.bin",
+            "sourceVersionId": "feature",
+            "targetVersionId": "main"
+        }),
+    )
+    .await;
+    assert_eq!(compared["status"], "incoming-changed");
+    assert_eq!(compared["current"], serde_json::Value::Null);
+    assert_eq!(compared["incoming"]["contentKind"], "binary");
+    assert_eq!(compared["incoming"]["text"], "");
+    assert_eq!(compared["incoming"]["sha256"], sha256);
+    assert_eq!(compared["incoming"]["blobSha256"], sha256);
+    assert_eq!(compared["incoming"]["byteLength"], 3);
+
+    let merged = call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.merge",
+        json!({
+            "path": "asset.bin",
+            "sourceVersionId": "feature",
+            "targetVersionId": "main",
+            "origin": "api",
+            "requestId": "binary-merge-wire"
+        }),
+    )
+    .await;
+    assert_eq!(merged["status"], "conflict");
+    let conflict_id = merged["conflictId"]
+        .as_str()
+        .expect("a binary merge opens a conflict")
+        .to_owned();
+
+    let conflicts = call(
+        &transport,
+        &handle,
+        4,
+        "conflicts.list",
+        json!({ "status": "open" }),
+    )
+    .await;
+    let conflict = conflicts["conflicts"]
+        .as_array()
+        .expect("conflicts")
+        .iter()
+        .find(|conflict| conflict["id"] == conflict_id.as_str())
+        .expect("the opened conflict is listed")
+        .clone();
+    assert_eq!(conflict["incoming"]["contentKind"], "binary");
+    assert_eq!(conflict["incoming"]["binarySha256"], sha256);
+    assert_eq!(conflict["incoming"]["binaryByteLength"], 3);
+    assert_eq!(conflict["incoming"]["snapshot"], serde_json::Value::Null);
+    assert_eq!(conflict["current"]["contentKind"], "text");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6458,4 +6496,164 @@ async fn replicated_conflict_rpc_retries_replay_the_persisted_refusal() {
             "MUTATION ({method}): formatting the ACKed replay as a bare skip loses the durable refusal"
         );
     }
+}
+
+/// A resolution can remove a BINARY head. Its preimage must reach the wire as
+/// what it was — bytes, their content address, their real size — not as the
+/// empty TEXT file the head's text view looks like.
+///
+/// MUTATION: serialize `delete.before` with the text-only snapshot encoder ->
+/// contentKind reads "text", byteLength reads 0, and sha256 silently reports a
+/// binary address under a text kind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resolved_binary_removal_reports_its_preimage_as_bytes() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let workspace_id = "ws-rpcd-binary-removal";
+    seed_binary_before_fork(scratch.path(), workspace_id);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+
+    // The source removes the asset; the target still holds its bytes.
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.delete",
+        json!({
+            "versionId": "feature",
+            "path": "logo.png",
+            "origin": "api",
+        }),
+    )
+    .await;
+
+    let merged = call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.merge",
+        json!({
+            "path": "logo.png",
+            "sourceVersionId": "feature",
+            "targetVersionId": "main",
+            "origin": "api",
+            "requestId": "binary-removal-merge",
+        }),
+    )
+    .await;
+    assert_eq!(merged["status"], "conflict");
+    let conflict_id = merged["conflictId"]
+        .as_str()
+        .expect("conflict id")
+        .to_owned();
+
+    let resolved = call(
+        &transport,
+        &handle,
+        4,
+        "conflicts.resolve",
+        json!({ "local": {
+            "conflictId": conflict_id,
+            "resolution": "apply-incoming",
+            "objectId": "binary-removal-object",
+            "writeMomentId": "binary-removal-write",
+            "deleteMomentId": "binary-removal-delete",
+            "metadataOrigin": "api",
+        }}),
+    )
+    .await;
+
+    let sha256 = dohc_engine_storage::hex_sha256(&[9, 9, 9, 9]);
+    let before = &resolved["delete"]["before"];
+    assert_eq!(before["contentKind"], "binary");
+    assert_eq!(before["sha256"], sha256);
+    assert_eq!(before["byteLength"], 4);
+    assert_eq!(before["path"], "logo.png");
+    assert_eq!(resolved["write"], serde_json::Value::Null);
+}
+
+/// A workspace whose fork base already holds a binary head, so the source can
+/// remove it and the target still has bytes to lose.
+fn seed_binary_before_fork(root: &Path, workspace_id: &str) {
+    use dohc_engine_domain::{
+        CreateNamedVersion, NoFaults, VersionedTextStore, WriteBinary, WriteText,
+    };
+    use dohc_engine_storage::EngineStore;
+
+    std::fs::create_dir_all(root.join(".dohc/engine")).expect("engine dir");
+    let mut store = EngineStore::open(&root.join(".dohc/engine/engine.db"), 1).expect("store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    let faults = NoFaults;
+    let mut versioned = VersionedTextStore::new(&mut store);
+    versioned
+        .ensure_main_version(workspace_id, "main", 1, &faults)
+        .expect("main");
+    versioned
+        .write_text(
+            &WriteText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "seed-object".to_owned(),
+                path: "seed.md".to_owned(),
+                text: "seed".to_owned(),
+                moment_id: "seed-moment".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &faults,
+        )
+        .expect("seed text");
+    versioned
+        .write_binary(
+            &WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "logo-object".to_owned(),
+                path: "logo.png".to_owned(),
+                bytes: vec![9, 9, 9, 9],
+                moment_id: "logo-moment".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3,
+                request_id: None,
+            },
+            &faults,
+        )
+        .expect("seed binary");
+    versioned
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: workspace_id.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 4,
+                request_id: None,
+            },
+            &faults,
+        )
+        .expect("fork");
 }

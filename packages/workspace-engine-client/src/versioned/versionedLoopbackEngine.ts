@@ -2038,13 +2038,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const current = target.files.get(path);
     const base = source.textForkBase.get(path);
     const comparison = this.comparisonRecord(workspace, path, target, source);
-    if (
-      incoming?.contentKind === "binary" ||
-      current?.contentKind === "binary" ||
-      base?.contentKind === "binary"
-    ) {
-      throw new Error("binary-head-not-text");
-    }
+    // WS-G1: the fast-forward writes a side through the TEXT seam, so both LIVE
+    // sides must be text. The base does not gate it — a binary base can never
+    // compare equal to a text current. The line merge below reads all three, and
+    // its own kind check keeps a binary ancestor out.
+    const liveSidesBinary =
+      incoming?.contentKind === "binary" || current?.contentKind === "binary";
     if (this.filesEqual(incoming, current)) {
       const result: JsonObject = {
         status: "unchanged",
@@ -2072,7 +2071,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       return result;
     }
     let textToWrite = incoming?.text;
-    if (!this.filesEqual(current, base)) {
+    if (liveSidesBinary || !this.filesEqual(current, base)) {
       const cleanMerge =
         base?.contentKind === "text" &&
         current?.contentKind === "text" &&
