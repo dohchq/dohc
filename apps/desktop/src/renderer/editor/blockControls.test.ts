@@ -572,3 +572,96 @@ describe("blockControls drag payload", () => {
     expect(dragged?.eq(editor.state.doc.child(1))).toBe(true);
   });
 });
+
+describe("blockControls drag ghost", () => {
+  // jsdom has no DataTransfer. The dragstart handler only writes to it, so a
+  // recording stub is enough to reach the ghost.
+  function dragStart(handle: HTMLElement): void {
+    const event = new Event("dragstart", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: {
+        clearData: () => {},
+        setData: () => {},
+        setDragImage: () => {},
+        effectAllowed: "none",
+      },
+    });
+    handle.dispatchEvent(event);
+  }
+
+  function parkedGhosts(): HTMLElement[] {
+    return Array.from(
+      document.body.querySelectorAll<HTMLElement>(".dohc-block-drag-ghost"),
+    );
+  }
+
+  function twoBlockEditor(): Editor {
+    return makeEditorWithControls({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: "Readable block text" }],
+        },
+        { type: "paragraph", content: [{ type: "text", text: "Second block" }] },
+      ],
+    });
+  }
+
+  function blockHandles(editor: Editor): HTMLElement[] {
+    const handles = Array.from(
+      editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-handle"),
+    );
+    if (handles.length < 2) throw new Error("block handles missing");
+    return handles;
+  }
+
+  it("hides the parked clone and takes it down with the editor", () => {
+    const editor = twoBlockEditor();
+    const [handle] = blockHandles(editor);
+
+    dragStart(handle);
+
+    const [ghost] = parkedGhosts();
+    expect(ghost?.textContent).toContain("Readable block text");
+    expect(ghost?.getAttribute("aria-hidden")).toBe("true");
+
+    // A workspace switch destroys the editor mid-drag, so `dragend` never
+    // fires. The clone carries document text into the next workspace's
+    // accessibility tree unless the plugin removes it itself.
+    editor.destroy();
+
+    expect(parkedGhosts()).toHaveLength(0);
+  });
+
+  it("removes the parked clone when the drag ends normally", () => {
+    const editor = track(twoBlockEditor());
+    const [handle] = blockHandles(editor);
+
+    dragStart(handle);
+    expect(parkedGhosts()).toHaveLength(1);
+
+    handle.dispatchEvent(new Event("dragend", { bubbles: true }));
+
+    expect(parkedGhosts()).toHaveLength(0);
+  });
+
+  it("strands no clone when a second drag starts before the first ends", () => {
+    const editor = twoBlockEditor();
+    const [first, second] = blockHandles(editor);
+
+    // A dragstart the browser never paired with a dragend — a dropped drag on
+    // a non-target, say — leaves its ghost parked. The next dragstart has to
+    // clear the slot, or that ghost becomes unreachable by every later
+    // dragend and by destroy.
+    dragStart(first);
+    dragStart(second);
+    expect(parkedGhosts()).toHaveLength(1);
+
+    first.dispatchEvent(new Event("dragend", { bubbles: true }));
+    second.dispatchEvent(new Event("dragend", { bubbles: true }));
+    editor.destroy();
+
+    expect(parkedGhosts()).toHaveLength(0);
+  });
+});

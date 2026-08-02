@@ -58,14 +58,23 @@ export function blockDragSlice(view: EditorView, pos: number): Slice | null {
   return NodeSelection.create(view.state.doc, pos).content();
 }
 
+/** The ghost a plugin instance currently has parked on the document. One slot,
+ * because it tracks a lifetime rather than a drag: every path that ends a
+ * ghost's life — `dragend`, the next `dragstart`, and the plugin's destroy
+ * after a workspace switch interrupts a drag — clears it through this slot. */
+type DragGhostSlot = { current: HTMLElement | null };
+
 function createDragGhost(blockDom: HTMLElement): HTMLElement {
   const ghost = blockDom.cloneNode(true) as HTMLElement;
   ghost
     .querySelectorAll(".dohc-block-affordance")
     .forEach((el) => el.remove());
   ghost.className = "dohc-block-drag-ghost";
+  // The clone carries the block's text off-screen; without this a screen
+  // reader reads it as a second copy of the block.
+  ghost.setAttribute("aria-hidden", "true");
   ghost.style.width = `${blockDom.offsetWidth}px`;
-  document.body.append(ghost);
+  blockDom.ownerDocument.body.append(ghost);
   return ghost;
 }
 
@@ -76,7 +85,7 @@ function createDragGhost(blockDom: HTMLElement): HTMLElement {
  * to `view.dragging` with `move: true`. A NodeSelection is set on the block so
  * ProseMirror's native drop (which calls `tr.deleteSelection()` when a dragging
  * object without a `node` is moved) removes the source. Returns the ghost node
- * so the caller can clean it up on dragend.
+ * so the caller can park it in the plugin's ghost slot.
  */
 function startBlockDrag(
   view: EditorView,
@@ -107,10 +116,16 @@ function startBlockDrag(
   return ghost;
 }
 
+function removeBlockDragGhost(slot: DragGhostSlot): void {
+  slot.current?.remove();
+  slot.current = null;
+}
+
 function buildBlockControlDecorations(
   doc: unknown,
   onInsertRef: RefObject<(pos: number) => void>,
   onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>,
+  ghostSlot: DragGhostSlot,
 ): DecorationSet {
   const decorations: Decoration[] = [];
 
@@ -152,12 +167,6 @@ function buildBlockControlDecorations(
           // can still start — preventing the mousedown default cancels dragging.
           handle.addEventListener("mousedown", (event) => event.stopPropagation());
 
-          let ghost: HTMLElement | null = null;
-          const removeGhost = () => {
-            ghost?.remove();
-            ghost = null;
-          };
-
           handle.addEventListener("dragstart", (event) => {
             const dragEvent = event as DragEvent;
             dragEvent.stopPropagation();
@@ -170,9 +179,19 @@ function buildBlockControlDecorations(
               dragEvent.preventDefault();
               return;
             }
-            ghost = startBlockDrag(view, pos, handle, dragEvent.dataTransfer);
+            // Whatever the slot still holds can no longer be reached: parking
+            // a new ghost over it would strand the old one on `document.body`.
+            removeBlockDragGhost(ghostSlot);
+            ghostSlot.current = startBlockDrag(
+              view,
+              pos,
+              handle,
+              dragEvent.dataTransfer,
+            );
           });
-          handle.addEventListener("dragend", removeGhost);
+          handle.addEventListener("dragend", () =>
+            removeBlockDragGhost(ghostSlot),
+          );
 
           handle.addEventListener("click", (event) => {
             stopEditorMouseEvent(event);
@@ -246,17 +265,35 @@ export function makeBlockControlsPlugin({
   onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>;
 }) {
   let activeBlockIndex: string | null | undefined;
+  const ghostSlot: DragGhostSlot = { current: null };
   return new Plugin({
     key: blockControlsKey,
     state: {
       init(_, instance) {
-        return buildBlockControlDecorations(instance.doc, onInsertRef, onOpenMenuRef);
+        return buildBlockControlDecorations(
+          instance.doc,
+          onInsertRef,
+          onOpenMenuRef,
+          ghostSlot,
+        );
       },
       apply(tr, old) {
         if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
         activeBlockIndex = undefined;
-        return buildBlockControlDecorations(tr.doc, onInsertRef, onOpenMenuRef);
+        return buildBlockControlDecorations(
+          tr.doc,
+          onInsertRef,
+          onOpenMenuRef,
+          ghostSlot,
+        );
       },
+    },
+    view() {
+      return {
+        destroy() {
+          removeBlockDragGhost(ghostSlot);
+        },
+      };
     },
     props: {
       decorations(state) {

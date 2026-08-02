@@ -226,6 +226,55 @@ describe("table controls grips", () => {
     editor = undefined;
   });
 
+  function dragFirstRowToLast(target: Editor): void {
+    const grips = target.view.dom.querySelectorAll(".dohc-table-grip--row");
+    drag(grips[0] as HTMLElement, grips[2] as HTMLElement);
+  }
+
+  function dragStatusText(): (string | null)[] {
+    return Array.from(
+      document.body.querySelectorAll("[data-dohc-table-drag-status]"),
+    ).map((region) => region.textContent);
+  }
+
+  it("takes its drag live region down with the editor", () => {
+    editor = createLabeledTableEditor();
+    dragFirstRowToLast(editor);
+    const status = document.body.querySelector("[data-dohc-table-drag-status]");
+    expect(status?.getAttribute("role")).toBe("status");
+    // Without this the region is announced only when focus lands on it, which
+    // for an off-screen status node means never.
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+
+    editor.destroy();
+    editor = undefined;
+
+    // A live region left on `document.body` outlives its editor: every
+    // workspace switch would add one more for a screen reader to enumerate.
+    expect(document.body.querySelector("[data-dohc-table-drag-status]")).toBeNull();
+  });
+
+  it("gives each mounted editor its own live region", () => {
+    const first = createLabeledTableEditor();
+    const second = createLabeledTableEditor();
+    editor = second;
+
+    dragFirstRowToLast(first);
+    const columnGrips = second.view.dom.querySelectorAll(".dohc-table-grip--col");
+    drag(columnGrips[0] as HTMLElement, columnGrips[2] as HTMLElement);
+
+    // One region per editor, each holding its own editor's announcement. A
+    // single shared region would let one editor announce into the other's.
+    expect(dragStatusText()).toEqual([
+      "Row 1 moved to position 3.",
+      "Column 1 moved to position 3.",
+    ]);
+
+    first.destroy();
+
+    expect(dragStatusText()).toEqual(["Column 1 moved to position 3."]);
+  });
+
   it("renders column grips, row grips, row resize handles, and one table menu button", () => {
     editor = createTableEditor(2, 3);
     const dom = editor.view.dom;

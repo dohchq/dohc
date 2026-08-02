@@ -710,24 +710,33 @@ function markTableBand(
   );
 }
 
+// The live region an editor parks on its host. Keyed by view so the plugin's
+// destroy can remove its own region instead of leaving one behind for screen
+// readers to enumerate after the editor is gone.
+const tableDragStatusNodes = new WeakMap<EditorView, HTMLElement>();
+
 function announceTableDrag(view: EditorView, message: string): void {
-  const ownerDocument = view.dom.ownerDocument;
-  const ownerWindow = ownerDocument.defaultView ?? window;
-  const editorRoot = view.dom.getRootNode();
-  const host =
-    editorRoot instanceof ownerWindow.ShadowRoot ? editorRoot : ownerDocument.body;
-  let status = host.querySelector<HTMLElement>(
-    "[data-dohc-table-drag-status]",
-  );
-  if (!status) {
+  let status = tableDragStatusNodes.get(view);
+  if (!status?.isConnected) {
+    const ownerDocument = view.dom.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView ?? window;
+    const editorRoot = view.dom.getRootNode();
+    const host =
+      editorRoot instanceof ownerWindow.ShadowRoot ? editorRoot : ownerDocument.body;
     status = ownerDocument.createElement("div");
     status.className = "dohc-table-drag-status";
     status.dataset.dohcTableDragStatus = "";
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
     host.appendChild(status);
+    tableDragStatusNodes.set(view, status);
   }
   status.textContent = message;
+}
+
+function removeTableDragStatus(view: EditorView): void {
+  tableDragStatusNodes.get(view)?.remove();
+  tableDragStatusNodes.delete(view);
 }
 
 function createTableDragPreview(
@@ -1919,6 +1928,7 @@ export function makeTableControlsPlugin(
           runtime.activeDrag?.indicator.remove();
           runtime.activeDrag = null;
           runtime.activeRowResize = null;
+          removeTableDragStatus(view);
           activeControls = undefined;
           hovered = null;
         },
