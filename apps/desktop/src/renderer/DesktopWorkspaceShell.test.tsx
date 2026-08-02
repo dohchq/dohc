@@ -815,6 +815,70 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
+  // Listings resolve out of order (the mount listing can overtake the one the
+  // share pull triggered). An older snapshot committing last would show a
+  // stale tree and, worse, make the reconciliation read a live file as
+  // deleted and close its tab.
+  it("ignores a listing that resolves after a newer one was issued", async () => {
+    type Listing = {
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    };
+    const older = deferred<Listing>();
+    const newer = deferred<Listing>();
+    let issued = 0;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "live.md"],
+        activeTab: "b.md",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(() =>
+      ++issued === 1 ? older.promise : newer.promise,
+    );
+    renderShell(bridge);
+
+    // A second listing is issued while the first is still in flight.
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The newer one lands first and knows about live.md.
+    await act(async () => {
+      newer.resolve({
+        files: [
+          { path: "a.md", kind: "file" },
+          { path: "b.md", kind: "file" },
+          { path: "live.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await newer.promise;
+    });
+    expect(await screen.findByTestId("tab-live.md")).toBeTruthy();
+
+    // Then the stale one, which predates live.md, arrives last.
+    await act(async () => {
+      older.resolve({
+        files: [
+          { path: "a.md", kind: "file" },
+          { path: "b.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await older.promise;
+    });
+
+    // It commits nothing: the tab is open and the tree still lists the file
+    // (its name renders in the explorer row, the open-editors row, and the
+    // tab — the stale snapshot would have removed all three).
+    expect(screen.getByTestId("tab-live.md")).toBeTruthy();
+    expect(screen.getAllByText("live.md").length).toBeGreaterThan(0);
+  });
+
   // Either load can win. When the listing lands FIRST there is nothing
   // restored to judge yet, so the restore itself has to re-run the check —
   // otherwise the missing tab survives and gets written back out.

@@ -1349,8 +1349,17 @@ export function DesktopWorkspaceShell(props: {
     };
   }, [workspaceId]);
 
+  // Latest-wins (refreshHistory idiom): fourteen call sites issue listings —
+  // mount, the watcher, imports, restores, the share pull — and they can
+  // resolve out of order. Each request ADVANCES the sequence, so an older
+  // snapshot can never commit over a newer one. Without this, the mount
+  // listing overtaking the post-pull listing would show a stale tree AND make
+  // the reconciliation below read a live file as deleted.
+  const filesRequest = useRef(0);
   const refreshFiles = useCallback(async () => {
+    const request = ++filesRequest.current;
     const result = await bridge().listWorkspaceFiles({ workspaceId });
+    if (request !== filesRequest.current) return;
     setFiles(result.files);
     setFolders(result.folders ?? []);
     setFilesLoaded(true);
