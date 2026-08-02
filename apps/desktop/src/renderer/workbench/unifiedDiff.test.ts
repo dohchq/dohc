@@ -96,23 +96,32 @@ describe("diff work bound", () => {
     return out.join("\n") + "\n";
   }
 
+  // Both sides of the limit, one 2.5% step apart, so these pin the constant
+  // itself rather than only its sign.
+  const UNDER_BOUND_CHARS = 3_900;
+  const OVER_BOUND_CHARS = 4_100;
+
   it("estimates the characters the inner loop compares, not the cell count", () => {
-    const before = splitDiffLines(longLines(499, 8_200));
-    const after = splitDiffLines(longLines(499, 8_200));
-    expect((before.length + 1) * (after.length + 1)).toBe(250_000);
-    expect(diffWorkEstimate(before, after)).toBeGreaterThan(HISTORY_DIFF_WORK_LIMIT);
+    const under = splitDiffLines(longLines(499, UNDER_BOUND_CHARS));
+    const over = splitDiffLines(longLines(499, OVER_BOUND_CHARS));
+    // Identical cell counts, on the cell ceiling: only the byte bound can tell
+    // these two apart.
+    expect((under.length + 1) * (under.length + 1)).toBe(250_000);
+    expect((over.length + 1) * (over.length + 1)).toBe(250_000);
+    expect(diffWorkEstimate(under, under)).toBeLessThan(HISTORY_DIFF_WORK_LIMIT);
+    expect(diffWorkEstimate(over, over)).toBeGreaterThan(HISTORY_DIFF_WORK_LIMIT);
   });
 
-  it("keeps the line-by-line diff for a body inside the bound", () => {
-    const before = longLines(499, 500);
+  it("keeps the line-by-line diff for a body just inside the bound", () => {
+    const before = longLines(499, UNDER_BOUND_CHARS);
     const after = before.replace("000000000100", "000000000999");
     const diff = computeTextDiff(before, after, 800);
     expect(diff.degraded).toBe(false);
     expect(diff.counts).toEqual({ added: 1, removed: 1 });
   });
 
-  it("degrades a body over the bound to the contiguous diff instead of freezing", () => {
-    const before = longLines(499, 8_200);
+  it("degrades a body just over the bound to the contiguous diff instead of freezing", () => {
+    const before = longLines(499, OVER_BOUND_CHARS);
     const after = before.replace("000000000100", "000000000999");
     const diff = computeTextDiff(before, after, 800);
     expect(diff.degraded).toBe(true);
@@ -124,12 +133,27 @@ describe("diff work bound", () => {
   });
 
   it("numbers the degraded diff from its place in the file, not from line 1", () => {
-    const before = longLines(499, 8_200);
+    const before = longLines(499, OVER_BOUND_CHARS);
     const after = before.replace("000000000100", "000000000999");
     const lines = buildUnifiedDiffLines(computeTextDiff(before, after, 800));
-    const removed = lines.find((line) => line.kind === "removed");
-    // Line 101 of the file (index 100), not line 1.
-    expect(removed?.oldLineNumber).toBe(101);
+    // Line 101 of the file (index 100), on BOTH sides, not line 1.
+    expect(lines.find((line) => line.kind === "removed")?.oldLineNumber).toBe(101);
+    expect(lines.find((line) => line.kind === "added")?.newLineNumber).toBe(101);
+    const context = lines.find((line) => line.kind === "context");
+    expect([context?.oldLineNumber, context?.newLineNumber]).toEqual([99, 99]);
+  });
+
+  // The degraded diff describes the span between the common prefix and the
+  // common suffix as one block, and its COUNTS follow the same rule. The page
+  // header shows those counts, so the coarsening is user-visible.
+  it("reports the degraded span in the counts, not the exact edit", () => {
+    const before = longLines(499, OVER_BOUND_CHARS);
+    const after = before
+      .replace("000000000100", "000000000999")
+      .replace("000000000400", "000000000998");
+    const diff = computeTextDiff(before, after, 800);
+    expect(diff.degraded).toBe(true);
+    expect(diff.counts).toEqual({ added: 301, removed: 301 });
   });
 
   it("builds no more diff lines than the display shows, and still counts them all", () => {

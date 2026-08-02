@@ -129,6 +129,7 @@ describe.skipIf(!measuring)("history diff work measurement", () => {
     // The reported failures: line counts parked at the cell ceiling with huge
     // lines, and bodies whose line COUNT is the problem.
     for (const [lines, lineChars, label] of [
+      [499, 3_990, "at the bound (largest body the limit admits)"],
       [499, 4_008, "cell ceiling, 2,000,000 chars"],
       [499, 21_014, "cell ceiling, 10 MiB"],
       [250_000, 42, "10 MiB, newline-heavy"],
@@ -143,5 +144,27 @@ describe.skipIf(!measuring)("history diff work measurement", () => {
         formatRows(rows) +
         "\n",
     );
+  }, 600_000);
+
+  // The ladder the limit is calibrated from. Every row stays UNDER the limit,
+  // so every row runs the real line-by-line diff and can be reproduced here.
+  // The last row is the largest body the limit admits: its time is the claim
+  // the limit rests on, not the throughput, which falls off below the bound as
+  // the fixed per-cell cost takes over.
+  it("reports the cost ladder the bound is calibrated from", () => {
+    const rows: Row[] = [];
+    for (const lineChars of [100, 250, 500, 1_000, 2_000, 3_990]) {
+      const before = longSimilarLines(499, lineChars);
+      rows.push(
+        measure(`499 x ${lineChars} chars`, before, editEveryNthLine(before, 50)),
+      );
+    }
+    const rates = rows.map(
+      (row) => `${row.scenario}: ${(row.work / row.renderMs / 1e6).toFixed(1)} M units/ms`,
+    );
+    console.log(`\n${formatRows(rows)}\n\n${rates.join("\n")}\n`);
+    for (const row of rows) {
+      if (row.path !== "lcs") throw new Error(`${row.scenario} did not run the LCS`);
+    }
   }, 600_000);
 });

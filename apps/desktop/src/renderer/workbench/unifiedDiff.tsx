@@ -30,8 +30,11 @@ export type TextDiff = {
   /// Diff lines the display bound stopped us from building. Their count still
   /// reaches the reader, as the "more diff lines hidden" note.
   hiddenLines: number;
-  /// Added and removed line totals for the WHOLE change, never truncated.
-  /// null means neither side of the change holds text.
+  /// Added and removed line totals for the whole diff, never cut by the
+  /// display bound. A DEGRADED diff describes the span between the common
+  /// prefix and the common suffix as one block, so its totals are that span,
+  /// not the exact edit: two edits far apart read as one large block, the same
+  /// way its lines do. null means neither side of the change holds text.
   counts: { added: number; removed: number } | null;
   /// The 1-based file line numbers the first entry of `lines` carries. The
   /// contiguous fallback starts partway down the file, so it does not start
@@ -52,14 +55,29 @@ const HISTORY_LCS_DIFF_CELL_LIMIT = 250_000;
 // Each of those cells compares two WHOLE LINES, so the TIME is the cell count
 // times the line length — linear in body bytes, which the cell limit does not
 // bound. This bounds it. Measured by unifiedDiff.measure.test.ts (Windows 11,
-// Node 22, the same V8 the renderer runs on): worst-case LCS moves a steady
-// 23-25 million work units per millisecond, and the largest healthy body
-// measured — 499 lines of 2,000-character paragraphs, 2 MB across both sides —
-// is 500 million units. Two billion units is four times that headroom and
-// measured at 86 ms, inside an interactive frame budget. A 10 MiB body sits at
-// 5.2 billion, so it degrades to the contiguous diff instead of costing the
-// 1.9 seconds it used to cost, twice per render.
-export const HISTORY_DIFF_WORK_LIMIT = 2_000_000_000;
+// Node 22, the same V8 the renderer runs on).
+//
+// What holds is the measured TIME AT THE BOUND, not a throughput figure. The
+// largest body this limit admits — 499 lines of 3,990 characters at the cell
+// ceiling, 4 MB across both sides — costs 50 ms here for a full pass: the diff
+// plus the lines the page draws. Throughput is NOT constant across scales. The
+// harness ladder reports 1.5 million units per millisecond for short lines and
+// 19 million near the bound, because a fixed per-cell cost dominates when the
+// lines are short; that only makes the estimate more conservative below the
+// bound. An independent review measured 74-120 ms at twice this limit on other
+// hardware.
+//
+// ENCODING: `.length` counts UTF-16 code units, not bytes and not glyphs. A
+// comparison of CJK text costs about twice a comparison of the same number of
+// ASCII units (186 ms against 99 ms, measured in review at twice this limit).
+// This limit is halved to pay for that, so the bound holds for either script.
+//
+// Headroom: the largest healthy body measured — 499 lines of 2,000-character
+// paragraphs, 2 MB across both sides — is 500 million units, so this is twice
+// the healthy maximum. A 10 MiB body sits at 5.2 billion and degrades to the
+// contiguous diff, instead of costing the 1.9 seconds it used to cost, twice
+// per render.
+export const HISTORY_DIFF_WORK_LIMIT = 1_000_000_000;
 
 /// An upper bound on the characters the LCS inner loop must compare: one whole
 /// line per cell. Cheap to compute, and the reason the cell limit alone never
