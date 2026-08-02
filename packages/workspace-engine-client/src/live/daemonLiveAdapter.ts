@@ -107,21 +107,30 @@ export function isDaemonReconnectError(error: unknown): boolean {
   );
 }
 
-export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
-  // The daemon wire enum currently groups both ydoc-session-not-found and
-  // ydoc-unsettled-close under INVALID_PARAMS. Keep the canonical discriminator
-  // check at this protocol boundary so release callers cannot accidentally
-  // reinterpret every INVALID_PARAMS refusal as an already-released session.
+// The daemon wire enum groups every caller-mistake refusal under
+// INVALID_PARAMS, so only the MESSAGE names which refusal this is. Keep each
+// discriminator at this protocol boundary so a caller cannot accidentally
+// reinterpret every INVALID_PARAMS refusal as the one it handles.
+function refusalMessageOf(error: unknown): string | null {
   const wireError =
     error instanceof DaemonRefusalError
       ? { code: error.wireCode, message: error.message }
       : isRecord(error) && isRecord(error.wireError)
         ? error.wireError
         : null;
-  return (
-    wireError?.code === "INVALID_PARAMS" &&
-    wireError.message === "ydoc-session-not-found"
-  );
+  if (wireError?.code !== "INVALID_PARAMS") return null;
+  return typeof wireError.message === "string" ? wireError.message : null;
+}
+
+export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "ydoc-session-not-found";
+}
+
+// The engine refused because the path's head moved under this caller: another
+// writer — the daemon's own capture ingesting an edit made outside dohc —
+// committed to the same object first. `DomainError::ConflictStaleTarget`.
+export function isConflictStaleTargetRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "conflict-stale-target";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

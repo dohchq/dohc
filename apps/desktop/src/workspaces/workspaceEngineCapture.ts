@@ -27,6 +27,7 @@ import {
 import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import {
   openEngineYdocProviderSession,
+  isConflictStaleTargetRefusal,
   isYdocSessionNotFoundRefusal,
   YdocReleasedWithSettleFailureError,
   type EngineYdocProviderSession,
@@ -1009,9 +1010,10 @@ export function createWorkspaceEngineCapture(
         materialized: boolean;
       },
       token: number,
+      generation: number,
     ) => void | Promise<void>;
-    onSettleStart: (token: number) => void;
-    onSettleError: (error: unknown, token: number) => void;
+    onSettleStart: (token: number, generation: number) => void;
+    onSettleError: (error: unknown, token: number, generation: number) => void;
   }): Promise<WorkspaceEngineYDocProviderSession> {
     const sessions = options.rustEngineSessions;
     const openProvider =
@@ -1086,6 +1088,11 @@ export function createWorkspaceEngineCapture(
     // overlap the canonical doc, so merging it would append a SECOND copy of
     // the file. The canonical doc is the renderer's truth; the replacement
     // starts empty and the replay re-establishes it.
+    // Settle tokens are minted PER GENERATION and every generation starts at 1,
+    // so a token alone does not identify a settle across a daemon restart. The
+    // generation is stamped here, where it is known, and travels with every
+    // settle callback.
+    let generations = 0;
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
@@ -1093,6 +1100,7 @@ export function createWorkspaceEngineCapture(
       await sessions.run(
         workspace,
         async (binding) => {
+          const generation = ++generations;
           if (typeof binding.client.onEvent !== "function") {
             throw new Error(
               "Rust engine client does not expose Y.Doc event delivery.",
@@ -1137,9 +1145,11 @@ export function createWorkspaceEngineCapture(
             // reconnect error, so it is NOT an error sink: every settle
             // failure also goes to onSettleError, which reports it.
             onSessionError: requestReconnect,
-            onSettleStart: input.onSettleStart,
-            onSettleError: input.onSettleError,
-            onSettled: input.onSettled,
+            onSettleStart: (token) => input.onSettleStart(token, generation),
+            onSettleError: (error, token) =>
+              input.onSettleError(error, token, generation),
+            onSettled: (result, token) =>
+              input.onSettled(result, token, generation),
           });
           openingRemoteUpdates.set(opened, opening);
           return opened;
@@ -2347,6 +2357,48 @@ export function createWorkspaceEngineCapture(
             // re-enter the session or wedge the settle chain.
           }
         };
+        // How many updates entered this document, and how many of them a
+        // COMMITTED settle carried. The close downgrade below needs proof that
+        // the text settled, and a successful RELEASE is not that proof:
+        // `close_session` checks `last_settled_sha` only before a local-only
+        // PRUNE, while a replicated lineage — a synced workspace, promoted by
+        // `claim_base` on the first pulled `ydoc.update` — compacts instead and
+        // never prunes, so its release succeeds over unsettled text
+        // (crates/dohc-engine-collab/src/durable.rs). The desktop therefore
+        // evidences its own claim rather than inferring it from a release whose
+        // meaning depends on the regime.
+        //
+        // Settles OVERLAP, and they do not finish in the order they start:
+        // runSettle announces a start before it queues, and a settle that
+        // aborts on the journal reports its failure WITHOUT ever reaching the
+        // settle chain, so it can finish ahead of one queued before it. Order
+        // is therefore not a sound pairing, and neither a shared slot nor a
+        // queue can be right. Each settle's claim is keyed by the settle
+        // itself: its token, and the generation that minted the token — every
+        // daemon generation runs its own settle chain and starts counting at 1
+        // again, so the token alone repeats across a restart.
+        //
+        // Counting is coarse for the same reason: an update that leaves the
+        // projection unchanged still marks the document unsettled, because
+        // over-counting only costs loudness while under-counting would report a
+        // save that never happened.
+        let updatesSeen = 0;
+        let updatesSettled = 0;
+        const settleClaims = new Map<string, number>();
+        const settleId = (token: number, generation: number): string =>
+          `${generation}:${token}`;
+        const noteUpdate = (): void => {
+          updatesSeen += 1;
+        };
+        // The sha of the last settle that committed — what the file must NOT
+        // hold for `changed-on-disk` to be true of it. An unverifiable read
+        // says nothing about the bytes, so it is not drift either.
+        let lastSettledSha: string | null = null;
+        const fileDriftedFromSettled = async (settled: string): Promise<boolean> => {
+          const digest = await digestSettledFile(rootPath, input.path);
+          if (digest.kind === "unverifiable") return false;
+          return digest.kind === "changed" || digest.sha256 !== settled;
+        };
         const onSettled = async (
           result: {
             sha256: string;
@@ -2356,7 +2408,17 @@ export function createWorkspaceEngineCapture(
             materialized: boolean;
           },
           token: number,
+          generation: number,
         ) => {
+          // The settle COMMITTED — every branch below is about the FILE, not
+          // the lineage — so the updates THIS settle carried are a moment in
+          // History now. Updates that arrived after its start are not: they
+          // belong to a later settle's claim, which only that settle can
+          // redeem.
+          const claim = settleClaims.get(settleId(token, generation));
+          settleClaims.delete(settleId(token, generation));
+          if (claim !== undefined && claim > updatesSettled) updatesSettled = claim;
+          lastSettledSha = result.sha256;
           // The settle committed, but the engine says the FILE did not move
           // (materialization blocked by containment — a symlinked target — with
           // the write pending a retry). Say so rather than report a save the
@@ -2421,12 +2483,44 @@ export function createWorkspaceEngineCapture(
           ]);
           reportSaveState("saved", token);
         };
-        const onSettleStart = (token: number) => reportSaveState("settling", token);
+        // Claim exactly what this settle can carry. The daemon serves one
+        // session's commands in order, so an update already sent is in the
+        // settle that follows it; one sent after this point is not.
+        const onSettleStart = (token: number, generation: number) => {
+          settleClaims.set(settleId(token, generation), updatesSeen);
+          reportSaveState("settling", token);
+        };
         // The one place a background settle failure is observable. Log it with
         // the path and the wire error, and tell the editor the file on disk is
         // behind — a settle that never lands is the user's content going
         // nowhere.
-        const onSettleError = (error: unknown, token: number) => {
+        //
+        // #496 corrects this report from the close path below, and only ever
+        // DOWNWARDS in loudness. Reporting the failure first and withdrawing it
+        // once the release proves it benign is deliberate: a report deferred
+        // until the outcome is known can be dropped, and a dropped settle
+        // failure is the silent loss this callback exists to prevent. An extra
+        // `error` that gets corrected cannot lose anything.
+        //
+        // Remembered per FAILURE, not as one latest-failure slot. This session
+        // outlives the daemon generation under it, each generation runs its own
+        // settle chain, and their tokens both start at 1 — so a slot could be
+        // overwritten by an unrelated generation's failure between the close's
+        // settle and its release, and the close would then withdraw nothing.
+        // Keying on the error itself is what the close already matches on, and
+        // a WeakMap keeps the record exactly as long as the error exists.
+        const settleFailureTokens = new WeakMap<object, number>();
+        const onSettleError = (
+          error: unknown,
+          token: number,
+          generation: number,
+        ) => {
+          // This settle carried nothing to History, so its claim is dropped
+          // unredeemed — and only ITS claim, whichever settle finishes first.
+          settleClaims.delete(settleId(token, generation));
+          if (typeof error === "object" && error !== null) {
+            settleFailureTokens.set(error, token);
+          }
           onError(`ydoc settle of ${input.path}`, error);
           reportSaveState("error", token);
         };
@@ -2453,7 +2547,10 @@ export function createWorkspaceEngineCapture(
               entry.status = "live";
             }
           },
-          onRemoteUpdate: input.onRemoteUpdate,
+          onRemoteUpdate: (update) => {
+            noteUpdate();
+            input.onRemoteUpdate(update);
+          },
           onSettled,
           onSettleStart,
           onSettleError,
@@ -2473,10 +2570,63 @@ export function createWorkspaceEngineCapture(
             if (error instanceof YdocReleasedWithSettleFailureError) {
               // The daemon session and its lease ARE gone — only the settle
               // failed. Lift the guard like a clean teardown (capture of the
-              // path must resume; nothing holds the reservation) and rethrow so
-              // the settle failure still surfaces to the caller.
+              // path must resume; nothing holds the reservation).
               if (liveYDocSessions.get(input.path) === entry) {
                 liveYDocSessions.delete(input.path);
+              }
+              // #496: the settle met a head the daemon's capture had already
+              // moved — an edit made outside dohc, ingested before this close.
+              //
+              // THIS error, not the refusal, is what makes that benign. The
+              // refusal alone proves nothing: the release that follows it can
+              // refuse too (`UnsettledClose`, when the CRDT projection no
+              // longer matches `last_settled_sha` —
+              // crates/dohc-engine-collab/src/durable.rs), and the daemon then
+              // REINSERTS the session entry (crates/dohc-workspace-engine/
+              // src/lib.rs, ydoc_close_inner) — the doc stays reserved, live,
+              // and unsaved. The provider throws this error only after the
+              // release completed, so it is the one signal that the session is
+              // gone and the settle was the only casualty.
+              //
+              // Being a close is structural — the provider constructs this
+              // error nowhere else — and the token is looked up from the exact
+              // failure this close carries, so the correction can never
+              // withdraw a DIFFERENT failure's `error`.
+              //
+              // The refusal itself is not enough to name the outcome, because
+              // it does not mean what the state would claim. `changed-on-disk`
+              // makes two assertions to the user, and each needs its own proof:
+              //
+              //  1. "your text is safe in History" — every update this document
+              //     received is in a committed settle. A release cannot stand
+              //     in for this: it proves settlement only for a local-only
+              //     PRUNE, while a replicated lineage compacts and releases
+              //     cleanly over unsettled text.
+              //  2. "the file changed outside dohc" — the file does NOT hold
+              //     this document's last settled bytes. The engine raises
+              //     ConflictStaleTarget for any divergence of the HEAD, which
+              //     includes a path rebound to another object and a settle
+              //     whose materialization was blocked or superseded
+              //     (crates/dohc-engine-runtime/src/actor.rs) — cases where the
+              //     durable head moved while the disk still holds our own
+              //     bytes. So read the file, exactly as the ordinary settled
+              //     path does.
+              //
+              // Fail either proof and the close stays loud, which is where this
+              // correction started.
+              const failedToken =
+                typeof error.cause === "object" && error.cause !== null
+                  ? settleFailureTokens.get(error.cause)
+                  : undefined;
+              if (
+                failedToken !== undefined &&
+                isConflictStaleTargetRefusal(error.cause) &&
+                updatesSeen === updatesSettled &&
+                lastSettledSha !== null &&
+                (await fileDriftedFromSettled(lastSettledSha))
+              ) {
+                reportSaveState("changed-on-disk", failedToken);
+                return;
               }
               throw error;
             }
@@ -2509,10 +2659,15 @@ export function createWorkspaceEngineCapture(
           initialUpdate: session.initialUpdate,
           contentKind: session.contentKind,
           path: session.path,
-          applyLocalUpdate: (update) => session.applyLocalUpdate(update),
+          applyLocalUpdate: (update) => {
+            noteUpdate();
+            return session.applyLocalUpdate(update);
+          },
           settleNow: (opts) => session.settleNow(opts),
-          applyExternalMarkdownEdit: (markdown) =>
-            session.applyExternalMarkdownEdit(markdown),
+          applyExternalMarkdownEdit: (markdown) => {
+            noteUpdate();
+            return session.applyExternalMarkdownEdit(markdown);
+          },
           close: closeEntry,
         };
       });

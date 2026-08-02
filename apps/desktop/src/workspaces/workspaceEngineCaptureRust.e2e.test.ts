@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -11,6 +12,7 @@ import {
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createWorkspaceActivity } from "./workspaceActivity";
+import { YdocReleasedWithSettleFailureError } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { nativeTmpdir } from "./testTemp";
 
@@ -353,6 +355,320 @@ it.skipIf(engine.missing)(
       await capture.stop();
       await sessions.closeAll();
       await lifecycle.stop();
+    }
+  },
+  60_000,
+);
+
+// #496, staged deterministically instead of by hoping the scheduler
+// interleaves: the daemon's capture is FLUSHED past the outside edit (proved
+// by the new moment) before the close runs, so the close-settle is guaranteed
+// to meet a head that already moved. That is the ordering PR #495's drift e2e
+// deliberately left unasserted because it could not pin which side won.
+it.skipIf(engine.missing)(
+  "closes clean when the daemon's capture reached an outside edit first",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-race-"));
+    roots.push(root);
+    const markerDirectory = join(root, ".dohc", "engine");
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(
+      join(markerDirectory, "SHADOW_CLONE"),
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "utf8",
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const errors: string[] = [];
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-race",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context) => errors.push(context),
+    });
+    const outside = "written outside dohc\n";
+    try {
+      await writeFile(join(root, "note.md"), "base\n", "utf8");
+      await waitForPathMoments(capture, "note.md", 1);
+
+      const states: string[] = [];
+      const session = await capture.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+        onSaveState: (state) => states.push(state),
+      });
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, session.initialUpdate);
+      const before = Y.encodeStateVector(editor);
+      editor.getText("plainText").insert(0, "typed in dohc\n");
+      await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+      await session.settleNow();
+      const settledMoments = await waitForPathMoments(capture, "note.md", 1);
+
+      // The outside writer replaces the file, and the daemon's capture INGESTS
+      // it — the new moment is the proof. The path's head is now the outside
+      // author's text, so the close-settle below cannot be answered from this
+      // session's lineage.
+      await writeFile(join(root, "note.md"), outside, "utf8");
+      await waitForPathMoments(capture, "note.md", settledMoments.length + 1);
+      states.length = 0;
+      errors.length = 0;
+
+      // A clean close: nothing was typed since the settle, so the release
+      // prunes, which is what proves the refusal benign — the file belongs to
+      // the outside author and this document's text is a settled moment in
+      // History. The refusal is still reported as it happens and withdrawn
+      // after the release; the editor's LAST word is what it acts on.
+      await expect(session.close()).resolves.toBeUndefined();
+      expect(states).toEqual(["settling", "error", "changed-on-disk"]);
+      expect(errors).toEqual(["ydoc settle of note.md"]);
+
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+
+      const moments = await capture.listMoments({ limit: 100 });
+      const texts = await Promise.all(
+        moments.moments
+          .filter((moment) => moment.path === "note.md")
+          .map(async (moment) => {
+            const detail = await capture.readMoment(moment.id);
+            const payload = detail?.protected === false ? detail.moment.payload : undefined;
+            return payload?.after.text ?? "";
+          }),
+      );
+      expect(texts.some((text) => text.includes("typed in dohc"))).toBe(true);
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
+    }
+  },
+  60_000,
+);
+
+// dohc-ai/dohc#337 item 5, driven by its own mechanism: another app holds the
+// `.md` open WITHOUT FILE_SHARE_DELETE, so every attempt to replace it fails
+// with a sharing violation. An ACL cannot model this — the workspace folder
+// grants FILE_DELETE_CHILD, which lets the replace through a deny-write ACE on
+// the file itself.
+async function holdWithoutShareDelete(absolute: string): Promise<() => Promise<void>> {
+  const script =
+    `$f=[System.IO.File]::Open('${absolute.replace(/'/g, "''")}','Open','ReadWrite','Read');` +
+    "Write-Output 'held';[Console]::In.ReadLine()|Out-Null;$f.Close()";
+  const child = spawn(
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
+  await new Promise<void>((resolve, reject) => {
+    let seen = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      seen += chunk.toString();
+      if (seen.includes("held")) resolve();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      seen += chunk.toString();
+    });
+    child.on("exit", () => reject(new Error(`holder exited: ${seen}`)));
+    child.on("error", reject);
+  });
+  return async () => {
+    child.stdin.write("\n");
+    await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+  };
+}
+
+// The journey behind #337 item 5, end to end through the real daemon. It was
+// filed as "no retry OR error", before PR #495 gave the save indicator honest
+// states. The error half is refuted here; the retry half is recorded, and it
+// is a stale indicator rather than lost text.
+it.skipIf(engine.missing || process.platform !== "win32")(
+  "surfaces a blocked save while a file is locked and recovers on the next settle",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-lock-"));
+    roots.push(root);
+    const markerDirectory = join(root, ".dohc", "engine");
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(
+      join(markerDirectory, "SHADOW_CLONE"),
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "utf8",
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const errors: string[] = [];
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-lock",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context) => errors.push(context),
+    });
+    const absolute = join(root, "note.md");
+    let release: (() => Promise<void>) | null = null;
+    try {
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(capture, "note.md", 1);
+
+      const states: string[] = [];
+      const session = await capture.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+        onSaveState: (state) => states.push(state),
+      });
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, session.initialUpdate);
+      const type = async (text: string) => {
+        const before = Y.encodeStateVector(editor);
+        editor.getText("plainText").insert(0, text);
+        await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+      };
+
+      release = await holdWithoutShareDelete(absolute);
+      await type("locked edit\n");
+
+      // The item's first claim, refuted: the blocked save IS surfaced. The
+      // editor gets the retryable `error` state, whose title tells the user
+      // their edits are here and to try another edit — which is exactly what
+      // lands them below.
+      await expect(session.settleNow()).rejects.toThrow();
+      expect(states).toEqual(["settling", "error"]);
+      expect(errors).toEqual(["ydoc settle of note.md"]);
+      expect(await readFile(absolute, "utf8")).toBe("base\n");
+
+      await release();
+      release = null;
+      states.length = 0;
+      errors.length = 0;
+
+      // The item's second claim, which STANDS: releasing the lock triggers
+      // nothing. Recorded so a retry has to change this line on purpose. The
+      // window is ~3x the settle debounce; no data is at risk here, only the
+      // indicator, which keeps saying "couldn't save" until the next settle.
+      await delay(2500);
+      expect(states).toEqual([]);
+      expect(await readFile(absolute, "utf8")).toBe("base\n");
+
+      // And the next settle recovers completely: BOTH edits reach the file,
+      // so nothing the lock blocked was dropped.
+      await type("second edit\n");
+      await session.settleNow();
+      expect(states).toEqual(["settling", "saved"]);
+      expect(await readFile(absolute, "utf8")).toBe(
+        "second edit\nlocked edit\nbase\n",
+      );
+
+      await expect(session.close()).resolves.toBeUndefined();
+    } finally {
+      await release?.();
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
+    }
+  },
+  120_000,
+);
+
+// The half a refusal cannot answer, driven against the real daemon. Same race
+// as above, but the user has UNSETTLED edits when the close runs: the
+// close-settle refuses ConflictStaleTarget exactly as before, and then the
+// release refuses too — a local-only prune needs the CRDT projection to equal
+// `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and the
+// daemon REINSERTS the session entry on that refusal
+// (crates/dohc-workspace-engine/src/lib.rs, ydoc_close_inner). The doc stays
+// reserved, live, and unsaved, so the failure must stay loud. Deciding this
+// at the refusal instead of after the release reported "changed on disk" over
+// exactly this state.
+it.skipIf(engine.missing)(
+  "keeps the close loud when unsettled edits meet an already-moved head",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-loud-"));
+    roots.push(root);
+    const markerDirectory = join(root, ".dohc", "engine");
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(
+      join(markerDirectory, "SHADOW_CLONE"),
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "utf8",
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const errors: string[] = [];
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-loud",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context) => errors.push(context),
+    });
+    const outside = "written outside dohc\n";
+    try {
+      await writeFile(join(root, "note.md"), "base\n", "utf8");
+      await waitForPathMoments(capture, "note.md", 1);
+
+      const states: string[] = [];
+      const session = await capture.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+        onSaveState: (state) => states.push(state),
+      });
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, session.initialUpdate);
+      const type = async (text: string) => {
+        const before = Y.encodeStateVector(editor);
+        editor.getText("plainText").insert(0, text);
+        await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+      };
+      await type("typed in dohc\n");
+      await session.settleNow();
+      const settledMoments = await waitForPathMoments(capture, "note.md", 1);
+
+      await writeFile(join(root, "note.md"), outside, "utf8");
+      await waitForPathMoments(capture, "note.md", settledMoments.length + 1);
+
+      // The difference from the clean case: text the engine has journaled but
+      // never settled, so the projection no longer equals `last_settled_sha`
+      // and the release cannot prune.
+      await type("never settled\n");
+      states.length = 0;
+      errors.length = 0;
+
+      const closeError = await session.close().then(
+        () => null,
+        (error: unknown) => error,
+      );
+      // The sharpest statement of the fix. The error the release throws here
+      // CARRIES the stale-target message — the escalated settling release
+      // refuses the same way the settle did — while NOT being the
+      // released-with-settle-failure signal, because nothing was released.
+      // A downgrade keyed on the refusal's message would fire on exactly
+      // this; keyed on the type, it cannot.
+      expect(closeError).not.toBeNull();
+      expect(closeError).not.toBeInstanceOf(YdocReleasedWithSettleFailureError);
+      expect(String(closeError)).toContain("conflict-stale-target");
+      expect(states.at(-1)).toBe("error");
+      expect(states).not.toContain("changed-on-disk");
+      expect(errors).toContain("ydoc settle of note.md");
+
+      // The outside author still owns the file, and the unsettled text is not
+      // in it — which is why "changed on disk" would have been a lie.
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
     }
   },
   60_000,
