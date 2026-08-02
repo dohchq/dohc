@@ -58,10 +58,17 @@ const DEFAULT_PING_INTERVAL_MS = 30_000;
 //
 // That is why the expiry alone cannot be the test, and why raising it would
 // not help: no timeout both survives 512 MiB of egress and still catches a
-// wedge. `sendPing` reads inbound TRAFFIC instead. A probe stuck behind bulk
-// output arrives with that output, and bytes for anybody prove the daemon is
-// turning; a wedged daemon sends nothing to anyone. The expiry then measures
+// wedge. The probe verdict reads inbound TRAFFIC instead. A probe stuck behind
+// bulk output arrives with that output, and bytes for anybody prove the daemon
+// is turning; a wedged daemon sends nothing to anyone. The expiry then measures
 // what it can honestly measure — total silence.
+//
+// That traffic counts whenever it arrived SINCE THE LAST VERDICT, not only
+// while a probe was racing. The next probe starts an interval after the
+// previous one resolved, so probes do not tile the timeline: at production
+// values a probe expires at 45s and its successor begins at 75s. A reply
+// delivered at 50s — the likeliest late frame there is, being the expired
+// probe's own — would fall in that gap and prove nothing.
 //
 // Scope: events count as traffic too. `event_forwarder` is a separate task
 // pushing onto the same queue, so it can emit while no request is in flight.
@@ -250,6 +257,12 @@ export class EngineDaemonLifecycle {
   private healthyResetTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setTimeout> | null = null;
   private pingExpiries = 0;
+  // Inbound frames counted at the last probe verdict. It spans the gaps between
+  // probes on purpose: the next probe does not start until `pingIntervalMs`
+  // AFTER the previous one resolved, so a per-window baseline would discard
+  // every frame that arrived in between — including a probe's own reply
+  // delivered just after its expiry, which is the likeliest late frame there is.
+  private activityBaseline: number | undefined;
   // Wedge kills with no probe answered since, across generations.
   private consecutiveWedges = 0;
   // A terminal verdict was reported. The kill it ordered still has an exit
@@ -756,6 +769,7 @@ export class EngineDaemonLifecycle {
     client: EngineDaemonClient,
   ): void {
     this.pingExpiries = 0;
+    this.activityBaseline = client.inboundActivity?.();
     this.schedulePing(generation, client);
   }
 
@@ -799,7 +813,19 @@ export class EngineDaemonLifecycle {
     const answered = await this.sendPing(client);
     // Re-check: the daemon can exit, or be replaced, while a probe is pending.
     if (!this.probedGenerationIsLive(generation, client)) return;
-    if (answered) {
+    // Traffic is life. The daemon serializes ONE output queue, so a probe waits
+    // behind whatever is already queued and cannot overtake it — its own reply
+    // is a measure of queue depth, not of health. Frames for ANYBODY prove the
+    // daemon is turning, and they count whenever they arrived since the last
+    // verdict, not only while a probe happened to be racing. A reply delivered
+    // just after its own probe expired is still proof the daemon is alive.
+    const activity = client.inboundActivity?.();
+    const sawTraffic =
+      activity !== undefined &&
+      this.activityBaseline !== undefined &&
+      activity > this.activityBaseline;
+    if (activity !== undefined) this.activityBaseline = activity;
+    if (answered || sawTraffic) {
       this.pingExpiries = 0;
       // One answer ends a wedge streak, whichever generation it came from. A
       // daemon that wedged once and now replies is being recovered, not looped.
@@ -828,18 +854,12 @@ export class EngineDaemonLifecycle {
   // reads as life, and the detector would never fire against the real client.
   private async sendPing(client: EngineDaemonClient): Promise<boolean> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
-    // Traffic is life. The daemon serializes ONE output queue, so a probe waits
-    // behind whatever is already queued and cannot overtake it — its own reply
-    // is therefore a measure of queue depth, not of health. Frames arriving for
-    // anybody prove the daemon is still turning, so only a client that heard
-    // NOTHING for the whole expiry has met silence.
-    const before = client.inboundActivity?.();
+    // This resolves false for "no reply in time", which is not yet a verdict.
+    // `probeOnce` decides, because liveness is judged on traffic seen since the
+    // last verdict rather than inside this one window.
     const silence = new Promise<boolean>((resolve) => {
       timeout = setTimeout(
-        () => {
-          const after = client.inboundActivity?.();
-          resolve(before !== undefined && after !== undefined && after > before);
-        },
+        () => resolve(false),
         this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS,
       );
       timeout.unref();

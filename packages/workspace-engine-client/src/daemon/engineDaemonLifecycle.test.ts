@@ -928,6 +928,55 @@ describe("Rust engine daemon lifecycle", () => {
     }
   }, 20_000);
 
+  it("counts a reply that lands between probe windows", async () => {
+    // Probes do not tile the timeline: the next one starts an interval after
+    // the previous RESOLVED, so with a 20ms expiry and a 30ms interval the
+    // windows are [0,20], [50,70], [100,120] — and the gaps belong to nobody.
+    // A reply delivered at 30ms, just after its own probe expired, is the
+    // likeliest late frame there is. It still proves the daemon is turning.
+    // MUTATION: baseline the activity count inside sendPing per window instead
+    // of carrying it across verdicts, and every one of these replies lands in
+    // a gap, is discarded, and this healthy daemon is killed as wedged.
+    const clients: SelfExitingClient[] = [];
+    const failures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 30,
+      pingExpiryMs: 20,
+      maxPingExpiries: 3,
+      launch: async (options) => {
+        const client: SelfExitingClient = new SelfExitingClient((request) => {
+          if (request.method !== "engine.ping") return healthyPing(request);
+          // Answers, but too late for its own race — exactly the queued reply
+          // that arrives once the daemon works through its output backlog.
+          setTimeout(() => {
+            client.inbound += 1;
+          }, 30);
+          return new Promise<Response>(() => {});
+        });
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error) => failures.push(error),
+    });
+
+    try {
+      await lifecycle.start();
+      // Room for several expiries to accumulate a wedge verdict, if the gaps
+      // were still being thrown away.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(failures).toEqual([]);
+      expect(clients).toHaveLength(1);
+      expect(clients[0]?.closed).toBe(false);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
   it("never kills a daemon that answers engine.ping slowly or refuses it", async () => {
     // A saturated daemon answers: the request supervisor resolves a queued
     // request's own deadline before it competes for an execution slot, so the
