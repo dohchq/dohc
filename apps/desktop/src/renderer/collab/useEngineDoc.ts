@@ -14,9 +14,11 @@ import {
 // token, no cloud. Solo editing runs entirely on the engine; a co-editor's edit
 // arrives as a forwarded remote delta on the same channel.
 //
-// available:false => the doc is NOT engine-backed (unflagged workspace, secret
-// path, missing file, or already live) — the caller stays on the plain local
-// autosave editor showing the real on-disk content. Undo/redo is intact: the
+// available:false AND opening:false => the doc is NOT engine-backed (unflagged
+// workspace, secret path, missing file, or already live) — the caller stays on
+// the plain local autosave editor showing the real on-disk content. While
+// opening:true the answer is not known yet and the caller must stay read-only.
+// Undo/redo is intact: the
 // Collaboration extension bundles the Yjs UndoManager binding (COLLAB_STARTER_KIT
 // disables the plain history), so Mod-z/Mod-y drive the CRDT undo stack.
 //
@@ -40,8 +42,19 @@ export type EngineDocSaveState =
 
 export type UseEngineDoc = {
   // True once the engine session is open and the mirror doc is bound. false =>
-  // fall back to the local autosave editor.
+  // fall back to the local autosave editor, but ONLY once `opening` is false.
   available: boolean;
+  // No open has answered for the CURRENT request yet (#533). "Opening" and
+  // "not engine-backed" used to be the same `available: false`, so the caller
+  // showed its writable plain editor — whose autosave writes straight to disk
+  // — for the whole wait. On a workspace whose capture chain is busy (startup
+  // reconciliation, a version switch) that wait is seconds, and every keystroke
+  // in it took a path the about-to-bind session never sees: the session then
+  // seeds from a head without them. True on the first render of an open AND on
+  // the first render after the request changes under a bound document (a
+  // version switch), because both are the same unanswered question.
+  // The caller must offer no writable surface while this is true.
+  opening: boolean;
   // The mirror Y.Doc Tiptap binds to; null until bound / when unavailable.
   doc: Y.Doc | null;
   // The document's REAL save state. "saving" the moment an edit is made,
@@ -51,6 +64,28 @@ export type UseEngineDoc = {
   // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
   saveState: EngineDocSaveState;
 };
+
+// What ONE open answers: a workspace, a path, the gate, and the active-version
+// token. Everything this hook returns belongs to exactly one of these. JSON
+// quotes each part, so two different requests cannot produce one key.
+function engineDocRequestKey(input: {
+  workspaceId: string;
+  path: string;
+  enabled: boolean;
+  reopenKey?: number;
+}): string {
+  return JSON.stringify([
+    input.enabled,
+    input.workspaceId,
+    input.path,
+    input.reopenKey ?? null,
+  ]);
+}
+
+// The settled result of one open, stamped with the request it answers.
+type EngineDocOpenOutcome =
+  | { key: string; kind: "bound"; doc: Y.Doc }
+  | { key: string; kind: "unavailable" };
 
 let engineDocSessionCounter = 0;
 function nextSessionId(): string {
@@ -121,30 +156,39 @@ export function useEngineDoc(input: {
   // SAME version must NOT bump this (that would churn the live session).
   reopenKey?: number;
 }): UseEngineDoc {
-  const [doc, setDoc] = useState<Y.Doc | null>(null);
-  const [available, setAvailable] = useState(false);
+  const requestKey = engineDocRequestKey(input);
+  const [outcome, setOutcome] = useState<EngineDocOpenOutcome | null>(null);
   const [saveState, setSaveState] = useState<EngineDocSaveState>("saved");
   // Monotonic per-open token: only the newest open may set state (the async-
   // state invariant — a stale workspace/path response never repaints).
   const openTokenRef = useRef(0);
 
+  // DERIVED DURING RENDER, never set by an effect. An effect runs after the
+  // render that scheduled it, so an effect-set flag is one frame late — and
+  // that frame is the whole defect. When the version switches under an open
+  // document (`reopenKey`), the render that carries the new token would
+  // otherwise still report the PREVIOUS version's `available`/`doc`: one
+  // committed frame of an editable, already-closed session, whose keystrokes
+  // go to an obsolete session. A result only counts for the request it
+  // answers, so switching request answers "opening" the instant it happens.
+  const settled = outcome !== null && outcome.key === requestKey ? outcome : null;
+  const available = settled?.kind === "bound";
+  const doc = settled?.kind === "bound" ? settled.doc : null;
+  const opening = input.enabled && settled === null;
+
   useEffect(() => {
-    if (!input.enabled) {
-      setAvailable(false);
-      setDoc(null);
-      setSaveState("saved");
-      return;
-    }
+    setSaveState("saved");
+    if (!input.enabled) return;
     const { workspaceId, path } = input;
+    // The key of the render that scheduled this effect — the request this open
+    // answers. Stamped onto the result so a render can tell whether the result
+    // it holds is still the one it asked for.
+    const key = requestKey;
     const token = ++openTokenRef.current;
     let cancelled = false;
     let binding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
     let unsubscribeSaveState: (() => void) | null = null;
-
-    setAvailable(false);
-    setDoc(null);
-    setSaveState("saved");
 
     const sessionId = nextSessionId();
     const localSeq = { current: 0 };
@@ -160,8 +204,9 @@ export function useEngineDoc(input: {
         }
         binding = bound;
         if (!bound.available || !bound.doc) {
-          setAvailable(false);
-          setDoc(null);
+          // Resolved: NOT engine-backed. The caller may offer the plain local
+          // editor again — that is what `opening` was holding back.
+          setOutcome({ key, kind: "unavailable" });
           return;
         }
         // An edit is unsaved the instant it happens. Only main's settle report
@@ -200,13 +245,11 @@ export function useEngineDoc(input: {
           // Anything typed since is still unsaved — keep showing "Saving…".
           if (event.seq >= localSeq.current) setSaveState("saved");
         });
-        setDoc(bound.doc);
-        setAvailable(true);
+        setOutcome({ key, kind: "bound", doc: bound.doc });
       })
       .catch(() => {
         if (cancelled || token !== openTokenRef.current) return;
-        setAvailable(false);
-        setDoc(null);
+        setOutcome({ key, kind: "unavailable" });
       });
 
     return () => {
@@ -217,6 +260,11 @@ export function useEngineDoc(input: {
       // reservation so a version/file switch can reopen the same object), then
       // drop the mirror doc.
       void binding?.destroy();
+      // The result dies with the session it describes. Without this, a request
+      // that comes BACK to a key it held before (a truncated read that reloads
+      // whole, so `enabled` goes false then true) would match the old outcome
+      // and hand the caller an editable doc this cleanup already destroyed.
+      setOutcome(null);
     };
     // input is destructured; re-open only when the workspace, path, gate, or the
     // active-version token changes — never on unrelated re-renders. reopenKey
@@ -228,5 +276,5 @@ export function useEngineDoc(input: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input.workspaceId, input.path, input.enabled, input.reopenKey]);
 
-  return { available, doc, saveState };
+  return { available, opening, doc, saveState };
 }
