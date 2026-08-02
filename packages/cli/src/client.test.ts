@@ -198,7 +198,7 @@ describe("sendCliRequest", () => {
       { stateDir, transport, platform: "win32" },
     );
     expect(result).toEqual({ channels: [] });
-    // The pipe name carries the per-boot entropy, so it must come from the
+    // The app randomizes the pipe name each boot, so it must come from the
     // descriptor rather than from the state dir path.
     expect(transport).toHaveBeenCalledWith(PIPE, expect.any(String), undefined);
   });

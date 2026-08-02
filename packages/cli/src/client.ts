@@ -19,11 +19,14 @@ import {
 const TOKEN_FILE = "dohc-cli-token";
 const SOCKET_FILE = "dohc-cli.sock";
 const ENDPOINT_FILE = "dohc-cli-endpoint";
-// The Windows pipe name is a per-boot capability, so it cannot be derived from
-// the state dir. The app writes it to the endpoint descriptor and the client
-// reads it back. Only a name the app could have produced is dialled: the
-// descriptor is a file, and a rewritten one must not redirect the boot token to
-// an endpoint of the writer's choosing.
+// The app randomizes the Windows pipe name each boot, so the client cannot
+// derive it from the state dir; it reads the name back from the endpoint
+// descriptor. That name is not a secret. Any local process can enumerate
+// `\\.\pipe\` and can create a name that matches this pattern. The
+// authentication gate is the 256-bit token in the token file, which only the
+// ACL of the state directory protects. This pattern exists to refuse remote
+// endpoints of the `\\host\pipe\...` form, so a rewritten descriptor cannot
+// send the token off the machine over SMB.
 const PIPE_NAME_RE = /^\\\\\.\\pipe\\dohc-cli-[a-f0-9]{32,}$/u;
 const tokenSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const responseVersionEnvelopeSchema = z
