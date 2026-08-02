@@ -1052,9 +1052,9 @@ fn fault_sync_before_blob_hydrate_commit_leaves_no_blob_or_cursor() {
     );
 }
 
-/// Ingest owns the text ceiling. Before this, `MAX_TEXT_BYTES` held on the sync
-/// path only because the HTTP transport's `MAX_BLOB_RESPONSE_BYTES` happened to
-/// equal it, so any other `RelayTransport` could store an over-cap body.
+/// Ingest owns the text ceiling. Before this, nothing on the sync path checked
+/// `MAX_TEXT_BYTES`: the HTTP transport's blob response bound sat near it by
+/// coincidence, and any other `RelayTransport` could store an over-cap body.
 ///
 /// MUTATION: delete the ceiling check in `hydrate_blob_content` and the over-cap
 /// half of this test fails; raise the limit above `MAX_TEXT_BYTES` and the

@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
-    BlobDownloadRequest, BlobHaveRequest, BlobUploadRequest, ClaimRequest, EpochRequest,
+    BlobDownloadRequest, BlobHaveRequest, BlobKind, BlobUploadRequest, ClaimRequest, EpochRequest,
     KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, NoLiveLeases, ProbeRequest, PullRequest,
     RelayError, RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest,
     ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome,
-    journal_local_replication_op, read_pushed_seq, read_relay_cursor,
+    blob_ceiling, journal_local_replication_op, read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::ScratchDir;
@@ -1326,4 +1326,91 @@ fn generic_blob_404_is_workspace_unavailable_not_blob_missing() {
         })
         .expect_err("workspace-level blob 404");
     assert_eq!(error, RelayError::WorkspaceUnavailable);
+}
+
+#[test]
+fn a_blob_at_the_ingest_ceiling_arrives_whole() {
+    // The relay stores blobs up to `MAX_BLOB_BYTES`, which is the text ceiling,
+    // so an at-ceiling text blob is work the relay legally serves.
+    //
+    // MUTATION: set the read limit back to `MAX_INGEST_BLOB_BYTES` and this
+    // fails with `InvalidResponse` — `ureq` refuses a body once a read reaches
+    // its limit, so the last byte the ceiling allows never arrives.
+    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Text);
+    let server = FakeServer::start(move |request| match request.path() {
+        path if path.starts_with("/sync/ws/blobs/") => TestResponse::bytes(vec![b'a'; limit_bytes]),
+        _ => TestResponse::json(500, json!({"code": "internal_error"})),
+    });
+    let response = transport(&server)
+        .download_blob(BlobDownloadRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            sha256: "b".repeat(64),
+        })
+        .expect("an at-ceiling blob downloads");
+    assert_eq!(response.bytes.len(), limit_bytes);
+}
+
+#[test]
+fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
+    // The production transport must carry the refusal ingest writes, not
+    // replace it with an unreadable-response error that names no limit.
+    //
+    // MUTATION: set the read limit back to `MAX_INGEST_BLOB_BYTES` and the
+    // caller gets `InvalidResponse` instead, with no constraint, no configured
+    // limit, and no observed size.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine, &json!({}));
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Text);
+    let oversized = vec![b'a'; limit_bytes + 1];
+    let sha256 = hex_sha256(&oversized);
+    let handler_sha = sha256.clone();
+    let server = FakeServer::start(move |request| match request.path() {
+        "/sync/ws/log" => log_page(
+            vec![remote_row(
+                "peer",
+                0,
+                "version.create",
+                json!({
+                    "versionId": "oversized-blob-version",
+                    "name": "oversized-blob-version",
+                    "kind": "named",
+                    "forkVersionId": "main",
+                    "forkMomentId": "fork-moment",
+                    "createdAtMs": 1_500,
+                    "forkSnapshots": [{
+                        "objectId": "oversized-blob-object",
+                        "objectCreatedAtMs": 1_100,
+                        "path": "oversized-blob.md",
+                        "blobSha256": handler_sha,
+                        "byteLength": 7,
+                        "updatedAtMs": 1_200,
+                        "latestMomentId": "oversized-blob-object-moment",
+                        "metadata": {"origin": "sync"}
+                    }]
+                }),
+            )],
+            1,
+            false,
+        ),
+        path if path.starts_with("/sync/ws/blobs/") => TestResponse::bytes(oversized.clone()),
+        _ => TestResponse::json(500, json!({"code": "internal_error"})),
+    });
+    // The served bytes hash to the requested sha256, so only the ceiling can
+    // refuse them.
+    assert_eq!(
+        RelaySyncClient::new(transport(&server)).pull_chat_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Err(RelayError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes: limit_bytes + 1,
+        })
+    );
+    assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
 }

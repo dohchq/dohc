@@ -9,10 +9,10 @@ use dohc_engine_sync::{
     BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
     BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ProbeRequest, ProbeResponse,
-    PullRequest, PullResponse, PushRequest, PushResponse, RelayError, RelayTransport,
-    ReplicationEnvelope, ShareBlobRequest, ShareReplicationEnvelope, ShareViewRequest,
-    ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
+    KeyEnvelopeResponse, MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ProbeRequest,
+    ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse, RelayError,
+    RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareReplicationEnvelope,
+    ShareViewRequest, ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -25,7 +25,12 @@ const MAX_JSON_RESPONSE_BYTES: u64 = (MAX_PULL_OPS
     + MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES) as u64;
 const MAX_ERROR_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_KEY_ENVELOPE_ACK_BYTES: u64 = 64 * 1024;
-const MAX_BLOB_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+/// The largest blob body a response may carry: the loosest ingest ceiling plus
+/// the one byte that lets ingest observe an overage and refuse it by name.
+const MAX_BLOB_BODY_BYTES: usize = MAX_INGEST_BLOB_BYTES + 1;
+/// `ureq` refuses a body once a read reaches its limit, so the limit sits one
+/// byte past the largest body this transport accepts.
+const BLOB_BODY_READ_LIMIT_BYTES: usize = MAX_BLOB_BODY_BYTES + 1;
 
 pub struct HttpRelayTransport {
     base_url: String,
@@ -167,7 +172,7 @@ impl HttpRelayTransport {
         &self,
         response: Result<Response<Body>, ureq::Error>,
         context: RequestContext,
-        limit: usize,
+        read_limit_bytes: usize,
     ) -> Result<(Vec<u8>, Option<String>), RelayError> {
         let mut response = response.map_err(map_transport_error)?;
         if !response.status().is_success() {
@@ -181,7 +186,7 @@ impl HttpRelayTransport {
         let bytes = response
             .body_mut()
             .with_config()
-            .limit(limit as u64)
+            .limit(read_limit_bytes as u64)
             .read_to_vec()
             .map_err(|_| RelayError::InvalidResponse)?;
         Ok((bytes, etag))
@@ -382,7 +387,7 @@ impl RelayTransport for HttpRelayTransport {
                 .header("authorization", &self.authorization())
                 .call(),
             RequestContext::Blob,
-            MAX_BLOB_RESPONSE_BYTES,
+            BLOB_BODY_READ_LIMIT_BYTES,
         )?;
         Ok(BlobDownloadResponse { bytes })
     }
@@ -521,7 +526,7 @@ impl RelayTransport for HttpRelayTransport {
                 .header("authorization", &self.authorization())
                 .call(),
             RequestContext::Share,
-            MAX_BLOB_RESPONSE_BYTES,
+            BLOB_BODY_READ_LIMIT_BYTES,
         )?;
         Ok(BlobDownloadResponse { bytes })
     }

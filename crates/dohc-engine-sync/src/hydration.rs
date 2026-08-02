@@ -44,6 +44,15 @@ pub const fn blob_ceiling(kind: BlobKind) -> (&'static str, usize) {
     }
 }
 
+/// The loosest ingest ceiling across blob kinds. A transport must deliver a
+/// blob of this size whole, and one byte more, so ingest refuses an overage by
+/// name instead of the transport refusing it as an unreadable response.
+pub const MAX_INGEST_BLOB_BYTES: usize = {
+    let text = blob_ceiling(BlobKind::Text).1;
+    let binary = blob_ceiling(BlobKind::Binary).1;
+    if text > binary { text } else { binary }
+};
+
 /// Hash-verify and hydrate a bounded content-addressed blob in one transaction.
 /// Existing content is re-verified; a hash collision or poisoned row fails
 /// closed instead of being overwritten.
