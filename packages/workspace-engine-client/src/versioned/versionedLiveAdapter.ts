@@ -421,10 +421,16 @@ export class VersionedLiveAdapter {
     return new Uint8Array(delivery.blob.bytes);
   }
 
+  /**
+   * The body behind a text digest, decoded once here so every caller of an
+   * over-cap text read gets the same string. `ignoreBOM` is load-bearing: the
+   * default decoder strips a leading U+FEFF, and a stripped body no longer
+   * matches the `sha256`/`byteLength` the daemon recorded for it.
+   */
   async readTextBlob(input: {
     workspaceId: string;
     sha256: string;
-  }): Promise<Uint8Array | null> {
+  }): Promise<string | null> {
     this.assertWorkspace(input.workspaceId);
     let delivery: Awaited<
       ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>
@@ -456,7 +462,7 @@ export class VersionedLiveAdapter {
       delivery.result,
     );
     if (result.bytesBase64 !== null) {
-      return this.decodeBase64(result.bytesBase64);
+      return this.decodeUtf8(this.decodeBase64(result.bytesBase64));
     }
     if (delivery.blob === null) {
       throw new DaemonProtocolError(
@@ -474,7 +480,7 @@ export class VersionedLiveAdapter {
         "The completed blob length does not match the text metadata.",
       );
     }
-    return new Uint8Array(delivery.blob.bytes);
+    return this.decodeUtf8(new Uint8Array(delivery.blob.bytes));
   }
 
   async readTextFile(input: {
@@ -488,20 +494,17 @@ export class VersionedLiveAdapter {
       path: input.path,
     });
     if (result?.contentKind === "text" && result.text === null) {
-      const bytes = await this.readTextBlob({
+      const text = await this.readTextBlob({
         workspaceId: input.workspaceId,
         sha256: result.blobSha256,
       });
-      if (bytes === null) {
+      if (text === null) {
         throw new DaemonProtocolError(
           "The daemon could not hydrate the referenced text blob.",
         );
       }
       const { inbandLimitBytes: _inbandLimitBytes, ...metadata } = result;
-      return {
-        ...metadata,
-        text: new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes),
-      };
+      return { ...metadata, text };
     }
     return result;
   }
@@ -1041,5 +1044,9 @@ export class VersionedLiveAdapter {
       );
     }
     return new Uint8Array(Buffer.from(value, "base64"));
+  }
+
+  private decodeUtf8(bytes: Uint8Array): string {
+    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
   }
 }

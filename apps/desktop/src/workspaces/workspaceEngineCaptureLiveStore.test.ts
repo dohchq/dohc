@@ -15,12 +15,24 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
 const WORKSPACE_ID = "workspace";
 const WORKSPACE_HANDLE = "workspace-handle";
 const SENTINEL = new Error("sentinel");
+
+// Past `MAX_DESKTOP_CAPTURE_TEXT_BYTES` (128 KiB), so the daemon withholds this
+// body from a moment payload and reports its digest instead. The leading BOM
+// and the two-byte characters make the readback a real UTF-8 check rather than
+// an ASCII one.
+const OVER_CAP_TEXT = `\uFEFF# héllo\n${"é".repeat(70 * 1024)}\n`;
+const OVER_CAP_BYTES = new Uint8Array(Buffer.from(OVER_CAP_TEXT, "utf8"));
+const OVER_CAP_SHA256 = createHash("sha256")
+  .update(OVER_CAP_BYTES)
+  .digest("hex");
 
 function sessionsFor(
   client: EngineDaemonClient,
@@ -53,6 +65,75 @@ function clientFor(
   sendRequest: (request: Request) => Promise<Response>,
 ): EngineDaemonClient {
   return { close: () => undefined, sendRequest };
+}
+
+type CompletedBlob = Parameters<
+  Parameters<NonNullable<EngineDaemonClient["onBlob"]>>[0]
+>[0];
+
+/**
+ * The daemon's answer to `versionedText.readBlob` for the one digest this
+ * workspace references, and a refusal for every other one:
+ * `read_text_blob_with_hydration` (store.rs) authorizes a digest against the
+ * workspace's text references before it reads a byte. A fake that answered any
+ * digest could not fail, and would pin nothing about the request sent.
+ *
+ * Delivery is out of band because the body is past the 48 KiB egress cap.
+ */
+function overCapBlobResult(
+  request: Request,
+  deliver: (blob: CompletedBlob) => void,
+): Response["result"] {
+  const params = request.params as { sha256?: unknown };
+  if (params.sha256 !== OVER_CAP_SHA256) {
+    throw {
+      wireError: {
+        code: "INVALID_PARAMS",
+        message: "file-not-found",
+        retry: "no",
+      },
+    };
+  }
+  deliver({
+    requestId: request.id,
+    streamId: request.id,
+    totalBytes: OVER_CAP_BYTES.byteLength,
+    sha256: OVER_CAP_SHA256,
+    bytes: OVER_CAP_BYTES,
+  });
+  return {
+    bytesBase64: null,
+    byteLength: OVER_CAP_BYTES.byteLength,
+    inbandLimitBytes: 48 * 1024,
+  };
+}
+
+/**
+ * A client that can deliver a completed blob out of band, which is the only
+ * way a body past the 48 KiB egress cap reaches the adapter. `clientFor` has
+ * no `helloAck` and no `onBlob`, so a suite built on it cannot observe blob
+ * hydration at all — it refuses first, on the missing capability.
+ */
+function blobClientFor(
+  sendRequest: (
+    request: Request,
+    deliver: (blob: CompletedBlob) => void,
+  ) => Promise<Response>,
+): EngineDaemonClient {
+  const handlers = new Set<(blob: CompletedBlob) => void>();
+  return {
+    close: () => undefined,
+    helloAck: { capabilities: ["blobs"] },
+    onBlob(handler: (blob: CompletedBlob) => void) {
+      handlers.add(handler);
+      return () => handlers.delete(handler);
+    },
+    async sendRequest(request: Request): Promise<Response> {
+      return await sendRequest(request, (blob) => {
+        for (const handler of handlers) handler(blob);
+      });
+    },
+  } as unknown as EngineDaemonClient;
 }
 
 const snapshot = {
@@ -578,19 +659,476 @@ describe("createCaptureLiveStores", () => {
     expect(detail?.payload.after.path).toBe("renamed.md");
   });
 
-  it("rejects a truncated text moment instead of fabricating empty content", async () => {
-    const client = clientFor(async (request) => {
-      expect(request.method).toBe(VERSIONED_METHOD.momentsGet);
-      return {
-        id: request.id,
-        result: {
-          ...moment,
-          afterText: null,
-          afterByteLength: 60 * 1024,
-          afterInbandLimitBytes: 48 * 1024,
-        },
-      };
+  it.each(["after", "before"] as const)(
+    "hydrates an over-cap %s moment body out of band (#359)",
+    async (side) => {
+      const requests: Request[] = [];
+      const client = blobClientFor(async (request, deliver) => {
+        requests.push(request);
+        if (request.method === VERSIONED_METHOD.momentsGet) {
+          return {
+            id: request.id,
+            result:
+              side === "after"
+                ? {
+                    ...moment,
+                    afterText: null,
+                    afterBlobSha256: OVER_CAP_SHA256,
+                    afterByteLength: OVER_CAP_BYTES.byteLength,
+                    afterInbandLimitBytes: 128 * 1024,
+                  }
+                : {
+                    ...moment,
+                    beforeText: null,
+                    beforeBlobSha256: OVER_CAP_SHA256,
+                    beforeByteLength: OVER_CAP_BYTES.byteLength,
+                    beforeInbandLimitBytes: 128 * 1024,
+                  },
+          };
+        }
+        expect(request.method).toBe(VERSIONED_METHOD.textReadBlob);
+        return { id: request.id, result: overCapBlobResult(request, deliver) };
+      });
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+        sessionsFor(client),
+      );
+
+      const detail = await store.getMoment({
+        workspaceId: WORKSPACE_ID,
+        momentId: "resolved-moment",
+      });
+
+      const hydrated =
+        side === "after" ? detail?.payload.after : detail?.payload.before;
+      expect(hydrated?.text).toBe(OVER_CAP_TEXT);
+      // Byte-identical, not merely equal-looking: a decoder that strips the
+      // leading BOM returns a body whose digest no longer matches the one the
+      // moment recorded.
+      expect(Buffer.from(hydrated?.text ?? "", "utf8")).toEqual(
+        Buffer.from(OVER_CAP_BYTES),
+      );
+      expect(
+        createHash("sha256").update(hydrated?.text ?? "", "utf8").digest("hex"),
+      ).toBe(OVER_CAP_SHA256);
+      expect(requests.map((request) => request.method)).toEqual([
+        VERSIONED_METHOD.momentsGet,
+        VERSIONED_METHOD.textReadBlob,
+      ]);
+    },
+  );
+
+  it("hydrates an over-cap moment returned by a write, not just by a read", async () => {
+    const requests: Request[] = [];
+    const client = blobClientFor(async (request, deliver) => {
+      requests.push(request);
+      if (request.method === VERSIONED_METHOD.textWrite) {
+        return {
+          id: request.id,
+          result: {
+            object: { id: "object", workspaceId: WORKSPACE_ID, createdAtMs: 1 },
+            snapshot: { ...snapshot, text: OVER_CAP_TEXT },
+            moment: {
+              ...moment,
+              afterText: null,
+              afterBlobSha256: OVER_CAP_SHA256,
+              afterByteLength: OVER_CAP_BYTES.byteLength,
+              afterInbandLimitBytes: 128 * 1024,
+            },
+            deduped: false,
+          },
+        };
+      }
+      return { id: request.id, result: overCapBlobResult(request, deliver) };
     });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const written = await store.writeTextFile({
+      workspaceId: WORKSPACE_ID,
+      versionId: "main",
+      path: "note.md",
+      text: OVER_CAP_TEXT,
+      metadata: { origin: "api" },
+    });
+
+    expect(written.moment.payload.after.text).toBe(OVER_CAP_TEXT);
+    expect(requests.map((request) => request.method)).toEqual([
+      VERSIONED_METHOD.textWrite,
+      VERSIONED_METHOD.textReadBlob,
+    ]);
+  });
+
+  it("spends no blob request on a moment whose body already fits", async () => {
+    const requests: Request[] = [];
+    const client = blobClientFor(async (request) => {
+      requests.push(request);
+      return { id: request.id, result: moment };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const detail = await store.getMoment({
+      workspaceId: WORKSPACE_ID,
+      momentId: "resolved-moment",
+    });
+
+    expect(detail?.payload.after.text).toBe("hello");
+    expect(requests.map((request) => request.method)).toEqual([
+      VERSIONED_METHOD.momentsGet,
+    ]);
+  });
+
+  // Every OTHER surface that returns a moment payload. `getMoment` and
+  // `writeTextFile` are pinned above; without these rows the hydration call at
+  // each site below could be deleted and the suite would stay green.
+  //
+  // `sides` is not cosmetic: a delete or rename records ONE digest on BOTH
+  // sides (store.rs binds the same `before.blob_sha256` to `after_blob_sha256`
+  // and `before_blob_sha256`), so those rows also pin that the body is fetched
+  // once rather than streamed twice. NOTE: the loopback engine writes
+  // `afterBlobSha256: null` for a delete and diverges from the daemon here —
+  // these rows follow the daemon.
+  const overCapAfter = {
+    ...moment,
+    afterText: null,
+    afterBlobSha256: OVER_CAP_SHA256,
+    afterByteLength: OVER_CAP_BYTES.byteLength,
+    afterInbandLimitBytes: 128 * 1024,
+  };
+  const overCapBothSides = {
+    ...overCapAfter,
+    beforeText: null,
+    beforeBlobSha256: OVER_CAP_SHA256,
+    beforeByteLength: OVER_CAP_BYTES.byteLength,
+    beforeInbandLimitBytes: 128 * 1024,
+  };
+  const overCapMetadata = {
+    workspaceId: WORKSPACE_ID,
+    versionId: "main",
+    objectId: "object",
+    path: "note.md",
+    contentKind: "text",
+    sha256: OVER_CAP_SHA256,
+    byteLength: OVER_CAP_BYTES.byteLength,
+    updatedAtMs: 3,
+    latestMomentId: "resolved-moment",
+    metadataOrigin: "api",
+    metadataSummary: null,
+    metadataCorrelationId: null,
+  };
+  const mergeComparison = {
+    workspaceId: WORKSPACE_ID,
+    path: "note.md",
+    targetVersionId: "main",
+    sourceVersionId: "draft",
+    base: snapshot,
+    current: snapshot,
+    incoming: { ...snapshot, versionId: "draft", text: "incoming" },
+    status: "diverged",
+  };
+  const materialization = {
+    materializeEnqueued: false,
+    materialized: false,
+    materializeOutcome: "skipped",
+  };
+  const fileObject = {
+    id: "object",
+    workspaceId: WORKSPACE_ID,
+    createdAtMs: 1,
+  };
+
+  interface MomentSurface {
+    name: string;
+    sides: readonly ("before" | "after")[];
+    blobReads: number;
+    respond: (request: Request) => Response["result"] | undefined;
+    run: (
+      store: ReturnType<typeof createCaptureLiveStores>["store"],
+    ) => Promise<VersionedTextMoment>;
+  }
+
+  const MOMENT_SURFACES: MomentSurface[] = [
+    {
+      name: "writeBinaryFile",
+      // Binary written over a text head: the preimage is the over-cap body.
+      sides: ["before"],
+      blobReads: 1,
+      respond: (request) =>
+        request.method === VERSIONED_METHOD.binaryWrite
+          ? {
+              object: fileObject,
+              snapshot: {
+                workspaceId: WORKSPACE_ID,
+                versionId: "main",
+                objectId: "object",
+                path: "note.md",
+                contentKind: "binary",
+                text: "",
+                sha256: "b".repeat(64),
+                byteLength: 3,
+                updatedAtMs: 3,
+                latestMomentId: "resolved-moment",
+                metadataOrigin: "api",
+              },
+              moment: {
+                ...overCapBothSides,
+                afterContentKind: "binary",
+                afterBinarySha256: "b".repeat(64),
+                afterBlobSha256: null,
+                afterText: "",
+                afterByteLength: 3,
+                afterInbandLimitBytes: null,
+              },
+              deduped: false,
+              ...materialization,
+            }
+          : undefined,
+      run: async (store) =>
+        (
+          await store.writeBinaryFile({
+            workspaceId: WORKSPACE_ID,
+            versionId: "main",
+            path: "note.md",
+            bytes: new Uint8Array([1, 2, 3]),
+            metadata: { origin: "api" },
+          })
+        ).moment,
+    },
+    {
+      name: "deleteTextFile",
+      sides: ["before", "after"],
+      blobReads: 1,
+      respond: (request) =>
+        request.method === VERSIONED_METHOD.textDelete
+          ? {
+              object: fileObject,
+              before: overCapMetadata,
+              moment: { ...overCapBothSides, operation: "delete" },
+              deduped: false,
+            }
+          : undefined,
+      run: async (store) =>
+        (
+          await store.deleteTextFile({
+            workspaceId: WORKSPACE_ID,
+            versionId: "main",
+            path: "note.md",
+            metadata: { origin: "api" },
+          })
+        ).moment,
+    },
+    {
+      name: "renameTextFile",
+      sides: ["before", "after"],
+      blobReads: 1,
+      respond: (request) => {
+        if (request.method === VERSIONED_METHOD.textRead) return snapshot;
+        return request.method === VERSIONED_METHOD.textRename
+          ? {
+              object: fileObject,
+              before: overCapMetadata,
+              after: { ...overCapMetadata, path: "renamed.md" },
+              moment: {
+                ...overCapBothSides,
+                operation: "rename",
+                path: "renamed.md",
+                beforePath: "note.md",
+              },
+              deduped: false,
+            }
+          : undefined;
+      },
+      run: async (store) =>
+        (
+          await store.renameTextFile({
+            workspaceId: WORKSPACE_ID,
+            versionId: "main",
+            fromPath: "note.md",
+            toPath: "renamed.md",
+            metadata: { origin: "api" },
+          })
+        ).moment,
+    },
+    {
+      name: "mergeTextFileFromVersion (write)",
+      sides: ["after"],
+      blobReads: 1,
+      respond: (request) => {
+        if (request.method === VERSIONED_METHOD.textRead) return snapshot;
+        return request.method === VERSIONED_METHOD.versionsMerge
+          ? {
+              status: "merged",
+              writeKind: "write",
+              object: fileObject,
+              snapshot: overCapMetadata,
+              moment: overCapAfter,
+              deduped: false,
+              comparison: mergeComparison,
+              ...materialization,
+            }
+          : undefined;
+      },
+      run: async (store) => {
+        const merged = await store.mergeTextFileFromVersion({
+          workspaceId: WORKSPACE_ID,
+          targetVersionId: "main",
+          sourceVersionId: "draft",
+          path: "note.md",
+          metadata: { origin: "api" },
+        });
+        if (merged.kind !== "merged" || merged.operation !== "write") {
+          throw new Error("expected a merged write");
+        }
+        return merged.write.moment;
+      },
+    },
+    {
+      name: "mergeTextFileFromVersion (delete)",
+      sides: ["before", "after"],
+      blobReads: 1,
+      respond: (request) => {
+        if (request.method === VERSIONED_METHOD.textRead) return snapshot;
+        return request.method === VERSIONED_METHOD.versionsMerge
+          ? {
+              status: "merged",
+              writeKind: "delete",
+              object: fileObject,
+              before: overCapMetadata,
+              moment: { ...overCapBothSides, operation: "delete" },
+              deduped: false,
+              comparison: mergeComparison,
+              ...materialization,
+            }
+          : undefined;
+      },
+      run: async (store) => {
+        const merged = await store.mergeTextFileFromVersion({
+          workspaceId: WORKSPACE_ID,
+          targetVersionId: "main",
+          sourceVersionId: "draft",
+          path: "note.md",
+          metadata: { origin: "api" },
+        });
+        if (merged.kind !== "merged" || merged.operation !== "delete") {
+          throw new Error("expected a merged delete");
+        }
+        return merged.delete.moment;
+      },
+    },
+    {
+      name: "resolveTextConflict (write)",
+      sides: ["after"],
+      blobReads: 1,
+      respond: (request) => {
+        if (request.method === WORKSPACE_METHOD.conflictsList) {
+          return { conflicts: [conflict()], nextAfterConflictId: null };
+        }
+        return request.method === WORKSPACE_METHOD.conflictsResolve
+          ? {
+              conflict: conflict("resolved"),
+              write: { object: fileObject, snapshot, moment: overCapAfter },
+              delete: null,
+            }
+          : undefined;
+      },
+      run: async (store) => {
+        const resolved = await store.resolveTextConflict({
+          workspaceId: WORKSPACE_ID,
+          conflictId: "conflict",
+          resolution: { kind: "apply-incoming" },
+          metadata: { origin: "api" },
+        });
+        if (resolved.write === undefined) throw new Error("expected a write");
+        return resolved.write.moment;
+      },
+    },
+    {
+      name: "resolveTextConflict (delete)",
+      sides: ["before", "after"],
+      blobReads: 1,
+      respond: (request) => {
+        if (request.method === WORKSPACE_METHOD.conflictsList) {
+          return { conflicts: [conflict()], nextAfterConflictId: null };
+        }
+        return request.method === WORKSPACE_METHOD.conflictsResolve
+          ? {
+              conflict: conflict("resolved"),
+              write: null,
+              delete: {
+                object: fileObject,
+                before: snapshot,
+                moment: { ...overCapBothSides, operation: "delete" },
+              },
+            }
+          : undefined;
+      },
+      run: async (store) => {
+        const resolved = await store.resolveTextConflict({
+          workspaceId: WORKSPACE_ID,
+          conflictId: "conflict",
+          resolution: { kind: "apply-incoming" },
+          metadata: { origin: "api" },
+        });
+        if (resolved.delete === undefined) throw new Error("expected a delete");
+        return resolved.delete.moment;
+      },
+    },
+  ];
+
+  it.each(MOMENT_SURFACES)(
+    "hydrates the over-cap moment $name returns (#359)",
+    async (surface) => {
+      const requests: Request[] = [];
+      const client = blobClientFor(async (request, deliver) => {
+        requests.push(request);
+        if (request.method === VERSIONED_METHOD.textReadBlob) {
+          return { id: request.id, result: overCapBlobResult(request, deliver) };
+        }
+        const result = surface.respond(request);
+        if (result === undefined) {
+          throw new Error(`Unexpected method ${request.method}`);
+        }
+        return { id: request.id, result };
+      });
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+        sessionsFor(client),
+      );
+
+      const hydrated = await surface.run(store);
+
+      for (const side of surface.sides) {
+        const payload =
+          side === "after" ? hydrated.payload.after : hydrated.payload.before;
+        expect(
+          Buffer.from(payload?.text ?? "", "utf8"),
+          `${surface.name} payload.${side}`,
+        ).toEqual(Buffer.from(OVER_CAP_BYTES));
+      }
+      expect(
+        requests.filter(
+          (request) => request.method === VERSIONED_METHOD.textReadBlob,
+        ),
+      ).toHaveLength(surface.blobReads);
+    },
+  );
+
+  it("rejects a withheld text moment that carries no digest to hydrate from", async () => {
+    const client = blobClientFor(async (request) => ({
+      id: request.id,
+      result: {
+        ...moment,
+        afterText: null,
+        afterBlobSha256: null,
+        afterByteLength: OVER_CAP_BYTES.byteLength,
+        afterInbandLimitBytes: 128 * 1024,
+      },
+    }));
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
       sessionsFor(client),
@@ -601,7 +1139,7 @@ describe("createCaptureLiveStores", () => {
         workspaceId: WORKSPACE_ID,
         momentId: "resolved-moment",
       }),
-    ).rejects.toThrow("exceeds the RPC in-band limit");
+    ).rejects.toThrow("carries no text digest");
   });
 
   it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(
