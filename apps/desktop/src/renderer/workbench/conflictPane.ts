@@ -63,29 +63,42 @@
 export const CONFLICT_PREVIEW_MAX_CHARS = 200_000;
 export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 
-/// The largest combined copy this surface will edit and post, in UTF-8 bytes.
+/// The largest combined copy this surface will EDIT, in UTF-8 bytes.
 ///
-/// TODAY this is the engine's own limit: the `apply-merged` arm in
-/// `crates/dohc-workspace-engine/src/lib.rs` refuses a merged text over
-/// `MAX_DESKTOP_CAPTURE_TEXT_BYTES`, and a surface must not offer an editing
-/// affordance whose apply the engine will refuse. The number is copied rather
-/// than imported because the engine's TypeScript twin lives in
-/// `versionedLoopbackEngine.ts`, whose first line is `import { createHash }
-/// from "node:crypto"` — importing it from the renderer would pull a Node
-/// builtin into the browser bundle, which neither the typecheck nor the test
-/// suite would notice. `engineTextLimits.test.ts` is what holds the copy
-/// honest; it reads the arm and fails when the two drift.
+/// This is a renderer bound, not the engine's. #569 replaced the old
+/// merged-text cap with a frame budget: `conflicts.resolve` succeeds when the
+/// whole JSON-ENCODED request fits `RESOLVE_REQUEST_FRAME_BYTES` (8 MiB), so
+/// what a body may weigh is whatever the rest of its request leaves. Every
+/// body this box can hold is far inside that, which leaves responsiveness as
+/// the only thing still binding — and responsiveness is this surface's own
+/// problem, so it owns the number. `engineTextLimits.test.ts` proves the two
+/// agree, by importing the frame contract rather than restating it.
 ///
-/// THIS NUMBER IS ABOUT TO STOP BEING THE ENGINE'S (#528 / PR #569). That PR
-/// raises the merged-resolution cap to 8,323,072 bytes — the conflict
-/// listing's own frame budget — so every side the surface can display becomes
-/// a side the engine would accept back. When it lands, this constant stops
-/// mirroring the engine and becomes what it always also was: the largest body
-/// this surface will hold in a CONTROLLED textarea that re-renders per
-/// keystroke. At that point it needs its own measured bound, set above the
-/// largest healthy document (469,068 characters — see the corpus above), not
-/// this number. See #566 and the note in engineTextLimits.test.ts.
-export const CONFLICT_COMBINED_MAX_BYTES = 128 * 1024;
+/// MEASURED. A controlled textarea re-renders on every keystroke, and React
+/// assigns the whole value each time. In the Chromium this app ships
+/// (playwright chromium-1223), the median of 21 keystrokes at the pane's own
+/// font and width:
+///
+///     100,000 characters    4.8 ms
+///     250,000 characters   12.1 ms
+///     469,068 characters   22.9 ms
+///   1,048,576 characters   53.4 ms
+///   8,388,608 characters  437.8 ms
+///
+/// The bound is set just above the largest healthy document in the measured
+/// corpus — 469,068 characters, see above — so combining a real document by
+/// hand is never refused, and a keystroke there costs about 25 ms. UTF-8 never
+/// spends less than one byte per UTF-16 code unit, so a bound in BYTES caps
+/// the code units that drive that cost for every script.
+///
+/// The trade this makes, stated plainly: a document whose characters are
+/// mostly multi-byte reaches this bound at fewer characters than an ASCII one,
+/// and the corpus behind the healthy range is ASCII-dominated source and
+/// Markdown. Above the bound the surface degrades rather than refuses — keep a
+/// side, then edit the file in the editor, which is incremental and pays none
+/// of this cost. Raising it to cover that tail costs every keystroke: 1 MiB is
+/// 53 ms, which is not an editor.
+export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 512 * 1024;
 
 export type ConflictPreview = {
   /// The text the pane paints.
