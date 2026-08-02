@@ -8992,7 +8992,30 @@ fn ydoc_record_update_on_store(
         faults,
         now_ms,
         move |tx, outcome| {
-            if outcome.emit_outbound {
+            // Origination is asked FIRST and owns the base-once decision: it
+            // returns a sha only for a lineage that has no base yet. The base
+            // is a full state, so it already carries this append and every row
+            // the lineage held before it — a delta beside it would be
+            // redundant. Everything else journals its delta.
+            if let Some(base_sha) = ydoc_originate_base_in_tx(tx, &journal_key, now_ms)? {
+                dohc_engine_sync::journal_local_op_in_tx(
+                    tx,
+                    &journal_key.workspace_id,
+                    "ydoc.update",
+                    &serde_json::json!({
+                        "versionId": journal_key.version_id,
+                        "objectId": journal_key.object_id,
+                        "path": journal_path,
+                        "contentKind": journal_kind.as_str(),
+                        "updateBlobSha256": base_sha,
+                        "isBaseState": true,
+                    }),
+                    now_ms,
+                )
+                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                    reason: format!("outbound ydoc.update base journal append failed: {error}"),
+                })?;
+            } else if outcome.emit_outbound {
                 dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
@@ -9024,6 +9047,67 @@ fn ydoc_record_update_on_store(
     )? {
         TxnOutcome::Committed(outcome) => Ok(outcome),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+/// Claim the base that ORIGINATES `key`'s replicated lineage, inside the
+/// append transaction that triggered it. Returns the base blob sha to journal,
+/// or `None` when this lineage must not originate.
+///
+/// Encoding inside the claim transaction is what makes the claim race-free.
+/// SQLite serializes writers, so no append can land between the encode and the
+/// claim, and the marker read here is that same transaction's view. A design
+/// that pre-read the marker on another connection would need the legacy
+/// driver's `onBeforeBaseClaimForTest` seam to prove the window closed; this
+/// one has no window.
+fn ydoc_originate_base_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<Option<String>, dohc_engine_collab::CollabError> {
+    let Some(marker) = dohc_engine_collab::read_marker_in_tx(tx, key)? else {
+        return Ok(None);
+    };
+    // Base-once. A claimed lineage journals deltas, never a second base.
+    if marker.base_claimed {
+        return Ok(None);
+    }
+    // Sync is off for this workspace, so nothing here replicates: the lineage
+    // stays local-only, keeps markdown as its artifact, and prunes on close.
+    // Checked BEFORE the claim because `journal_local_op_in_tx` refuses
+    // without an identity, and that refusal would roll back the user's edit.
+    if !dohc_engine_sync::workspace_has_sync_identity_in_tx(tx, &key.workspace_id).map_err(
+        |error| dohc_engine_collab::CollabError::Corrupt {
+            reason: format!("sync identity probe failed: {error}"),
+        },
+    )? {
+        return Ok(None);
+    }
+    let Some(encoded) = dohc_engine_collab::encode_origination_base_in_tx(tx, key)? else {
+        // An unresolved dependency: a full-state encode would drop the pending
+        // row. A later append retries once the predecessor lands.
+        return Ok(None);
+    };
+    // The marker's OWN kind, never the caller's: the kind belongs to the
+    // lineage, and `claim_base_in_tx` upserts whatever it is handed. The append
+    // this rides already refused a caller whose kind disagreed, so the two
+    // always match here — reading it from the marker keeps that true even if
+    // the append's guard ever moves.
+    match dohc_engine_collab::claim_base_in_tx(
+        tx,
+        key,
+        marker.content_kind,
+        &encoded.base,
+        &encoded.state_vector,
+        now_ms,
+    )? {
+        dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha } => {
+            Ok(Some(base_snapshot_sha))
+        }
+        // Unreachable: `base_claimed` was false in this same transaction and
+        // no other writer can interleave. Harmless if it ever is — the lineage
+        // has its base, and base-once forbids a second.
+        dohc_engine_collab::ClaimOutcome::Resumed => Ok(None),
     }
 }
 

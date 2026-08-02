@@ -36,6 +36,28 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
     false
 }
 
+/// Whether `workspace_id` has a sync identity, read inside the caller's
+/// transaction.
+///
+/// Y.Doc base origination consults this BEFORE it claims a base:
+/// [`journal_local_op_in_tx`] refuses without an identity, and a refusal raised
+/// inside the append transaction would roll the user's edit back with it. A
+/// workspace with no identity has sync off, so nothing there originates.
+pub fn workspace_has_sync_identity_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    let found: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM sync_identity WHERE workspace_id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(found.is_some())
+}
+
 /// Transaction-composable local journal append for callers that must commit
 /// an op in the SAME transaction as a domain mutation (the live-session
 /// `ydoc.update` delta: blob-before-log holds because the CRDT append stored
