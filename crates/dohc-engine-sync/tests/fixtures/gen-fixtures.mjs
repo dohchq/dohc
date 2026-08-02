@@ -73,6 +73,33 @@ const inputs = [
   ["encoded/secrets%2eenv", false],
   ["../escape.env", false],
   ["C:/absolute.env", false],
+  // Secret-rule surface. The share classifier and the files policy each carry
+  // three secret rules — an `.env` segment at any depth, a basename ending
+  // `.env`, and a basename starting `.env.` — under the same case folding and
+  // trailing dot/space alias strip. One vector per rule, plus the near misses
+  // that must stay tracked, so a rule that changes on one side alone moves a
+  // vector.
+  ["apps/site/.env/local", true],
+  ["deploy/PROD.ENV", true],
+  ["config/.ENV.LOCAL", true],
+  [".env.", true],
+  ["config/.env.local. ", true],
+  [".envrc", true],
+  ["notes/env/config.md", true],
+  ["notes/envelope.md", true],
+  // Ignored and reserved segments outrank a secret-shaped name on both sides.
+  ["node_modules/pkg/.env", true],
+  [".dohc/config.env", true],
+  // Secret classes neither classifier holds today. They are the shapes a
+  // future secret rule would most likely name, so adding that rule to one
+  // classifier alone moves one of these vectors and the equivalence test bites.
+  ["keys/server.pem", true],
+  ["home/.ssh/id_rsa", true],
+  ["secrets/api-token.txt", true],
+  // Secret material outside the share grammar. The share classifier fails
+  // closed on the `.` segment while the files policy normalizes it away and
+  // reads the path as secret.
+  ["./config/.env", false],
 ];
 
 const vectors = inputs.map(([path, rustClaimed]) => ({

@@ -93,6 +93,90 @@
       "rustClaimed": false,
       "write": "ignored",
       "read": "ignored"
+    },
+    {
+      "path": "apps/site/.env/local",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": "deploy/PROD.ENV",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": "config/.ENV.LOCAL",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": ".env.",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": "config/.env.local. ",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": ".envrc",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": "notes/env/config.md",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": "notes/envelope.md",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": "node_modules/pkg/.env",
+      "rustClaimed": true,
+      "write": "ignored",
+      "read": "ignored"
+    },
+    {
+      "path": ".dohc/config.env",
+      "rustClaimed": true,
+      "write": "ignored",
+      "read": "ignored"
+    },
+    {
+      "path": "keys/server.pem",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": "home/.ssh/id_rsa",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": "secrets/api-token.txt",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": "./config/.env",
+      "rustClaimed": false,
+      "write": "secret",
+      "read": "secret"
     }
   ]
 }
