@@ -61,6 +61,59 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
   );
 });
 
+test("a required step is matched by its whole name, not as a substring", () => {
+  // Reading the line by substring let any row whose name merely contained a
+  // required name answer for it, so a run that never verified its target
+  // passed the check by carrying a row about something else.
+  const forged = passVerdict.replace(
+    "native target=PASS",
+    "not-native target=PASS",
+  );
+  assert.throws(() => requireCiPassVerdict(forged), /native target/);
+
+  // The genuine row still satisfies the requirement beside the forged one.
+  assert.doesNotThrow(() =>
+    requireCiPassVerdict(
+      passVerdict.replace(
+        "native target=PASS",
+        "not-native target=PASS native target=PASS",
+      ),
+    ),
+  );
+
+  // Two rows for one step leave the step's result ambiguous, so neither wins.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict.replace(
+          "native target=PASS",
+          "native target=SKIP native target=PASS",
+        ),
+      ),
+    /2 rows for required CI gate step `native target`/,
+  );
+});
+
+test("the verdict line a real gate run printed passes as written", () => {
+  // Verbatim from C:/w/iss-nativeev-gate3.log, 2026-08-02 — a passing local
+  // run of tools/rust-engine-program/run-rust-checks.mjs. The parser has to
+  // read the names this producer emits, spaces, hyphens and all.
+  const observed =
+    "- 2026-08-02T05:19:19.166Z | run-rust-checks | win32/x64 " +
+    "(rust cfg x86_64/windows/msvc) | PASS | native target=PASS " +
+    "fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
+    "build --workspace=PASS test --workspace=PASS test collab crash tier=PASS " +
+    "cargo-deny=PASS cargo-audit=PASS";
+  assert.doesNotThrow(() => requireCiPassVerdict(observed));
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        observed.replace("cargo-deny=PASS", "not-cargo-deny=PASS"),
+      ),
+    /cargo-deny/,
+  );
+});
+
 test("PR workflow validates the canonical verdict and installed cargo-deny version", () => {
   assert.match(
     workflow,
