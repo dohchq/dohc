@@ -29,6 +29,27 @@ const DEFAULT_HEALTHY_RESET_MS = 30_000;
 const DEFAULT_RESTART_WINDOW_MS = 600_000;
 const DEFAULT_MAX_RESTARTS_PER_WINDOW = 10;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+// Wedge detection. The restart path starts at process exit, so a daemon that
+// is alive but not answering never reaches it. These probe for that silence.
+//
+// `engine.ping` takes no workspace, reads no store, and touches no disk, and a
+// live daemon answers it even while saturated: the request supervisor resolves
+// a queued request's own deadline BEFORE the request competes for an execution
+// slot, and admission overflow refuses immediately. So only silence is
+// evidence of a wedge — never a slow answer, and never a refusal.
+const DEFAULT_PING_INTERVAL_MS = 30_000;
+// A probe carries NO wire deadline, so the supervisor gives it the daemon's own
+// `default_deadline` of 30s — the latest a live daemon can take to answer a
+// probe it never gets an execution slot for. 45s is that bound with half again
+// of headroom. The probe must not carry a deadline of its own: EngineClient
+// arms a client-side timer for any request that has one, and that timer turns
+// the very silence this looks for into a rejection, which reads as life.
+const DEFAULT_PING_EXPIRY_MS = 45_000;
+// Three silent probes in a row. They are one interval apart and each waits out
+// its own expiry, so a wedge verdict needs at least 2 intervals + 3 expiries —
+// three and a half minutes of unbroken silence from a process that answers in
+// milliseconds when it is well. One answer in that span clears the count.
+const DEFAULT_MAX_PING_EXPIRIES = 3;
 
 export interface EngineDaemonClient {
   sendRequest(request: Request): Promise<Response>;
@@ -54,6 +75,9 @@ export interface EngineDaemonLifecycleOptions {
   monotonicNowMs?: () => number;
   wallNowMs?: () => number;
   requestTimeoutMs?: number;
+  pingIntervalMs?: number;
+  pingExpiryMs?: number;
+  maxPingExpiries?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
   // Fires once per launched-and-healthy daemon generation (the first launch
   // AND every restart). A capture event committed by a previous generation
@@ -168,6 +192,8 @@ export class EngineDaemonLifecycle {
   private running = false;
   private stopping = false;
   private healthyResetTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingExpiries = 0;
   private readonly exitedGenerations = new Set<number>();
   private readonly inFlightLaunches = new Set<InFlightLaunch>();
   private readonly launchingClients = new Set<EngineDaemonClient>();
@@ -336,6 +362,7 @@ export class EngineDaemonLifecycle {
     this.stopping = true;
     this.running = false;
     this.clearHealthyResetTimer();
+    this.clearPingTimer();
     for (const launch of this.inFlightLaunches) {
       launch.abortController.abort();
     }
@@ -521,6 +548,7 @@ export class EngineDaemonLifecycle {
       this.client = client;
       this.running = true;
       this.scheduleHealthyReset(generation);
+      this.startWedgeWatch(generation, client);
       try {
         this.options.onLaunch?.();
       } catch {
@@ -554,6 +582,7 @@ export class EngineDaemonLifecycle {
       return;
     }
     this.clearHealthyResetTimer();
+    this.clearPingTimer();
     this.running = false;
     this.client = null;
     const detail = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
@@ -653,6 +682,123 @@ export class EngineDaemonLifecycle {
     if (!this.healthyResetTimer) return;
     clearTimeout(this.healthyResetTimer);
     this.healthyResetTimer = null;
+  }
+
+  // Watch one live generation for a wedge: a process that is still running but
+  // has stopped answering. Every generation starts its own watch with a fresh
+  // count, so silence from a daemon that was already replaced cannot carry over.
+  private startWedgeWatch(
+    generation: number,
+    client: EngineDaemonClient,
+  ): void {
+    this.pingExpiries = 0;
+    this.schedulePing(generation, client);
+  }
+
+  private schedulePing(generation: number, client: EngineDaemonClient): void {
+    this.clearPingTimer();
+    this.pingTimer = setTimeout(() => {
+      this.pingTimer = null;
+      void this.probeOnce(generation, client);
+    }, this.options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS);
+    this.pingTimer.unref();
+  }
+
+  private clearPingTimer(): void {
+    if (!this.pingTimer) return;
+    clearTimeout(this.pingTimer);
+    this.pingTimer = null;
+  }
+
+  // A probe counts only against the generation that is CURRENT, running, and
+  // still owns the client it was scheduled for. While a restart is in flight
+  // `running` is false, so a daemon that is merely being replaced is never
+  // probed and can never be called wedged.
+  private probedGenerationIsLive(
+    generation: number,
+    client: EngineDaemonClient,
+  ): boolean {
+    return (
+      this.running &&
+      !this.stopping &&
+      this.client === client &&
+      generation === this.activeGeneration &&
+      !this.exitedGenerations.has(generation)
+    );
+  }
+
+  private async probeOnce(
+    generation: number,
+    client: EngineDaemonClient,
+  ): Promise<void> {
+    if (!this.probedGenerationIsLive(generation, client)) return;
+    const answered = await this.sendPing(client);
+    // Re-check: the daemon can exit, or be replaced, while a probe is pending.
+    if (!this.probedGenerationIsLive(generation, client)) return;
+    if (answered) {
+      this.pingExpiries = 0;
+      this.schedulePing(generation, client);
+      return;
+    }
+    this.pingExpiries += 1;
+    const maxExpiries = this.options.maxPingExpiries ?? DEFAULT_MAX_PING_EXPIRIES;
+    if (this.pingExpiries < maxExpiries) {
+      this.schedulePing(generation, client);
+      return;
+    }
+    this.reportWedge(client, maxExpiries);
+  }
+
+  // True when the daemon answered AT ALL: a pong, a deadline refusal for a
+  // probe that queued behind real work, an overload refusal, or a transport
+  // error. Each of those proves something in the daemon is still turning, and
+  // a broken transport is already on its way to a kill. Only silence — nothing
+  // back within the expiry bound — resolves false.
+  //
+  // The request carries no deadline ON PURPOSE. EngineClient arms its own timer
+  // for any request that names one and rejects when it fires, so a wire
+  // deadline would convert a wedged daemon's silence into a rejection this
+  // reads as life, and the detector would never fire against the real client.
+  private async sendPing(client: EngineDaemonClient): Promise<boolean> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const silence = new Promise<boolean>((resolve) => {
+      timeout = setTimeout(
+        () => resolve(false),
+        this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS,
+      );
+      timeout.unref();
+    });
+    const answer = client
+      .sendRequest({
+        id: this.requestId(),
+        method: "engine.ping",
+        params: {},
+      })
+      .then(
+        () => true,
+        () => true,
+      );
+    try {
+      return await Promise.race([answer, silence]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private reportWedge(client: EngineDaemonClient, maxExpiries: number): void {
+    this.clearPingTimer();
+    this.pingExpiries = 0;
+    this.reportFailure(
+      new EngineDaemonUnavailableError(
+        `The Rust engine is running but stopped answering engine.ping: ${maxExpiries} probes in a row got no reply within ${this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS}ms each. The limit is ${maxExpiries} silent probes. dohc is restarting it.`,
+      ),
+      false,
+    );
+    // Killing it is the point. Restarting starts at process exit, so the only
+    // way a wedge reaches the restart path is to become an exit. That exit then
+    // spends one rolling-window slot like any crash, so a wedge LOOP reaches
+    // terminal exactly like a crash loop.
+    client.close();
   }
 
   private reportFailure(error: Error, terminal: boolean): void {

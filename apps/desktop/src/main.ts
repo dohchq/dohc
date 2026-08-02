@@ -7655,29 +7655,33 @@ function testEngineRestartOverrides(): {
 }
 
 async function startRustEngineDaemon(): Promise<boolean> {
-  rustEngineDaemon = createRustEngineDaemon({
-    ...testEngineRestartOverrides(),
-    command: defaultEngineBinaryPath({
-      isPackaged: app.isPackaged,
-      appPath: app.getAppPath(),
-      resourcesPath: process.resourcesPath,
-    }),
-    onFailure: (error, terminal) => {
-      console.error("[desktop] Rust engine daemon:", error);
-      if (terminal && !quitting) {
-        dialog.showErrorBox(
-          "Rust engine stopped",
-          `${error.message}\n\nRestart dohc. If the engine stops again, review the desktop logs and repair or reinstall dohc.`,
-        );
-      }
-    },
-    // A capture event can die with the previous daemon's transport after its
-    // moment committed; the replacement never re-emits it (its baseline finds
-    // disk and manifest agreeing). One repaint per healthy launch closes that
-    // staleness window.
-    onLaunch: () => notifyRenderer(),
-  });
+  // Everything, including resolving the binary path, runs inside the try: a
+  // throw while BUILDING the options would otherwise reject this whenReady
+  // callback and leave the user with no dialog, on the one path whose job is
+  // to explain that the engine could not start.
   try {
+    rustEngineDaemon = createRustEngineDaemon({
+      ...testEngineRestartOverrides(),
+      command: defaultEngineBinaryPath({
+        isPackaged: app.isPackaged,
+        appPath: app.getAppPath(),
+        resourcesPath: process.resourcesPath,
+      }),
+      onFailure: (error, terminal) => {
+        console.error("[desktop] Rust engine daemon:", error);
+        if (terminal && !quitting) {
+          dialog.showErrorBox(
+            "Rust engine stopped",
+            `${error.message}\n\nRestart dohc. If the engine stops again, review the desktop logs and repair or reinstall dohc.`,
+          );
+        }
+      },
+      // A capture event can die with the previous daemon's transport after its
+      // moment committed; the replacement never re-emits it (its baseline finds
+      // disk and manifest agreeing). One repaint per healthy launch closes that
+      // staleness window.
+      onLaunch: () => notifyRenderer(),
+    });
     await rustEngineDaemon.start();
     // The daemon owns capture: its capture.momentRecorded events are the ONLY
     // signal that a moment landed, so bridge them onto the renderer's
@@ -7702,7 +7706,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
       "Rust engine failed to start",
       `${message}\n\nThe desktop cannot start without the Rust engine.`,
     );
-    await rustEngineDaemon.stop();
+    await rustEngineDaemon?.stop();
     rustEngineDaemon = null;
     rustEngineWorkspaceSessions = null;
     rustEngineRelayClient = null;

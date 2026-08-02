@@ -57,6 +57,37 @@ class FakeClient implements EngineDaemonClient {
   }
 }
 
+function healthyPing(request: Request): Response {
+  if (request.method === "workspace.open") {
+    return { id: request.id, result: { workspace: "health-handle" } };
+  }
+  if (request.method === "engine.ping") {
+    return { id: request.id, result: { ok: true } };
+  }
+  return { id: request.id, result: null };
+}
+
+// Alive, handshaked, serving the launch smoke — and silent on engine.ping.
+// This is the wedge: nothing exits, so nothing in the restart path can see it.
+function silentPing(request: Request): Response | Promise<Response> {
+  if (request.method === "engine.ping") return new Promise<Response>(() => {});
+  return healthyPing(request);
+}
+
+// A real client.close() ends the child's stdin and kills a child that ignores
+// it; the resulting process exit is what reaches the lifecycle. This fake makes
+// that same handoff, so a test can prove the wedge kill lands in the ordinary
+// restart machinery.
+class SelfExitingClient extends FakeClient {
+  exit: EngineClientSpawnOptions["onExit"];
+
+  close(): void {
+    if (this.closed) return;
+    super.close();
+    this.exit?.(null, "SIGTERM");
+  }
+}
+
 const scratchPaths: string[] = [];
 
 function fakeBinary(): string {
@@ -546,6 +577,201 @@ describe("Rust engine daemon lifecycle", () => {
 
       expect(exits).toHaveLength(4);
       expect(terminalFailures).toHaveLength(0);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("restarts a daemon that is alive but stopped answering engine.ping", async () => {
+    // The wedge from the issue: the process never exits, so the restart path —
+    // which starts at process exit — is never reached on its own.
+    // MUTATION: remove the wedge detector (or its reportWedge kill) and no
+    // failure is ever reported, no client is closed, and no relaunch happens.
+    const clients: SelfExitingClient[] = [];
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      pingExpiryMs: 10,
+      maxPingExpiries: 2,
+      launch: async (options) => {
+        // Only the first generation wedges; its replacement answers.
+        const client = new SelfExitingClient(
+          clients.length === 0 ? silentPing : healthyPing,
+        );
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => {
+        failures.push({ error, terminal });
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(clients).toHaveLength(2), {
+        timeout: 5_000,
+      });
+      expect(clients[0]?.closed).toBe(true);
+      expect(
+        failures.map(({ error, terminal }) => [error.message, terminal]),
+      ).toEqual([
+        [
+          "The Rust engine is running but stopped answering engine.ping: " +
+            "2 probes in a row got no reply within 10ms each. " +
+            "The limit is 2 silent probes. dohc is restarting it.",
+          false,
+        ],
+        // The kill becomes an exit, and the exit is what carries the wedge
+        // into the same restart machinery a crash uses — including the rolling
+        // window's crash accounting.
+        ["Rust engine daemon exited unexpectedly with signal SIGTERM.", false],
+      ]);
+      // The probe must carry no wire deadline. EngineClient arms its OWN timer
+      // for any request that names one and rejects when it fires, so a deadline
+      // here would turn a wedged daemon's silence into a rejection the detector
+      // reads as life — and none of the above would ever happen against the
+      // real client. This fake cannot model that timer, so assert the input.
+      const probes = clients[0]?.requests.filter(
+        (request) => request.method === "engine.ping",
+      );
+      expect(probes?.length).toBeGreaterThanOrEqual(2);
+      for (const probe of probes ?? []) {
+        expect(probe.deadlineMs ?? null).toBeNull();
+      }
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("ends terminal when every replacement wedges, like a crash loop", async () => {
+    // The window slot each wedge kill spends is what makes this reachable.
+    // MUTATION: route the wedge kill around handleUnexpectedExit (so it never
+    // reaches recordCrash) and this times out waiting for a terminal failure.
+    const clients: SelfExitingClient[] = [];
+    const terminalFailures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      restartWindowMs: 120_000,
+      maxRestartsPerWindow: 2,
+      pingIntervalMs: 5,
+      pingExpiryMs: 10,
+      maxPingExpiries: 1,
+      launch: async (options) => {
+        const client = new SelfExitingClient(silentPing);
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => {
+        if (terminal) terminalFailures.push(error);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(terminalFailures).toHaveLength(1), {
+        timeout: 10_000,
+      });
+      expect(terminalFailures[0]?.message).toBe(
+        "The Rust engine crashed again after 2 restarts in the last 2 minutes. " +
+          "The limit is 2 restarts per 2 minutes. dohc stopped restarting it.",
+      );
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("never kills a daemon that answers engine.ping slowly or refuses it", async () => {
+    // A saturated daemon answers: the request supervisor resolves a queued
+    // request's own deadline before it competes for an execution slot, so the
+    // probe comes back as a refusal rather than as silence.
+    // MUTATION: count a rejected probe as an expiry, or drop the expiry bound
+    // below the answer latency, and this kills a healthy daemon.
+    const clients: FakeClient[] = [];
+    const failures: Error[] = [];
+    let probes = 0;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 2,
+      pingExpiryMs: 40,
+      maxPingExpiries: 1,
+      launch: async () => {
+        const client = new FakeClient(async (request) => {
+          if (request.method !== "engine.ping") return healthyPing(request);
+          probes += 1;
+          const saturated = probes % 2 === 1;
+          // Well inside the 40ms expiry bound, well past the 20ms deadline.
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          if (saturated) throw new Error("request deadline elapsed while queued");
+          return { id: request.id, result: { ok: true } };
+        });
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error) => failures.push(error),
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(probes).toBeGreaterThanOrEqual(4), {
+        timeout: 5_000,
+      });
+      expect(failures).toEqual([]);
+      expect(clients).toHaveLength(1);
+      expect(clients[0]?.closed).toBe(false);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("does not call a restarting daemon wedged", async () => {
+    // A probe can still be in flight when its generation dies. The replacement
+    // must not inherit that silence.
+    // MUTATION: drop the liveness re-check after the probe settles and the
+    // stale probe reports a wedge against a daemon that is already gone.
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const failures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      // 100ms of expiry bound: long enough that the first generation's probe is
+      // still pending when the crash lands.
+      pingExpiryMs: 100,
+      maxPingExpiries: 1,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new FakeClient(
+          exits.length === 1 ? silentPing : healthyPing,
+        );
+      },
+      onFailure: (error) => failures.push(error),
+    });
+
+    try {
+      await lifecycle.start();
+      // Let the first probe get in flight, then crash under it.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      exits[0]?.(1, null);
+      await vi.waitFor(() => expect(exits).toHaveLength(2), { timeout: 5_000 });
+      // Outlive the stale probe's expiry bound by a wide margin.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(failures.map((error) => error.message)).toEqual([
+        "Rust engine daemon exited unexpectedly with code 1.",
+      ]);
     } finally {
       await lifecycle.stop();
     }
