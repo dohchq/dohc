@@ -58,9 +58,10 @@ export function blockDragSlice(view: EditorView, pos: number): Slice | null {
   return NodeSelection.create(view.state.doc, pos).content();
 }
 
-/** Where a plugin instance keeps its live drag ghost. One slot, because one
- * editor runs one drag at a time, and the plugin's destroy has to remove the
- * ghost when a workspace switch interrupts the drag before `dragend`. */
+/** The ghost a plugin instance currently has parked on the document. One slot,
+ * because it tracks a lifetime rather than a drag: every path that ends a
+ * ghost's life — `dragend`, the next `dragstart`, and the plugin's destroy
+ * after a workspace switch interrupts a drag — clears it through this slot. */
 type DragGhostSlot = { current: HTMLElement | null };
 
 function createDragGhost(blockDom: HTMLElement): HTMLElement {
@@ -73,7 +74,7 @@ function createDragGhost(blockDom: HTMLElement): HTMLElement {
   // reader reads it as a second copy of the block.
   ghost.setAttribute("aria-hidden", "true");
   ghost.style.width = `${blockDom.offsetWidth}px`;
-  document.body.append(ghost);
+  blockDom.ownerDocument.body.append(ghost);
   return ghost;
 }
 
@@ -178,6 +179,9 @@ function buildBlockControlDecorations(
               dragEvent.preventDefault();
               return;
             }
+            // Whatever the slot still holds can no longer be reached: parking
+            // a new ghost over it would strand the old one on `document.body`.
+            removeBlockDragGhost(ghostSlot);
             ghostSlot.current = startBlockDrag(
               view,
               pos,
