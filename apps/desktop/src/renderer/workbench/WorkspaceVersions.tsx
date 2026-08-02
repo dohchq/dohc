@@ -60,7 +60,12 @@ export function VersionMenu(props: {
   onOpenCompare: (versionId: string) => void;
   // Fired after any operation that may have changed disk or history state so
   // the shell refreshes files/history and reloads open editors.
-  onWorkspaceStateChanged: () => void;
+  // Pass the version that is active NOW when this operation set it. The
+  // shell needs the boundary before it can judge answers still in flight,
+  // and a lookup it has to await is a window those answers slip through.
+  // Omit it only when the operation did not change the active version, or
+  // when it failed and nobody knows what stuck.
+  onWorkspaceStateChanged: (activeVersionId?: string) => void;
   onError: (message: string) => void;
   // Bumped by the shell when ANOTHER surface switched versions (PR 0N-2's
   // review card switches back to Main) so the selector re-reads the active
@@ -156,15 +161,18 @@ export function VersionMenu(props: {
         if (token !== liveToken.current) return;
         await refresh();
         if (token !== liveToken.current) return;
-        props.onWorkspaceStateChanged();
+        // The switch succeeded, so this IS the active version now. Naming it
+        // saves the shell a lookup it would have to await.
+        props.onWorkspaceStateChanged(versionId);
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not switch versions."));
         // The switch may have partially applied before failing; make the
-        // selector and editors reflect reality.
-        await refresh().catch(() => undefined);
+        // selector and editors reflect reality. Whatever stuck is what the
+        // re-read reports, and if that read fails too, nobody knows.
+        const recovered = await refresh().catch(() => null);
         if (token !== liveToken.current) return;
-        props.onWorkspaceStateChanged();
+        props.onWorkspaceStateChanged(recovered?.activeVersionId);
       } finally {
         if (token === liveToken.current) setBusy(null);
       }
@@ -209,7 +217,8 @@ export function VersionMenu(props: {
         });
         if (token !== liveToken.current) return;
         setSnapshot(result);
-        props.onWorkspaceStateChanged();
+        // Create-and-switch: the new version is the active one.
+        props.onWorkspaceStateChanged(result.activeVersionId);
         closeMenu();
       } catch (error) {
         if (token !== liveToken.current) return;
@@ -554,13 +563,14 @@ export function VersionMenu(props: {
           workspaceId={workspaceId}
           activeTabDirty={props.activeTabDirty}
           flushActiveDraft={props.flushActiveDraft}
-          onStarted={() => {
+          onStarted={(activeVersionId) => {
             setTryOpen(false);
             // The gesture switched into the new version; refresh the selector
             // and let the shell reload files/history (the running banner
-            // arrives through the same refresh).
+            // arrives through the same refresh). The new version comes back
+            // from the gesture itself, so the shell needs no lookup.
             void refresh().catch(() => undefined);
-            props.onWorkspaceStateChanged();
+            props.onWorkspaceStateChanged(activeVersionId);
           }}
           onClose={() => setTryOpen(false)}
         />
@@ -578,7 +588,8 @@ export function TryTaskDialog(props: {
   workspaceId: string;
   activeTabDirty: boolean;
   flushActiveDraft: () => Promise<void>;
-  onStarted: () => void;
+  /** The version the gesture created and switched into. */
+  onStarted: (activeVersionId: string) => void;
   onClose: () => void;
 }) {
   const { workspaceId } = props;
@@ -634,13 +645,13 @@ export function TryTaskDialog(props: {
     try {
       await props.flushActiveDraft();
       if (token !== liveToken.current) return;
-      await bridge().tryInWorkspaceVersion({
+      const started = await bridge().tryInWorkspaceVersion({
         workspaceId,
         task: trimmed,
         ...(helper.status === "driver" ? { driverId: helper.driverId } : {}),
       });
       if (token !== liveToken.current) return;
-      props.onStarted();
+      props.onStarted(started.versionId);
     } catch (caught) {
       if (token !== liveToken.current) return;
       setError(ipcErrorMessage(caught, "Could not start trying this."));
@@ -749,7 +760,12 @@ export function VersionMergeDialog(props: {
   source: WorkspaceVersionRecord;
   activeTabDirty: boolean;
   flushActiveDraft: () => Promise<void>;
-  onWorkspaceStateChanged: () => void;
+  // Pass the version that is active NOW when this operation set it. The
+  // shell needs the boundary before it can judge answers still in flight,
+  // and a lookup it has to await is a window those answers slip through.
+  // Omit it only when the operation did not change the active version, or
+  // when it failed and nobody knows what stuck.
+  onWorkspaceStateChanged: (activeVersionId?: string) => void;
   onClose: () => void;
   // Optional (PR 0N-2): how the dialog was left when it closed — "merged"
   // (clean or all conflicts resolved), "conflicts-open" (Finish later), or
@@ -1376,7 +1392,12 @@ export function VersionComparePage(props: {
 // looks the same everywhere.
 export function ConflictReviewDialog(props: {
   workspaceId: string;
-  onWorkspaceStateChanged: () => void;
+  // Pass the version that is active NOW when this operation set it. The
+  // shell needs the boundary before it can judge answers still in flight,
+  // and a lookup it has to await is a window those answers slip through.
+  // Omit it only when the operation did not change the active version, or
+  // when it failed and nobody knows what stuck.
+  onWorkspaceStateChanged: (activeVersionId?: string) => void;
   onClose: () => void;
 }) {
   const { workspaceId } = props;

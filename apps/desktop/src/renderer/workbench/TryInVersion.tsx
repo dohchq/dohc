@@ -83,7 +83,12 @@ export function TryInVersionReviewCard(props: {
   activeTabDirty: boolean;
   flushActiveDraft: () => Promise<void>;
   onOpenCompare: (versionId: string) => void;
-  onWorkspaceStateChanged: () => void;
+  // Pass the version that is active NOW when this operation set it. The
+  // shell needs the boundary before it can judge answers still in flight,
+  // and a lookup it has to await is a window those answers slip through.
+  // Omit it only when the operation did not change the active version, or
+  // when it failed and nobody knows what stuck.
+  onWorkspaceStateChanged: (activeVersionId?: string) => void;
   onDismissed: () => void;
 }) {
   const { workspaceId, state } = props;
@@ -138,12 +143,15 @@ export function TryInVersionReviewCard(props: {
       }
       await bridge().dismissTryInVersionReview({ workspaceId });
       if (token !== liveToken.current) return;
-      props.onWorkspaceStateChanged();
+      // Main is where we are now — whether this call switched, or it was
+      // already the active version.
+      props.onWorkspaceStateChanged(main.id);
       props.onDismissed();
     } catch (error) {
       if (token !== liveToken.current) return;
       setInlineError(ipcErrorMessage(error, "Could not switch back to Main."));
       // A switch may have partially applied; make the shell reflect reality.
+      // Nobody knows which version stuck, so the shell has to ask.
       props.onWorkspaceStateChanged();
     } finally {
       if (token === liveToken.current) setBusy(null);

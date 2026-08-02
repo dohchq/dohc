@@ -1881,45 +1881,62 @@ export function DesktopWorkspaceShell(props: {
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
-  const onVersionWorkspaceStateChanged = useCallback(() => {
-    setVersionEpoch((epoch) => epoch + 1);
-    // A version switch changes WHICH timeline is true, and only the workspace
-    // can say which version that now is. Rejecting everything in flight by
-    // token was too blunt: main notifies the renderer BEFORE the switch invoke
-    // resolves, so a perfectly valid NEW-version refresh can be issued before
-    // this runs, and rejecting it left the panel on the old version whenever
-    // the refresh below failed. So ask, and let the answer take its place in
-    // the same issue order as the history answers — older answers naming
-    // another version lose to it, newer ones cannot.
-    //
-    // Nothing is discarded here. This callback also runs for merges and
-    // conflict resolutions that never changed the version at all, so a refresh
-    // held behind a pagination is judged when that pagination settles, not
-    // thrown away on the chance that a switch happened.
-    const versionToken = ++engineHistoryToken.current;
-    void bridge()
-      .listWorkspaceVersions({ workspaceId })
-      .then(({ activeVersionId }) =>
-        noteActiveEngineVersion(versionToken, activeVersionId),
-      )
-      // A failed read leaves the previous statement standing, which is not
-      // permanent blindness: history answers carry the active version too, so
-      // the next refresh that succeeds was issued later and repairs the guard.
-      // Narrowing the window in between is #555.
-      .catch(() => undefined);
-    void refreshFiles().catch((error) =>
-      reportShellError("Could not refresh workspace files.", error),
-    );
-    void refreshHistory().catch((error) =>
-      reportShellError("Could not refresh history.", error),
-    );
-  }, [
-    noteActiveEngineVersion,
-    refreshFiles,
-    refreshHistory,
-    reportShellError,
-    workspaceId,
-  ]);
+  const onVersionWorkspaceStateChanged = useCallback(
+    (activeVersionId?: string) => {
+      setVersionEpoch((epoch) => epoch + 1);
+      // A version switch changes WHICH timeline is true, and the boundary is
+      // only worth anything BEFORE the answers it has to judge arrive.
+      // Rejecting everything in flight by token was too blunt: main notifies
+      // the renderer BEFORE the switch invoke resolves, so a perfectly valid
+      // NEW-version refresh can be issued before this runs, and rejecting it
+      // left the panel on the old version whenever the refresh below failed.
+      // Naming the version instead fixes that — but a version this callback
+      // has to AWAIT is not a boundary at all: an old answer landing first
+      // reads a guard that knows nothing, commits, and the late lookup cannot
+      // retract it.
+      //
+      // So the operation says which version it left the workspace on. Every
+      // caller that moved the workspace knows: a switch names its target, a
+      // create and a try name the version they forked into, and going back to
+      // Main names Main. Nobody has to ask, and there is no window.
+      //
+      // Nothing is discarded here. This callback also runs for merges and
+      // conflict resolutions that never changed the version at all, so a
+      // refresh held behind a pagination is judged when that pagination
+      // settles, not thrown away on the chance that a switch happened.
+      const versionToken = ++engineHistoryToken.current;
+      if (activeVersionId !== undefined) {
+        noteActiveEngineVersion(versionToken, activeVersionId);
+      } else {
+        // Nobody could name it: the operation changed no version, or it failed
+        // and left an unknown one active. Ask. This read is the only remaining
+        // asynchronous boundary, it cannot retract an answer admitted while it
+        // was in flight, and a failure leaves the previous statement standing
+        // — which is not permanent blindness, because history answers carry
+        // the active version too and the next refresh to succeed was issued
+        // later. Narrowing what is left is #555.
+        void bridge()
+          .listWorkspaceVersions({ workspaceId })
+          .then(({ activeVersionId: active }) =>
+            noteActiveEngineVersion(versionToken, active),
+          )
+          .catch(() => undefined);
+      }
+      void refreshFiles().catch((error) =>
+        reportShellError("Could not refresh workspace files.", error),
+      );
+      void refreshHistory().catch((error) =>
+        reportShellError("Could not refresh history.", error),
+      );
+    },
+    [
+      noteActiveEngineVersion,
+      refreshFiles,
+      refreshHistory,
+      reportShellError,
+      workspaceId,
+    ],
+  );
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
       mutateWb((state) => openTab(state, versionCompareTabPath(versionId)));

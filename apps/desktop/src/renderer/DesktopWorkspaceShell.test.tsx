@@ -2974,6 +2974,89 @@ describe("history page", () => {
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
   });
 
+  // A boundary the shell has to AWAIT is not a boundary. When the old
+  // version's answer lands before the lookup settles, it meets a guard that
+  // knows nothing, commits, and the lookup arriving later cannot retract it —
+  // so a failed switch-triggered refresh left the previous version's moments
+  // on screen. The operation names the version it left the workspace on, so
+  // there is nothing to wait for. The lookup here never answers at all.
+  it("rejects the old version's answer without waiting for a lookup", async () => {
+    const stranded = deferred<ListEngineMomentsResult>();
+    let failSwitchRefresh!: (error: Error) => void;
+    const switchRefresh = new Promise<never>((_resolve, reject) => {
+      failSwitchRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      stranded.promise,
+      switchRefresh,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    let switched = false;
+    // The selector's mount read and its post-switch re-read answer. Every read
+    // after those hangs forever — so any lookup the SHELL still had to make to
+    // learn the active version never answers, which is the whole point.
+    const hungLookup = new Promise<never>(() => {});
+    let versionReads = 0;
+    bridge.listWorkspaceVersions = vi.fn(() => {
+      versionReads += 1;
+      if (versionReads > 2) return hungLookup;
+      return Promise.resolve({
+        versions: [
+          {
+            id: "main",
+            name: "Main",
+            kind: "main" as const,
+            createdAtMs: 0,
+            canMergeIntoMain: false,
+          },
+          {
+            id: "try-1",
+            name: "Try: launch note",
+            kind: "named" as const,
+            createdAtMs: 1,
+            canMergeIntoMain: true,
+          },
+        ],
+        activeVersionId: switched ? "main" : "try-1",
+      });
+    });
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      switched = true;
+      return { activeVersionId: "main", changedFileCount: 0 };
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const mainItem = (await screen.findAllByTestId("version-item")).find(
+      (item) => item.dataset.versionId === "main",
+    );
+    await user.click(mainItem!);
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stranded.resolve(
+        historyPage(
+          [historyMoment("m-stranded", "Wrote the note in the try version")],
+          "try-1",
+        ),
+      );
+      await stranded.promise;
+    });
+
+    expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+  });
+
   // Statements about the active version are ordered by the ISSUE counter, and
   // main serves these calls concurrently — so a request issued earlier can
   // answer later. A late answer restating a version the workspace has already
