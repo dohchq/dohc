@@ -127,6 +127,8 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     const status = await activity.open(workspace());
     expect(status.historyRecordingOff).toBe(true);
     expect(activity.getStatus("activity-test").historyRecordingOff).toBe(true);
+    // A decision, not a failure: the notice may name Settings for this one.
+    expect(status.historyRecordingUnavailable).toBe(false);
     // No capture also means no versions surface.
     expect(activity.engineCaptureFor("activity-test")).toBeNull();
     await activity.stopAll();
@@ -158,6 +160,28 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     await activity.stopAll();
   });
 
+  // #505: a capture build that THREW leaves the same empty recorder, but the
+  // cause is a failure. The status separates the two so the notice can.
+  it("separates a failed capture build from the engine opt-out", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => {
+        throw new Error("engine store unavailable");
+      },
+    });
+    const status = await activity.open(workspace());
+    expect(status.historyRecordingOff).toBe(true);
+    expect(status.historyRecordingUnavailable).toBe(true);
+    expect(
+      activity.getStatus("activity-test").historyRecordingUnavailable,
+    ).toBe(true);
+    expect(activity.engineCaptureFor("activity-test")).toBeNull();
+    // The failure itself stays developer-facing, in the log.
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+    await activity.stopAll();
+  });
+
   it("does not raise the history-off status before open or without a captureFor gate", async () => {
     const activity = createWorkspaceActivity(() => {});
     // Unknown/unopened workspace: status is derivable but never claims
@@ -166,6 +190,7 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     const status = await activity.open(workspace());
     // No captureFor option at all (test/legacy wiring): stays false.
     expect(status.historyRecordingOff).toBe(false);
+    expect(status.historyRecordingUnavailable).toBe(false);
     await activity.stopAll();
   });
 });

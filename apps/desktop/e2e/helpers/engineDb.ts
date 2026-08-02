@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // WS-G2-C-2 — the ONE source of truth for the e2e SQLite helpers that read the
 // workspace engine.db. These are load-bearing for the "no double-journal"
@@ -31,30 +33,153 @@ export interface EngineMoment {
   text: string;
 }
 
-// The engine.db may not exist yet while the app is still opening, and right
-// after creation its schema materializes through a migration chain a readonly
-// poll can observe mid-flight (moments existed before payload_after_* landed —
-// a real race caught on Windows). Both are "not ready, poll again" cases.
-// The cost: a genuinely typo'd column/table now times the poll out instead of
-// failing fast — every other error still rethrows with its real message.
-function isDbNotReady(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  if (code === "ENOENT" || code === "SQLITE_CANTOPEN") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /unable to open database|cannot open|no such file|no such table|no such column/i.test(
-    message,
+// Only a database that cannot be OPENED reads as "not ready, poll again", and
+// only by error CODE — never by matching message text, which is the rule the
+// relay helper already follows.
+//
+// `node:sqlite` reports EVERY sqlite failure as `code: "ERR_SQLITE_ERROR"` and
+// carries the real result code in `errcode`, so an absent engine.db arrives as
+// SQLITE_CANTOPEN (14), NOT as ENOENT. ENOENT stays for a filesystem-level
+// failure raised before sqlite sees the path.
+const SQLITE_CANTOPEN = 14;
+
+function isDbNotOpenable(error: unknown, dbOpened: boolean): boolean {
+  if (dbOpened) return false;
+  if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return true;
+  return (error as { errcode?: unknown } | undefined)?.errcode === SQLITE_CANTOPEN;
+}
+
+// Every (table, column) this file reads.
+const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
+  [
+    "moments",
+    [
+      "path",
+      "operation",
+      "moment_order",
+      "payload_after_blob_sha256",
+      "payload_after_content_kind",
+    ],
+  ],
+  ["blobs", ["sha256", "text"]],
+  ["snapshots", ["path"]],
+  ["ydoc_updates", []],
+  ["replication_log", ["op_kind", "payload_json"]],
+];
+
+// PRESENCE is the read gate. Every migration this engine ships is transactional
+// (crates/dohc-engine-storage/src/migration.rs) — DDL and `engine_migrations`
+// row commit together — so a read-only connection sees a name only after the
+// migration that adds it committed. Every name above present therefore means
+// every read below is valid, whatever ordinal the store has reached.
+//
+// The two sides come from different places: the ledger belongs to the DAEMON
+// BINARY, the migration list to the SOURCE TREE. This repo's e2e workflow
+// stages a prebuilt `dohc-workspace-engine.exe`, so a store settled at an
+// EARLIER ordinal than the source is a normal state — and gating reads on the
+// source terminal left every helper here answering 0/[]/false in it, silently
+// and forever.
+//
+// The ledger therefore only classifies an ABSENT name: settled at the source
+// terminal is a defect and throws, short of it may still be migrating and
+// polls. Ordinals apply in strictly increasing order
+// (`validate_migration_order`), so a complete terminal row means every earlier
+// migration committed before it started. An empty ledger settles nothing.
+//
+// The terminal ordinal is READ FROM the source, never pinned here: a stale
+// constant would call a store settled while a newly added migration ran.
+const MIGRATION_SOURCE = fileURLToPath(
+  new URL("../../../../crates/dohc-engine-storage/src/migration.rs", import.meta.url),
+);
+
+let terminalOrdinalCache: number | null = null;
+
+function terminalMigrationOrdinal(): number {
+  if (terminalOrdinalCache !== null) return terminalOrdinalCache;
+  const source = readFileSync(MIGRATION_SOURCE, "utf8");
+  const start = source.indexOf("const BASELINE_MIGRATIONS: &[Migration] = &[");
+  if (start < 0) {
+    throw new Error(`${MIGRATION_SOURCE} has no BASELINE_MIGRATIONS list to read ordinals from.`);
+  }
+  const end = source.indexOf("\n];", start);
+  if (end < 0) {
+    throw new Error(`${MIGRATION_SOURCE} has an unterminated BASELINE_MIGRATIONS list.`);
+  }
+  const ordinals = [...source.slice(start, end).matchAll(/^\s*ordinal:\s*(\d+),/gm)].map((match) =>
+    Number(match[1]),
   );
+  // The list must be 0..n-1 in order. Anything else means this reader no longer
+  // understands the migration source, and guessing a terminal from it would put
+  // the gate back to reporting "settled" mid-chain.
+  const contiguous =
+    ordinals.length > 0 && ordinals.every((ordinal, index) => ordinal === index);
+  if (!contiguous) {
+    throw new Error(
+      `${MIGRATION_SOURCE} lists migration ordinals [${ordinals.join(", ")}], which are not ` +
+        "0..n-1 in order, so the e2e schema gate cannot tell when the chain has finished.",
+    );
+  }
+  terminalOrdinalCache = ordinals[ordinals.length - 1]!;
+  return terminalOrdinalCache;
+}
+
+function schemaSettled(db: EngineDb): boolean {
+  const ledger = db
+    .prepare("SELECT name FROM pragma_table_info('engine_migrations')")
+    .all();
+  if (ledger.length === 0) return false;
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM engine_migrations
+       WHERE ordinal = ? AND completed_at IS NOT NULL`,
+    )
+    .get(terminalMigrationOrdinal()) as { n: number } | undefined;
+  return Number(row?.n ?? 0) === 1;
+}
+
+// Which of the names above this store does not have.
+function missingSchemaNames(db: EngineDb): string[] {
+  const missing: string[] = [];
+  for (const [table, columns] of SCHEMA_READ_HERE) {
+    const present = new Set(
+      db
+        .prepare("SELECT name FROM pragma_table_info(?)")
+        .all(table)
+        .map((row) => String(row.name)),
+    );
+    if (present.size === 0) {
+      missing.push(table);
+      continue;
+    }
+    for (const column of columns) if (!present.has(column)) missing.push(`${table}.${column}`);
+  }
+  return missing;
 }
 
 export function withEngineDb<T>(rootPath: string, fn: (db: EngineDb) => T): T | null {
   let db: EngineDb | null = null;
   try {
     db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), { readOnly: true });
-    return fn(db);
+    if (missingSchemaNames(db).length === 0) return fn(db);
+    if (!schemaSettled(db)) return null;
+    // Every read above is its own snapshot, so the daemon can commit the rest
+    // of the chain between them and leave "name absent" and "ledger finished"
+    // describing two different instants. Settling is final, so re-reading the
+    // names AFTER the ledger is the whole guard: still absent now means never.
+    const missing = missingSchemaNames(db);
+    if (missing.length === 0) return fn(db);
+    // Absent after settling is a defect, and it says which name and where the
+    // ledger stopped. Returning "not ready" instead would leave the gate shut
+    // forever, every helper would answer 0/[]/false, and the `toBe(0)` and
+    // `toEqual([])` call sites would pass on nothing — the shape this file
+    // exists to remove.
+    throw new Error(
+      `engine.db has no ${missing.join(", ")}, and its migration ledger has settled at ` +
+        `ordinal ${terminalMigrationOrdinal()}: these e2e readers query a schema the ` +
+        "engine no longer has.",
+    );
   } catch (error) {
-    // "Not present yet" and "schema still materializing" both poll again —
-    // the latter throws from the query itself, so the db handle may be open.
-    if (isDbNotReady(error)) return null;
+    if (isDbNotOpenable(error, db !== null)) return null;
     throw error;
   } finally {
     db?.close();
@@ -72,19 +197,42 @@ export function ydocUpdateCount(rootPath: string): number {
   );
 }
 
-// Every projected moment carrying its blob text, ordered by moment_order.
+// Every text-carrying moment with its blob text, ordered by moment_order.
+//
+// A moment's `payload_after_blob_sha256` holds a `blobs` digest for text and a
+// `binary_blobs` digest for binary, so binary moments have no `blobs` row.
+// Filter them out BY KIND rather than letting an inner join drop them: a text
+// moment whose blob is missing is then an impossible state — a wrong join or a
+// corrupt store — and it throws. Returning a shorter list instead would quietly
+// satisfy the "exactly one settle moment" double-journal check in
+// workspace-engine-editor.spec, the assertion this join feeds.
+function readMoments(db: EngineDb, path?: string): EngineMoment[] {
+  const rows = db
+    .prepare(
+      `SELECT m.path AS path, m.operation AS operation,
+              m.payload_after_blob_sha256 AS sha, b.text AS text
+       FROM moments m
+       LEFT JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
+       WHERE m.payload_after_blob_sha256 IS NOT NULL
+         AND m.payload_after_content_kind IS NOT 'binary'
+         ${path === undefined ? "" : "AND m.path = ?"}
+       ORDER BY m.moment_order`,
+    )
+    .all(...(path === undefined ? [] : [path]));
+  return rows.map((row) => {
+    if (typeof row.text !== "string") {
+      throw new Error(
+        `engine moment ${String(row.path)} carries text payload ${String(row.sha)}, ` +
+          "but blobs holds no row for that digest: the moments->blobs join is " +
+          "wrong or the store is corrupt.",
+      );
+    }
+    return { path: String(row.path), operation: String(row.operation), text: row.text };
+  });
+}
+
 export function engineMomentsOrEmpty(rootPath: string): EngineMoment[] {
-  return (
-    withEngineDb(rootPath, (db) =>
-      db
-        .prepare(
-          `SELECT m.path AS path, m.operation AS operation, b.text AS text
-           FROM moments m JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
-           ORDER BY m.moment_order`,
-        )
-        .all() as unknown as EngineMoment[],
-    ) ?? []
-  );
+  return withEngineDb(rootPath, (db) => readMoments(db)) ?? [];
 }
 
 // The projected settle-moment texts for one path (settle points ARE engine
@@ -92,17 +240,7 @@ export function engineMomentsOrEmpty(rootPath: string): EngineMoment[] {
 // join is how the content is read.
 export function momentTextsForPath(rootPath: string, path: string): string[] {
   return (
-    withEngineDb(rootPath, (db) =>
-      (
-        db
-          .prepare(
-            `SELECT b.text AS text
-             FROM moments m JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
-             WHERE m.path = ? ORDER BY m.moment_order`,
-          )
-          .all(path) as Array<{ text: string }>
-      ).map((row) => row.text),
-    ) ?? []
+    withEngineDb(rootPath, (db) => readMoments(db, path).map((moment) => moment.text)) ?? []
   );
 }
 

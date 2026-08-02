@@ -14,9 +14,17 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 // The REAL MCP tool implementation, invoked from the test runner's process
-// while the app is running — a genuine second-process write against the same
-// engine.db (the deployment shape: desktop + MCP stdio child).
+// while the app is running (the deployment shape: desktop + MCP stdio child).
+// MCP never opens the daemon-owned engine.db itself: every chat verb goes to
+// the running desktop over the CLI transport, which is the sole writer.
 import { replyToChat } from "../../../packages/mcp/src/tools";
+
+// That CLI transport is POSIX-only. `packages/cli/src/client.ts` refuses on
+// Windows before it sends anything, so this spec pins the contract from
+// whichever side the host platform is on — the reply lands and renders, or the
+// call is refused BY NAME and writes nothing at all.
+const CLI_TRANSPORT_SUPPORTED = process.platform !== "win32";
+const CLI_TRANSPORT_REFUSAL = "CLI is not yet supported on this platform";
 
 // PR 0N-1 agent loop E2E: a dohc-tracked agent run's file edits appear in
 // History as "<User Name>'s agent" (signed out => "You's agent"), edits after
@@ -108,7 +116,7 @@ test("a dohc-tracked run's edits show as \"You's agent\" in History; later edits
   }
 });
 
-test("an MCP chat reply appears in the file rail as \"You's agent\"", async () => {
+test("an MCP chat reply reaches the file rail as \"You's agent\", or is refused and writes nothing", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "agent-chat-reply";
@@ -184,6 +192,24 @@ test("an MCP chat reply appears in the file rail as \"You's agent\"", async () =
       { root: temp.rootPath, home: temp.homeDir },
       { threadId: threadId!, body: "Done — here is the summary you asked for." },
     );
+    const agentAuthor = page.locator(
+      '[data-testid="linked-chat-message-author"][data-author-kind="agent"]',
+    );
+
+    if (!CLI_TRANSPORT_SUPPORTED) {
+      // The refusal is NAMED, not a silent failure or a generic transport
+      // error. And the load-bearing half: a refused call wrote NOTHING. MCP
+      // has no second path into engine.db, so the rail still holds only the
+      // human question. Re-open the thread the same way the supported branch
+      // does, so both branches read a FRESH message list.
+      expect(reply).toEqual({ ok: false, reason: CLI_TRANSPORT_REFUSAL });
+      await page.getByTestId("linked-chat-back").click();
+      await page.getByTestId("linked-chat-open").click();
+      await expect(page.getByTestId("linked-chat-message-body")).toHaveCount(1);
+      await expect(agentAuthor).toHaveCount(0);
+      return;
+    }
+
     expect(reply).toMatchObject({
       ok: true,
       message: { authorKind: "agent", authorDisplayName: "You" },
@@ -195,9 +221,6 @@ test("an MCP chat reply appears in the file rail as \"You's agent\"", async () =
     await page.getByTestId("linked-chat-open").click();
     await expect(page.getByTestId("linked-chat-message-body").nth(1)).toContainText(
       "Done — here is the summary you asked for.",
-    );
-    const agentAuthor = page.locator(
-      '[data-testid="linked-chat-message-author"][data-author-kind="agent"]',
     );
     await expect(agentAuthor).toHaveText("You's agent");
   } finally {

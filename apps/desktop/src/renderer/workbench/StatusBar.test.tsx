@@ -170,7 +170,12 @@ describe("update toast", () => {
 describe("sync status surface", () => {
   it("keeps the pinned testid/data-state and shows no count when clean", () => {
     renderBar({
-      syncStatus: { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null },
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
+      },
     });
     const status = screen.getByTestId("sync-status");
     expect(status.getAttribute("data-state")).toBe("synced");
@@ -188,6 +193,7 @@ describe("sync status surface", () => {
         state: "conflict",
         pendingChangeCount: 2,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         conflictCount: 2,
       },
     });
@@ -204,6 +210,7 @@ describe("notice center", () => {
         state: "conflict",
         pendingChangeCount: 2,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         conflictCount: 2,
       },
       agentActive: true,
@@ -257,6 +264,7 @@ describe("notice center", () => {
         state: "conflict",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         conflictCount: 1,
       },
     });
@@ -279,6 +287,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         historyRecordingOff: true,
         // #483: the cause rides main's open-time read, on the same status
         // that decided history is off. One read answers both.
@@ -302,6 +311,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         historyRecordingOff: true,
       },
     });
@@ -309,6 +319,34 @@ describe("notice center", () => {
     expect(
       screen.getByTestId("notice-history-recording-off").textContent,
     ).toContain("The workspace engine is turned off in Settings");
+    expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
+  });
+
+  // #505: the recorder failed to build. Nothing records, exactly as for the
+  // opt-out — so the two states arrive at this surface together and only the
+  // cause separates them. The failure must not wear the opt-out's copy.
+  it("names the failure when the recorder could not be built", async () => {
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingOff: true,
+        historyRecordingUnavailable: true,
+      },
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-history-recording-unavailable");
+    expect(notice.textContent).toContain("History is off for this workspace");
+    expect(notice.textContent).toContain(
+      "dohc could not start recording history for this workspace.",
+    );
+    // The Next: main builds the recorder once per app session, so a reopen
+    // retries nothing.
+    expect(notice.textContent).toContain("Restart dohc to try again.");
+    // Never the opt-out's cause, and never both notices at once.
+    expect(notice.textContent).not.toContain("turned off in Settings");
+    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
   });
 
   it("surfaces an unmatched remote conflict resolution as a review notice (0P-C)", async () => {
@@ -318,6 +356,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         unmatchedRemoteResolves: 1,
       },
       onOpenHistory,
@@ -338,6 +377,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         unmatchedRemoteResolves: 1,
       },
       onDismissSyncReview,
@@ -355,6 +395,7 @@ describe("notice center", () => {
           state: "synced",
           pendingChangeCount: 0,
           lastSyncedAtMs: null,
+          historyRecordingUnavailable: false,
           unmatchedRemoteResolves: 0,
         }}
         agentActive={false}
@@ -373,7 +414,12 @@ describe("notice center", () => {
 
   it("shows all clear when there are no notices", async () => {
     renderBar({
-      syncStatus: { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null },
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
+      },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
@@ -386,6 +432,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         historyCaptureFailed: true,
       },
       onOpenHistory,
@@ -410,6 +457,7 @@ describe("notice center", () => {
       state: "synced" as const,
       pendingChangeCount: 0,
       lastSyncedAtMs: null,
+      historyRecordingUnavailable: false,
       historyCaptureFailed: true,
     };
     const { rerender } = renderBar({ syncStatus: failedStatus });
@@ -589,6 +637,7 @@ describe("notice center", () => {
         state: "cloud-disconnected",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
       },
     });
 

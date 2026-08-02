@@ -1,8 +1,15 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DocumentMenu } from "./DocumentMenu";
+// The HTML/PDF actions load ./editor/documentExport lazily, on demand — a
+// Tiptap + ProseMirror + KaTeX graph the app deliberately keeps off its open
+// path. Import it here so vitest transforms and executes that graph while
+// collecting this file, not in the middle of a test. Leaving it on the test's
+// own clock put ~600ms of module load inside the assertion, and a busy machine
+// pushed it past the window (#522).
+import "./editor/documentExport";
 
 type ExportDocumentFileCall = {
   workspaceId: string;
@@ -11,10 +18,34 @@ type ExportDocumentFileCall = {
   kind: "markdown" | "html" | "pdf";
 };
 
-const writeText = vi.fn(async () => {});
-const exportDocumentFile = vi.fn(async (_payload: ExportDocumentFileCall) => ({
-  path: "/tmp/out.html",
-}));
+// Every assertion below awaits the call itself, never a wall-clock window. A
+// slow machine must delay these tests, never fail them — and no abandoned
+// export can land in the next test and corrupt its call count.
+let pendingClipboardWrite: ((text: string) => void) | null = null;
+let pendingExport: ((payload: ExportDocumentFileCall) => void) | null = null;
+
+const writeText = vi.fn(async (text: string) => {
+  pendingClipboardWrite?.(text);
+  pendingClipboardWrite = null;
+});
+const exportDocumentFile = vi.fn(async (payload: ExportDocumentFileCall) => {
+  pendingExport?.(payload);
+  pendingExport = null;
+  return { path: "/tmp/out.html" };
+});
+
+// Arm before the click that should trigger the call, await after it.
+function nextClipboardWrite(): Promise<string> {
+  return new Promise((resolve) => {
+    pendingClipboardWrite = resolve;
+  });
+}
+
+function nextExport(): Promise<ExportDocumentFileCall> {
+  return new Promise((resolve) => {
+    pendingExport = resolve;
+  });
+}
 
 vi.mock("./bridge", () => ({
   bridge: () => ({ exportDocumentFile }),
@@ -43,6 +74,8 @@ function renderMenu() {
 
 beforeEach(() => {
   vi.useRealTimers();
+  pendingClipboardWrite = null;
+  pendingExport = null;
   writeText.mockClear();
   exportDocumentFile.mockClear();
 });
@@ -110,8 +143,9 @@ describe("DocumentMenu", () => {
       screen.getByTestId("document-menu-item-copy-markdown").className,
     ).toContain("is-selected");
 
+    const written = nextClipboardWrite();
     await user.keyboard("{Enter}");
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(MARKDOWN));
+    expect(await written).toBe(MARKDOWN);
   });
 
   it("copies the exact current markdown to the clipboard and shows quiet confirmation", async () => {
@@ -120,10 +154,15 @@ describe("DocumentMenu", () => {
     stubClipboard();
     await user.click(screen.getByTestId("document-menu-trigger"));
 
+    const written = nextClipboardWrite();
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
 
-    expect(writeText).toHaveBeenCalledWith(MARKDOWN);
-    await waitFor(() => expect(screen.getByText("Copied")).toBeTruthy());
+    expect(await written).toBe(MARKDOWN);
+    // Lets the component's own `await` chain finish and React repaint. No
+    // polling and no timeout: the queued work is microtask-bound, so this
+    // does not depend on elapsed time.
+    await act(async () => {});
+    expect(screen.getByText("Copied")).toBeTruthy();
   });
 
   it("exports as HTML through the bridge with the rendered document and closes the menu", async () => {
@@ -131,10 +170,11 @@ describe("DocumentMenu", () => {
     renderMenu();
     await user.click(screen.getByTestId("document-menu-trigger"));
 
+    const exported = nextExport();
     await user.click(screen.getByTestId("document-menu-item-export-html"));
 
-    await waitFor(() => expect(exportDocumentFile).toHaveBeenCalledTimes(1));
-    const call = exportDocumentFile.mock.calls[0]![0];
+    const call = await exported;
+    expect(exportDocumentFile).toHaveBeenCalledTimes(1);
     expect(call.workspaceId).toBe("ws-1");
     expect(call.suggestedName).toBe("Plan");
     expect(call.kind).toBe("html");
@@ -148,10 +188,11 @@ describe("DocumentMenu", () => {
     renderMenu();
     await user.click(screen.getByTestId("document-menu-trigger"));
 
+    const exported = nextExport();
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    await waitFor(() => expect(exportDocumentFile).toHaveBeenCalledTimes(1));
-    const call = exportDocumentFile.mock.calls[0]![0];
+    const call = await exported;
+    expect(exportDocumentFile).toHaveBeenCalledTimes(1);
     expect(call.kind).toBe("markdown");
     // Verbatim source, frontmatter included — no HTML rendering involved.
     expect(call.content).toBe(MARKDOWN);
@@ -163,9 +204,10 @@ describe("DocumentMenu", () => {
     renderMenu();
     await user.click(screen.getByTestId("document-menu-trigger"));
 
+    const exported = nextExport();
     await user.click(screen.getByTestId("document-menu-item-export-pdf"));
 
-    await waitFor(() => expect(exportDocumentFile).toHaveBeenCalledTimes(1));
-    expect(exportDocumentFile.mock.calls[0]![0].kind).toBe("pdf");
+    expect((await exported).kind).toBe("pdf");
+    expect(exportDocumentFile).toHaveBeenCalledTimes(1);
   });
 });

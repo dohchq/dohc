@@ -69,6 +69,40 @@ const WORKSPACE_ID = z
   .max(200)
   .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
+
+// Stored-body fields are the exception to the caps above. Every RESPONSE field
+// on this schema carries text the ENGINE already accepted, not text a renderer
+// supplied. The engine accepts a text write up to MAX_TEXT_BYTES — 10 MiB of
+// UTF-8 (`crates/dohc-engine-domain/src/store.rs`) — and it never gates a
+// settle on the smaller in-band response cap
+// (`crates/dohc-engine-runtime/src/actor.rs` settle), so an over-cap document
+// lands on disk like any other. The bound below is the engine's own, so the
+// bridge is never the gate that rejects a stored body. Zod counts UTF-16 code
+// units and UTF-8 never spends less than one byte per code unit, so this
+// character bound admits every body the engine could hold.
+//
+// Matching the STORAGE contract does not promise that every stored body
+// arrives. The daemon caps one wire string at 8 MiB (`WireLimits`,
+// `crates/dohc-engine-protocol/src/limits.rs`), so a larger body reaches the
+// renderer only by blob hydration. `versionedText.read` and the moment
+// timeline hydrate, and compare rows inherit that through `listTextFiles`.
+// Conflict listing is the one lane that does not — see VERSION_TEXT.
+//
+// One REQUEST field shares the schema — the combined conflict resolution at
+// VERSION_TEXT. There this bound is only a ceiling on what crosses IPC; the
+// engine owns the real limit and re-checks it.
+export const ENGINE_TEXT_MAX_CHARS = 10 * 1024 * 1024;
+function engineStoredText(label: string) {
+  return z.string().refine(
+    (text) => text.length <= ENGINE_TEXT_MAX_CHARS,
+    (text) => ({
+      message:
+        `${label} is ${text.length} characters; the IPC bridge carries at most ` +
+        `${ENGINE_TEXT_MAX_CHARS} characters (the engine's 10 MiB UTF-8 text cap)`,
+    }),
+  );
+}
+
 const SITE_ROOT_STRING = PATH_STRING.superRefine((value, ctx) => {
   if (
     value.includes("\0") ||
@@ -658,6 +692,16 @@ export const SyncStatusResult = z.object({
   // sentence names a full path. Optional so older producers/fixtures keep
   // parsing.
   settingsWarning: z.string().min(1).max(4600).optional(),
+  // #505: true when the recorder could not be BUILT at workspace open — a
+  // failure, not a decision. `historyRecordingOff` is true as well (nothing
+  // records either way), so the notice must read this first: the opt-out copy
+  // names Settings, which nobody touched here.
+  //
+  // REQUIRED where its neighbours above are optional, and deliberately so. An
+  // omitted boolean reads as false, and false here does not mean "unknown" —
+  // it asserts the user chose this, which is the false cause #505 is about. A
+  // producer that cannot say which cause it means must not compile.
+  historyRecordingUnavailable: z.boolean(),
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
@@ -676,21 +720,7 @@ export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 // workspaces reject.
 const MOMENT_ID = z.string().min(1).max(200);
 
-// A moment body is whatever the engine stored, and the engine accepts a text
-// write up to MAX_TEXT_BYTES — 10 MiB of UTF-8
-// (`crates/dohc-engine-domain/src/store.rs`). The bridge carries the same
-// contract, so a body the engine accepted can always reach the renderer.
-// Zod counts UTF-16 code units and UTF-8 never spends less than one byte per
-// code unit, so this character bound admits every body the engine could hold.
-export const MOMENT_TEXT_MAX_CHARS = 10 * 1024 * 1024;
-const MOMENT_TEXT = z.string().refine(
-  (text) => text.length <= MOMENT_TEXT_MAX_CHARS,
-  (text) => ({
-    message:
-      `moment body is ${text.length} characters; the IPC bridge carries at most ` +
-      `${MOMENT_TEXT_MAX_CHARS} characters (the engine's 10 MiB UTF-8 text cap)`,
-  }),
-);
+const MOMENT_TEXT = engineStoredText("moment body");
 
 export const EngineMomentRecord = z.object({
   id: MOMENT_ID,
@@ -1575,9 +1605,32 @@ export type PresenceResult = z.infer<typeof PresenceResult>;
 // attached (flag on) — for unflagged workspaces they reject.
 const VERSION_ID = z.string().min(1).max(200);
 export const WORKSPACE_VERSION_NAME_MAX = 80;
-// Versions cover engine-owned text files (<=128KiB each during alpha); the
-// bound is defensive headroom, not a promise of 2MB texts.
-const VERSION_TEXT = z.string().max(2_000_000);
+// Conflict and compare sides are the same hydrated stored bodies the timeline
+// carries, passed through verbatim (`engineHistoryIpc.ts` versionConflictForIpc,
+// `versionCompare.ts`), so they carry the engine's own text contract.
+//
+// Compare rows use this bound to its full height: `compareVersionFiles` reads
+// them through `listTextFiles`, which hydrates each over-cap body by
+// `readTextFile` -> `readTextBlob`, so a compare side at the engine's contract
+// does arrive.
+//
+// Conflict listing is the exception. The daemon serializes a conflict's three
+// sides in band and refuses the page with `conflict-row-exceeds-wire-limit`
+// above 8 MiB minus envelope headroom
+// (`crates/dohc-workspace-engine/src/lib.rs:244-248,7482-7491`), and
+// `listTextConflicts` has no hydration branch. So this raise fixes the 2 MB to
+// ~8 MB band, where the bridge was the only rejecting gate, and #537 tracks
+// the tail above it. The bound stays the engine's storage contract rather than
+// the transport's current ceiling: a second hand-copied constant is the drift
+// #517 was filed about, and it would have to move again when #537 lands.
+//
+// The combined resolution (`keep-combined` below) is the one REQUEST use, and
+// its contract is NOT this one: the engine caps a combined write at its 128 KiB
+// in-band cap and refuses above it
+// (`crates/dohc-workspace-engine/src/lib.rs:7574`). This bound only keeps an
+// unbounded string off the wire; the engine decides what applies. Raising the
+// engine to match the sides it hands out is tracked in #528.
+const VERSION_TEXT = engineStoredText("version text");
 
 export const WorkspaceVersionRecord = z.object({
   id: VERSION_ID,

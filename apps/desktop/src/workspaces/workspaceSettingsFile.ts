@@ -47,7 +47,20 @@ async function workspaceSettingsPath(rootPath: string): Promise<string> {
 export async function readWorkspaceSettingsFile(
   rootPath: string,
 ): Promise<WorkspaceSettingsResult> {
-  const path = await workspaceSettingsPath(rootPath);
+  // The metadata resolver refuses a symlinked or non-directory .dohc by
+  // throwing, and its contract says readers stay tolerant by catching. A
+  // throw here is the settings-unreadable class one level up — the FOLDER is
+  // untrustworthy — so it takes the same fail-closed path, with a warning
+  // that names the folder to repair. Restart alone cannot fix this class.
+  let path: string;
+  try {
+    path = await workspaceSettingsPath(rootPath);
+  } catch {
+    return unreadableSettings(
+      "dohc cannot use the workspace's .dohc folder.",
+      join(rootPath, ".dohc"),
+    );
+  }
   try {
     const fileStats = await lstat(path);
     if (fileStats.isSymbolicLink() || !fileStats.isFile()) {

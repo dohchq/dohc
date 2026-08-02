@@ -169,6 +169,39 @@ function chatsDestinationKey(nav: ChatsNav | null): string {
   return nav.level;
 }
 
+function chatsFocusMessageId(nav: ChatsNav | null): string | undefined {
+  return nav && (nav.level === "thread" || nav.level === "dm")
+    ? nav.focusMessageId
+    : undefined;
+}
+
+// Two questions about one navigation, deliberately different.
+//
+// Did the user LEAVE the conversation? That scopes drafts: a draft belongs to
+// the conversation it was typed in, so a jump WITHIN that conversation must
+// not discard it.
+export function chatsNavigationLeavesConversation(
+  current: ChatsNav | null,
+  next: ChatsNav,
+): boolean {
+  return chatsDestinationKey(current) !== chatsDestinationKey(next);
+}
+
+// Did the user GO somewhere? That cancels a pending DM lookup. A focused
+// message IS somewhere — chatsNavigationRequiresRemount treats it as a new
+// jump for exactly that reason — so a backlink or feed item landing on another
+// message in the open conversation counts, even though the conversation did
+// not change and the draft typed there survives.
+export function chatsNavigationChangesDestination(
+  current: ChatsNav | null,
+  next: ChatsNav,
+): boolean {
+  return (
+    chatsNavigationLeavesConversation(current, next) ||
+    chatsFocusMessageId(current) !== chatsFocusMessageId(next)
+  );
+}
+
 export function chatsNavigationRequiresRemount(
   current: ChatsNav | null,
   next: ChatsNav,
@@ -332,6 +365,22 @@ export async function runCanonicalDmNavigation(input: {
   } catch {
     if (input.isCurrent()) input.open({ level: "channels" });
   }
+}
+
+/** The record a pending canonical DM navigation checks itself against. */
+type DmNavigationRequest = { workspaceId: string; sequence: number };
+
+// Cancel any in-flight canonical DM navigation so its late answer cannot land
+// a chat destination over wherever the user went meanwhile. REPLACE the
+// record, never increment it in place: openCanonicalDmInTab installs the very
+// object it then compares against, so an in-place increment moves the pending
+// navigation's captured sequence too, its isCurrent() compares the object with
+// itself, and the cancellation is a no-op.
+function invalidateDmNavigation(request: { current: DmNavigationRequest }): void {
+  request.current = {
+    workspaceId: request.current.workspaceId,
+    sequence: request.current.sequence + 1,
+  };
 }
 
 export function pendingHeadingTargetForOpen(
@@ -1305,7 +1354,18 @@ export function DesktopWorkspaceShell(props: {
   // the update. Loading stored state is the only setWb that bypasses this.
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
-      dmNavigationRequest.current.sequence += 1;
+      // A pending canonical DM navigation loses to a DESTINATION change, not
+      // to every workbench write. Most writes here are not one: a width drag
+      // streams a mutation per pointermove, and the share-mount poll reaches
+      // this seam with no user involved at all — cancelling on those would
+      // silently discard a DM the user had just clicked. The transition is
+      // computed from wbRef outside the functional updater, the idiom openFile
+      // and closeFileTab already use for their marks (updaters are
+      // side-effect-free by contract, so probing one is safe).
+      const current = wbRef.current;
+      if (updater(current).activeTab !== current.activeTab) {
+        invalidateDmNavigation(dmNavigationRequest);
+      }
       userTouchedWb.current = true;
       setWb(updater);
     },
@@ -1473,13 +1533,7 @@ export function DesktopWorkspaceShell(props: {
       // active tab exactly as mutateWb does, so it owes the same invalidation
       // — otherwise an in-flight DM navigation still passes its isCurrent()
       // check and lands its destination on top of the tab we just activated.
-      // REPLACE the record, never increment it in place: openCanonicalDmInTab
-      // installs the very object it then compares against, so mutating it
-      // would move its captured sequence too and the check would still pass.
-      dmNavigationRequest.current = {
-        workspaceId: dmNavigationRequest.current.workspaceId,
-        sequence: dmNavigationRequest.current.sequence + 1,
-      };
+      invalidateDmNavigation(dmNavigationRequest);
       // Activating a neighbour remounts the keyed inspector — that is an OPEN
       // (closeFileTab idiom). Without the mark, the inspector's mount measure
       // brackets whatever stale mark came before it.
@@ -1731,6 +1785,10 @@ export function DesktopWorkspaceShell(props: {
   // side-effect-free (StrictMode/concurrent replays would re-fire them).
   const openFile = useCallback(
     (path: string, target?: HeadingTarget) => {
+      // A heading jump is a destination change mutateWb's tab check cannot
+      // see: the file may already BE the active tab, and the user still went
+      // somewhere new inside it.
+      if (target) invalidateDmNavigation(dmNavigationRequest);
       // Heading jumps are one open command, never durable tab state. Every
       // ordinary explorer/tab open therefore clears a prior jump before the
       // file can become active again.
@@ -1775,11 +1833,26 @@ export function DesktopWorkspaceShell(props: {
   const onChatsThreadRead = useCallback(() => {
     setChatsReadRevision((current) => current + 1);
   }, []);
-  const onChatsNav = useCallback((nav: ChatsNav) => {
-    dmNavigationRequest.current.sequence += 1;
+  // THE one write of the chat destination: the ref the panel reads, the state
+  // the navigator highlights, and the cancellation that choosing a different
+  // conversation implies. Both writers below open-coded these two lines, which
+  // is why the invalidation kept being missed one caller at a time — a chat
+  // destination can only change here, so this is where the rule belongs.
+  // Reports that stay on the same conversation change nothing and cancel
+  // nothing.
+  const setChatsDestination = useCallback((nav: ChatsNav) => {
+    if (chatsNavigationChangesDestination(chatsNav.current, nav)) {
+      invalidateDmNavigation(dmNavigationRequest);
+    }
     chatsNav.current = nav;
     setSelectedChatsNav(nav);
   }, []);
+  const onChatsNav = useCallback(
+    (nav: ChatsNav) => {
+      setChatsDestination(nav);
+    },
+    [setChatsDestination],
+  );
   // Unsent drafts ride the same handoff: mirrored live (a ref write per
   // keystroke, no re-render) and seeded into the next mount, so expanding
   // or collapsing chats never discards what the user typed.
@@ -1792,12 +1865,20 @@ export function DesktopWorkspaceShell(props: {
   }, [mutateWb]);
   const openChatsNavInTab = useCallback(
     (nav: ChatsNav) => {
-      const destinationChanged =
-        chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav);
+      // Read before the write: both answers are about the destination the
+      // panel is leaving.
       const shouldRemount = chatsNavigationRequiresRemount(chatsNav.current, nav);
-      chatsNav.current = nav;
-      setSelectedChatsNav(nav);
-      if (destinationChanged) {
+      const leftConversation = chatsNavigationLeavesConversation(chatsNav.current, nav);
+      // An explicit open is the user going somewhere, so it always cancels a
+      // pending DM — even when the destination key is unchanged. Repeating a
+      // backlink to the message you already focused is the case that proves
+      // it: chatsNavigationRequiresRemount deliberately treats it as a new
+      // jump, and the page it remounts must not be replaced by a DM answering
+      // late. Only the panel's passive onChatsNav reports stay conditional;
+      // they say where the view already is, and nobody commanded them.
+      invalidateDmNavigation(dmNavigationRequest);
+      setChatsDestination(nav);
+      if (leftConversation) {
         // Drafts are scoped to the conversation they were typed in. Until the
         // draft store is keyed per channel/thread, never seed one into a
         // different destination.
@@ -1808,7 +1889,7 @@ export function DesktopWorkspaceShell(props: {
       }
       mutateWb((state) => openTab(state, CHATS_TAB_PATH));
     },
-    [mutateWb],
+    [mutateWb, setChatsDestination],
   );
   const openCanonicalDmInTab = useCallback(
     async (locator: DmChatLocator) => {
@@ -1839,6 +1920,11 @@ export function DesktopWorkspaceShell(props: {
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
       focusMessageId?: string,
     ) => {
+      // The user picked a DIFFERENT chat destination. The panel is not the
+      // editor, so no tab moves and the check in mutateWb cannot see this —
+      // but a pending DM answering late would open the Chats TAB over the
+      // thread they just chose.
+      invalidateDmNavigation(dmNavigationRequest);
       setSearchChatTarget({
         thread: {
           id: thread.id,
@@ -1954,6 +2040,10 @@ export function DesktopWorkspaceShell(props: {
         });
         return;
       }
+      // Landing at a line is the same kind of destination change: openFile
+      // below cannot see it, because the result may be in the file the user is
+      // already reading.
+      invalidateDmNavigation(dmNavigationRequest);
       setSearchScrollTarget({ path, line, nonce: ++scrollNonce.current });
       openFile(path);
     },

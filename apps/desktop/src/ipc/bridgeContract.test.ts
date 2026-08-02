@@ -34,6 +34,7 @@ import {
   SendChatMessageResult,
   SetChatReactionPayload,
   StartDmPayload,
+  SyncStatusResult,
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
   SwitchWorkspaceVersionPayload,
@@ -989,6 +990,23 @@ describe("try-in-version IPC contract (PR 0N-2)", () => {
         mergeAvailable: true,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("sync status IPC contract (#505)", () => {
+  it("refuses a status that cannot say why history is off", () => {
+    const status = {
+      state: "synced",
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      historyRecordingUnavailable: false,
+    };
+    expect(SyncStatusResult.safeParse(status).success).toBe(true);
+    // historyRecordingUnavailable is REQUIRED where its neighbours are
+    // optional: an omitted boolean would read as "the user chose this",
+    // which is the false cause #505 exists to kill.
+    const { historyRecordingUnavailable: _dropped, ...withoutCause } = status;
+    expect(SyncStatusResult.safeParse(withoutCause).success).toBe(false);
   });
 });
 

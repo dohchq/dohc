@@ -25,7 +25,8 @@ export type {
 } from "@dohc/workspace-contracts/engine";
 
 export async function compareVersionFiles(
-  store: VersionedTextStore,
+  // The comparison reads snapshot listings and nothing else.
+  store: Pick<VersionedTextStore, "listTextFiles">,
   input: {
     workspaceId: WorkspaceId;
     sourceVersionId: VersionId;
