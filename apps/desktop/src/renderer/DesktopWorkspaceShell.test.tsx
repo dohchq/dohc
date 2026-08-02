@@ -2424,6 +2424,125 @@ describe("history page", () => {
 
     expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
   });
+
+  // #507, and the mirror of the test above: the refresh answers FIRST, while
+  // the pagination is still in flight. Blocked is not refuted — when the
+  // pagination then fails, this is again the only answer anyone has, so
+  // discarding it at resolve time would leave the timeline stale with nothing
+  // to retry it.
+  it("commits a refresh that was blocked by a pagination which then failed", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const refreshed = deferred<ListEngineMomentsResult>();
+    let failPage!: (error: Error) => void;
+    const page = new Promise<never>((_resolve, reject) => {
+      failPage = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      refreshed.promise,
+      page,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve({
+        ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
+        nextBeforeMomentOrder: 1,
+      });
+      await first.promise;
+    });
+    expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("engine-history-load-more"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+
+    // The refresh answers while the pagination is still out. It is held, not
+    // displayed: the pagination could still land on top of it.
+    await act(async () => {
+      refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
+      await refreshed.promise;
+    });
+
+    // The pagination fails, so nothing newer ever arrives, and the held answer
+    // is the only one there is.
+    await act(async () => {
+      failPage(new Error("pagination failed"));
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
+  });
+
+  // #507's other half: the page the user asked for answered, and a newer
+  // refresh that merely FAILED took it away — leaving "Loading…" disabled on
+  // the button as well, so the earlier moments were unreachable.
+  it("commits a pagination whose newer refresh failed, and frees the button", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const earlier = deferred<ListEngineMomentsResult>();
+    let failRefresh!: (error: Error) => void;
+    const refreshed = new Promise<never>((_resolve, reject) => {
+      failRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      earlier.promise,
+      refreshed,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve({
+        ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
+        nextBeforeMomentOrder: 1,
+      });
+      await first.promise;
+    });
+    expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+
+    // The user asks for earlier changes, then an activity event fires a
+    // refresh that fails.
+    await user.click(screen.getByTestId("engine-history-load-more"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      failRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      earlier.resolve({
+        ...historyPage([historyMoment("m-earlier", "Started the plan")]),
+        nextBeforeMomentOrder: 0,
+      });
+      await earlier.promise;
+    });
+
+    // The page displays, and the control the user pressed is usable again.
+    expect(await screen.findByText("Started the plan")).toBeTruthy();
+    expect(screen.getByText("Added the launch checklist")).toBeTruthy();
+    const loadMore = screen.getByTestId("engine-history-load-more");
+    await waitFor(() => expect(loadMore.hasAttribute("disabled")).toBe(false));
+    expect(loadMore.textContent).toBe("Show earlier changes");
+  });
 });
 
 describe("open editors", () => {

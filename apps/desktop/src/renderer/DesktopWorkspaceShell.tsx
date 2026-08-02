@@ -1600,6 +1600,14 @@ export function DesktopWorkspaceShell(props: {
   // is on screen. Cleared when the pagination settles, so a FAILED one stops
   // holding anything back.
   const pendingEngineHistoryPage = useRef(0);
+  // A refresh that was blocked by that pagination, held until it settles.
+  // Blocked is not refuted: the pagination may FAIL, and then this is again
+  // the only answer anyone has. Dropping it at resolve time would be the very
+  // bug the watermark exists to fix, one interleaving over (#507).
+  const blockedEngineHistoryRefresh = useRef<{
+    token: number;
+    commit: () => void;
+  } | null>(null);
   useEffect(
     () => () => {
       // Unmount invalidates every load in flight. Hygiene, not a repaint
@@ -1638,20 +1646,31 @@ export function DesktopWorkspaceShell(props: {
         bridge().getTryInVersionState({ workspaceId }),
       ]);
       if (token <= committedEngineHistoryToken.current) return;
-      if (token < pendingEngineHistoryPage.current) return;
-      committedEngineHistoryToken.current = token;
-      // A refresh returns to the newest page; older pages reload on demand.
-      // It also supersedes any in-flight load-more, whose finally can no
-      // longer clear the flag (its token is stale now).
-      setEngineHistoryLoadingMore(false);
-      setEngineHistory({
-        moments: page.moments,
-        nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-        latestMomentOrder: page.latestMomentOrder,
-      });
-      setSyncStatus(status);
-      setAgentActive(agent.activeRun !== null);
-      setTryState(trySession.state);
+      const commit = () => {
+        committedEngineHistoryToken.current = token;
+        // A refresh returns to the newest page; older pages reload on demand,
+        // so any load-more it supersedes is over.
+        setEngineHistoryLoadingMore(false);
+        setEngineHistory({
+          moments: page.moments,
+          nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+          latestMomentOrder: page.latestMomentOrder,
+        });
+        setSyncStatus(status);
+        setAgentActive(agent.activeRun !== null);
+        setTryState(trySession.state);
+      };
+      // Blocked by a newer pagination: hold this answer instead of throwing it
+      // away, and let the pagination's settlement decide (keeping the newest
+      // blocked answer, since an older one could never win afterwards).
+      if (token < pendingEngineHistoryPage.current) {
+        const held = blockedEngineHistoryRefresh.current;
+        if (!held || token > held.token) {
+          blockedEngineHistoryRefresh.current = { token, commit };
+        }
+        return;
+      }
+      commit();
       return;
     }
     // Opted-out workspace (retirement Phase C): no history source exists —
@@ -1667,9 +1686,10 @@ export function DesktopWorkspaceShell(props: {
   const loadMoreEngineHistory = useCallback(async () => {
     const cursor = engineHistory?.nextBeforeMomentOrder;
     if (cursor === null || cursor === undefined || engineHistoryLoadingMore) return;
-    // Latest-wins with refreshHistory: advancing the token means a refresh
-    // started after this pagination supersedes it (and vice versa), so
-    // overlapping responses can never interleave into a mixed timeline.
+    // Same rule as refreshHistory, in both directions: overlapping responses
+    // are ordered by which one is newer, never by which one was issued last,
+    // so they can neither interleave into a mixed timeline nor discard each
+    // other for merely existing.
     const token = ++engineHistoryToken.current;
     pendingEngineHistoryPage.current = token;
     setEngineHistoryLoadingMore(true);
@@ -1679,28 +1699,42 @@ export function DesktopWorkspaceShell(props: {
         limit: 200,
         beforeMomentOrder: cursor,
       });
-      if (token !== engineHistoryToken.current) return;
-      // This page is what the timeline now shows, so an older refresh must not
-      // replace it with the newest page and drop it.
-      committedEngineHistoryToken.current = token;
-      setEngineHistory((current) =>
-        current
-          ? {
-              moments: [...current.moments, ...page.moments],
-              nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-              latestMomentOrder: Math.max(
-                current.latestMomentOrder,
-                page.latestMomentOrder,
-              ),
-            }
-          : current,
-      );
+      // The committed-answer rule, applied to this page as well: display it
+      // unless a NEWER answer already took the timeline. Superseding on issue
+      // here let a newer refresh that merely FAILED throw this page away.
+      if (token > committedEngineHistoryToken.current) {
+        committedEngineHistoryToken.current = token;
+        setEngineHistory((current) =>
+          current
+            ? {
+                moments: [...current.moments, ...page.moments],
+                nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+                latestMomentOrder: Math.max(
+                  current.latestMomentOrder,
+                  page.latestMomentOrder,
+                ),
+              }
+            : current,
+        );
+      }
     } catch (error) {
-      if (token !== engineHistoryToken.current) return;
-      reportShellError("Could not load earlier history.", error);
+      // Silent only when a newer answer already replaced what this page was
+      // going to extend — then the failure is about a timeline nobody sees.
+      if (token > committedEngineHistoryToken.current) {
+        reportShellError("Could not load earlier history.", error);
+      }
     } finally {
-      if (pendingEngineHistoryPage.current === token) pendingEngineHistoryPage.current = 0;
-      if (token === engineHistoryToken.current) setEngineHistoryLoadingMore(false);
+      // Settlement, not success, releases what this pagination held: the
+      // pending slot, the refresh it blocked, and the button. A pagination
+      // superseded by a newer one releases nothing — that newer one owns all
+      // three now, so nothing is left stuck either way.
+      if (pendingEngineHistoryPage.current === token) {
+        pendingEngineHistoryPage.current = 0;
+        const held = blockedEngineHistoryRefresh.current;
+        blockedEngineHistoryRefresh.current = null;
+        if (held && held.token > committedEngineHistoryToken.current) held.commit();
+        setEngineHistoryLoadingMore(false);
+      }
     }
   }, [engineHistory, engineHistoryLoadingMore, reportShellError, workspaceId]);
 
