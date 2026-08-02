@@ -17,16 +17,21 @@
 // 10 MiB side costs nothing next to painting it.
 
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { transformWithEsbuild } from "vite";
 import { describe, it } from "vitest";
 import {
+  CONFLICT_COMBINED_EDIT_MAX_BYTES,
+  CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS,
   CONFLICT_PREVIEW_MAX_CHARS,
   CONFLICT_PREVIEW_MAX_LINES,
   conflictPreview,
 } from "./conflictPane";
 
 const repoRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
+
 
 // The repository's own tracked text, as the stand-in for the documents a
 // workspace holds. dohc has no user corpus yet; this is the closest honest
@@ -124,5 +129,122 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
       );
     });
     console.log(`\n${rows.join("\n")}\n`);
+  }, 600_000);
+});
+
+// The benchmark behind CONFLICT_COMBINED_EDIT_MAX_BYTES (#566).
+//
+// That limit REJECTS otherwise valid combined text, so AGENTS.md requires its
+// evidence to live in a focused benchmark rather than a comment. The rows
+// above cannot supply it: they measure corpus sizes and preview slicing in
+// Node, and this cost is Chromium's.
+//
+// WHAT ONE KEYSTROKE COSTS. "Combine by hand" is a CONTROLLED textarea, so
+// every keystroke runs `onCombinedChange` — `exceedsUtf8Bytes` over the whole
+// draft — and then React assigns the whole new value back to the element. This
+// drives BOTH halves in the browser, at the pane's own font and width, with
+// the SHIPPED `exceedsUtf8Bytes` handed to the page as source rather than
+// reimplemented, so the number cannot drift from the function it describes.
+//
+// Re-run it when Chromium or React move:
+//
+//   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
+//
+// It reports rather than asserts, like its siblings: the numbers are
+// wall-clock and machine-specific, and a threshold here would be a gate that
+// fails on a slow laptop rather than on a regression.
+describe.skipIf(!measuring)("combine textarea keystroke latency", () => {
+  it("reports what one keystroke costs across draft sizes", async () => {
+    // Resolved from the desktop package, which has playwright as a devDep.
+    const require = createRequire(`${repoRoot}apps/desktop/`);
+    const { chromium } = require("playwright") as typeof import("playwright");
+
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      // The pane's own textarea: `font-mono text-[11px] leading-4`, six rows,
+      // inside the 720px dialog's padded column.
+      await page.setContent(
+        `<textarea id="draft" rows="6" style="font:11px/16px monospace;width:320px"></textarea>`,
+      );
+      // The REAL module, not a copy of one function. conflictPane.ts imports
+      // nothing, so transpiling it is enough to run it in the page — and the
+      // guard keeps the module-private helper it actually calls, which
+      // stringifying the exported function alone would have left behind.
+      const moduleSource = readFileSync(
+        `${repoRoot}apps/desktop/src/renderer/workbench/conflictPane.ts`,
+        "utf8",
+      );
+      const transpiled = await transformWithEsbuild(moduleSource, "conflictPane.ts", {
+        loader: "ts",
+        format: "cjs",
+      });
+      await page.evaluate((source) => {
+        const shipped = { exports: {} as Record<string, unknown> };
+        new Function("module", "exports", source)(shipped, shipped.exports);
+        (globalThis as unknown as Record<string, unknown>).exceedsUtf8Bytes =
+          shipped.exports.exceedsUtf8Bytes;
+      }, transpiled.code);
+
+      const rows: string[] = [];
+      for (const size of [
+        100_000, 250_000, CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS, CONFLICT_COMBINED_EDIT_MAX_BYTES,
+        1_048_576, 4 * 1024 * 1024, 8 * 1024 * 1024,
+      ]) {
+        const timings = await page.evaluate(
+          ({ length, limit }) => {
+            const draft = document.getElementById("draft") as HTMLTextAreaElement;
+            const guard = (globalThis as unknown as {
+              exceedsUtf8Bytes: (text: string, limitBytes: number) => boolean;
+            }).exceedsUtf8Bytes;
+            const body = "x".repeat(length);
+            const guardMs: number[] = [];
+            let refusals = 0;
+            const assignMs: number[] = [];
+            for (let stroke = 0; stroke < 21; stroke += 1) {
+              const next = body.slice(0, length - 1) + String.fromCharCode(97 + (stroke % 26));
+              const beforeGuard = performance.now();
+              const refused = guard(next, limit);
+              guardMs.push(performance.now() - beforeGuard);
+              refusals += refused ? 1 : 0;
+              // Measured even when the guard refuses. What a draft past the
+              // bound WOULD cost is the evidence for not raising the bound,
+              // and it is the only place that number can come from.
+              const beforeAssign = performance.now();
+              draft.value = next;
+              // Force layout, or the assignment is deferred out of the sample.
+              void draft.scrollHeight;
+              assignMs.push(performance.now() - beforeAssign);
+            }
+            const median = (samples: number[]) =>
+              samples.length === 0
+                ? Number.NaN
+                : [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)];
+            return { guard: median(guardMs), assign: median(assignMs), refusals };
+          },
+          { length: size, limit: CONFLICT_COMBINED_EDIT_MAX_BYTES },
+        );
+        const total = timings.guard + timings.assign;
+        rows.push(
+          `${size.toLocaleString("en-US").padStart(11)} chars` +
+            `  guard ${timings.guard.toFixed(2).padStart(6)} ms` +
+            `  assign ${timings.assign.toFixed(2).padStart(7)} ms` +
+            `  keystroke ${total.toFixed(2).padStart(7)} ms` +
+            (timings.refusals > 0
+              ? "   past the bound: refused, cost shown is what raising it would buy"
+              : ""),
+        );
+      }
+
+      console.log(
+        `\nCONFLICT_COMBINED_EDIT_MAX_BYTES = ` +
+          `${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")}` +
+          `\nlargest healthy document = ` +
+          `${CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS.toLocaleString("en-US")} characters\n\n` +
+          `${rows.join("\n")}\n`,
+      );
+    } finally {
+      await browser.close();
+    }
   }, 600_000);
 });

@@ -74,31 +74,43 @@ export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 /// problem, so it owns the number. `engineTextLimits.test.ts` proves the two
 /// agree, by importing the frame contract rather than restating it.
 ///
-/// MEASURED. A controlled textarea re-renders on every keystroke, and React
-/// assigns the whole value each time. In the Chromium this app ships
-/// (playwright chromium-1223), the median of 21 keystrokes at the pane's own
-/// font and width:
+/// MEASURED, and the measurement is committed rather than described:
+/// `conflictPane.measure.test.ts` drives the real guard and a real controlled
+/// textarea in the Chromium this app ships, at the pane's own font and width,
+/// and prints one keystroke's cost across the ladder. Run it to reproduce or
+/// recalibrate — after a Chromium or React upgrade, or when the corpus row
+/// below passes this bound:
 ///
-///     100,000 characters    4.8 ms
-///     250,000 characters   12.1 ms
-///     469,068 characters   22.9 ms
-///   1,048,576 characters   53.4 ms
-///   8,388,608 characters  437.8 ms
+///   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
 ///
-/// The bound is set just above the largest healthy document in the measured
-/// corpus — 469,068 characters, see above — so combining a real document by
-/// hand is never refused, and a keystroke there costs about 25 ms. UTF-8 never
-/// spends less than one byte per UTF-16 code unit, so a bound in BYTES caps
-/// the code units that drive that cost for every script.
+/// What it showed when this number was chosen: a keystroke costs about 6 ms at
+/// 100,000 characters, 15 ms at 250,000, and 26-36 ms at this bound depending
+/// on machine load — while 1 MiB costs 53-77 ms and 8 MiB costs 438-590 ms.
+/// The guard itself is about 1 ms of that; the rest is React assigning the
+/// whole value back to a controlled element on every keystroke.
+///
+/// WHY THIS VALUE. It is the smallest round bound that clears
+/// `CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS`, so it never refuses a document the
+/// size of a real one (AGENTS.md), and every larger choice buys nothing but
+/// latency. UTF-8 never spends less than one byte per UTF-16 code unit, so a
+/// bound in BYTES caps the code units that drive that cost for every script.
 ///
 /// The trade this makes, stated plainly: a document whose characters are
 /// mostly multi-byte reaches this bound at fewer characters than an ASCII one,
 /// and the corpus behind the healthy range is ASCII-dominated source and
 /// Markdown. Above the bound the surface degrades rather than refuses — keep a
 /// side, then edit the file in the editor, which is incremental and pays none
-/// of this cost. Raising it to cover that tail costs every keystroke: 1 MiB is
-/// 53 ms, which is not an editor.
+/// of this cost.
 export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 512 * 1024;
+
+/// The largest document in the measured corpus, in characters — the healthy
+/// maximum the bound above has to clear (AGENTS.md: set a limit that rejects
+/// work beyond the measured healthy range).
+///
+/// A SNAPSHOT, re-read by conflictPane.measure.test.ts, which prints the
+/// current corpus every run. It drifts as the repository grows; when it passes
+/// the bound, re-measure both rather than nudging this number.
+export const CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS = 495_878;
 
 export type ConflictPreview = {
   /// The text the pane paints.

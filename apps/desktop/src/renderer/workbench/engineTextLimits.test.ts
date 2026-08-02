@@ -17,7 +17,10 @@ import {
   jsonStringEncodedLength,
 } from "@dohc/workspace-engine-client/limits";
 import { describe, expect, it } from "vitest";
-import { CONFLICT_COMBINED_EDIT_MAX_BYTES } from "./conflictPane";
+import {
+  CONFLICT_COMBINED_EDIT_MAX_BYTES,
+  CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS,
+} from "./conflictPane";
 
 const repoRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 
@@ -35,10 +38,6 @@ function readRepoFile(relativePath: string): string {
 /// envelope to the byte.
 const RESOLVE_REQUEST_OVERHEAD_BUDGET = 128 * 1024;
 
-/// The largest healthy document in the measured corpus
-/// (conflictPane.measure.test.ts). AGENTS.md: a limit that rejects otherwise
-/// valid work is set beyond the measured healthy range.
-const LARGEST_HEALTHY_DOCUMENT_CHARS = 469_068;
 
 describe("the bound on what a combined copy can be edited to", () => {
   it("leaves a whole worst-case body inside the resolve frame", () => {
@@ -57,7 +56,7 @@ describe("the bound on what a combined copy can be edited to", () => {
 
   it("sits above the largest healthy document", () => {
     expect(CONFLICT_COMBINED_EDIT_MAX_BYTES).toBeGreaterThan(
-      LARGEST_HEALTHY_DOCUMENT_CHARS,
+      CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS,
     );
   });
 
