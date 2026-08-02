@@ -1410,15 +1410,25 @@ export function DesktopWorkspaceShell(props: {
     const current = wbRef.current;
     const next = pruneMissingRestoredTabs(current, closable, fileExists);
     if (next === current) return;
-    // Closing the ACTIVE tab activates a neighbour, which remounts the keyed
-    // inspector — that is an OPEN (closeFileTab idiom). Without the mark, the
-    // inspector's mount measure brackets whatever stale mark came before it.
-    if (
-      next.activeTab !== current.activeTab &&
-      next.activeTab !== null &&
-      !isVirtualTabPath(next.activeTab)
-    ) {
-      rendererMarks.mark("file-open-start");
+    if (next.activeTab !== current.activeTab) {
+      // This commits through the direct setter, on purpose: reconciling is not
+      // a user action and must not set the touched flag. But it moves the
+      // active tab exactly as mutateWb does, so it owes the same invalidation
+      // — otherwise an in-flight DM navigation still passes its isCurrent()
+      // check and lands its destination on top of the tab we just activated.
+      // REPLACE the record, never increment it in place: openCanonicalDmInTab
+      // installs the very object it then compares against, so mutating it
+      // would move its captured sequence too and the check would still pass.
+      dmNavigationRequest.current = {
+        workspaceId: dmNavigationRequest.current.workspaceId,
+        sequence: dmNavigationRequest.current.sequence + 1,
+      };
+      // Activating a neighbour remounts the keyed inspector — that is an OPEN
+      // (closeFileTab idiom). Without the mark, the inspector's mount measure
+      // brackets whatever stale mark came before it.
+      if (next.activeTab !== null && !isVirtualTabPath(next.activeTab)) {
+        rendererMarks.mark("file-open-start");
+      }
     }
     setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
   }, [files, filesLoaded, restoredTabPaths, activeTabDirty, wb.activeTab]);

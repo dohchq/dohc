@@ -47,6 +47,7 @@ import {
 } from "./DesktopWorkspaceShell";
 import type { ChatsNav } from "./workbench/ChatsView";
 import {
+  CHATS_TAB_PATH,
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
 } from "./workbench/workbenchState";
@@ -968,6 +969,77 @@ describe("ui-state merge-on-load", () => {
 
     mark.mockRestore();
   });
+
+  // CodeRabbit: reconciling commits through the direct setter (it must not set
+  // the touched flag), which also skips mutateWb's DM-navigation invalidation.
+  // A DM navigation in flight would then still pass its isCurrent() check and
+  // land its destination on top of the tab the close just activated.
+  it("discards an in-flight DM navigation when closing a tab moves the active tab", async () => {
+    const dmNode = {
+      path: "chat-thread:dm-thread",
+      kind: "chat-thread" as const,
+      threadId: "dm-thread",
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      channelName: "alice@example.com",
+      channelKind: "dm" as const,
+      title: "Direct message",
+      incoming: 1,
+      outgoing: 0,
+    };
+    const listing = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    const sync = deferred<{ available: boolean; dms: never[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "gone.md"],
+        activeTab: "gone.md",
+      }),
+    );
+    // The listing is held so the close cannot happen before the navigation.
+    bridge.listWorkspaceFiles = vi.fn(() => listing.promise);
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [dmNode],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    // Start a canonical DM navigation and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === dmNode.path)!);
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    // Now the listing lands without the active tab's file, so the close runs
+    // and hands over to the survivor.
+    await act(async () => {
+      listing.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await listing.promise;
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    // The navigation answers late. It is stale, so it must not open Chats
+    // over the tab the close just activated.
+    await act(async () => {
+      sync.resolve({ available: true, dms: [] });
+      await sync.promise;
+    });
+    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+  }, 20_000);
 
   // A request that is merely in flight has not answered anything, and a
   // request that fails never will. Superseding on ISSUE would drop the only
