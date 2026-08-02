@@ -7,6 +7,13 @@
 //! already-normalized, slash-separated relative paths needed to prevent secret
 //! materialization across share boundaries. Any path outside that narrow
 //! grammar is [`PathClass::Unsafe`] and therefore fails closed.
+//!
+//! Which paths hold secret material is not decided here. That narrow grammar
+//! is exactly the input contract of
+//! [`dohc_engine_files::policy::normalized_path_is_secret`], so this module
+//! calls it. A restated copy of the rules would agree with the floor only by
+//! coincidence, and a class added to the floor alone would leave relayed
+//! deletes of it replayable (#484).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathClass {
@@ -45,11 +52,10 @@ pub fn classify_share_path(path: &str) -> PathClass {
     }) {
         return PathClass::Ignored;
     }
-    if normalized.iter().any(|segment| segment == ".env") {
-        return PathClass::Secret;
-    }
-    let basename = normalized.last().map(String::as_str).unwrap_or("");
-    if basename.ends_with(".env") || basename.starts_with(".env.") {
+    // The grammar checks above are exactly this predicate's input contract:
+    // the path is relative, slash-separated, and free of `.`, `..`, and
+    // percent-encoding. It folds case and Win32 trailing aliases itself.
+    if dohc_engine_files::policy::normalized_path_is_secret(path) {
         return PathClass::Secret;
     }
     PathClass::Tracked

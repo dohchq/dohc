@@ -73,6 +73,34 @@ const inputs = [
   ["encoded/secrets%2eenv", false],
   ["../escape.env", false],
   ["C:/absolute.env", false],
+  // Secret-rule surface. Three rules decide secret material — an `.env`
+  // segment at any depth, a basename ending `.env`, and a basename starting
+  // `.env.` — under case folding and a trailing dot/space alias strip. One
+  // vector per rule, plus the near misses that must stay tracked, so any
+  // change to a rule moves a vector and the TypeScript oracle is asked about
+  // it too.
+  ["apps/site/.env/local", true],
+  ["deploy/PROD.ENV", true],
+  ["config/.ENV.LOCAL", true],
+  [".env.", true],
+  ["config/.env.local. ", true],
+  [".envrc", true],
+  ["notes/env/config.md", true],
+  ["notes/envelope.md", true],
+  // Ignored and reserved segments outrank a secret-shaped name on both sides.
+  ["node_modules/pkg/.env", true],
+  [".dohc/config.env", true],
+  // Secret classes no rule holds today. The share boundary reads its secret
+  // verdict from the files policy, so a rule that names one of these moves the
+  // boundary too, with no edit at the boundary. These are the vectors that
+  // show it.
+  ["keys/server.pem", true],
+  ["home/.ssh/id_rsa", true],
+  ["secrets/api-token.txt", true],
+  // Secret material outside the share grammar. The share classifier fails
+  // closed on the `.` segment while the files policy normalizes it away and
+  // reads the path as secret.
+  ["./config/.env", false],
 ];
 
 const vectors = inputs.map(([path, rustClaimed]) => ({
