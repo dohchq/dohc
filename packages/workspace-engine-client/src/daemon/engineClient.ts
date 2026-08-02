@@ -554,11 +554,13 @@ export class EngineClient implements EngineTransport {
   private bufferedBlobBytes = 0;
   private connectTimer: ReturnType<typeof setTimeout> | undefined;
   helloAck: HelloAckEnvelope | undefined;
+  private inboundFrames = 0;
 
   constructor(
     private readonly connection: EngineClientConnection,
     private readonly connectOptions: EngineClientConnectOptions,
-    private readonly terminate: () => void = () => connection.close(),
+    private readonly terminate: (force?: boolean) => void = () =>
+      connection.close(),
     private readonly termination: Promise<void> = Promise.resolve(),
   ) {
     this.maxFrameBytes =
@@ -722,6 +724,30 @@ export class EngineClient implements EngineTransport {
     this.fail(new EngineClientError("closed", "The engine client was closed."));
   }
 
+  // AUDIT-KILLREC again, for the supervisor's wedge kill. Killing a daemon that
+  // stopped answering is a REPLACEMENT, not a shutdown, and this cause is the
+  // only one its in-flight callers will ever see: `notifyProcessExit` returns
+  // early once the client is closed, so the process exit that follows cannot
+  // re-cause these rejections. Reporting a bare `closed` here told every
+  // retry-enabled caller the daemon went away on purpose, and they stayed
+  // failed across a restart that was already under way.
+  closeUnresponsive(): void {
+    if (this.closed) return;
+    // `force` because a wedged daemon must die NOW, not on a timer. The
+    // ordinary close ends stdin and schedules the kill 2s later, and the
+    // supervisor's next act is to report a terminal failure — which the
+    // desktop answers with a modal that blocks the event loop. A timer cannot
+    // run while that modal stands, so the deferred kill would wait for the
+    // user and the wedged child would outlive the dialog.
+    this.fail(
+      new EngineClientError(
+        "transport-error",
+        "The engine stopped answering and was killed for replacement.",
+      ),
+      true,
+    );
+  }
+
   dispose(): void {
     this.close();
   }
@@ -773,7 +799,16 @@ export class EngineClient implements EngineTransport {
     }
   };
 
+  // Every frame this client has decoded, of any kind. A liveness probe cannot
+  // read its own reply as the only proof of life: the daemon writes ONE output
+  // queue in order, so a probe can sit behind bulk egress it is not allowed to
+  // overtake. Bytes arriving for anyone prove the daemon is turning.
+  inboundActivity(): number {
+    return this.inboundFrames;
+  }
+
   private receiveFrame(frame: Frame): void {
+    this.inboundFrames += 1;
     if (frame.kind === "blobChunk") {
       if (!this.readyState) {
         throw new EngineClientError(
@@ -1213,7 +1248,7 @@ export class EngineClient implements EngineTransport {
     }
   }
 
-  private fail(error: EngineClientError): void {
+  private fail(error: EngineClientError, force = false): void {
     if (this.closed) return;
     this.closed = true;
     this.closeCause = error;
@@ -1235,7 +1270,7 @@ export class EngineClient implements EngineTransport {
     this.bufferedBlobBytes = 0;
     this.bufferedBlobChunks = 0;
     try {
-      this.terminate();
+      this.terminate(force);
     } catch {
       this.connection.close();
     }
@@ -1321,12 +1356,19 @@ export async function createEngineClient(
   const client = new EngineClient(
     clientConnection,
     options,
-    () => {
+    (force) => {
       // Closing stdin lets the Rust host observe EOF, drain its workspace
       // actors, and exit normally. Keep a bounded kill fallback for a wedged
       // child so desktop shutdown cannot leak the sidecar.
       connection.end();
       if (child.exitCode !== null || child.signalCode !== null) return;
+      // A forced kill cannot wait for the timer below. The caller already
+      // proved this child answers nothing, and it is about to run code that
+      // can block the event loop, which is where that timer lives. Signal now.
+      if (force) {
+        child.kill();
+        return;
+      }
       const killTimer = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) child.kill();
       }, 2_000);

@@ -1403,6 +1403,99 @@ describe("EngineClient", () => {
     ).rejects.toMatchObject({ code: "transport-error" });
   });
 
+  // The supervisor's wedge kill, on the REAL client. A wedged daemon never
+  // exits on its own, so the supervisor kills it — and once this client is
+  // closed, `notifyProcessExit` returns early, so the exit that follows can no
+  // longer re-cause these rejections. Whatever is recorded here is final.
+  it("reports a wedge kill as a transport failure so callers retry the replacement", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const inFlight = transport.sendRequest(request(300, "wedged.work"));
+
+    transport.closeUnresponsive();
+
+    await expect(inFlight).rejects.toMatchObject({ code: "transport-error" });
+    // And the later process exit cannot upgrade it, which is why the cause
+    // above has to be right the first time.
+    transport.notifyProcessExit(null, "SIGTERM");
+    await expect(
+      transport.sendRequest(request(301, "after.kill")),
+    ).rejects.toMatchObject({ code: "transport-error" });
+  });
+
+  // The wedge detector's ONE production input. A daemon draining a large
+  // backlog answers no probe — the probe cannot overtake its output queue — so
+  // this counter is the only thing that tells the supervisor it is alive. If it
+  // never advanced, every busy daemon would be killed as wedged.
+  // MUTATION: delete `this.inboundFrames += 1` from receiveFrame and this
+  // fails. Nothing else in the suite notices, which is why it is asserted here.
+  it("counts every frame it receives, which is what proves a busy daemon alive", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+
+    const beforeWork = transport.inboundActivity();
+    const pending = transport.sendRequest(request(400, "bulk.work"));
+    const sent = peer.received.at(-1);
+    peer.send({
+      type: "response",
+      id: (sent as { id: number }).id,
+      result: "bulk",
+    });
+    await pending;
+
+    // Traffic for an ordinary caller, not a probe: exactly the frames that
+    // arrive while a probe waits its turn behind them.
+    expect(transport.inboundActivity()).toBeGreaterThan(beforeWork);
+  });
+
+  // A wedge kill cannot be left on the 2-second timer that a deliberate close
+  // uses. The supervisor reports the terminal failure immediately afterwards,
+  // and the desktop answers that report with a modal; the event loop stops
+  // there, so a deferred kill would wait for the user to dismiss it while the
+  // wedged child kept running.
+  it("forces termination for a wedge kill and defers it for a deliberate close", async () => {
+    const forced: Array<boolean | undefined> = [];
+    const wedged = new FakePeerConnection();
+    const killedNow = new EngineClient(
+      wedged,
+      {
+        authToken: "parent-secret",
+        protocolVersion: 1,
+        capabilities: ["core"],
+        connectTimeoutMs: 5_000,
+        maxFrameBytes: LIMITS.maxFrameBytes,
+      },
+      (force) => forced.push(force),
+    );
+    wedged.acknowledge();
+    await killedNow.ready();
+    killedNow.closeUnresponsive();
+
+    const shutdown = new FakePeerConnection();
+    const closedNormally = new EngineClient(
+      shutdown,
+      {
+        authToken: "parent-secret",
+        protocolVersion: 1,
+        capabilities: ["core"],
+        connectTimeoutMs: 5_000,
+        maxFrameBytes: LIMITS.maxFrameBytes,
+      },
+      (force) => forced.push(force),
+    );
+    shutdown.acknowledge();
+    await closedNormally.ready();
+    closedNormally.close();
+
+    // Only the wedge kill forces it. A deliberate close still gets the stdin
+    // EOF and the grace period the Rust host needs to drain its actors.
+    expect(forced).toEqual([true, false]);
+  });
+
   it("still reports a deliberate close as closed", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);

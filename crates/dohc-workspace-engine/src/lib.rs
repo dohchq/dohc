@@ -737,6 +737,7 @@ impl EngineService {
             });
         }
         let result = match request.method.as_str() {
+            "engine.ping" => engine_ping(),
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
             "workspace.close" => self.workspace_close(request.workspace).await?,
             "sync.push" => {
@@ -11021,6 +11022,16 @@ fn sync_identifier_from_entropy(prefix: &str, mut entropy: [u8; 16]) -> String {
     )
 }
 
+/// Liveness probe. It takes no workspace, reads no store, and touches no
+/// filesystem, so it can neither block nor fail. An answer therefore proves
+/// the transport reader, the request supervisor, and the writer are all still
+/// turning — which is the whole claim a client-side wedge detector needs.
+/// It says nothing about any single workspace actor, which runs on its own
+/// thread and can stall alone.
+fn engine_ping() -> Value {
+    json!({ "ok": true })
+}
+
 fn wire(code: ErrorCode, message: &'static str) -> WireError {
     WireError::new(code, message)
 }
@@ -11059,6 +11070,30 @@ mod tests {
             drained, ENGINE_EVENT_QUEUE_CAPACITY,
             "emit must shed past the bound, not queue unboundedly"
         );
+    }
+
+    #[tokio::test]
+    async fn engine_ping_answers_without_a_workspace_handle() {
+        // MUTATION: drop the "engine.ping" dispatch arm and the call falls
+        // through to MethodNotFound; require a workspace and it errors on a
+        // probe that must work before any workspace is open.
+        let service = EngineService::new();
+        let answer = service
+            .call(
+                RequestContext::unbounded(),
+                Request {
+                    id: 1,
+                    method: "engine.ping".to_owned(),
+                    workspace: None,
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    params: Value::Null,
+                },
+            )
+            .await
+            .expect("engine.ping must answer");
+        assert_eq!(answer.response.id, 1);
+        assert_eq!(answer.response.result, json!({ "ok": true }));
     }
 
     #[test]

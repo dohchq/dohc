@@ -32,7 +32,19 @@ class FakeClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
   readonly cancelledRequestIds: number[] = [];
   closed = false;
+  // WHICH kill path ran. The real EngineClient rejects everything in flight
+  // with this code, and a caller that retries through a relaunch reads it to
+  // tell a replacement from a deliberate shutdown. A fake that only recorded
+  // `closed = true` could not tell the two apart at all.
+  closeCause: "closed" | "transport-error" | null = null;
+  // Frames arriving from the daemon for ANYONE. Bulk egress advances this
+  // while a probe waits behind it in the daemon's single output queue.
+  inbound = 0;
   waitForExit?: () => Promise<void>;
+
+  inboundActivity(): number {
+    return this.inbound;
+  }
 
   constructor(
     private readonly respond: (
@@ -53,7 +65,55 @@ class FakeClient implements EngineDaemonClient {
   }
 
   close(): void {
+    this.finishClose("closed");
+  }
+
+  closeUnresponsive(): void {
+    this.finishClose("transport-error");
+  }
+
+  protected finishClose(cause: "closed" | "transport-error"): void {
+    if (this.closed) return;
     this.closed = true;
+    this.closeCause = cause;
+  }
+}
+
+function healthyPing(request: Request): Response {
+  if (request.method === "workspace.open") {
+    return { id: request.id, result: { workspace: "health-handle" } };
+  }
+  if (request.method === "engine.ping") {
+    return { id: request.id, result: { ok: true } };
+  }
+  return { id: request.id, result: null };
+}
+
+// Alive, handshaked, serving the launch smoke — and silent on engine.ping.
+// This is the wedge: nothing exits, so nothing in the restart path can see it.
+function silentPing(request: Request): Response | Promise<Response> {
+  if (request.method === "engine.ping") return new Promise<Response>(() => {});
+  return healthyPing(request);
+}
+
+// A real client.close() ends the child's stdin and kills a child that ignores
+// it; the resulting process exit is what reaches the lifecycle. This fake makes
+// that same handoff, so a test can prove the wedge kill lands in the ordinary
+// restart machinery.
+class SelfExitingClient extends FakeClient {
+  exit: EngineClientSpawnOptions["onExit"];
+
+  protected override finishClose(
+    cause: "closed" | "transport-error",
+  ): void {
+    if (this.closed) return;
+    super.finishClose(cause);
+    // A REAL child's "exit" is an event-loop delivery: node cannot dispatch it
+    // inside the close() call that killed the process. Delivering it
+    // synchronously here would let a fake reorder failure reports in a way the
+    // real transport never can. A microtask keeps that ordering honest without
+    // depending on fake timers.
+    queueMicrotask(() => this.exit?.(null, "SIGTERM"));
   }
 }
 
@@ -546,6 +606,460 @@ describe("Rust engine daemon lifecycle", () => {
 
       expect(exits).toHaveLength(4);
       expect(terminalFailures).toHaveLength(0);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("restarts a daemon that is alive but stopped answering engine.ping", async () => {
+    // The wedge from the issue: the process never exits, so the restart path —
+    // which starts at process exit — is never reached on its own.
+    // MUTATION: remove the wedge detector (or its reportWedge kill) and no
+    // failure is ever reported, no client is closed, and no relaunch happens.
+    const clients: SelfExitingClient[] = [];
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      pingExpiryMs: 10,
+      maxPingExpiries: 2,
+      launch: async (options) => {
+        // Only the first generation wedges; its replacement answers.
+        const client = new SelfExitingClient(
+          clients.length === 0 ? silentPing : healthyPing,
+        );
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => {
+        failures.push({ error, terminal });
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(clients).toHaveLength(2), {
+        timeout: 5_000,
+      });
+      expect(clients[0]?.closed).toBe(true);
+      expect(
+        failures.map(({ error, terminal }) => [error.message, terminal]),
+      ).toEqual([
+        [
+          "The Rust engine is running but sent nothing: " +
+            "2 probes in a row expired after 10ms each with no frame of any " +
+            "kind from the engine. " +
+            "The limit is 2 probes with no traffic. dohc is restarting it.",
+          false,
+        ],
+        // The kill becomes an exit, and the exit is what carries the wedge
+        // into the same restart machinery a crash uses — including the rolling
+        // window's crash accounting.
+        ["Rust engine daemon exited unexpectedly with signal SIGTERM.", false],
+      ]);
+      // The probe must carry no wire deadline. EngineClient arms its OWN timer
+      // for any request that names one and rejects when it fires, so a deadline
+      // here would turn a wedged daemon's silence into a rejection the detector
+      // reads as life — and none of the above would ever happen against the
+      // real client. This fake cannot model that timer, so assert the input.
+      const probes = clients[0]?.requests.filter(
+        (request) => request.method === "engine.ping",
+      );
+      expect(probes?.length).toBeGreaterThanOrEqual(2);
+      for (const probe of probes ?? []) {
+        expect(probe.deadlineMs ?? null).toBeNull();
+      }
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("ends a wedge loop at PRODUCTION cadence, on a driven clock", async () => {
+    // THE RATIO, not the numbers. Every other wedge test compresses the probe
+    // cadence, and compression changes the one relationship that was broken:
+    // a wedge cycle is 3 intervals + 3 expiries = 225s, so the shared crash
+    // window (10 exits per 600s) can never hold more than 3 of them, and
+    // healthyResetMs (30s) is shorter than the cycle so the burst budget
+    // resets every generation too. A daemon that wedged after every launch
+    // therefore restarted forever — #412's own complaint, for wedges.
+    //
+    // So this test changes NO production constant. It drives a clock instead.
+    // MUTATION: delete the consecutive-wedge budget and leave wedge exits to
+    // the shared 10-in-600s crash contract -> no terminal failure ever
+    // arrives and this fails on an empty list.
+    const realSetTimeout = globalThis.setTimeout;
+    vi.useFakeTimers();
+    let now = 0;
+    const clients: SelfExitingClient[] = [];
+    const terminalFailures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      initialBackoffMs: 0,
+      // Ping cadence, expiry, wedge budget, healthy reset, and the rolling
+      // window are all left at their production defaults ON PURPOSE.
+      monotonicNowMs: () => now,
+      wallNowMs: () => now,
+      launch: async (options) => {
+        const client = new SelfExitingClient(silentPing);
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => {
+        if (terminal) terminalFailures.push(error);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      // Twenty minutes of driven time: twice the crash window, and room for
+      // five 225s wedge cycles.
+      const step = 5_000;
+      for (
+        let elapsed = 0;
+        elapsed < 20 * 60_000 && terminalFailures.length === 0;
+        elapsed += step
+      ) {
+        now += step;
+        await vi.advanceTimersByTimeAsync(step);
+        // Each launch runs the smoke against a real temporary directory. A
+        // driven clock does not move real I/O, so give the event loop a real
+        // turn between steps or the relaunch never completes.
+        await new Promise((resolve) => realSetTimeout(resolve, 0));
+      }
+
+      expect(terminalFailures.map((error) => error.message)).toEqual([
+        "The Rust engine went silent on 2 launches: " +
+          "3 probes in a row expired after 45000ms each with no frame of any " +
+          "kind from the engine. " +
+          "The limit is 2 wedges with no traffic in between. " +
+          "dohc stopped restarting it.",
+      ]);
+      // Two generations, both wedged, both killed. A third would mean the
+      // terminal verdict failed to stop the restart it ordered.
+      expect(clients).toHaveLength(2);
+      expect(clients.every((client) => client.closed)).toBe(true);
+      // And it ended well inside the crash window it could never have filled:
+      // ten wedge exits at 225s each would take 37.5 minutes.
+      expect(now).toBeLessThan(600_000);
+    } finally {
+      vi.useRealTimers();
+      await lifecycle.stop();
+    }
+  }, 30_000);
+
+  it("clears the wedge streak when a generation answers a probe", async () => {
+    // A daemon that wedges, is restarted, ANSWERS, then wedges again is being
+    // recovered — not looping. Only consecutive wedges with nothing answered
+    // in between are evidence, so this daemon must keep getting restarted.
+    // MUTATION: drop the consecutiveWedges reset in probeOnce and the second
+    // wedge condemns a daemon that demonstrably answered between the two.
+    const clients: SelfExitingClient[] = [];
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      pingExpiryMs: 10,
+      maxPingExpiries: 1,
+      maxConsecutiveWedges: 2,
+      launch: async (options) => {
+        // Every generation after the first answers two probes before going
+        // silent, so no streak ever reaches two.
+        let answers = clients.length === 0 ? 0 : 2;
+        const client = new SelfExitingClient((request) => {
+          if (request.method !== "engine.ping") return healthyPing(request);
+          if (answers > 0) {
+            answers -= 1;
+            return healthyPing(request);
+          }
+          return new Promise<Response>(() => {});
+        });
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => {
+        failures.push({ error, terminal });
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      // Four generations means three wedge kills survived without terminating.
+      await vi.waitFor(() => expect(clients.length).toBeGreaterThanOrEqual(4), {
+        timeout: 10_000,
+      });
+      expect(failures.filter(({ terminal }) => terminal)).toEqual([]);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("kills a wedged daemon as a transport failure, not a deliberate close", async () => {
+    // A wedge kill is a REPLACEMENT. EngineWorkspaceSessions retries only
+    // `transport-error`, so a plain close tells an editor session the daemon
+    // went away on purpose and it stays failed across the restart already
+    // under way — AUDIT-KILLREC, reached the second way.
+    // MUTATION: call client.close() in reportWedge instead and the recorded
+    // cause is "closed", which no retry path rebinds through.
+    const clients: SelfExitingClient[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      pingExpiryMs: 10,
+      maxPingExpiries: 1,
+      launch: async (options) => {
+        const client = new SelfExitingClient(silentPing);
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(clients.length).toBeGreaterThanOrEqual(2), {
+        timeout: 10_000,
+      });
+      expect(clients[0]?.closed).toBe(true);
+      expect(clients[0]?.closeCause).toBe("transport-error");
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("kills the wedged daemon before the terminal report can block", async () => {
+    // The desktop answers a terminal verdict with dialog.showErrorBox, which
+    // does not return until the user dismisses the modal. Reporting first
+    // would leave the wedged child alive behind that dialog for as long as it
+    // stands, while this lifecycle already called the engine gone.
+    // MUTATION: move the kill below reportFailure and the wedged client is
+    // still open when the consumer regains control -> [false].
+    const clients: SelfExitingClient[] = [];
+    const closedWhenReported: boolean[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      pingExpiryMs: 10,
+      maxPingExpiries: 1,
+      maxConsecutiveWedges: 2,
+      launch: async (options) => {
+        const client = new SelfExitingClient(silentPing);
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (_error, terminal) => {
+        // Stands in for the modal: read the wedged client at the exact moment
+        // the consumer takes control, which is where a dialog would park.
+        if (terminal) closedWhenReported.push(clients.at(-1)?.closed ?? false);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(closedWhenReported).toHaveLength(1), {
+        timeout: 10_000,
+      });
+      expect(closedWhenReported).toEqual([true]);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("never kills a daemon whose output is still arriving", async () => {
+    // A probe cannot overtake the daemon's output queue. That queue holds 64
+    // ITEMS counted without regard to size, a control frame may reach 8 MiB,
+    // and BlobEgressBudget reserves blob bytes only — so a reply can sit
+    // behind hundreds of megabytes, and the wait on that channel is untimed.
+    // No expiry can both survive that and still catch a wedge, so silence is
+    // measured as NO TRAFFIC AT ALL rather than as no reply.
+    // MUTATION: drop the inboundActivity check in sendPing and this daemon —
+    // which never answers a probe but never stops sending — is killed as
+    // wedged, restarting a daemon that is draining real work.
+    const clients: SelfExitingClient[] = [];
+    const failures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 2,
+      pingExpiryMs: 20,
+      maxPingExpiries: 1,
+      launch: async (options) => {
+        const client = new SelfExitingClient(silentPing);
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error) => failures.push(error),
+    });
+
+    // Output keeps arriving for OTHER callers throughout, exactly as it would
+    // while the daemon writes down a queued backlog. No probe is ever answered.
+    const traffic = setInterval(() => {
+      for (const client of clients) client.inbound += 1;
+    }, 2);
+    try {
+      await lifecycle.start();
+      // Long enough for several expiries to pass and condemn it, if silence
+      // were still being measured by the probe's own reply.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(failures).toEqual([]);
+      expect(clients).toHaveLength(1);
+      expect(clients[0]?.closed).toBe(false);
+    } finally {
+      clearInterval(traffic);
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("counts a reply that lands between probe windows", async () => {
+    // Probes do not tile the timeline: the next one starts an interval after
+    // the previous RESOLVED, so with a 20ms expiry and a 30ms interval the
+    // windows are [0,20], [50,70], [100,120] — and the gaps belong to nobody.
+    // A reply delivered at 30ms, just after its own probe expired, is the
+    // likeliest late frame there is. It still proves the daemon is turning.
+    // MUTATION: baseline the activity count inside sendPing per window instead
+    // of carrying it across verdicts, and every one of these replies lands in
+    // a gap, is discarded, and this healthy daemon is killed as wedged.
+    const clients: SelfExitingClient[] = [];
+    const failures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 30,
+      pingExpiryMs: 20,
+      maxPingExpiries: 3,
+      launch: async (options) => {
+        const client: SelfExitingClient = new SelfExitingClient((request) => {
+          if (request.method !== "engine.ping") return healthyPing(request);
+          // Answers, but too late for its own race — exactly the queued reply
+          // that arrives once the daemon works through its output backlog.
+          setTimeout(() => {
+            client.inbound += 1;
+          }, 30);
+          return new Promise<Response>(() => {});
+        });
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error) => failures.push(error),
+    });
+
+    try {
+      await lifecycle.start();
+      // Room for several expiries to accumulate a wedge verdict, if the gaps
+      // were still being thrown away.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(failures).toEqual([]);
+      expect(clients).toHaveLength(1);
+      expect(clients[0]?.closed).toBe(false);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("never kills a daemon that answers engine.ping slowly or refuses it", async () => {
+    // A saturated daemon answers: the request supervisor resolves a queued
+    // request's own deadline before it competes for an execution slot, so the
+    // probe comes back as a refusal rather than as silence.
+    // MUTATION: count a rejected probe as an expiry, or drop the expiry bound
+    // below the answer latency, and this kills a healthy daemon.
+    const clients: FakeClient[] = [];
+    const failures: Error[] = [];
+    let probes = 0;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 2,
+      pingExpiryMs: 40,
+      maxPingExpiries: 1,
+      launch: async () => {
+        const client = new FakeClient(async (request) => {
+          if (request.method !== "engine.ping") return healthyPing(request);
+          probes += 1;
+          const saturated = probes % 2 === 1;
+          // Well inside the 40ms expiry bound, well past the 20ms deadline.
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          if (saturated) throw new Error("request deadline elapsed while queued");
+          return { id: request.id, result: { ok: true } };
+        });
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error) => failures.push(error),
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(probes).toBeGreaterThanOrEqual(4), {
+        timeout: 5_000,
+      });
+      expect(failures).toEqual([]);
+      expect(clients).toHaveLength(1);
+      expect(clients[0]?.closed).toBe(false);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("does not call a restarting daemon wedged", async () => {
+    // A probe can still be in flight when its generation dies. The replacement
+    // must not inherit that silence.
+    // MUTATION: drop the liveness re-check after the probe settles and the
+    // stale probe reports a wedge against a daemon that is already gone.
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const failures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      // 100ms of expiry bound: long enough that the first generation's probe is
+      // still pending when the crash lands.
+      pingExpiryMs: 100,
+      maxPingExpiries: 1,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new FakeClient(
+          exits.length === 1 ? silentPing : healthyPing,
+        );
+      },
+      onFailure: (error) => failures.push(error),
+    });
+
+    try {
+      await lifecycle.start();
+      // Let the first probe get in flight, then crash under it.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      exits[0]?.(1, null);
+      await vi.waitFor(() => expect(exits).toHaveLength(2), { timeout: 5_000 });
+      // Outlive the stale probe's expiry bound by a wide margin.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(failures.map((error) => error.message)).toEqual([
+        "Rust engine daemon exited unexpectedly with code 1.",
+      ]);
     } finally {
       await lifecycle.stop();
     }

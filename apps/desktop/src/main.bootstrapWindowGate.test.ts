@@ -150,6 +150,26 @@ describe("bootstrap window gate", () => {
     expect(mainSource).toContain('\n    window.webContents.once("did-finish-load"');
   });
 
+  // Resolving the binary path can throw (a packaged build with no resources
+  // path). Outside the try it rejects the whenReady callback instead, so the
+  // user gets an unhandled rejection on the one path whose job is to explain
+  // why the engine could not start.
+  it("resolves the engine binary path inside the failure dialog's try", () => {
+    const startAt = mainSource.indexOf("async function startRustEngineDaemon(");
+    expect(startAt).toBeGreaterThanOrEqual(0);
+    const tryAt = mainSource.indexOf("\n  try {", startAt);
+    const resolveAt = mainSource.indexOf("defaultEngineBinaryPath({", startAt);
+    const catchAt = mainSource.indexOf("\n  } catch (error) {", startAt);
+    expect(tryAt).toBeGreaterThan(startAt);
+    expect(resolveAt).toBeGreaterThan(tryAt);
+    expect(catchAt).toBeGreaterThan(resolveAt);
+    // The daemon handle is now assigned inside the try, so a throw before that
+    // assignment reaches a catch that must not dereference it.
+    const handler = mainSource.slice(catchAt, catchAt + 800);
+    expect(handler).toContain('"Rust engine failed to start"');
+    expect(handler).toContain("await rustEngineDaemon?.stop();");
+  });
+
   it("quits with a visible error when the bootstrap continuation throws", () => {
     const catchAt = mainSource.indexOf("}).catch((error: unknown) => {");
     expect(catchAt).toBeGreaterThan(mainSource.indexOf("app.whenReady().then("));

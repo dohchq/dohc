@@ -7707,29 +7707,47 @@ function testEngineRestartOverrides(): {
 }
 
 async function startRustEngineDaemon(): Promise<boolean> {
-  rustEngineDaemon = createRustEngineDaemon({
-    ...testEngineRestartOverrides(),
-    command: defaultEngineBinaryPath({
-      isPackaged: app.isPackaged,
-      appPath: app.getAppPath(),
-      resourcesPath: process.resourcesPath,
-    }),
-    onFailure: (error, terminal) => {
-      console.error("[desktop] Rust engine daemon:", error);
-      if (terminal && !quitting) {
-        dialog.showErrorBox(
-          "Rust engine stopped",
-          `${error.message}\n\nRestart dohc. If the engine stops again, review the desktop logs and repair or reinstall dohc.`,
-        );
-      }
-    },
-    // A capture event can die with the previous daemon's transport after its
-    // moment committed; the replacement never re-emits it (its baseline finds
-    // disk and manifest agreeing). One repaint per healthy launch closes that
-    // staleness window.
-    onLaunch: () => notifyRenderer(),
-  });
+  // Everything, including resolving the binary path, runs inside the try: a
+  // throw while BUILDING the options would otherwise reject this whenReady
+  // callback and leave the user with no dialog, on the one path whose job is
+  // to explain that the engine could not start.
   try {
+    rustEngineDaemon = createRustEngineDaemon({
+      ...testEngineRestartOverrides(),
+      command: defaultEngineBinaryPath({
+        isPackaged: app.isPackaged,
+        appPath: app.getAppPath(),
+        resourcesPath: process.resourcesPath,
+      }),
+      onFailure: (error, terminal) => {
+        // The supervisor's diagnostic is for us: it names engine.ping, probe
+        // counts and wedge budgets, which tell a developer or an agent exactly
+        // which limit was hit. It goes to the log in full.
+        console.error("[desktop] Rust engine daemon:", error);
+        if (terminal && !quitting) {
+          // The dialog is for the user, so it says what broke and what to do
+          // instead — no internal names, one instruction per sentence
+          // (docs/brand/copy.md). "The workspace engine" is the noun the
+          // shipping UI already uses for this (SettingsDialog, StatusBar,
+          // NoticeCenter), so this must not invent another one.
+          //
+          // Cause-neutral on purpose: a terminal failure also arrives from the
+          // restart limit and the crash window, where the engine crashed
+          // rather than went silent. Every one of them ends the same way.
+          dialog.showErrorBox(
+            "The workspace engine stopped",
+            "dohc stopped restarting the workspace engine.\n\n" +
+              "Restart dohc. If this happens again, review the desktop logs. " +
+              "If it continues, reinstall dohc.",
+          );
+        }
+      },
+      // A capture event can die with the previous daemon's transport after its
+      // moment committed; the replacement never re-emits it (its baseline finds
+      // disk and manifest agreeing). One repaint per healthy launch closes that
+      // staleness window.
+      onLaunch: () => notifyRenderer(),
+    });
     await rustEngineDaemon.start();
     // The daemon owns capture: its capture.momentRecorded events are the ONLY
     // signal that a moment landed, so bridge them onto the renderer's
@@ -7754,7 +7772,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
       "Rust engine failed to start",
       `${message}\n\nThe desktop cannot start without the Rust engine.`,
     );
-    await rustEngineDaemon.stop();
+    await rustEngineDaemon?.stop();
     rustEngineDaemon = null;
     rustEngineWorkspaceSessions = null;
     rustEngineRelayClient = null;
