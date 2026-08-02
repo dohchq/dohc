@@ -664,7 +664,12 @@ describe("DesktopSettings", () => {
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
     );
     expect(bridge.startAgentRun).toHaveBeenCalledWith({ workspaceId: "ws-1" });
-    expect(onAgentActiveChange).toHaveBeenLastCalledWith(true);
+    // Started the run itself, so the shell may let this outrank a refresh
+    // that was already in flight.
+    expect(onAgentActiveChange).toHaveBeenLastCalledWith({
+      active: true,
+      mutated: true,
+    });
   });
 
   it("disables an enabled server, ending the active run", async () => {
@@ -686,16 +691,23 @@ describe("DesktopSettings", () => {
     );
     await user.click(toggle);
     expect(bridge.endAgentRun).toHaveBeenCalledWith({ workspaceId: "ws-1", runId: "run-1" });
-    await waitFor(() => expect(onAgentActiveChange).toHaveBeenLastCalledWith(false));
+    await waitFor(() =>
+      expect(onAgentActiveChange).toHaveBeenLastCalledWith({
+        active: false,
+        mutated: true,
+      }),
+    );
   });
 
   it("refreshes stale stopped UI before toggling so it cannot disable behind an Enable label", async () => {
     const user = userEvent.setup();
+    const onAgentActiveChange = vi.fn();
     render(
       <DesktopSettings
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
+        onAgentActiveChange={onAgentActiveChange}
         onClose={() => {}}
       />,
     );
@@ -713,16 +725,25 @@ describe("DesktopSettings", () => {
     expect(bridge.startAgentRun).not.toHaveBeenCalled();
     expect(bridge.endAgentRun).not.toHaveBeenCalled();
     expect(screen.getByTestId("mcp-enable-toggle").textContent).toContain("Disable");
+    // Nothing was started or ended, so this reading must not outrank anything.
+    // It came from its own request, which may be older than one the shell is
+    // still waiting on.
+    expect(onAgentActiveChange).toHaveBeenLastCalledWith({
+      active: true,
+      mutated: false,
+    });
   });
 
   it("refreshes stale running UI before toggling so it cannot enable behind a Disable label", async () => {
     mcpEnabled = true;
     const user = userEvent.setup();
+    const onAgentActiveChange = vi.fn();
     render(
       <DesktopSettings
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
+        onAgentActiveChange={onAgentActiveChange}
         onClose={() => {}}
       />,
     );
@@ -742,6 +763,10 @@ describe("DesktopSettings", () => {
     expect(bridge.startAgentRun).not.toHaveBeenCalled();
     expect(bridge.endAgentRun).not.toHaveBeenCalled();
     expect(screen.getByTestId("mcp-enable-toggle").textContent).toContain("Enable");
+    expect(onAgentActiveChange).toHaveBeenLastCalledWith({
+      active: false,
+      mutated: false,
+    });
   });
 
   it("shows current desktop update version and channel", async () => {

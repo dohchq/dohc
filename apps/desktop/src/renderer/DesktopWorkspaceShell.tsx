@@ -1695,17 +1695,23 @@ export function DesktopWorkspaceShell(props: {
   // running banner or the run's review card. Refreshed with history (the
   // manager pings the same workspace-activity channel on every transition).
   const [tryState, setTryState] = useState<TryInVersionRunState | null>(null);
-  // The two local writers on that lane. Dismissing the review card clears it
-  // here; starting or ending an agent run from Settings reports the state it
-  // just observed. Both are the user acting, and both supersede whatever a
-  // request issued earlier will eventually say.
+  // The local writers on these lanes. Dismissing the review card clears it
+  // here, and that IS the user acting: it supersedes whatever a request issued
+  // earlier will eventually say.
   const onTryReviewDismissed = useCallback(() => {
     supersedeSnapshotLane(committedTryStateToken);
     setTryState(null);
   }, [supersedeSnapshotLane]);
+  // Settings reports the agent lane two different ways, and only one of them
+  // is the user acting. Starting or ending a run is a local write, newer than
+  // every request in flight. Merely OBSERVING that the run changed under the
+  // rendered label is not: that reading came from its own request, which may
+  // have been issued BEFORE a refresh the shell is still waiting on — and
+  // superseding on it would throw away the newer answer. A run observed alive
+  // just before it ended would then leave the indicator running forever.
   const onSettingsAgentActiveChange = useCallback(
-    (active: boolean) => {
-      supersedeSnapshotLane(committedAgentActiveToken);
+    ({ active, mutated }: { active: boolean; mutated: boolean }) => {
+      if (mutated) supersedeSnapshotLane(committedAgentActiveToken);
       setAgentActive(active);
     },
     [supersedeSnapshotLane],
@@ -1786,6 +1792,9 @@ export function DesktopWorkspaceShell(props: {
     // so they can neither interleave into a mixed timeline nor discard each
     // other for merely existing.
     const token = ++engineHistoryToken.current;
+    // The version this page belongs to: the one the DISPLAYED timeline shows,
+    // because that is the timeline the cursor points into.
+    const pageVersionId = committedEngineVersionId.current;
     pendingEngineHistoryPage.current = token;
     setEngineHistoryLoadingMore(true);
     try {
@@ -1821,9 +1830,15 @@ export function DesktopWorkspaceShell(props: {
         );
       }
     } catch (error) {
-      // Silent only when a newer answer already replaced what this page was
-      // going to extend — then the failure is about a timeline nobody sees.
-      if (token > committedEngineHistoryToken.current) {
+      // Two ways this failure is about a timeline nobody is looking at: a
+      // newer answer already replaced what the page was going to extend, or
+      // the user left the version the page belongs to. A failure IS an answer
+      // for the purposes of the version rule — it answers about somewhere
+      // else — and the switch does not move the committed watermark, so
+      // without this the user gets a banner for a timeline they have left.
+      const forALeftVersion =
+        pageVersionId !== null && engineHistoryAnswerIsStale(token, pageVersionId);
+      if (token > committedEngineHistoryToken.current && !forALeftVersion) {
         reportShellError("Could not load earlier history.", error);
       }
     } finally {

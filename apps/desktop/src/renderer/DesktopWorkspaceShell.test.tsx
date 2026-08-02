@@ -29,7 +29,9 @@ import type {
   FileChatThreadRecord,
   ListEngineMomentsResult,
   ListWorkspaceVersionsResult,
+  McpConfigResult,
   RefreshSharedViewResult,
+  StartAgentRunResult,
   SwitchWorkspaceVersionResult,
   TryInVersionStateResult,
   ShowExplorerMenuResult,
@@ -208,12 +210,24 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         lastRun: null,
       }),
     ),
-    getMcpConfig: vi.fn(async () => ({
+    getMcpConfig: vi.fn(async (): Promise<McpConfigResult> => ({
       command: "dohc-mcp",
       args: ["--workspace", WORKSPACE.rootPath, "--home", "/tmp/dohc-home"],
       workspacePath: WORKSPACE.rootPath,
       home: "/tmp/dohc-home",
     })),
+    // The Settings agent toggle reaches these. Typed to the contract, because
+    // a test that drives the toggle has to be able to swap them.
+    startAgentRun: vi.fn(
+      async (): Promise<StartAgentRunResult> => ({
+        id: "run-1",
+        startedAt: 1,
+        agentId: "agent-1",
+        onBehalfOf: "ice",
+        status: "running",
+      }),
+    ),
+    endAgentRun: vi.fn(async (): Promise<void> => undefined),
     getUserSettings: vi.fn(async () => ({
       settings: DEFAULT_USER_SETTINGS,
       source: "default" as const,
@@ -3404,6 +3418,200 @@ describe("history page", () => {
     });
 
     expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
+  });
+
+  // A failure is an ANSWER for the version rule: it answers about somewhere
+  // the user has left. The switch bumps the issue counter but not the
+  // committed watermark, so the old pagination's rejection still read as
+  // "about the open timeline" and posted a banner for a version nobody is
+  // looking at.
+  it("says nothing about a pagination that failed for the version the user left", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    let failPage!: (error: Error) => void;
+    const page = new Promise<never>((_resolve, reject) => {
+      failPage = reject;
+    });
+    let failSwitchRefresh!: (error: Error) => void;
+    const switchRefresh = new Promise<never>((_resolve, reject) => {
+      failSwitchRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      page,
+      switchRefresh,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    let switched = false;
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "try-1",
+          name: "Try: launch note",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: switched ? "main" : "try-1",
+    }));
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      switched = true;
+      return { activeVersionId: "main", changedFileCount: 0 };
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve({
+        ...historyPage(
+          [historyMoment("m-first", "Wrote the note in the try version")],
+          "try-1",
+        ),
+        nextBeforeMomentOrder: 1,
+      });
+      await first.promise;
+    });
+    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+
+    // Earlier moments are on their way when the user leaves this version.
+    await user.click(screen.getByTestId("engine-history-load-more"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const mainItem = (await screen.findAllByTestId("version-item")).find(
+      (item) => item.dataset.versionId === "main",
+    );
+    await user.click(mainItem!);
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    // Nothing commits for the new version either, so the committed watermark
+    // never moves — the only thing that can tell the failure apart is which
+    // version it belongs to.
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+    // That refresh's own failure is real and is reported. Clear it, so what
+    // remains can only have come from the pagination.
+    await user.click(await screen.findByLabelText("Dismiss workspace error"));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    await act(async () => {
+      failPage(new Error("pagination failed"));
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // Starting or ending a run is the user acting. Merely OBSERVING that the run
+  // changed under the rendered label is not: that reading came from its own
+  // request, which can be older than a refresh the shell is still waiting on.
+  // Superseding on it threw the newer answer away, and a run seen alive just
+  // before it ended left the indicator running with nothing to correct it.
+  it("keeps an observed agent state from rejecting a newer refresh", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const afterTheRun = deferred<ListEngineMomentsResult>();
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      afterTheRun.promise,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    let activeRunId: string | null = null;
+    bridge.getAgentRunStatus = vi.fn(async () => ({
+      mcpEnabled: true,
+      activeRun: activeRunId
+        ? {
+            id: activeRunId,
+            startedAt: 1,
+            agentId: "agent-1",
+            onBehalfOf: "ice",
+            status: "running" as const,
+          }
+        : null,
+      lastRun: null,
+    }));
+    // The panel's reread is held open through getMcpConfig, which only the
+    // settings panel calls — so the shell's own requests run unimpeded.
+    const heldPanelReads: Array<() => void> = [];
+    let panelReads = 0;
+    const mcpConfig: McpConfigResult = {
+      command: "dohc-mcp",
+      args: [],
+      workspacePath: WORKSPACE.rootPath,
+      home: "/tmp/dohc-home",
+    };
+    bridge.getMcpConfig = vi.fn(() => {
+      panelReads += 1;
+      if (panelReads === 1) return Promise.resolve(mcpConfig);
+      return new Promise<McpConfigResult>((resolveRead) => {
+        heldPanelReads.push(() => resolveRead(mcpConfig));
+      });
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve(historyPage([historyMoment("m-first", "Added the launch checklist")]));
+      await first.promise;
+    });
+    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
+
+    // Settings opens while no run is going, so the panel renders "no run".
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Settings: Open Agents & MCP",
+      ),
+    );
+    await screen.findByTestId("mcp-enable-toggle");
+
+    // A run starts, and the toggle's reread catches it alive — but the reread
+    // is still in flight.
+    activeRunId = "run-1";
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await waitFor(() => expect(heldPanelReads.length).toBe(1));
+
+    // The run ends, and the refresh that captured the END is waiting on its
+    // history page.
+    activeRunId = null;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+
+    // The reread answers first, reporting the run it saw alive.
+    await act(async () => {
+      for (const answerRead of heldPanelReads) answerRead();
+      await Promise.resolve();
+    });
+    expect(bridge.startAgentRun).not.toHaveBeenCalled();
+    expect(bridge.endAgentRun).not.toHaveBeenCalled();
+
+    // Then the refresh lands, and it knows the run is over.
+    await act(async () => {
+      afterTheRun.resolve(historyPage([historyMoment("m-after", "Rewrote the plan")]));
+      await afterTheRun.promise;
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("agent-run-indicator")).toBeNull(),
+    );
   });
 
   // Supersession is per LANE. The user dismissed a review; that says nothing

@@ -37,7 +37,15 @@ export function AgentsMcpSettings(props: {
   runner: RunnerSettings;
   engineEnabled: boolean;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
-  onAgentActiveChange?: (active: boolean) => void;
+  onAgentActiveChange?: (update: {
+    active: boolean;
+    /**
+     * True only when this panel started or ended the run itself. An
+     * OBSERVATION may be older than a refresh the shell already has in
+     * flight, so it must never supersede one.
+     */
+    mutated: boolean;
+  }) => void;
 }) {
   const {
     workspaceId,
@@ -155,7 +163,9 @@ export function AgentsMcpSettings(props: {
       if (!isCurrentRequest(version)) return;
       const latestRun = latestStatus.activeRun;
       if ((latestRun?.id ?? null) !== renderedRunId) {
-        onAgentActiveChange?.(latestRun !== null);
+        // The run changed under the rendered label, so this click only
+        // reports what the reread saw. Nothing was started or ended.
+        onAgentActiveChange?.({ active: latestRun !== null, mutated: false });
         return;
       }
       if (latestRun) {
@@ -165,7 +175,7 @@ export function AgentsMcpSettings(props: {
       }
       const finalStatus = await refresh(version);
       if (isCurrentRequest(version)) {
-        onAgentActiveChange?.(finalStatus.activeRun !== null);
+        onAgentActiveChange?.({ active: finalStatus.activeRun !== null, mutated: true });
       }
     } catch {
       if (isCurrentRequest(version)) {
