@@ -1653,6 +1653,140 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("planning");
     expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
   });
+
+  // The share listing is relay-backed and answers "none" when the relay is
+  // unreachable — the main handler catches the failure and returns empty rows.
+  // A badge refresh that re-read it would let an unrelated file save erase a
+  // pending invitation that is still true.
+  it("leaves the relay-backed share listing alone while it updates a badge", async () => {
+    let unreadCount = 0;
+    bridgeMock.listChatChannels.mockImplementation(() =>
+      Promise.resolve({ channels: [channel({ unreadCount })], fileThreads: [] }),
+    );
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [
+        {
+          shareId: "share-received",
+          channelWireId: "wire-received",
+          granterEmail: "owner@example.com",
+          access: "read-write",
+          ended: false,
+        },
+      ],
+      joined: [],
+    });
+    renderView();
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    // The relay goes away: the handler answers with empty rows, not an error.
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [],
+    });
+    unreadCount = 3;
+    act(() => emitWorkspaceActivity());
+
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("3");
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+    expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1);
+  });
+
+  // Activity fires for every settled file batch and run update, and the
+  // channel listing syncs shared channels over the relay before it reads.
+  it("keeps one channel listing in flight through an activity storm, then catches up once", async () => {
+    type ChannelListPage = {
+      channels: ChatChannelRecord[];
+      fileThreads: FileChatThreadRecord[];
+    };
+    const deferred: Array<(value: ChannelListPage) => void> = [];
+    let reads = 0;
+    bridgeMock.listChatChannels.mockImplementation(() => {
+      reads += 1;
+      if (reads === 1) {
+        return Promise.resolve({ channels: [channel()], fileThreads: [] });
+      }
+      return new Promise<ChannelListPage>((resolve) => deferred.push(resolve));
+    });
+    renderView();
+    await screen.findByTestId("chats-channel-name");
+
+    act(() => {
+      emitWorkspaceActivity();
+      emitWorkspaceActivity();
+      emitWorkspaceActivity();
+    });
+    // Three unrelated writes, one relay-backed listing.
+    expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      deferred[0]({ channels: [channel({ unreadCount: 1 })], fileThreads: [] });
+      await Promise.resolve();
+    });
+    // The events that arrived mid-read are not lost — they cost ONE catch-up.
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      deferred[1]({ channels: [channel({ unreadCount: 5 })], fileThreads: [] });
+      await Promise.resolve();
+    });
+
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("5");
+    expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(3);
+  });
+
+  // A refresh nobody asked for must not spend the answer to one the user did:
+  // back-navigation, Join, Leave and the retry button all own an overview
+  // request, and losing one leaves a completed action invisible.
+  it("does not discard a user-owned overview refresh that activity lands on top of", async () => {
+    type ChannelListPage = {
+      channels: ChatChannelRecord[];
+      fileThreads: FileChatThreadRecord[];
+    };
+    const deferred: Array<(value: ChannelListPage) => void> = [];
+    let reads = 0;
+    bridgeMock.listChatChannels.mockImplementation(() => {
+      reads += 1;
+      if (reads === 1) {
+        return Promise.resolve({ channels: [channel()], fileThreads: [] });
+      }
+      return new Promise<ChannelListPage>((resolve) => deferred.push(resolve));
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    const user = userEvent.setup();
+    renderView();
+
+    // Back out of a channel: goBack owns an explicit overview refresh.
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-channel-back"));
+    await waitFor(() => expect(deferred.length).toBe(1));
+
+    // A file save lands while that refresh is still in flight.
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(deferred.length).toBe(2));
+
+    // The badge read answers first, then the user's refresh.
+    await act(async () => {
+      deferred[1]({ channels: [channel({ unreadCount: 9 })], fileThreads: [] });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      deferred[0]({
+        channels: [
+          channel(),
+          channel({ id: "channel-launch", name: "launch", slug: "launch" }),
+        ],
+        fileThreads: [],
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("chats-channel-name").map((node) => node.textContent),
+      ).toContain("launch"),
+    );
+  });
 });
 
 describe("ChatsView decisions", () => {

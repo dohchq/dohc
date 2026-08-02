@@ -1103,6 +1103,59 @@ export function ChatsView(props: {
     [workspaceId],
   );
 
+  // Badge-only refresh, for the invalidation nobody asked for. It differs from
+  // refreshOverview in three ways, and each one is a thing this refresh has no
+  // authority to do:
+  //
+  //  - It reads the channel listing ALONE. The share listing is relay-backed
+  //    and answers "none" when the relay is unreachable, so re-reading it here
+  //    would let an unrelated workspace write erase a pending invitation or a
+  //    member row that is still true.
+  //  - It never touches overviewRequest, so it cannot discard the response of
+  //    a refresh the user DID ask for (a join, a leave, a retry). It captures
+  //    liveToken and commits only over a resolved overview, so a workspace
+  //    switch, a navigation, or a mutation still wins.
+  //  - It keeps ONE listing in flight. The activity signal fires for every
+  //    settled file batch and run update, the listing syncs shared channels
+  //    over the relay before it reads, and a persistent navigator plus an
+  //    expanded page mount two of these surfaces. Activity arriving mid-read
+  //    is not dropped: it runs exactly one more pass when the read settles.
+  const badgeReadInFlight = useRef(false);
+  const badgeReadPending = useRef(false);
+  const refreshChannelBadges = useCallback(async (): Promise<void> => {
+    if (badgeReadInFlight.current) {
+      badgeReadPending.current = true;
+      return;
+    }
+    badgeReadInFlight.current = true;
+    try {
+      let again = true;
+      while (again) {
+        badgeReadPending.current = false;
+        const token = liveToken.current;
+        try {
+          const result = await bridge().listChatChannels({ workspaceId });
+          if (token === liveToken.current) {
+            setOverview((current) =>
+              current.status === "ready"
+                ? {
+                    status: "ready",
+                    channels: result.channels,
+                    fileThreads: result.fileThreads,
+                  }
+                : current,
+            );
+          }
+        } catch {
+          // Nobody asked for this refresh: a stale badge beats an error card.
+        }
+        again = badgeReadPending.current;
+      }
+    } finally {
+      badgeReadInFlight.current = false;
+    }
+  }, [workspaceId]);
+
   const refreshBookmarks = useCallback(async () => {
     const workspaceGeneration = bookmarkWorkspaceGeneration.current;
     const listGeneration = ++bookmarkListGeneration.current;
@@ -1167,6 +1220,9 @@ export function ChatsView(props: {
     liveToken.current += 1;
     dmRefreshSeq.current += 1;
     feedRefreshSeq.current += 1;
+    // A badge read queued for the workspace the user just left has nothing to
+    // report here, and the listing it would run reaches the relay.
+    badgeReadPending.current = false;
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
     bookmarkMutationGeneration.current += 1;
@@ -1649,19 +1705,16 @@ export function ChatsView(props: {
 
   // Main emits workspaceActivity for CLI writes, follow mutations, runner
   // reports/failures, and run-record completion. Treat it as an invalidation
-  // for every mounted Chats surface. Every response carries either the follow
-  // request sequence or both the navigation token and a per-surface request
-  // sequence so a slow refresh cannot repaint a newer one.
+  // for every mounted Chats surface. Every response carries the follow request
+  // sequence, the navigation token, or both the token and a per-surface
+  // request sequence, so a slow refresh cannot repaint a newer one.
   useEffect(() => {
     return bridge().onWorkspaceActivity(() => {
       void refreshFollows();
       if (nav.level === "channels") {
         // The roll-up unread badge lives on this list, so a write to a chat
-        // the user does not have open is only visible here. Background mode
-        // keeps an in-flight create/join/share mutation's result (it leaves
-        // liveToken alone) while still checking the captured token and its own
-        // request sequence, so a stale or cross-workspace response is dropped.
-        void refreshOverview({ background: true });
+        // the user does not have open is only visible here.
+        void refreshChannelBadges();
         return;
       }
       if (nav.level === "feed") {
@@ -1759,7 +1812,7 @@ export function ChatsView(props: {
     nav,
     refreshOpenDm,
     refreshFollows,
-    refreshOverview,
+    refreshChannelBadges,
   ]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.
