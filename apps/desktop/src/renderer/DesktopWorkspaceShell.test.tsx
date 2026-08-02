@@ -1256,6 +1256,54 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
   }, 20_000);
 
+  // A chat thread opening in the PANEL moves no tab either, and it is the
+  // destination change that conflicts most directly: the user chose another
+  // conversation, so the DM they walked away from must not arrive as a tab on
+  // top of it.
+  it("discards an in-flight DM navigation when another chat thread opens in the panel", async () => {
+    const fileThreadNode = {
+      path: "chat-thread:file-thread",
+      kind: "chat-thread" as const,
+      threadId: "file-thread",
+      title: "Notes discussion",
+      incoming: 1,
+      outgoing: 0,
+    };
+    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [DM_GRAPH_NODE, fileThreadNode],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    // Start a canonical DM navigation and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    // The user picks a different conversation. It has no channel metadata, so
+    // it opens in the panel — no tab moves.
+    const afterNav = await screen.findAllByTestId("graph-file-row");
+    await user.click(afterNav.find((row) => row.dataset.path === fileThreadNode.path)!);
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+
+    await act(async () => {
+      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      await sync.promise;
+    });
+    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+  }, 20_000);
+
   // The positive direction, and the reason it is not optional: every
   // cancellation test above also passes when NOTHING ever lands, so a fix that
   // cancelled the navigation the moment it started would read as green.

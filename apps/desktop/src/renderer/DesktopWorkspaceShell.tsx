@@ -1863,6 +1863,11 @@ export function DesktopWorkspaceShell(props: {
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
       focusMessageId?: string,
     ) => {
+      // The user picked a DIFFERENT chat destination. The panel is not the
+      // editor, so no tab moves and the check in mutateWb cannot see this —
+      // but a pending DM answering late would open the Chats TAB over the
+      // thread they just chose.
+      invalidateDmNavigation(dmNavigationRequest);
       setSearchChatTarget({
         thread: {
           id: thread.id,
