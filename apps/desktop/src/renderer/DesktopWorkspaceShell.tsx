@@ -1602,9 +1602,11 @@ export function DesktopWorkspaceShell(props: {
   const pendingEngineHistoryPage = useRef(0);
   useEffect(
     () => () => {
-      // Unmount invalidates every load in flight. Raising the watermark is
-      // what does that now: advancing the issue counter alone no longer stops
-      // a response from committing.
+      // Unmount invalidates every load in flight. Hygiene, not a repaint
+      // guard: the shell is keyed by workspace, so a late response has no
+      // mounted state to reach. Raising the watermark keeps the invalidation
+      // true to what it says, now that the issue counter alone no longer
+      // stops a response from committing.
       engineHistoryToken.current += 1;
       committedEngineHistoryToken.current = engineHistoryToken.current;
     },

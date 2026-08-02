@@ -2369,6 +2369,61 @@ describe("history page", () => {
     expect(screen.getByText("Added the launch checklist")).toBeTruthy();
     expect(screen.queryByText("Rewrote the plan")).toBeNull();
   });
+
+  // #489 one layer over: a pagination that FAILS answered nothing either, so
+  // it must stop holding back the refresh it raced. If its token were left
+  // standing, the dead pagination would block every older refresh for the rest
+  // of the session and the timeline would go stale with nothing to retry it.
+  it("commits a refresh that raced a pagination which then failed", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const refreshed = deferred<ListEngineMomentsResult>();
+    let failPage!: (error: Error) => void;
+    const page = new Promise<never>((_resolve, reject) => {
+      failPage = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      refreshed.promise,
+      page,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve({
+        ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
+        nextBeforeMomentOrder: 1,
+      });
+      await first.promise;
+    });
+    expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("engine-history-load-more"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+
+    // The page the user asked for fails. It answered nothing, so it holds
+    // nothing back.
+    await act(async () => {
+      failPage(new Error("pagination failed"));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
+      await refreshed.promise;
+    });
+
+    expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
+  });
 });
 
 describe("open editors", () => {
