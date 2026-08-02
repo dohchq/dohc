@@ -1090,9 +1090,6 @@ export function ChatsView(props: {
     },
     [],
   );
-  // Read the committed state from an async callback (see latestComposerState).
-  const overviewIsReady = useRef(false);
-  overviewIsReady.current = overview.status === "ready";
   // The one place a full share listing lands, whichever reader produced it.
   // Success commits per lane: each takes the newest answer it has.
   //
@@ -1163,10 +1160,13 @@ export function ChatsView(props: {
         }
       } catch (error) {
         if (token !== liveToken.current) return;
-        // A refresh the user did not ask for must not replace a working list
-        // with an error card. Having nothing to commit, it must not claim the
-        // lane either, or it would discard an answer still in flight.
-        if (options?.background && overviewIsReady.current) return;
+        // A refresh nobody asked for never reports a failure. There is nothing
+        // to tell a user who asked for nothing, and a failure holds no answer
+        // for the lane — so claiming it would only discard the answer of
+        // whoever IS still in flight: a working list on screen, or the load
+        // the surface is waiting on. Someone always owns settling it, because
+        // every foreground refresh commits its own failure.
+        if (options?.background) return;
         if (!claimLanes(["overview"], ticket)) return;
         setOverview({
           status: "unavailable",

@@ -1987,6 +1987,51 @@ describe("ChatsView live activity refresh", () => {
     expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1);
   });
 
+  // A background failure is fast when the relay is refusing, and the load it
+  // lands on top of is slow. The failure holds no answer for the list, so it
+  // must not take the lane away from the request that does.
+  it("does not strand the first load behind a background failure", async () => {
+    type ChannelListPage = {
+      channels: ChatChannelRecord[];
+      fileThreads: FileChatThreadRecord[];
+    };
+    let answerFirstLoad!: (value: ChannelListPage) => void;
+    let reads = 0;
+    bridgeMock.listChatChannels.mockImplementation(() => {
+      reads += 1;
+      if (reads === 1) {
+        return new Promise<ChannelListPage>((resolve) => {
+          answerFirstLoad = resolve;
+        });
+      }
+      return Promise.reject(new Error("offline"));
+    });
+    const navigator = (readRevision: number) => (
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        onOpenInTab={vi.fn()}
+        readRevision={readRevision}
+      />
+    );
+    const view = render(navigator(0));
+    await waitFor(() => expect(reads).toBe(1));
+
+    // The editor reports a read; that background refresh fails immediately.
+    view.rerender(navigator(1));
+    await waitFor(() => expect(reads).toBe(2));
+
+    // The first load answers. It is the request the surface was waiting on.
+    await act(async () => {
+      answerFirstLoad({ channels: [channel({ unreadCount: 2 })], fileThreads: [] });
+      await Promise.resolve();
+    });
+
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect(screen.queryByText("Try again")).toBeNull();
+  });
+
   // The channel listing itself syncs shared channels over the relay before it
   // reads, so it can stall too. Once a navigation has moved past that read it
   // can commit nothing, and a later write must not queue behind it.
