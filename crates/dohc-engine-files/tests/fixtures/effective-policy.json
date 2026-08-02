@@ -530,6 +530,16 @@
       ]
     },
     {
+      "name": "unknown-rule-keys-named-before-array-index-boundary",
+      "toml": "[[rule]]\npath = \"x.md\"\nzeta = 1\n4294967295 = 2\n0 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 0",
+        "rule 1: unknown key: zeta",
+        "rule 1: unknown key: 4294967295"
+      ]
+    },
+    {
       "name": "tracked-not-boolean",
       "toml": "[[rule]]\npath = \"x.md\"\ntracked = \"false\"\n",
       "ok": false,

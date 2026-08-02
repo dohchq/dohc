@@ -194,6 +194,13 @@ const filesPolicyCases = [
   ["unknown-rule-keys-integer-like", '[[rule]]\npath = "x.md"\nzeta = 1\n2 = 2\n1 = 3\n'],
   ["unknown-rule-keys-non-canonical-integers", '[[rule]]\npath = "x.md"\n"01" = 1\n"+1" = 2\n1 = 3\n'],
   ["unknown-rule-keys-array-index-boundary", '[[rule]]\npath = "x.md"\n4294967295 = 1\n4294967294 = 2\n0 = 3\n'],
+  // The boundary case above cannot SEE the `4294967295` exclusion: `path` is
+  // the only non-index key there, and it reports no error, so moving
+  // `4294967295` between the index half and the named half leaves the reported
+  // error order unchanged. An unknown NAMED key ahead of the boundary key is
+  // what makes the two halves distinguishable: `zeta` is reported BEFORE
+  // `4294967295` only while `4294967295` is an ordinary string key.
+  ["unknown-rule-keys-named-before-array-index-boundary", '[[rule]]\npath = "x.md"\nzeta = 1\n4294967295 = 2\n0 = 3\n'],
   ["tracked-not-boolean", '[[rule]]\npath = "x.md"\ntracked = "false"\n'],
   ["searchable-not-boolean", '[[rule]]\npath = "x.md"\nsearchable = 1\n'],
   ["invalid-path-glob", '[[rule]]\npath = "bad/**/x.md"\ntracked = false\n'],
