@@ -2954,6 +2954,101 @@ describe("loopback contract enforcement", () => {
     });
   });
 
+  // The daemon writes `payload_before_path` — the wire's `beforePath`
+  // (lib.rs:10123) — on EVERY moment that has a preimage, not on renames
+  // alone: `CASE WHEN before_present = 2 THEN path` for a text write
+  // (store.rs:2909) and a binary write (conflicts.rs:1222), the removed path
+  // for a delete (store.rs:3540), and the source path for a rename
+  // (store.rs:381). Its own tests pin that shape
+  // (dohc-engine-domain/tests/versioning.rs:1641 and :1764).
+  it("records the daemon's beforePath for creates, overwrites, and deletes", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const created = decodeVersionedTextWriteResult(
+      await call(engine, 1, VERSIONED_METHOD.textWrite, {
+        versionId: "main",
+        path: "provenance.md",
+        text: "first",
+        origin: "api",
+      }),
+    );
+    const overwritten = decodeVersionedTextWriteResult(
+      await call(engine, 2, VERSIONED_METHOD.textWrite, {
+        versionId: "main",
+        path: "provenance.md",
+        text: "second",
+        origin: "api",
+      }),
+    );
+    const binaryOverText = decodeVersionedBinaryWriteResult(
+      await call(engine, 3, VERSIONED_METHOD.binaryWrite, {
+        versionId: "main",
+        path: "provenance.md",
+        bytes: [1, 2, 3],
+        origin: "api",
+      }),
+    );
+    const deleted = decodeVersionedTextDeleteResult(
+      await call(engine, 4, VERSIONED_METHOD.textDelete, {
+        versionId: "main",
+        path: "provenance.md",
+        origin: "api",
+      }),
+    );
+
+    // MUTATION: return `path` for a moment with no preimage -> fails here.
+    expect(created.moment.beforePath).toBeNull();
+    // MUTATION: return null unless the moment is a rename -> fails on all three.
+    expect(overwritten.moment.beforePath).toBe("provenance.md");
+    expect(binaryOverText.moment.beforePath).toBe("provenance.md");
+    expect(deleted.moment.beforePath).toBe("provenance.md");
+
+    // The field survives the moment readers, not just the write result.
+    expect(
+      decodeMomentsListResult(
+        await call(engine, 5, VERSIONED_METHOD.momentsList, { versionId: "main" }),
+      ).moments.map((moment) => [moment.operation, moment.beforePath ?? null]),
+    ).toEqual([
+      ["delete", "provenance.md"],
+      ["write", "provenance.md"],
+      ["write", "provenance.md"],
+      ["write", null],
+    ]);
+  });
+
+  it("keeps a rename's beforePath at the path it moved from", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "from.md", text: "moved" });
+    const renamed = decodeVersionedTextRenameResult(
+      await call(engine, 1, VERSIONED_METHOD.textRename, {
+        versionId: "main",
+        fromPath: "from.md",
+        toPath: "to.md",
+        origin: "api",
+      }),
+    );
+    // MUTATION: use the moment's own path for a rename too -> fails here.
+    expect(renamed.moment).toMatchObject({ path: "to.md", beforePath: "from.md" });
+
+    // The next write at the destination reverts to the write rule: its own
+    // path, not the path the file once had.
+    const after = decodeVersionedTextWriteResult(
+      await call(engine, 2, VERSIONED_METHOD.textWrite, {
+        versionId: "main",
+        path: "to.md",
+        text: "edited",
+        origin: "api",
+      }),
+    );
+    expect(after.moment.beforePath).toBe("to.md");
+    expect(
+      decodeMomentsGetResult(
+        await call(engine, 3, VERSIONED_METHOD.momentsGet, {
+          momentId: renamed.moment.momentId,
+        }),
+      ),
+    ).toMatchObject({ beforePath: "from.md" });
+  });
+
   it("replays an exact momentId text write and rejects a changed payload", async () => {
     const engine = new VersionedLoopbackEngine();
     const params: VersionedTextWriteParams = {

@@ -1617,8 +1617,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       before,
       now,
       metadata,
+      fromPath,
     );
-    moment.beforePath = fromPath;
     const internal = {
       wire: moment,
       before: copyFile(before),
@@ -2916,6 +2916,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     before: LoopbackFile | undefined,
     recordedAtMs = this.clock++,
     metadata: JsonObject = {},
+    fromPath?: string,
   ): MomentRecord {
     const afterText = after.contentKind === "text" ? after.text ?? "" : null;
     const beforeText = before?.contentKind === "text" ? before.text ?? "" : null;
@@ -2954,6 +2955,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       beforeText,
       beforeByteLength: before === undefined ? null : before.contentKind === "text" ? utf8Length(beforeText ?? "") : before.bytes?.length ?? null,
       beforeInbandLimitBytes: null,
+      // The path the preimage occupied. A write or delete replaced or removed
+      // content at its own path (`payload_before_path` is
+      // `CASE WHEN before_present = 2 THEN path` in store.rs:2909 and
+      // conflicts.rs:1222, and the delete's own path in store.rs:3540); a
+      // rename carries the path it moved FROM (store.rs:381). No preimage, no
+      // before side.
+      beforePath: before === undefined ? null : fromPath ?? path,
     };
   }
 
