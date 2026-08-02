@@ -2846,6 +2846,13 @@ function isApprovedRoot(normalized: string): boolean {
 const OPEN_WORKSPACE_ARG = "--open-workspace";
 const pendingOpenPaths: string[] = [];
 
+// `app.isReady()` turns true before the whenReady continuation finishes
+// awaiting the Rust engine daemon, so it cannot gate window creation. This
+// flag turns true only once the daemon is up, IPC is registered, and the first
+// window exists. Until then, handlers queue their paths instead of opening a
+// window the bootstrap cannot serve.
+let bootstrapComplete = false;
+
 function collectOpenWorkspaceArgs(argv: string[]): string[] {
   const paths: string[] = [];
   for (let index = 1; index < argv.length; index += 1) {
@@ -7698,19 +7705,22 @@ if (!app.requestSingleInstanceLock()) {
   app.on("open-file", (event, path) => {
     event.preventDefault();
     pendingOpenPaths.push(path);
-    if (app.isReady()) {
-      const window = targetWindow(undefined);
-      if (window) {
-        void flushPendingOpenPaths(window);
-      } else {
-        void showOrCreateMainWindow().then(() =>
-          flushPendingOpenPaths(targetWindow(undefined)),
-        );
-      }
+    if (!bootstrapComplete) return;
+    const window = targetWindow(undefined);
+    if (window) {
+      void flushPendingOpenPaths(window);
+    } else {
+      void showOrCreateMainWindow().then(() =>
+        flushPendingOpenPaths(targetWindow(undefined)),
+      );
     }
   });
 
   app.on("second-instance", (_event, argv) => {
+    if (!bootstrapComplete) {
+      pendingOpenPaths.push(...collectOpenWorkspaceArgs(argv));
+      return;
+    }
     const window = targetWindow(undefined);
     if (window) {
       if (window.isMinimized()) window.restore();
@@ -7817,6 +7827,10 @@ if (!app.requestSingleInstanceLock()) {
     }
     launchMarks.firstWindow();
     desktopMarks.markOnce("first-window");
+    // The daemon is up, IPC is registered, and a window exists, so the deferred
+    // handlers can act directly. Drain what they queued after the flush above.
+    bootstrapComplete = true;
+    void flushPendingOpenPaths(window);
 
     // Load persisted cloud credentials after the first window exists so local
     // workspaces do not pay credential-store I/O on the visible-launch path.
@@ -7854,6 +7868,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("activate", () => {
+    if (!bootstrapComplete) return;
     if (BrowserWindow.getAllWindows().length === 0) {
       void showOrCreateMainWindow();
     }
