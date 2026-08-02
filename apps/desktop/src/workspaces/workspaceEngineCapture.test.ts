@@ -1562,15 +1562,17 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       },
     });
 
+    // "Daemon path" here means the daemon-BACKED STORE, not daemon-owns-
+    // capture. Production's only construction (engineCaptureGate.ts) passes
+    // daemonOwnsCapture: true, and under that flag BOTH enqueues below return
+    // early — the daemon captures on its own side and settles through
+    // flushCapture. So this pins the client-side chain contract, not the
+    // capture ownership production actually runs.
     const engine = capture(root, {
       store: trackedStore,
       rustEngineSessions: sessions,
     });
     engine.start();
-    // The batch enqueues from the caller's NEXT turn — the exact window where
-    // reconciliation would lose its slot if it joined the chain after an async
-    // preflight (opening the daemon workspace) instead of before one.
-    await Promise.resolve();
     engine.captureBatch([{ path: "live.md", operation: "update" }]);
     await engine.stop();
 
