@@ -94,6 +94,32 @@ test("a required step is matched by its whole name, not as a substring", () => {
   );
 });
 
+test("a status is matched whole, so `PASSED` is not a PASS", () => {
+  // The substring hole on the status axis: without a word boundary after the
+  // status, `native target=PASSED` reads as `native target=PASS` followed by
+  // a row named `ED fixture drift`.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict.replace("native target=PASS", "native target=PASSED"),
+      ),
+    /native target/,
+  );
+});
+
+test("the verdict is read from its own field, not found anywhere in the line", () => {
+  // A failed run can quote `| PASS |` inside a step's reason, and the quote
+  // does not split the line into more fields when it carries no outer spaces.
+  const forged = passVerdict.replace(
+    "| PASS | native target=PASS",
+    "| FAIL | native target=PASS[the run before this one said x| PASS |y]",
+  );
+  assert.throws(
+    () => requireCiPassVerdict(forged),
+    /verdict field reads `FAIL`/,
+  );
+});
+
 test("the verdict line a real gate run printed passes as written", () => {
   // Verbatim from C:/w/iss-nativeev-gate3.log, 2026-08-02 — a passing local
   // run of tools/rust-engine-program/run-rust-checks.mjs. The parser has to

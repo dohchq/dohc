@@ -27,10 +27,12 @@ const requiredSteps = [
 ];
 
 // One step row of the evidence line: `name=STATUS`, plus `[reason]` when the
-// status is not PASS. A name can hold spaces and hyphens (`clippy -D
-// warnings`) but never an `=`, so a row's name is everything between the end
-// of the row before it and its own `=`. Reading the line by substring instead
-// let a row named `not-native target=PASS` answer for `native target`.
+// status is not PASS. A name holds spaces and hyphens (`clippy -D warnings`)
+// but never an `=`, so a row's name is the text between its own `=` and the
+// nearest `=` or row end before it. The trailing `\b` keeps the status whole:
+// without it `native target=PASSED` reads as a PASS. Reading this line by
+// substring instead let a row named `not-native target=PASS` answer for
+// `native target`.
 const STEP_ROW = /(?<name>[^=\s](?:[^=]*[^=\s])?)=(?<status>PASS|FAIL|SKIP)\b/g;
 
 /** `name -> [status, ...]`, one entry per row the summary field carries. */
@@ -55,21 +57,25 @@ export function requireCiPassVerdict(log) {
     );
   }
 
-  const verdict = verdictLines[0];
-  if (!verdict.includes("| PASS |")) {
-    throw new Error("run-rust-checks did not report PASS");
-  }
-
-  // Field 5 onward is the step summary. A reason's free-form text can swallow
-  // the row that follows it, but only a FAIL or SKIP row carries a reason and
-  // such a line is already rejected above.
-  const fields = verdict.split(" | ");
-  if (fields.length < 5) {
+  // `- <stamp> | run-rust-checks | <platform> | <verdict> | <step summary>`.
+  // A line this checker can accept has exactly these five fields: only a
+  // step's free-form reason can carry a second ` | `, and only a FAIL or SKIP
+  // row carries a reason at all.
+  const fields = verdictLines[0].split(" | ");
+  if (fields.length !== 5) {
     throw new Error(
-      `verdict line has ${fields.length} " | "-separated fields, expected at least 5 (stamp, step, platform, verdict, summary)`,
+      `verdict line has ${fields.length} " | "-separated fields, expected exactly 5 (stamp, step, platform, verdict, summary)`,
     );
   }
-  const rows = parseStepRows(fields.slice(4).join(" | "));
+  // The verdict is that field, not text found anywhere in the line: a reason
+  // can quote `| PASS |` while the run failed.
+  if (fields[3] !== "PASS") {
+    throw new Error(
+      `run-rust-checks did not report PASS, its verdict field reads \`${fields[3]}\``,
+    );
+  }
+
+  const rows = parseStepRows(fields[4]);
 
   for (const step of requiredSteps) {
     const statuses = rows.get(step) ?? [];
