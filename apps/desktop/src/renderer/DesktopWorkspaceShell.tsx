@@ -1608,17 +1608,31 @@ export function DesktopWorkspaceShell(props: {
     token: number;
     commit: () => void;
   } | null>(null);
+  // The sync/agent/try snapshots ride the refresh response but are NOT the
+  // timeline: no pagination competes for them, so they apply as soon as they
+  // arrive, on their own newest-wins watermark. Holding them with the timeline
+  // is what let a review the user had already dismissed come back when the
+  // held answer finally committed.
+  const committedEngineStatusToken = useRef(0);
+  // Everything in flight describes a state of the world that is no longer
+  // true. Raise both watermarks so no answer already issued can win the
+  // newest-answer race, and drop anything held for a settlement that would now
+  // mean the wrong thing. The pending pagination is deliberately left alone:
+  // it still owns the Load-more button, and its settlement is what releases it.
+  const invalidateEngineHistoryLoads = useCallback(() => {
+    engineHistoryToken.current += 1;
+    committedEngineHistoryToken.current = engineHistoryToken.current;
+    committedEngineStatusToken.current = engineHistoryToken.current;
+    blockedEngineHistoryRefresh.current = null;
+  }, []);
   useEffect(
     () => () => {
-      // Unmount invalidates every load in flight. Hygiene, not a repaint
-      // guard: the shell is keyed by workspace, so a late response has no
-      // mounted state to reach. Raising the watermark keeps the invalidation
-      // true to what it says, now that the issue counter alone no longer
-      // stops a response from committing.
-      engineHistoryToken.current += 1;
-      committedEngineHistoryToken.current = engineHistoryToken.current;
+      // Unmount is one such boundary. Hygiene, not a repaint guard: the shell
+      // is keyed by workspace, so a late response has no mounted state to
+      // reach. It keeps the invalidation true to what it claims.
+      invalidateEngineHistoryLoads();
     },
-    [],
+    [invalidateEngineHistoryLoads],
   );
   // Which surface the right-hand Chats panel shows (all chats vs the active
   // file's). Runtime-only — not persisted.
@@ -1645,6 +1659,15 @@ export function DesktopWorkspaceShell(props: {
         bridge().getAgentRunStatus({ workspaceId }),
         bridge().getTryInVersionState({ workspaceId }),
       ]);
+      // The snapshots settle here and now: nothing can block them, and holding
+      // them for a later commit would republish a world the user has already
+      // acted on — a dismissed review card, most visibly.
+      if (token > committedEngineStatusToken.current) {
+        committedEngineStatusToken.current = token;
+        setSyncStatus(status);
+        setAgentActive(agent.activeRun !== null);
+        setTryState(trySession.state);
+      }
       if (token <= committedEngineHistoryToken.current) return;
       const commit = () => {
         committedEngineHistoryToken.current = token;
@@ -1656,9 +1679,6 @@ export function DesktopWorkspaceShell(props: {
           nextBeforeMomentOrder: page.nextBeforeMomentOrder,
           latestMomentOrder: page.latestMomentOrder,
         });
-        setSyncStatus(status);
-        setAgentActive(agent.activeRun !== null);
-        setTryState(trySession.state);
       };
       // Blocked by a newer pagination: hold this answer instead of throwing it
       // away, and let the pagination's settlement decide (keeping the newest
@@ -1771,13 +1791,19 @@ export function DesktopWorkspaceShell(props: {
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
   const onVersionWorkspaceStateChanged = useCallback(() => {
     setVersionEpoch((epoch) => epoch + 1);
+    // A version switch changes WHICH timeline is true, so it is an
+    // invalidation boundary: every history answer in flight describes the
+    // version the user left, and the newest-answer rule would otherwise let
+    // one paint the version they are now on — a failed refresh below is all it
+    // takes. Every surface that changes the active version reports here.
+    invalidateEngineHistoryLoads();
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
     );
     void refreshHistory().catch((error) =>
       reportShellError("Could not refresh history.", error),
     );
-  }, [refreshFiles, refreshHistory, reportShellError]);
+  }, [invalidateEngineHistoryLoads, refreshFiles, refreshHistory, reportShellError]);
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
       mutateWb((state) => openTab(state, versionCompareTabPath(versionId)));

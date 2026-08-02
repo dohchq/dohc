@@ -28,6 +28,8 @@ import type {
   FileChatThreadRecord,
   ListEngineMomentsResult,
   RefreshSharedViewResult,
+  SwitchWorkspaceVersionResult,
+  TryInVersionStateResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
@@ -366,7 +368,18 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         activeVersionId: "main",
       }),
     ),
-    getTryInVersionState: vi.fn(async () => ({ state: null })),
+    // Typed to the contract, not to these empty defaults: the freshness tests
+    // drive a real review card and a real version switch through them.
+    getTryInVersionState: vi.fn(
+      async (): Promise<TryInVersionStateResult> => ({ state: null }),
+    ),
+    dismissTryInVersionReview: vi.fn(async (): Promise<void> => undefined),
+    switchWorkspaceVersion: vi.fn(
+      async (): Promise<SwitchWorkspaceVersionResult> => ({
+        activeVersionId: "main",
+        changedFileCount: 0,
+      }),
+    ),
     listWorkspaceVersions: vi.fn(async () => ({
       versions: [
         {
@@ -2542,6 +2555,164 @@ describe("history page", () => {
     const loadMore = screen.getByTestId("engine-history-load-more");
     await waitFor(() => expect(loadMore.hasAttribute("disabled")).toBe(false));
     expect(loadMore.textContent).toBe("Show earlier changes");
+  });
+
+  const REVIEW_STATE = {
+    status: "review" as const,
+    task: "Draft the launch note",
+    versionId: "try-1",
+    versionName: "Try: launch note",
+    runId: "run-1",
+    startedAtMs: 10,
+    endedAtMs: 20,
+    runOutcome: "complete" as const,
+    changedFileCount: 1,
+    mergeAvailable: false,
+  };
+
+  // The held answer is a TIMELINE answer. Holding the whole response would
+  // republish snapshots the user has acted on since — here the review card the
+  // main process already dismissed, which nothing else would clear.
+  it("does not bring back a review the user dismissed while a page was loading", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const refreshed = deferred<ListEngineMomentsResult>();
+    let failPage!: (error: Error) => void;
+    const page = new Promise<never>((_resolve, reject) => {
+      failPage = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      refreshed.promise,
+      page,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    // The main process keeps reporting the review until it is dismissed.
+    bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve({
+        ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
+        nextBeforeMomentOrder: 1,
+      });
+      await first.promise;
+    });
+    expect(await screen.findByTestId("try-review-card")).toBeTruthy();
+
+    // A refresh answers while a pagination is in flight, so it is held — and
+    // the response it carries still contains the review.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("engine-history-load-more"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
+      await refreshed.promise;
+    });
+
+    // The user dismisses the review.
+    await user.click(screen.getByTestId("try-review-keep-working"));
+    await waitFor(() => expect(bridge.dismissTryInVersionReview).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByTestId("try-review-card")).toBeNull());
+
+    // The pagination fails, so the held TIMELINE answer commits — and only it.
+    await act(async () => {
+      failPage(new Error("pagination failed"));
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
+    expect(screen.queryByTestId("try-review-card")).toBeNull();
+  });
+
+  // A version switch changes which timeline is true, so it is a boundary: an
+  // answer describing the version the user left must never paint the one they
+  // are now on, however the newest-answer race would otherwise resolve.
+  it("never paints the version the user left over the one they switched to", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const staleRefresh = deferred<ListEngineMomentsResult>();
+    const stalePage = deferred<ListEngineMomentsResult>();
+    let failSwitchRefresh!: (error: Error) => void;
+    const switchRefresh = new Promise<never>((_resolve, reject) => {
+      failSwitchRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      staleRefresh.promise,
+      stalePage.promise,
+      switchRefresh,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+      ],
+      activeVersionId: "try-1",
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve({
+        ...historyPage([historyMoment("m-first", "Wrote the note in the try version")]),
+        nextBeforeMomentOrder: 1,
+      });
+      await first.promise;
+    });
+    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+
+    // A refresh and a pagination are both in flight when the user leaves.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("engine-history-load-more"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+
+    // Set aside: switch back to Main. Its own refresh fails, so nothing newer
+    // ever answers — exactly when the stale answers would win.
+    await user.click(screen.getByTestId("try-review-set-aside"));
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(4));
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+
+    // Both answers from the version the user left arrive too late to matter.
+    await act(async () => {
+      staleRefresh.resolve(
+        historyPage([historyMoment("m-stale", "Edited the note in the try version")]),
+      );
+      await staleRefresh.promise;
+    });
+    await act(async () => {
+      stalePage.resolve(
+        historyPage([historyMoment("m-stale-page", "Started the try version")]),
+      );
+      await stalePage.promise;
+    });
+
+    expect(screen.queryByText("Edited the note in the try version")).toBeNull();
+    expect(screen.queryByText("Started the try version")).toBeNull();
   });
 });
 
