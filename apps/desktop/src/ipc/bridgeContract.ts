@@ -692,6 +692,16 @@ export const SyncStatusResult = z.object({
   // sentence names a full path. Optional so older producers/fixtures keep
   // parsing.
   settingsWarning: z.string().min(1).max(4600).optional(),
+  // #505: true when the recorder could not be BUILT at workspace open — a
+  // failure, not a decision. `historyRecordingOff` is true as well (nothing
+  // records either way), so the notice must read this first: the opt-out copy
+  // names Settings, which nobody touched here.
+  //
+  // REQUIRED where its neighbours above are optional, and deliberately so. An
+  // omitted boolean reads as false, and false here does not mean "unknown" —
+  // it asserts the user chose this, which is the false cause #505 is about. A
+  // producer that cannot say which cause it means must not compile.
+  historyRecordingUnavailable: z.boolean(),
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),

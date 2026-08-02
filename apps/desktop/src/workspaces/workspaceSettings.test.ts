@@ -268,6 +268,21 @@ describe("workspace settings file store", () => {
     expect(WorkspaceSettingsResult.parse(hugeResult)).toEqual(hugeResult);
   });
 
+  it("an untrustworthy .dohc FOLDER reads as opted out and names the folder", async () => {
+    // The metadata resolver refuses a non-directory .dohc by throwing, and
+    // its contract says readers stay tolerant. Left uncaught, the throw
+    // reached the #505 build-failure notice, whose restart step repeats the
+    // identical failure — the folder, not the app session, is what is broken.
+    const root = await tempRoot();
+    await writeFile(join(root, ".dohc"), "a file squatting the metadata dir");
+    const result = await readWorkspaceSettingsFile(root);
+    expect(result.source).toBe("recovered");
+    expect(result.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(result.warning).toContain(join(root, ".dohc"));
+    expect(result.warning).toContain(".dohc folder");
+    expect(result.warning).toContain("Then restart dohc.");
+  });
+
   it("an unreadable settings file stops the engine capture gate", async () => {
     // The gate is the reader that decides whether anything is recorded, so the
     // fail-closed read is asserted THROUGH it, not only at the file layer.
@@ -483,7 +498,13 @@ describe("workspace settings file store", () => {
     await expect(
       writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS),
     ).rejects.toThrow(/\.dohc/);
-    await expect(readWorkspaceSettingsFile(root)).rejects.toThrow(/\.dohc/);
+    // The READ stays tolerant, like the symlinked-file case below: fail
+    // closed (opted out, warning names the folder), and never follow the
+    // link — nothing is read from or written into the link target.
+    const read = await readWorkspaceSettingsFile(root);
+    expect(read.source).toBe("recovered");
+    expect(read.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(read.warning).toContain(join(root, ".dohc"));
     expect(await readdir(outside)).toEqual([]);
   });
 

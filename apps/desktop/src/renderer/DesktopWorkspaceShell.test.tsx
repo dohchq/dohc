@@ -69,6 +69,11 @@ const SYNC_STATUS = {
   state: "synced" as const,
   pendingChangeCount: 0,
   lastSyncedAtMs: null,
+  // Required on the contract (#505): every status states whether the recorder
+  // failed to build. This fake is not type-checked against SyncStatusResult,
+  // so it declares the cause by hand rather than shipping a payload main
+  // could never produce.
+  historyRecordingUnavailable: false,
 };
 
 const IDLE_UPDATE_STATE: UpdateStateEvent = {
