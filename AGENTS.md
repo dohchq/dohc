@@ -234,7 +234,6 @@ A manual `workflow_dispatch` still runs every gate.
   code gate applies.
 - If the impact is unclear, run both jobs.
 - In the PR, state which gates ran or why no code gate applies.
-- Keep each PR to one concern. If the description needs "also," split the PR.
 
 ### Review without expanding the change
 
