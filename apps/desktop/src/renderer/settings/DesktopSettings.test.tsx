@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
-  type WorkspaceSettings,
+  mergeWorkspaceSettings,
+  type WorkspaceSettingsPatch,
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
 import { DesktopSettings } from "./DesktopSettings";
@@ -44,9 +45,13 @@ async function readWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
 }
 
 async function writeWorkspaceSettings(payload: {
-  settings: WorkspaceSettings;
+  patch: WorkspaceSettingsPatch;
 }): Promise<WorkspaceSettingsResult> {
-  return { settings: payload.settings, source: "stored" };
+  // Mirrors main: the patch is merged onto what the file holds.
+  return {
+    settings: mergeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS, payload.patch),
+    source: "stored",
+  };
 }
 
 const bridge = {
@@ -936,11 +941,11 @@ describe("DesktopSettings", () => {
       screen.getByTestId("attachment-location-select"),
       "global-folder",
     );
+    // The save carries the changed control only — main merges it onto the
+    // file, so the dialog's copy of the other fields never rides along.
     expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
       workspaceId: "ws-1",
-      settings: expect.objectContaining({
-        files: expect.objectContaining({ attachmentLocation: "global-folder" }),
-      }),
+      patch: { files: { attachmentLocation: "global-folder" } },
     });
 
     // Switching to same-folder removes the (now meaningless) folder-name row.
@@ -953,15 +958,15 @@ describe("DesktopSettings", () => {
     );
   });
 
-  // #483: over a settings file dohc cannot read, saving one unrelated control
-  // would write the whole resolved object — including the fail-closed opt-out
-  // — and the workspace would look opted out forever. main refuses; the dialog
-  // must say so and must not claim a save happened.
+  // #483: over a settings file dohc cannot read, the dialog's resolved copy
+  // carries the fail-closed opt-out, so saving one unrelated control would
+  // land that opt-out on disk and the workspace would look opted out forever.
+  // main refuses; the dialog must say so and must not claim a save happened.
   it("shows the refusal when the settings file cannot be read, and never says Saved", async () => {
     const warning =
       "Workspace settings could not be read. dohc records no history for this workspace until you fix /x/.dohc/settings.local.json.";
     const refusal =
-      "dohc did not save workspace settings. dohc cannot read /x/.dohc/settings.local.json. Fix that file, or select Reset workspace in Advanced to replace it.";
+      "dohc did not save workspace settings. dohc cannot read /x/.dohc/settings.local.json. Fix that file. Or select Reset workspace in Advanced to replace it.";
     const onDisk = {
       settings: {
         ...DEFAULT_WORKSPACE_SETTINGS,
@@ -1025,9 +1030,7 @@ describe("DesktopSettings", () => {
     await waitFor(() =>
       expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
-        settings: expect.objectContaining({
-          files: expect.objectContaining({ attachmentFolderName: "media" }),
-        }),
+        patch: { files: { attachmentFolderName: "media" } },
       }),
     );
   });

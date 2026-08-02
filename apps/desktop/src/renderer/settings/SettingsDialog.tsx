@@ -24,6 +24,7 @@ import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
   type WorkspaceSettings,
+  type WorkspaceSettingsPatch,
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
 import { bridge } from "../bridge";
@@ -281,8 +282,12 @@ export function SettingsDialog(props: {
     }
   }, [markSaved, markSaving, userResult]);
 
+  // Takes the changed controls, not the whole file. Main merges them onto the
+  // settings on disk, so an edit made outside this dialog (or a file the user
+  // repaired after a refusal) survives the next save. The merge here is only
+  // the optimistic paint.
   const saveWorkspaceSettings = useCallback(
-    async (settings: WorkspaceSettings) => {
+    async (patch: WorkspaceSettingsPatch) => {
       if (!workspaceResult) {
         setError("Workspace settings are still loading.");
         return;
@@ -294,7 +299,10 @@ export function SettingsDialog(props: {
       const token = workspaceTokenRef.current;
       const previous = workspaceResult;
       setWorkspaceResult((current) => ({
-        settings,
+        settings: mergeWorkspaceSettings(
+          current?.settings ?? DEFAULT_WORKSPACE_SETTINGS,
+          patch,
+        ),
         source: current?.source ?? "default",
         ...(current?.warning ? { warning: current.warning } : {}),
       }));
@@ -303,7 +311,7 @@ export function SettingsDialog(props: {
       try {
         const saved = await bridge().setWorkspaceSettings({
           workspaceId: props.workspaceId,
-          settings,
+          patch,
         });
         if (
           workspaceTokenRef.current !== token ||
@@ -639,13 +647,12 @@ export function SettingsDialog(props: {
                 DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
               )}
               onReset={() =>
-                void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                void saveWorkspaceSettings({
                   files: {
-                    ...workspaceSettings.files,
                     attachmentLocation:
                       DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
                   },
-                }))
+                })
               }
               testId="settings-row-attachment-location"
             >
@@ -654,13 +661,12 @@ export function SettingsDialog(props: {
                 data-testid="attachment-location-select"
                 value={workspaceSettings.files.attachmentLocation}
                 onChange={(event) =>
-                  void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                  void saveWorkspaceSettings({
                     files: {
-                      ...workspaceSettings.files,
                       attachmentLocation: event.target
                         .value as WorkspaceSettings["files"]["attachmentLocation"],
                     },
-                  }))
+                  })
                 }
                 className="h-8 w-64 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
               >
@@ -684,13 +690,12 @@ export function SettingsDialog(props: {
                   DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
                 )}
                 onReset={() =>
-                  void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                  void saveWorkspaceSettings({
                     files: {
-                      ...workspaceSettings.files,
                       attachmentFolderName:
                         DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
                     },
-                  }))
+                  })
                 }
                 testId="settings-row-attachment-folder"
               >
@@ -701,9 +706,8 @@ export function SettingsDialog(props: {
                   testId="attachment-folder-input"
                   maxLength={ATTACHMENT_FOLDER_NAME_MAX_LENGTH}
                   onChange={(attachmentFolderName) =>
-                    void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                    void saveWorkspaceSettings({
                       files: {
-                        ...workspaceSettings.files,
                         // mergeWorkspaceSettings re-parses and throws past the
                         // schema bound, and this is a plain change handler — an
                         // over-long value must be clamped, not thrown. `maxLength`
@@ -715,7 +719,7 @@ export function SettingsDialog(props: {
                           ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
                         ),
                       },
-                    }))
+                    })
                   }
                 />
               </SettingRow>
@@ -733,22 +737,19 @@ export function SettingsDialog(props: {
                 DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
               )}
               onReset={() =>
-                void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                void saveWorkspaceSettings({
                   privacy: {
-                    ...workspaceSettings.privacy,
                     confirmExternalLinks:
                       DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
                   },
-                }))
+                })
               }
             >
               <SwitchControl
                 label="Confirm external links"
                 checked={workspaceSettings.privacy.confirmExternalLinks}
                 onChange={(confirmExternalLinks) =>
-                  void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
-                    privacy: { ...workspaceSettings.privacy, confirmExternalLinks },
-                  }))
+                  void saveWorkspaceSettings({ privacy: { confirmExternalLinks } })
                 }
               />
             </SettingRow>
@@ -778,13 +779,12 @@ export function SettingsDialog(props: {
                 DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
               )}
               onReset={() =>
-                void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                void saveWorkspaceSettings({
                   experimental: {
-                    ...workspaceSettings.experimental,
                     workspaceEngineAlpha:
                       DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
                   },
-                }))
+                })
               }
               testId="settings-row-workspace-engine-alpha"
             >
@@ -792,9 +792,7 @@ export function SettingsDialog(props: {
                 label="Use the workspace engine (default on)"
                 checked={workspaceSettings.experimental.workspaceEngineAlpha}
                 onChange={(workspaceEngineAlpha) =>
-                  void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
-                    experimental: { ...workspaceSettings.experimental, workspaceEngineAlpha },
-                  }))
+                  void saveWorkspaceSettings({ experimental: { workspaceEngineAlpha } })
                 }
               />
             </SettingRow>

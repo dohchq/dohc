@@ -31,14 +31,19 @@ export const WorkspaceSettingsResult = z.object({
 }).strict();
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 
-export type WorkspaceSettingsPatch =
-  Partial<Omit<WorkspaceSettings, "agents" | "sites" | "privacy" | "experimental" | "files">> & {
-    agents?: Partial<WorkspaceSettings["agents"]>;
-    sites?: Partial<WorkspaceSettings["sites"]>;
-    privacy?: Partial<WorkspaceSettings["privacy"]>;
-    experimental?: Partial<WorkspaceSettings["experimental"]>;
-    files?: Partial<WorkspaceSettings["files"]>;
-  };
+// What a save carries: the controls the user actually changed, never the whole
+// file. Main merges a patch onto the settings as they are on disk RIGHT NOW,
+// so a caller holding a stale copy of the file (a Settings dialog opened
+// before an external edit, or before the user repaired an unreadable file)
+// can no longer write its stale copy back over fields it never touched.
+export const WorkspaceSettingsPatch = z.object({
+  agents: WorkspaceSettings.shape.agents.partial().optional(),
+  sites: WorkspaceSettings.shape.sites.partial().optional(),
+  privacy: WorkspaceSettings.shape.privacy.partial().optional(),
+  experimental: WorkspaceSettings.shape.experimental.removeDefault().partial().optional(),
+  files: WorkspaceSettings.shape.files.removeDefault().partial().optional(),
+}).strict();
+export type WorkspaceSettingsPatch = z.infer<typeof WorkspaceSettingsPatch>;
 
 export function parseWorkspaceSettings(raw: unknown): WorkspaceSettings {
   const parsed = WorkspaceSettings.safeParse(raw);

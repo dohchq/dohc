@@ -44,6 +44,7 @@ import type {
 } from "../settings/userSettings";
 import {
   WorkspaceSettings as WorkspaceSettingsSchema,
+  WorkspaceSettingsPatch as WorkspaceSettingsPatchSchema,
   WorkspaceSettingsResult as WorkspaceSettingsResultSchema,
 } from "../workspaces/workspaceSettings";
 import type {
@@ -2632,9 +2633,12 @@ export const WorkspaceSettingsPayload = z.object({
 }).strict();
 export type WorkspaceSettingsPayload = z.infer<typeof WorkspaceSettingsPayload>;
 
+// A save carries the changed controls, not the whole file: main merges them
+// onto the settings on disk, so a stale caller cannot write back fields it
+// never touched.
 export const SetWorkspaceSettingsPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  settings: WorkspaceSettingsSchema,
+  patch: WorkspaceSettingsPatchSchema,
 }).strict();
 export type SetWorkspaceSettingsPayload = z.infer<typeof SetWorkspaceSettingsPayload>;
 

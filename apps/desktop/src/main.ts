@@ -7119,7 +7119,7 @@ function registerIpcHandlers(
     const input = SetWorkspaceSettingsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     return WorkspaceSettingsResult.parse(
-      await saveWorkspaceSettingsFile(workspace.rootPath, input.settings),
+      await saveWorkspaceSettingsFile(workspace.rootPath, input.patch),
     );
   });
 

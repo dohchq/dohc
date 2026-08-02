@@ -256,21 +256,20 @@ describe("workspace settings file store", () => {
   });
 
   it("refuses to save over an unreadable file, and reset still replaces it", async () => {
-    // #483: a save writes the whole RESOLVED object, and over an unreadable
-    // file that object carries the fail-closed opt-out. Writing it would
-    // record a deliberate opt-out the user never chose, and the warning would
-    // disappear with it. The file must survive the save byte for byte.
+    // #483: over an unreadable file the caller's resolved settings carry the
+    // fail-closed opt-out, so saving any control would record a deliberate
+    // opt-out the user never chose and the warning would disappear with it.
+    // The file must survive the save byte for byte.
     const root = await tempRoot();
     const path = join(root, ".dohc", WORKSPACE_SETTINGS_FILE);
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
     await writeFile(path, "{not json");
 
     const refused = await saveWorkspaceSettingsFile(root, {
-      ...DEFAULT_WORKSPACE_SETTINGS,
-      files: { ...DEFAULT_WORKSPACE_SETTINGS.files, attachmentLocation: "same-folder" },
+      files: { attachmentLocation: "same-folder" },
     });
     expect(refused.refusal).toBe(
-      `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file, or select Reset workspace in Advanced to replace it.`,
+      `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file. Or select Reset workspace in Advanced to replace it.`,
     );
     expect(await readFile(path, "utf8")).toBe("{not json");
     // The refusal hands back the file's real state, warning included, so the
@@ -286,29 +285,71 @@ describe("workspace settings file store", () => {
     expect((await readWorkspaceSettingsFile(root)).source).toBe("stored");
   });
 
-  it("saves normally over a readable file", async () => {
+  it("applies a save to the file as it is NOW, not to the caller's copy", async () => {
+    // The recovery path the refusal prescribes: the user repairs the file
+    // while the Settings dialog still holds the resolved copy from before the
+    // repair — a copy carrying the fail-closed opt-out. The next save must not
+    // write that copy back over the repair.
     const root = await tempRoot();
+    const path = join(root, ".dohc", WORKSPACE_SETTINGS_FILE);
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
-    const settings = {
+    await writeFile(path, "{not json");
+    expect(
+      (await saveWorkspaceSettingsFile(root, { files: { attachmentLocation: "same-folder" } }))
+        .refusal,
+    ).toBeTruthy();
+
+    // The user repairs the file outside dohc: engine on, and a distinctive
+    // value in a group this save does not touch.
+    const repaired = {
       ...DEFAULT_WORKSPACE_SETTINGS,
-      privacy: { confirmExternalLinks: false },
+      agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, defaultDriverId: "claude" },
+      experimental: { workspaceEngineAlpha: true },
     };
-    const saved = await saveWorkspaceSettingsFile(root, settings);
-    expect(saved).toEqual({ settings, source: "stored" });
-    expect(await readWorkspaceSettingsFile(root)).toEqual({
-      settings,
-      source: "stored",
+    await writeWorkspaceSettingsFile(root, repaired);
+
+    const saved = await saveWorkspaceSettingsFile(root, {
+      files: { attachmentLocation: "same-folder" },
     });
+    expect(saved.settings).toEqual({
+      ...repaired,
+      files: { ...repaired.files, attachmentLocation: "same-folder" },
+    });
+    // What lands on disk is the repaired file plus the one edited control.
+    const onDisk = await readWorkspaceSettingsFile(root);
+    expect(onDisk.settings.experimental.workspaceEngineAlpha).toBe(true);
+    expect(onDisk.settings.agents.defaultDriverId).toBe("claude");
+    expect(onDisk.settings.files.attachmentLocation).toBe("same-folder");
+  });
+
+  it("saves normally over a readable file, touching only the patched keys", async () => {
+    const root = await tempRoot();
+    await writeWorkspaceSettingsFile(root, {
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      files: { attachmentLocation: "global-folder", attachmentFolderName: "media" },
+    });
+    const saved = await saveWorkspaceSettingsFile(root, {
+      privacy: { confirmExternalLinks: false },
+    });
+    expect(saved.source).toBe("stored");
+    expect(saved.settings.privacy.confirmExternalLinks).toBe(false);
+    // A sibling group, and a sibling key inside the patched group, survive.
+    expect(saved.settings.files).toEqual({
+      attachmentLocation: "global-folder",
+      attachmentFolderName: "media",
+    });
+    expect(await readWorkspaceSettingsFile(root)).toEqual(saved);
   });
 
   it("saves over a MISSING file — a new workspace is not born refused", async () => {
     const root = await tempRoot();
-    const settings = {
-      ...DEFAULT_WORKSPACE_SETTINGS,
-      privacy: { confirmExternalLinks: false },
-    };
-    expect(await saveWorkspaceSettingsFile(root, settings)).toEqual({
-      settings,
+    expect(
+      await saveWorkspaceSettingsFile(root, { privacy: { confirmExternalLinks: false } }),
+    ).toEqual({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        privacy: { confirmExternalLinks: false },
+      },
       source: "stored",
     });
   });

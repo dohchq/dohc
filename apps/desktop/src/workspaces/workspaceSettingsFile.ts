@@ -3,7 +3,9 @@ import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
+  mergeWorkspaceSettings,
   WorkspaceSettings,
+  type WorkspaceSettingsPatch,
   type WorkspaceSettingsResult,
 } from "./workspaceSettings";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
@@ -65,23 +67,31 @@ export async function readWorkspaceSettingsFile(
   }
 }
 
-// Settings saves write the whole RESOLVED object. Over a file dohc cannot
-// read, the resolved object carries the fail-closed opt-out, so one unrelated
-// control would land `workspaceEngineAlpha: false` on disk as a choice the
-// user never made — and the warning would disappear with it. Refuse instead.
-// Reset stays open as the deliberate way to replace the file.
+// THE save path: the changed controls, applied to the file as it is NOW.
+//
+// Two ways the old whole-object save wrote an opt-out nobody chose. Over a
+// file dohc cannot read, the caller's resolved object carries the fail-closed
+// `workspaceEngineAlpha: false`, so one unrelated control would land the
+// opt-out on disk and the warning would disappear with it — that one is
+// refused here, and reset stays open as the deliberate way to replace the
+// file. And after the user repairs the file, the caller still holds the
+// resolved copy from before the repair: writing that copy back would undo the
+// repair through the very recovery path the refusal prescribes. Merging the
+// patch onto a fresh read closes both, and every other stale-snapshot save
+// with them.
 export async function saveWorkspaceSettingsFile(
   rootPath: string,
-  settings: WorkspaceSettings,
+  patch: WorkspaceSettingsPatch,
 ): Promise<WorkspaceSettingsResult> {
   const current = await readWorkspaceSettingsFile(rootPath);
   if (current.source === "recovered") {
     const path = await workspaceSettingsPath(rootPath);
     return {
       ...current,
-      refusal: `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file, or select Reset workspace in Advanced to replace it.`,
+      refusal: `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file. Or select Reset workspace in Advanced to replace it.`,
     };
   }
+  const settings = mergeWorkspaceSettings(current.settings, patch);
   await writeWorkspaceSettingsFile(rootPath, settings);
   return { settings, source: "stored" };
 }
