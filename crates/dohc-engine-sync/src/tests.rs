@@ -11545,9 +11545,20 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
 
     let result = client.pull_share_view(&mut engine, "ws", "share", &NoFaults);
 
-    // Asserted before the outcome: replay downloads the blob BEFORE the write
-    // floor refuses the path, so a swallowed refusal discloses the secret bytes
-    // to the client even though nothing lands.
+    // Nothing landed. Two independent floors say so — the boundary refusal
+    // here, and `write_text`'s storable-path floor in `store.rs` — so this
+    // fires only when BOTH regress.
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "app/.env")
+            .expect("secret path read is answerable"),
+        None,
+        "MUTATION: losing the boundary refusal AND store.rs's storable floor lands secret plaintext on the read surface"
+    );
+    // And the blob was never even asked for. Replay downloads it BEFORE the
+    // storable floor refuses the path, so a swallowed refusal discloses the
+    // secret bytes to the client even though nothing lands. Asserted before
+    // the outcome so this disclosure, not the later error, is what fails.
     assert_eq!(
         *client
             .transport()
@@ -11570,13 +11581,6 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
             .map(|changed| changed.path.as_str())
             .collect::<Vec<_>>(),
         ["docs/a.md"]
-    );
-    assert_eq!(
-        VersionedTextStore::new(&mut engine)
-            .read_text("ws", "main", "app/.env")
-            .expect("secret path read is answerable"),
-        None,
-        "MUTATION: continuing into replay lands secret plaintext on the read surface"
     );
 }
 
