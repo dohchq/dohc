@@ -79,7 +79,15 @@ export function SettingsDialog(props: {
   workspacePath: string;
   initialSection?: SettingsSectionId;
   onClose: () => void;
-  onAgentActiveChange?: (active: boolean) => void;
+  onAgentActiveChange?: (update: {
+    active: boolean;
+    /**
+     * True only when this panel started or ended the run itself. An
+     * OBSERVATION may be older than a refresh the shell already has in
+     * flight, so it must never supersede one.
+     */
+    mutated: boolean;
+  }) => void;
   onOpenCloud?: () => void;
   onWorkspaceFilesChanged?: () => void;
 }) {
