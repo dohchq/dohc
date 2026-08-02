@@ -499,19 +499,21 @@ survives the package's deletion, but less than I first claimed:
   regenerates `crates/dohc-engine-collab/tests/fixtures` from it and fails on
   drift — **except** for fixtures listed in its `knownOracleFailures`
   allowlist, which it filters out of BOTH the committed and generated sets
-  before comparing (`check-fixture-drift.mjs:176-196`). A case on that list
+  before comparing (`check-fixture-drift.mjs:204-214`). A case on that list
   (e.g. `richdocProjection-code-language-backtick.json`) can drift freely
   while the gate still passes. Mitigating: the same script FAILS if an
   allowlisted case starts generating cleanly again, so the allowlist cannot
   silently rot — but while an entry is live, that one case has no parity
   guard at all.
-- `packages/security-contract` parity is **NOT** enforced. A generator exists
-  (`crates/dohc-engine-sync/tests/fixtures/gen-fixtures.mjs` reads that package)
-  but `check-fixture-drift.mjs` only ever regenerates the collab directory, so
-  the sync fixtures can go stale and the gate still passes while the Rust path
-  floor diverges from its TypeScript twin. That is a pre-existing hole in the
-  gate, not something R16 introduces, and it is tracked separately — but it means
+- `packages/security-contract` parity was **NOT** enforced when R16 was decided.
+  A generator existed (`crates/dohc-engine-sync/tests/fixtures/gen-fixtures.mjs`
+  reads that package) but `check-fixture-drift.mjs` only ever regenerated the
+  collab directory, so the sync fixtures could go stale and the gate still pass
+  while the Rust path floor diverged from its TypeScript twin. That was a
+  pre-existing hole in the gate, not something R16 introduced, and it meant
   "parity survives" must not be used as the whole justification here.
+  **Closed by #368**: `check-fixture-drift.mjs` now regenerates both fixture
+  sets from a `fixtureSets` list, so security-contract parity is enforced too.
 
 Consequences, all owned by R16:
 

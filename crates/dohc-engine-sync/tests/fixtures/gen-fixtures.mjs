@@ -1,17 +1,51 @@
 // Real TypeScript oracle for R10's cross-process security vocabulary.
 // Regenerate with:
-//   pnpm exec tsx crates/dohc-engine-sync/tests/fixtures/gen-fixtures.mjs
-import { writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import {
+//   node crates/dohc-engine-sync/tests/fixtures/gen-fixtures.mjs
+//   DOHC_FIXTURE_OUT=<directory> node crates/dohc-engine-sync/tests/fixtures/gen-fixtures.mjs
+//
+// The oracle is TypeScript, so this registers tsx itself rather than requiring
+// the caller to run it under `tsx` — the same shape the dohc-engine-collab
+// generator uses, so the fixture drift check can run both with plain node.
+import { createRequire } from "node:module";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(here, "../../../..");
+const outputDir = process.env.DOHC_FIXTURE_OUT
+  ? resolve(process.env.DOHC_FIXTURE_OUT)
+  : here;
+mkdirSync(outputDir, { recursive: true });
+
+const require = createRequire(join(repoRoot, "package.json"));
+const tsxBases = [repoRoot, join(repoRoot, "node_modules/.pnpm")];
+let tsxApiPath = null;
+for (const base of tsxBases) {
+  try {
+    tsxApiPath = require.resolve("tsx/esm/api", { paths: [base] });
+    break;
+  } catch {
+    /* try next base */
+  }
+}
+if (!tsxApiPath) {
+  throw new Error(
+    `could not resolve tsx/esm/api from any base:\n${tsxBases.join("\n")}\nrun 'pnpm install --offline --frozen-lockfile' before regenerating security-contract fixtures`,
+  );
+}
+const { register } = await import(pathToFileURL(tsxApiPath).href);
+const unregisterTsx = register();
+const {
   AGENT_CHANNEL_WIRE_ID,
   GENERAL_CHANNEL_WIRE_ID,
   classifyEngineFilePath,
   classifyEngineFilePathForRead,
-} from "../../../../packages/security-contract/src/index.ts";
+} = await import(
+  pathToFileURL(join(repoRoot, "packages/security-contract/src/index.ts")).href
+);
+await unregisterTsx();
 
-const here = dirname(fileURLToPath(import.meta.url));
 const inputs = [
   ["notes/today.md", true],
   ["config/app.env", true],
@@ -44,4 +78,7 @@ const fixture = {
   },
   vectors,
 };
-writeFileSync(join(here, "security-contract.json"), `${JSON.stringify(fixture, null, 2)}\n`);
+writeFileSync(
+  join(outputDir, "security-contract.json"),
+  `${JSON.stringify(fixture, null, 2)}\n`,
+);
