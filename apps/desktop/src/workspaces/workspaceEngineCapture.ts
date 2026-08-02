@@ -496,6 +496,22 @@ interface RegisteredExpectedEngineEvent extends ExpectedEngineEvent {
   expiresAtMs: number;
 }
 
+/**
+ * Wraps a callback so it runs at most once, and tolerates it being absent.
+ *
+ * Used for the save-state edit count: several recovery paths can each be the
+ * first to arm a settle carrying one update, so they all get the same wrapped
+ * callback and the first one there wins.
+ */
+function announceOnce(announce: (() => void) | undefined): () => void {
+  let announced = false;
+  return () => {
+    if (announced) return;
+    announced = true;
+    announce?.();
+  };
+}
+
 function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -1231,7 +1247,15 @@ export function createWorkspaceEngineCapture(
 
     const rebind = async (
       failed: EngineYdocProviderSession,
-      options?: { releaseBeforeOpen?: boolean; retryTransportErrors?: boolean },
+      options?: {
+        releaseBeforeOpen?: boolean;
+        retryTransportErrors?: boolean;
+        // The recovery replay is an arm point like any other: when the failed
+        // generation never armed anything (a SYNCHRONOUS refusal throws before
+        // its settle exists), this replay is the first settle that will carry
+        // the edit, and the only one that will.
+        onReplayArmed?: () => void;
+      },
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
       const doc = canonicalDoc;
@@ -1254,7 +1278,7 @@ export function createWorkspaceEngineCapture(
         markDead(failed);
         throw error;
       }
-      await adoptGeneration(doc, replacement);
+      await adoptGeneration(doc, replacement, options?.onReplayArmed);
       // A reconnect-class failure means the prior daemon/workspace binding is
       // gone. Opening the replacement first is the release boundary; sending a
       // close through the broken transport can only fail and must not turn a
@@ -1348,6 +1372,17 @@ export function createWorkspaceEngineCapture(
       contentKind,
       path: sessionPath,
       applyLocalUpdate(update, onArmed) {
+        // ONE announcement per update, at the FIRST provider call that arms a
+        // settle carrying it. Three calls can be that first one — the live
+        // generation's own, a dead session's revive replay, and a failed
+        // generation's recovery replay — and which one gets there depends on
+        // how the generation failed. Handing the same once-guarded function to
+        // all three is what stops that from mattering: the count can neither
+        // lead the armed settle (a "Saved" over content it never carried) nor
+        // lag it (a settle that saves the edit while vouching for a seq below
+        // it, leaving the document on "Saving…" with nothing left to arm
+        // another settle). #514, and its two review rounds.
+        const armed = announceOnce(onArmed);
         void append(async () => {
           if (canonicalDoc === null || closed) throw closedError();
           const doc = canonicalDoc;
@@ -1361,7 +1396,7 @@ export function createWorkspaceEngineCapture(
             // The revive replays the canonical doc — this update included —
             // into the new generation. It announces the update when that
             // replay is ARMED, not when its journal RPC returns.
-            await reviveDeadSession(doc, onArmed);
+            await reviveDeadSession(doc, armed);
             return;
           }
           const generation = current;
@@ -1371,15 +1406,22 @@ export function createWorkspaceEngineCapture(
             // awaiting the journal round trip: the settle it just armed may
             // start before that round trip returns.
             const journaled = generation.applyLocalUpdate(update);
-            onArmed?.();
+            armed();
             await journaled;
             Y.applyUpdate(doc, update);
           } catch (error) {
             // A live refusal still owns its lease and must close first; a
             // transport restart opens first because the old daemon is gone.
+            //
+            // A SYNCHRONOUS refusal threw before the line above, so nothing was
+            // armed and nothing announced. The recovery replay below is then
+            // the first and only settle that will carry this edit, and the
+            // once-guard makes announcing there a no-op when the failure was
+            // asynchronous and the count already rose.
             Y.applyUpdate(doc, update);
             await rebind(generation, {
               releaseBeforeOpen: !isEngineSessionReconnectError(error),
+              onReplayArmed: armed,
             });
           }
         }).catch((error: unknown) => {
