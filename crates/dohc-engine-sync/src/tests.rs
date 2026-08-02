@@ -14027,7 +14027,10 @@ fn share_view_binary_pull(
         )
         .with_view_blobs([(sha256, bytes)]),
     );
-    client.pull_share_view(engine, "ws", "share", &NoFaults)
+    // The write must sit INSIDE the grant, or the op is skipped and this helper
+    // stops exercising the ceiling it exists to test. Granting the exact path
+    // keeps that true whatever path a caller passes.
+    client.pull_share_view(engine, "ws", "share", &tracked_grant([path]), &NoFaults)
 }
 
 /// A shared write reaches the store through `write_binary`, which never passes
