@@ -1270,8 +1270,39 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         "notes/rival.md",
         b"written by something else\n",
     );
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    call(&transport, &handle, 3, "capture.flush", json!({})).await;
+    // POLL until the rival content is provably the head. One sleep plus a
+    // flush is not enough: a watcher that has not yet queued the write makes
+    // the flush report quiescence with no head minted, and the settle below
+    // then refuses through the materialization preimage instead — passing
+    // without ever reaching the predicate this test exists to hold.
+    let mut ingested = Value::Null;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        call(
+            &transport,
+            &handle,
+            100 + attempt,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        ingested = call(
+            &transport,
+            &handle,
+            200 + attempt,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": "notes/rival.md" }),
+        )
+        .await;
+        if ingested["text"] == json!("written by something else\n") {
+            break;
+        }
+    }
+    assert_eq!(
+        ingested["text"],
+        json!("written by something else\n"),
+        "capture must mint the RIVAL head before the settle is meaningful"
+    );
 
     call(
         &transport,
