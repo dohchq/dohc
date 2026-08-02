@@ -1678,12 +1678,12 @@ describe("settings entry points", () => {
 });
 
 // AUDIT-OPTOUT: a settings file that cannot be read reads as opted out, so the
-// workspace records nothing. The Settings dialog is not enough — the user must
-// see it without opening Settings.
+// workspace records no history. The Settings dialog is not enough — the user
+// must see it without opening Settings.
 describe("unreadable workspace settings", () => {
   it("raises the settings warning in the notice center, not only in Settings", async () => {
     const warning =
-      "Workspace settings use an unsupported shape. dohc records nothing for this workspace until you fix /ws/.dohc/settings.local.json.";
+      "Workspace settings could not be read. dohc records no history for this workspace until you fix /ws/.dohc/settings.local.json.";
     const bridge = makeBridge(Promise.resolve(null));
     bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
       settings: {

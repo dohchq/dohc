@@ -74,7 +74,7 @@ function renderBar(
       {...(props.onDismissAgentNotification
         ? { onDismissAgentNotification: props.onDismissAgentNotification }
         : {})}
-      onOpenSettings={() => {}}
+      onOpenSettings={props.onOpenSettings ?? (() => {})}
       onToggleTheme={() => {}}
       onContextMenu={props.onContextMenu ?? (() => {})}
     />,
@@ -273,7 +273,9 @@ describe("notice center", () => {
   // recorded. The flip must never be silent, and it must not claim the user
   // turned the engine off in Settings.
   it("names the unreadable settings file instead of blaming the engine setting", async () => {
+    const onOpenSettings = vi.fn();
     renderBar({
+      onOpenSettings,
       syncStatus: {
         state: "synced",
         pendingChangeCount: 0,
@@ -281,13 +283,16 @@ describe("notice center", () => {
         historyRecordingOff: true,
       },
       settingsWarning:
-        "Workspace settings use an unsupported shape. dohc records nothing for this workspace until you fix /ws/.dohc/settings.local.json.",
+        "Workspace settings could not be read. dohc records no history for this workspace until you fix /ws/.dohc/settings.local.json.",
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-workspace-settings-unreadable");
     expect(notice.textContent).toContain("History is off for this workspace");
     expect(notice.textContent).toContain("/ws/.dohc/settings.local.json");
     expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
+    // The notice owes a Next the user can act on, as a control.
+    await userEvent.click(within(notice).getByRole("button", { name: "Open Settings" }));
+    expect(onOpenSettings).toHaveBeenCalledOnce();
   });
 
   it("blames the engine setting when the settings file reads normally", async () => {

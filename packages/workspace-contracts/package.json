@@ -9,7 +9,8 @@
     "./domain": "./src/domain.ts",
     "./engine": "./src/engine.ts",
     "./relay": "./src/relay.ts",
-    "./conformance": "./src/conformance.ts"
+    "./conformance": "./src/conformance.ts",
+    "./workspace-settings": "./src/workspaceSettings.ts"
   },
   "scripts": {
     "test": "vitest run",

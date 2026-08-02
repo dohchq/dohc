@@ -88,6 +88,7 @@ export function StatusBar(props: {
           conflictSummaries={props.conflictSummaries}
           {...(props.settingsWarning ? { settingsWarning: props.settingsWarning } : {})}
           onOpenHistory={props.onOpenHistory}
+          onOpenSettings={props.onOpenSettings}
           onOpenConflicts={props.onOpenConflicts}
           {...(props.onDismissSyncReview
             ? { onDismissSyncReview: props.onDismissSyncReview }

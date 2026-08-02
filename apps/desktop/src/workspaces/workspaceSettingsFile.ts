@@ -28,7 +28,7 @@ function unreadableSettings(
   return {
     settings: UNREADABLE_WORKSPACE_SETTINGS,
     source: "recovered",
-    warning: `${reason} dohc records nothing for this workspace until you fix ${path}.`,
+    warning: `${reason} dohc records no history for this workspace until you fix ${path}.`,
   };
 }
 
@@ -41,7 +41,7 @@ export async function readWorkspaceSettingsFile(
     const fileStats = await lstat(path);
     if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
       return unreadableSettings(
-        "Workspace settings are not a regular file.",
+        "Workspace settings are not a file dohc can read.",
         path,
       );
     }
@@ -51,17 +51,14 @@ export async function readWorkspaceSettingsFile(
     const raw = JSON.parse(await readFile(path, "utf8"));
     const parsed = WorkspaceSettings.safeParse(raw);
     if (!parsed.success) {
-      return unreadableSettings(
-        "Workspace settings use an unsupported shape.",
-        path,
-      );
+      return unreadableSettings("Workspace settings could not be read.", path);
     }
     return { settings: parsed.data, source: "stored" };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" };
     }
-    return unreadableSettings("dohc could not read workspace settings.", path);
+    return unreadableSettings("Workspace settings could not be read.", path);
   }
 }
 

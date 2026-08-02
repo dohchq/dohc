@@ -207,13 +207,26 @@ describe("workspace settings file store", () => {
       join(corrupt, ".dohc", WORKSPACE_SETTINGS_FILE),
     );
 
-    const future = await tempRoot();
-    await writeWorkspaceSettingsFile(future, DEFAULT_WORKSPACE_SETTINGS);
-    await writeFile(join(future, ".dohc", WORKSPACE_SETTINGS_FILE), JSON.stringify({ version: 2 }));
-    const futureResult = await readWorkspaceSettingsFile(future);
-    expect(futureResult.source).toBe("recovered");
-    expect(futureResult.settings.experimental.workspaceEngineAlpha).toBe(false);
-    expect(futureResult.warning).toContain("unsupported shape");
+    // The same table packages/mcp asserts against isWorkspaceEngineFlagged.
+    // Both readers share one schema, so both must answer OFF for every body.
+    for (const body of [
+      JSON.stringify({ version: 2 }),
+      JSON.stringify({ experimental: { workspaceEngineAlpha: "false" } }),
+      JSON.stringify({}),
+      JSON.stringify([]),
+      JSON.stringify(null),
+    ]) {
+      const invalid = await tempRoot();
+      await writeWorkspaceSettingsFile(invalid, DEFAULT_WORKSPACE_SETTINGS);
+      await writeFile(join(invalid, ".dohc", WORKSPACE_SETTINGS_FILE), body);
+      const invalidResult = await readWorkspaceSettingsFile(invalid);
+      expect(invalidResult.source, body).toBe("recovered");
+      expect(
+        invalidResult.settings.experimental.workspaceEngineAlpha,
+        body,
+      ).toBe(false);
+      expect(invalidResult.warning, body).toContain("could not be read");
+    }
 
     const huge = await tempRoot();
     await writeWorkspaceSettingsFile(huge, DEFAULT_WORKSPACE_SETTINGS);
@@ -272,7 +285,7 @@ describe("workspace settings file store", () => {
     expect(result.source).toBe("recovered");
     expect(result.settings.agents.mcpAutoStart).toBe(false);
     expect(result.settings.experimental.workspaceEngineAlpha).toBe(false);
-    expect(result.warning).toContain("not a regular file");
+    expect(result.warning).toContain("not a file dohc can read");
   });
 });
 

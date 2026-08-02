@@ -79,9 +79,10 @@ export function NoticeCenter(props: {
   agentActive: boolean;
   conflictSummaries: string[];
   // Set when this workspace's settings file exists but cannot be read. It
-  // reads as opted out, so nothing is recorded — the warning names the file.
+  // reads as opted out, so no history is recorded — the warning names the file.
   settingsWarning?: string;
   onOpenHistory: () => void;
+  onOpenSettings: () => void;
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
@@ -283,6 +284,7 @@ export function NoticeCenter(props: {
         tone: "warning",
         title: "History is off for this workspace",
         body: props.settingsWarning,
+        action: { label: "Open Settings", onClick: props.onOpenSettings },
         Icon: AlertTriangle,
       });
     } else if (props.syncStatus?.historyRecordingOff) {
@@ -341,7 +343,9 @@ export function NoticeCenter(props: {
     props.onDismissAgentNotification,
     props.onOpenConflicts,
     props.onOpenHistory,
+    props.onOpenSettings,
     props.onDismissSyncReview,
+    props.settingsWarning,
     props.syncStatus,
     installPending,
     installUpdate,
