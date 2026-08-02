@@ -243,15 +243,28 @@ export interface WorkspaceVersionConflictResolveOutcome {
 // claim it.
 export type EngineYDocSaveState = "settling" | "saved" | "error";
 
+export interface WorkspaceEngineYDocCloseOptions {
+  settle?: boolean;
+  summary?: string;
+  // Set ONLY by the app-quit teardown. `will-quit` races the whole shutdown
+  // chain against one 3s timer, so a close there must not wait for a daemon to
+  // come back: the budget cannot cover a relaunch anyway, and the wait starves
+  // the store closes and the daemon stop chained behind it. Every other close
+  // keeps the full transport ladder, because outside quit a daemon that
+  // relaunches in a second is a session worth recovering.
+  shuttingDown?: boolean;
+}
+
 // The desktop adds restart recovery and adapts external-edit outcomes around
 // the Rust client session. Keep that small delta local instead of importing
 // the retired in-process provider's public type into production.
 export type WorkspaceEngineYDocProviderSession = Omit<
   EngineYdocProviderSession,
-  "lineage" | "applyLocalUpdate" | "applyExternalMarkdownEdit"
+  "lineage" | "applyLocalUpdate" | "applyExternalMarkdownEdit" | "close"
 > & {
   applyLocalUpdate(update: Uint8Array): void;
   applyExternalMarkdownEdit(markdown: string): Promise<{ supported: boolean }>;
+  close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
 
 export interface WorkspaceEngineCapture {
@@ -896,7 +909,7 @@ export function createWorkspaceEngineCapture(
     // failing-close and the error propagates (never swallowed on this
     // data-integrity-critical teardown). Reused by the returned session's
     // close(), the renderer close IPC, and every lifecycle op below.
-    close: (opts?: { settle?: boolean; summary?: string }) => Promise<void>;
+    close: (opts?: WorkspaceEngineYDocCloseOptions) => Promise<void>;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
 
@@ -1107,7 +1120,7 @@ export function createWorkspaceEngineCapture(
 
     const rebind = async (
       failed: EngineYdocProviderSession,
-      options?: { releaseBeforeOpen?: boolean },
+      options?: { releaseBeforeOpen?: boolean; retryTransportErrors?: boolean },
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
       const doc = canonicalDoc;
@@ -1123,7 +1136,9 @@ export function createWorkspaceEngineCapture(
       }
       let replacement: EngineYdocProviderSession;
       try {
-        replacement = await openGeneration(false);
+        replacement = await openGeneration(false, {
+          retryTransportErrors: options?.retryTransportErrors,
+        });
       } catch (error) {
         markDead(failed);
         throw error;
@@ -1166,6 +1181,7 @@ export function createWorkspaceEngineCapture(
 
     const executeWithReconnect = async <T>(
       operation: (session: EngineYdocProviderSession) => Promise<T>,
+      options?: { retryTransportErrors?: boolean },
     ): Promise<T> => {
       if (closed) throw closedError();
       // Settling and closing are the paths that PERSIST. A dead session still
@@ -1185,7 +1201,9 @@ export function createWorkspaceEngineCapture(
         return await operation(generation);
       } catch (error) {
         if (!isEngineSessionReconnectError(error)) throw error;
-        await rebind(generation);
+        await rebind(generation, {
+          retryTransportErrors: options?.retryTransportErrors,
+        });
         if (current === null) throw error;
         return await operation(current);
       }
@@ -1286,9 +1304,20 @@ export function createWorkspaceEngineCapture(
             return;
           }
           try {
-            await executeWithReconnect(async (session) => {
-              await session.close(closeOptions);
-            });
+            // A session still LIVE when the daemon died reaches its rebind
+            // from HERE. At quit that rebind cannot succeed: the 3s budget
+            // does not cover a daemon relaunch, and waiting it out starves the
+            // store closes and the daemon stop. Nothing is dropped by giving
+            // up — a live `current` means no edit has failed since the daemon
+            // died, so every update is already in its journal and only the .md
+            // projection is deferred to the next launch. The path that DOES
+            // still hold unjournaled text is the dead-session revive above.
+            await executeWithReconnect(
+              async (session) => {
+                await session.close(closeOptions);
+              },
+              { retryTransportErrors: closeOptions?.shuttingDown !== true },
+            );
           } catch (error) {
             // A settle failure whose RELEASE still succeeded tore the daemon
             // session down — record the teardown before rethrowing, or every
@@ -2323,10 +2352,9 @@ export function createWorkspaceEngineCapture(
       // ONLY when teardown succeeds (gate fix 5): a failing close retains a
       // failing-close entry so the reservation/retry are not lost and capture
       // stays deferred for the path.
-      const closeEntry = async (opts?: {
-        settle?: boolean;
-        summary?: string;
-      }): Promise<void> => {
+      const closeEntry = async (
+        opts?: WorkspaceEngineYDocCloseOptions,
+      ): Promise<void> => {
         try {
           await session.close(opts);
         } catch (error) {

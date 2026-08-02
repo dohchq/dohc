@@ -2555,7 +2555,14 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
 async function closeAllEngineYDocSessions(): Promise<void> {
   const entries = [...engineYDocSessions.values()];
   engineYDocSessions.clear();
-  await Promise.all(entries.map((entry) => entry.session.close().catch(() => undefined)));
+  // `shuttingDown` ONLY here: this is the one close that runs inside the
+  // will-quit budget, so it is the one close that must not wait for a daemon
+  // to come back. A user closing a document still gets the full ladder.
+  await Promise.all(
+    entries.map((entry) =>
+      entry.session.close({ shuttingDown: true }).catch(() => undefined),
+    ),
+  );
 }
 
 function fallbackUpdateState(): PublicUpdateState {
