@@ -56,9 +56,11 @@ describe("share mounts real daemon", () => {
               token: "unused",
             },
             scope: {
-              recorded: { paths: [], versionId: null },
+              // A REAL pinned selector: no paths and no version selects
+              // nothing at all, which the engine refuses.
+              recorded: { paths: ["docs"], versionId: null },
               fetch: () => {
-                throw new Error("a recorded selector must not be re-fetched");
+                throw new Error("a pinned selector must not be re-fetched");
               },
               record: () => undefined,
             },

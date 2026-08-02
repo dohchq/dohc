@@ -2194,7 +2194,7 @@ impl EngineService {
                 RelayOperation::PullShareView {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
-                    granted: params.granted_selector.map(Into::into),
+                    granted: params.granted_selector.into(),
                 },
                 "share.view.pull",
             )
@@ -8309,12 +8309,12 @@ struct SharedChannelParams {
 struct ShareViewParams {
     workspace_id: String,
     share_id: String,
-    /// The selector the caller recorded when it accepted this share. ABSENT
-    /// declares no scope, and that pull enforces no containment. Present with
-    /// empty `paths` is a whole-workspace grant; present with a `versionId`
-    /// is a version share. The three states are deliberately distinct.
-    #[serde(default)]
-    granted_selector: Option<GrantedSelectorParams>,
+    /// The selector the relay stated for this share, pinned by the caller on
+    /// first read. REQUIRED, and required as an object: absent and explicit
+    /// `null` both parse as "no scope", which is the one pull nothing checks.
+    /// Serde refuses either — a caller with no selector must resolve one
+    /// before it pulls.
+    granted_selector: GrantedSelectorParams,
 }
 
 #[derive(Deserialize)]

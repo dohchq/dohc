@@ -14,9 +14,10 @@ export interface ShareViewInfo {
   granterUserId: string;
   granterEmail: string | null;
   /**
-   * The accepted selector, or null when the share grants a chat channel and
-   * has no file selector at all. NEVER a softened stand-in for a response
-   * this client could not read — see `ShareSelectorInvalidError`.
+   * The selector the relay states for this share, or null when the share
+   * grants a chat channel and has no file selector at all. NEVER a softened
+   * stand-in for a response this client could not read — see
+   * `ShareSelectorInvalidError`.
    */
   selector: ShareViewSelector | null;
   createdAtMs: number;
@@ -24,10 +25,9 @@ export interface ShareViewInfo {
 
 /**
  * The relay answered with something that is not a selector this client can
- * enforce. It is refused rather than softened, because every permissive
- * reading of a missing selector lands on the WIDEST grant: empty paths with
- * no version is "the whole tracked workspace" to the engine, so a relay that
- * simply omits the field would disarm the containment it is checked by.
+ * enforce. It is refused rather than softened: a client that guesses at a
+ * selector is not pinning the relay's assertion, it is inventing one, and
+ * every permissive guess is wider than the grant it stands in for.
  *
  * The contract is the relay's own (`validateShareSelector` in
  * `services/sync-relay/src/shareFilter.ts`): paths are non-empty strings, and
@@ -61,7 +61,7 @@ async function shareFetch(
   return response;
 }
 
-// Strict, because this value BECOMES the recorded grant every later pull is
+// Strict, because this value BECOMES the pinned grant every later pull is
 // enforced against. `null` means "a chat-channel grant, no file selector";
 // anything unreadable throws rather than degrading into a wider grant.
 function parseSelector(

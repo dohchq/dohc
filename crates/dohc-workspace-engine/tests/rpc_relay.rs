@@ -1696,6 +1696,7 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
         }),
     )
     .await;
@@ -1755,6 +1756,40 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
         )
         .expect("persisted share view cursor");
     assert_eq!(cursor, "2");
+}
+
+/// `grantedSelector` has exactly two unscoped-looking wire states — absent,
+/// and an explicit `null` that a permissive `Option` would read as absent
+/// while looking declared. Both are refused BEFORE the relay is called, so a
+/// pull that enforces no containment cannot be requested at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn share_view_pull_refuses_a_missing_or_null_granted_selector() {
+    let workspace_id = "rpc-share-view-no-selector";
+    let relay = FakeRelay::start(RelayState::default());
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let mut id = 1;
+    let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    let unscoped = [
+        json!({ "workspaceId": workspace_id, "shareId": "share" }),
+        json!({ "workspaceId": workspace_id, "shareId": "share", "grantedSelector": null }),
+    ];
+    for params in unscoped {
+        id += 1;
+        let error = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "share.view.pull", Some(handle.clone()), params.clone()),
+            )
+            .await
+            .expect_err("MUTATION: an unscoped share view pull is accepted");
+        assert_eq!(error.code, ErrorCode::InvalidParams, "{params}");
+    }
+    assert!(
+        relay.state.lock().expect("relay state").requests.is_empty(),
+        "MUTATION: the pull reaches the relay before the selector is required"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -22,11 +22,13 @@ import {
 import type { ShareScopeSource } from "./sharedView";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
-// These tests drive the pull with a selector already recorded; the
-// fetch-first path has its own tests. A throwing `fetch` asserts that a
-// recorded selector never goes back to the relay.
+// These tests drive the pull with a selector already pinned; the fetch-first
+// path has its own tests. A throwing `fetch` asserts that a pinned selector
+// never goes back to the relay. No paths selects the whole tracked workspace
+// only WITH a version — no paths and no version selects nothing at all, which
+// the engine refuses.
 const RECORDED_SCOPE: ShareScopeSource = {
-  recorded: { paths: [], versionId: null },
+  recorded: { paths: [], versionId: "shared-version" },
   fetch: () => {
     throw new Error("a recorded selector must not be re-fetched");
   },

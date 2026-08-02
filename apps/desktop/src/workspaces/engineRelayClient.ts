@@ -477,10 +477,10 @@ export interface EngineRelayWorkspaceClient {
   }): Promise<PushSharedChannelResult>;
   pullShareView(input: {
     shareId: string;
-    // The selector this share granted when the user accepted it. Omitting it
-    // declares no scope, and that pull enforces no containment — the desktop
-    // refresh paths resolve a selector first and skip the pull otherwise.
-    grantedSelector?: { paths: readonly string[]; versionId: string | null };
+    // The selector the relay stated for this share, pinned on first read.
+    // Required, because the engine has no unscoped pull: a caller that cannot
+    // resolve a selector must skip its refresh, not widen it.
+    grantedSelector: { paths: readonly string[]; versionId: string | null };
   }): Promise<PullShareViewResult>;
 }
 
@@ -846,17 +846,13 @@ export class EngineRelayClient {
             await request("share.view.pull", {
               workspaceId: workspace.workspaceId,
               shareId,
-              // Absent and empty mean different things to the engine: absent
-              // declares no scope and enforces nothing, empty `paths` is a
-              // whole-workspace grant. Never collapse one into the other.
-              ...(grantedSelector === undefined
-                ? {}
-                : {
-                    grantedSelector: {
-                      paths: [...grantedSelector.paths],
-                      versionId: grantedSelector.versionId,
-                    },
-                  }),
+              // Both dimensions, always. Dropping the paths leaves a grant
+              // that selects everything under a version; dropping the version
+              // leaves one the engine refuses outright.
+              grantedSelector: {
+                paths: [...grantedSelector.paths],
+                versionId: grantedSelector.versionId,
+              },
             }),
             "share.view.pull",
           );

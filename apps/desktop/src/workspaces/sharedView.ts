@@ -23,16 +23,21 @@ export interface RefreshSharedViewOutcome {
   changedPaths: number;
 }
 
-/** The selector a share granted, as the relay expressed it at accept time. */
-export interface AcceptedShareSelector {
+/**
+ * The selector the RELAY stated for a share, pinned locally the first time
+ * this client could read it and enforced against every later pull (trust on
+ * first use). The user never sees or chooses this scope — pinning only stops
+ * the relay from restating a wider one on a later pull.
+ */
+export interface PinnedShareSelector {
   paths: string[];
   versionId: string | null;
 }
 
 /**
- * Raised when a refresh cannot establish the scope the user accepted, so it
- * did NOT pull. An unscoped pull enforces no containment, which would hand a
- * relay able to INDUCE this failure the one pull it is not checked on.
+ * Raised when a refresh could not resolve the share's selector, so it did NOT
+ * pull. An unscoped pull enforces no containment, which would hand a relay
+ * able to INDUCE this failure the one pull it is not checked on.
  */
 export class ShareScopeUnavailableError extends Error {
   constructor(readonly shareId: string) {
@@ -41,24 +46,24 @@ export class ShareScopeUnavailableError extends Error {
   }
 }
 
-/** How one refresh learns the selector the user accepted. */
+/** How one refresh resolves the share's pinned selector. */
 export interface ShareScopeSource {
   /** What the local record holds. Anything malformed reads as absent. */
   recorded: unknown;
   /** Asked ONCE, and only when the record holds no usable selector. */
-  fetch: () => Promise<AcceptedShareSelector>;
-  /** Persist a fetched selector so no later refresh has to ask again. */
-  record: (selector: AcceptedShareSelector) => void;
+  fetch: () => Promise<PinnedShareSelector>;
+  /** Pin a fetched selector so no later refresh has to ask again. */
+  record: (selector: PinnedShareSelector) => void;
 }
 
 /**
  * A registry record is data, not a contract: read the selector back
- * defensively. Anything malformed reads as absent, which is repaired by the
- * fetch below rather than passed to the engine.
+ * defensively. Anything the relay could not have issued reads as absent,
+ * which is repaired by the fetch below rather than passed to the engine.
  */
 export function recordedShareSelector(
   value: unknown,
-): AcceptedShareSelector | null {
+): PinnedShareSelector | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -68,6 +73,11 @@ export function recordedShareSelector(
   if (candidate.versionId !== null && typeof candidate.versionId !== "string") {
     return null;
   }
+  // Selects nothing, by the relay's own rule: `validateShareSelector` refuses
+  // to create a selector with neither a path nor a version, and
+  // `pathVisibleThroughShare` serves nothing through one. A record holding it
+  // is damage, not a grant — re-fetch rather than pull against it.
+  if (candidate.paths.length === 0 && candidate.versionId === null) return null;
   return {
     paths: [...(candidate.paths as string[])],
     versionId: candidate.versionId,
@@ -75,16 +85,16 @@ export function recordedShareSelector(
 }
 
 /**
- * Fetch-then-persist BEFORE the pull, never after: a record with no selector
- * gets one now, or this refresh does not pull at all.
+ * Fetch-then-pin BEFORE the pull, never after: a record with no usable
+ * selector gets one now, or this refresh does not pull at all.
  */
-async function acceptedShareSelector(
+async function pinnedShareSelector(
   scope: ShareScopeSource,
   shareId: string,
-): Promise<AcceptedShareSelector> {
+): Promise<PinnedShareSelector> {
   const recorded = recordedShareSelector(scope.recorded);
   if (recorded !== null) return recorded;
-  let fetched: AcceptedShareSelector;
+  let fetched: PinnedShareSelector;
   try {
     fetched = await scope.fetch();
   } catch (error) {
@@ -299,7 +309,7 @@ export async function refreshSharedViewOnce(input: {
     workspaceId: string;
     relay: SyncRelayConnection;
     shareId: string;
-    grantedSelector: AcceptedShareSelector;
+    grantedSelector: PinnedShareSelector;
   }) => Promise<PullShareViewResult>;
   // Required at the factory boundary for the same reason: every rooted caller
   // must explicitly select its store implementation.
@@ -308,9 +318,9 @@ export async function refreshSharedViewOnce(input: {
   // ever runs unscoped.
   scope: ShareScopeSource;
 }): Promise<RefreshSharedViewOutcome> {
-  let grantedSelector: AcceptedShareSelector;
+  let grantedSelector: PinnedShareSelector;
   try {
-    grantedSelector = await acceptedShareSelector(input.scope, input.shareId);
+    grantedSelector = await pinnedShareSelector(input.scope, input.shareId);
   } catch (error) {
     if (error instanceof ShareUnavailableError) {
       return { status: "ended", changedPaths: 0 };

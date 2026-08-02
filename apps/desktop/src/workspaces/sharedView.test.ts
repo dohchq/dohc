@@ -15,11 +15,12 @@ import {
   type ShareScopeSource,
 } from "./sharedView";
 
-// These tests drive the pull with a selector already recorded; the
-// fetch-first path has its own tests. A throwing `fetch` asserts that a
-// recorded selector never goes back to the relay.
+// These tests drive the pull with a selector already pinned; the fetch-first
+// path has its own tests. A throwing `fetch` asserts that a pinned selector
+// never goes back to the relay. The selector is a REAL one — no paths and no
+// version selects nothing at all, which the engine refuses.
 const RECORDED_SCOPE: ShareScopeSource = {
-  recorded: { paths: [], versionId: null },
+  recorded: { paths: ["docs"], versionId: null },
   fetch: () => {
     throw new Error("a recorded selector must not be re-fetched");
   },
@@ -272,7 +273,7 @@ describe("shared view refresh", () => {
   // A relay that cannot answer the metadata request is exactly the relay this
   // enforcement exists for, so a failure there must not buy it an unchecked
   // pull — it must buy it nothing.
-  it("does not pull at all when the accepted selector cannot be resolved", async () => {
+  it("does not pull at all when the pinned selector cannot be resolved", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
@@ -306,6 +307,51 @@ describe("shared view refresh", () => {
     expect(
       pulls,
       "MUTATION: falling back to an unscoped pull serves the relay that induced the failure",
+    ).toBe(0);
+    await expect(stat(join(rootDir, "docs/a.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await harness.closeAll();
+  });
+
+  // A record holding no paths AND no version is not a whole-workspace grant.
+  // The relay refuses to CREATE that selector and serves nothing through one,
+  // so a record carrying it is damage — it must send this refresh back to the
+  // relay, not hand the engine the widest grant there is.
+  it("treats a pinned selector that selects nothing as damage, not a whole-workspace grant", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("docs/a.md", "body the relay must not get to send");
+    let pulls = 0;
+
+    await expect(
+      refreshSharedViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store: harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir }),
+        scope: {
+          recorded: { paths: [], versionId: null },
+          fetch: async () => {
+            throw new Error("relay metadata is unavailable");
+          },
+          record: () => undefined,
+        },
+        pull: async (input) => {
+          pulls += 1;
+          return await harness.pullFor({
+            workspaceId: WORKSPACE,
+            rootPath: rootDir,
+          })(input);
+        },
+      }),
+    ).rejects.toBeInstanceOf(ShareScopeUnavailableError);
+
+    expect(
+      pulls,
+      "MUTATION: reading a selector that selects nothing as a grant pulls the whole workspace",
     ).toBe(0);
     await expect(stat(join(rootDir, "docs/a.md"))).rejects.toMatchObject({
       code: "ENOENT",
@@ -378,7 +424,7 @@ describe("shared view refresh", () => {
     expect(recorded).toEqual([{ paths: ["docs"], versionId: null }]);
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("first body");
 
-    // The recorded selector is now the scope, and it is NOT fetched again.
+    // The pinned selector is now the scope, and it is NOT fetched again.
     relay.addWrite("docs/b.md", "second body");
     const second = await refreshSharedViewOnce(harness, {
       rootDir,
@@ -388,7 +434,7 @@ describe("shared view refresh", () => {
         recorded: recorded[0],
         fetch: async () => {
           fetches += 1;
-          return { paths: [], versionId: null };
+          return { paths: ["other"], versionId: null };
         },
         record: (selector) => recorded.push(selector),
       },

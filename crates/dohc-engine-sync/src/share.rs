@@ -20,21 +20,25 @@ pub struct ShareBoundary {
     pub share_id: String,
     pub surface: ShareSurface,
     pub channel_wire_id: Option<String>,
-    /// The selector the recipient recorded when it accepted the share.
-    ///
-    /// `None` declares no scope and enforces no containment. The desktop
-    /// never pulls that way: it records the selector when the user accepts
-    /// the share, and a refresh that cannot resolve one skips its pull.
+    /// The share's pinned selector. A ShareView boundary without one admits
+    /// nothing: an unscoped view pull would enforce no containment, which is
+    /// the whole property this boundary exists to hold. A SharedChannel
+    /// boundary carries none by design — it scopes by `channel_wire_id`.
     pub granted: Option<ShareGrant>,
 }
 
-/// A received share's accepted selector, mirroring the relay's own
-/// `ShareSelector` (`services/sync-relay/src/shareFilter.ts`).
+/// The selector the RELAY stated for a received share, pinned by the
+/// recipient the first time it read it and enforced against every later pull
+/// (trust on first use). The recipient never chooses or reviews this scope;
+/// pinning only stops the relay from restating a wider one later.
+///
+/// Mirrors the relay's own `ShareSelector`
+/// (`services/sync-relay/src/shareFilter.ts`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareGrant {
-    /// Granted paths. Each selects itself and everything beneath it. EMPTY is
-    /// a whole-workspace grant, which admits every tracked path — distinct
-    /// from an absent `ShareGrant`, which declares no scope at all.
+    /// Granted paths. Each selects itself and everything beneath it. EMPTY
+    /// selects every tracked path, but ONLY together with a `version_id` —
+    /// see `path_within_grant`.
     pub paths: Vec<String>,
     /// The granted version. `None` is a live-follow share of the workspace's
     /// main version, which is never entitled to a `version.create`; `Some(id)`
@@ -209,7 +213,7 @@ fn thread_bound_to_wire(
 
 /// Fail-closed ShareView scoping. EVERY referenced path (`path`,
 /// `payloadBeforePath`, `payloadAfterPath`, `beforePath`) must classify
-/// `Tracked` and sit within the recorded grant, and at least one must be
+/// `Tracked` and sit within the pinned grant, and at least one must be
 /// present — mirroring `services/sync-relay/src/shareFilter.ts` moment.append
 /// all-paths visibility so a rename crossing the boundary cannot leak the
 /// outside path.
@@ -217,7 +221,11 @@ fn enforce_share_view_boundary(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    let granted = boundary.granted.as_ref();
+    // No pinned grant, no containment to enforce — so nothing is admitted.
+    let granted = boundary
+        .granted
+        .as_ref()
+        .ok_or(SyncError::ShareBoundaryViolation)?;
     if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
         return Err(SyncError::ShareBoundaryViolation);
     }
@@ -227,12 +235,10 @@ fn enforce_share_view_boundary(
     // minimizes a served `moment.append` down to paths, blob and operation,
     // so an inbound moment carries no version identity at all.
     if op.op_kind == "version.create" {
-        if let Some(grant) = granted {
-            let claimed = op.payload.get("versionId").and_then(Value::as_str);
-            match (grant.version_id.as_deref(), claimed) {
-                (Some(entitled), Some(claimed)) if entitled == claimed => {}
-                _ => return Err(SyncError::ShareBoundaryViolation),
-            }
+        let claimed = op.payload.get("versionId").and_then(Value::as_str);
+        match (granted.version_id.as_deref(), claimed) {
+            (Some(entitled), Some(claimed)) if entitled == claimed => {}
+            _ => return Err(SyncError::ShareBoundaryViolation),
         }
     }
     let mut paths = Vec::new();
@@ -265,9 +271,7 @@ fn enforce_share_view_boundary(
         return Err(SyncError::ShareBoundaryViolation);
     }
     for path in paths {
-        if classify_share_path(path) != PathClass::Tracked
-            || granted.is_some_and(|grant| !path_within_grant(path, &grant.paths))
-        {
+        if classify_share_path(path) != PathClass::Tracked || !path_within_grant(path, granted) {
             return Err(SyncError::ShareBoundaryViolation);
         }
     }
@@ -275,32 +279,55 @@ fn enforce_share_view_boundary(
 }
 
 /// The relay's own selection rule (`shareFilter.ts` `pathVisibleThroughShare`),
-/// re-run against the scope the recipient recorded: a granted path selects
-/// itself and everything beneath it, and an empty grant is the whole tracked
-/// workspace.
-fn path_within_grant(path: &str, granted: &[String]) -> bool {
-    granted.is_empty()
-        || granted.iter().any(|selected| {
-            path == selected
-                || path
-                    .strip_prefix(selected.as_str())
-                    .is_some_and(|tail| tail.starts_with('/'))
-        })
+/// re-run against the pinned grant. A granted path selects itself and
+/// everything beneath it. NO paths selects every tracked path, but only for a
+/// version share: the relay answers `selector.versionId !== null` there, and
+/// refuses to create a selector with neither dimension at all
+/// (`validateShareSelector`, `empty_selector`). Reading no paths as "the whole
+/// workspace" regardless of version is exactly the divergence that would let a
+/// grant the relay serves NOTHING through admit everything here.
+fn path_within_grant(path: &str, grant: &ShareGrant) -> bool {
+    if grant.paths.is_empty() {
+        return grant.version_id.is_some();
+    }
+    grant.paths.iter().any(|selected| {
+        path == selected
+            || path
+                .strip_prefix(selected.as_str())
+                .is_some_and(|tail| tail.starts_with('/'))
+    })
 }
 
 #[cfg(test)]
 mod granted_path_tests {
-    use super::path_within_grant;
+    use super::{ShareGrant, path_within_grant};
+
+    fn grant(paths: &[&str], version_id: Option<&str>) -> ShareGrant {
+        ShareGrant {
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            version_id: version_id.map(str::to_owned),
+        }
+    }
 
     #[test]
-    fn an_empty_grant_is_the_whole_tracked_workspace() {
-        assert!(path_within_grant("notes/plan.md", &[]));
-        assert!(path_within_grant("plan.md", &[]));
+    fn no_paths_selects_the_whole_tracked_workspace_only_for_a_version_share() {
+        let version_share = grant(&[], Some("v1"));
+        assert!(path_within_grant("notes/plan.md", &version_share));
+        assert!(path_within_grant("plan.md", &version_share));
+    }
+
+    /// The relay refuses to create this selector and serves nothing through
+    /// one that exists anyway. The mirror must agree.
+    #[test]
+    fn no_paths_and_no_version_selects_nothing() {
+        let selects_nothing = grant(&[], None);
+        assert!(!path_within_grant("notes/plan.md", &selects_nothing));
+        assert!(!path_within_grant("plan.md", &selects_nothing));
     }
 
     #[test]
     fn a_granted_path_selects_itself_and_its_children_only() {
-        let granted = ["notes".to_owned()];
+        let granted = grant(&["notes"], None);
         assert!(path_within_grant("notes", &granted));
         assert!(path_within_grant("notes/plan.md", &granted));
         assert!(!path_within_grant("notes-private/plan.md", &granted));

@@ -49,6 +49,10 @@ import {
 //    sha256 and hash-verified, and the bearer token comes from what
 //    `workspace.open` was told — so a wrong token or a revoked share reaches
 //    the same 401 / 404 translation the daemon produces.
+//  - NOT REAL: the grant. This double serves whatever the relay double put in
+//    the log; it does not re-check `grantedSelector`. Containment is the Rust
+//    share boundary's job (`crates/dohc-engine-sync/src/share.rs`) and is
+//    tested there. Do not read a passing test here as proof a scope holds.
 //  - NOT REAL: durability. Cursors and file state live in this object, so they
 //    survive a `workspace.close` (as the daemon's SQLite would) but not the
 //    process. Anything that must be proven ON DISK needs a real daemon.

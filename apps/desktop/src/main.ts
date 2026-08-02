@@ -361,7 +361,7 @@ import {
 import {
   ShareScopeUnavailableError,
   refreshSharedViewOnce,
-  type AcceptedShareSelector,
+  type PinnedShareSelector,
   type ShareScopeSource,
 } from "./workspaces/sharedView";
 import {
@@ -4327,9 +4327,9 @@ function registerIpcHandlers(
     return undefined;
   });
 
-  // How a refresh learns the selector the user accepted. A record that has
-  // one is used as is; a record that has none (accepted before dohc kept it,
-  // or left malformed by a hand edit) is filled from the relay and persisted
+  // How a refresh resolves the share's pinned selector. A record that holds
+  // a usable one is used as is; a record that holds none (never pinned, or
+  // left damaged by a hand edit) is filled from the relay and persisted
   // BEFORE the pull. If that fetch fails, refreshSharedViewOnce raises
   // ShareScopeUnavailableError and no pull runs: a pull with no scope
   // enforces no containment, and a relay that could induce the failure would
@@ -4338,7 +4338,7 @@ function registerIpcHandlers(
     relay: SyncRelayConnection;
     shareId: string;
     recorded: unknown;
-    record: (selector: AcceptedShareSelector) => void;
+    record: (selector: PinnedShareSelector) => void;
   }): ShareScopeSource {
     return {
       recorded: input.recorded,
@@ -4428,8 +4428,8 @@ function registerIpcHandlers(
     setWorkspaceShareView(created.workspaceId, {
       shareId: parsed.shareId,
       granterEmail: info.granterEmail,
-      // Record the selector the user is accepting, so later pulls enforce it
-      // instead of trusting the relay's selection.
+      // Pin the selector the relay just stated, so later pulls enforce it
+      // instead of trusting the relay's selection each time.
       grantedSelector: info.selector,
       // Persist the origin relay so a later refresh signed into a DIFFERENT
       // relay is skipped instead of misreading a 404 as "share ended".
@@ -4451,7 +4451,7 @@ function registerIpcHandlers(
         scope: shareScopeSource({
           relay,
           shareId: parsed.shareId,
-          // Just fetched and recorded above: this accept never re-fetches.
+          // Just fetched and pinned above: this open never re-fetches.
           recorded: info.selector,
           record: () => undefined,
         }),
@@ -4652,7 +4652,7 @@ function registerIpcHandlers(
       granterEmail: info.granterEmail,
       relayUrl: credentials.relayUrl,
       recipientEmail: credentials.email ?? null,
-      // Record the selector the user is accepting (same reason as a view).
+      // Pin the selector the relay just stated (same reason as a view).
       grantedSelector: info.selector,
     };
     await createMountDirectory(workspace.rootPath, mount.label);
@@ -4683,7 +4683,7 @@ function registerIpcHandlers(
         scope: shareScopeSource({
           relay,
           shareId: parsed.shareId,
-          // Just fetched and recorded above: this accept never re-fetches.
+          // Just fetched and pinned above: this open never re-fetches.
           recorded: info.selector,
           record: () => undefined,
         }),

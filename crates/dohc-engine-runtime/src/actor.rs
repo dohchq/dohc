@@ -322,9 +322,9 @@ pub enum RelayOperation {
     PullShareView {
         workspace_id: String,
         share_id: String,
-        /// The selector the recipient recorded when it accepted the share.
-        /// `None` declares no scope and enforces nothing.
-        granted: Option<dohc_engine_sync::ShareGrant>,
+        /// The selector the relay stated for this share, pinned by the
+        /// recipient on first read. Required: there is no unscoped pull.
+        granted: dohc_engine_sync::ShareGrant,
     },
     CommitShareViewCursor {
         workspace_id: String,
@@ -6478,7 +6478,7 @@ fn execute_relay_operation(
             share_id,
             granted,
         } => client
-            .pull_share_view(store, &workspace_id, &share_id, granted.as_ref(), &NoFaults)
+            .pull_share_view(store, &workspace_id, &share_id, &granted, &NoFaults)
             .map(RelayOperationOutcome::ShareViewPulled)
             .map_err(RuntimeError::from),
         RelayOperation::CommitShareViewCursor {

@@ -18,13 +18,12 @@ export interface RemoteIdentity {
 export interface ShareViewIdentity {
   shareId: string;
   granterEmail: string | null;
-  // The selector the share granted when the user accepted it, recorded so
-  // every later pull enforces it locally instead of trusting the relay to
-  // send only what it granted. Empty `paths` is a whole-workspace grant;
-  // `versionId` is the granted version, or null for a share that follows
-  // main. ABSENT means a view accepted before dohc kept the selector: its
-  // next refresh fetches and records one BEFORE pulling, and does not pull
-  // at all if it cannot.
+  // The selector the relay stated for this share, pinned here on first read
+  // so every later pull enforces it locally instead of trusting the relay to
+  // send only what it granted. Empty `paths` with a `versionId` is a
+  // whole-workspace version share; `versionId` null follows main. ABSENT (or
+  // damaged) means nothing is pinned yet: the next refresh fetches and pins
+  // one BEFORE pulling, and does not pull at all if it cannot.
   grantedSelector?: { paths: string[]; versionId: string | null };
   ended?: boolean;
   // The relay this share was opened from. A refresh only ever runs against
@@ -69,7 +68,7 @@ export interface ShareMountRecord {
   // account, a refresh must SKIP (not flip the mount to ended). Null on
   // records from before this field existed — those refresh as before.
   recipientEmail?: string | null;
-  // Same recorded selector as ShareViewIdentity.grantedSelector, for the same
+  // Same pinned selector as ShareViewIdentity.grantedSelector, for the same
   // reason: the mount's pulls enforce it against the relay's selection.
   grantedSelector?: { paths: string[]; versionId: string | null };
   ended?: boolean;

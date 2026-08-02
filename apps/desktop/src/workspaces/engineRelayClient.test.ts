@@ -38,11 +38,13 @@ import {
   type ShareScopeSource,
 } from "./sharedView";
 
-// Every test in this file pulls with a selector already recorded; the
+// Every test in this file pulls with a selector already pinned; the
 // fetch-first path has its own tests in sharedView.test.ts. A throwing
-// `fetch` is the assertion that a recorded selector never re-asks the relay.
+// `fetch` is the assertion that a pinned selector never re-asks the relay.
+// The selector is a REAL one — no paths and no version selects nothing at
+// all, which the engine refuses.
 const RECORDED_SCOPE: ShareScopeSource = {
-  recorded: { paths: [], versionId: null },
+  recorded: { paths: ["docs"], versionId: null },
   fetch: () => {
     throw new Error("a recorded selector must not be re-fetched");
   },
@@ -450,7 +452,7 @@ describe("EngineRelayClient", () => {
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
-      grantedSelector: { paths: [], versionId: null },
+      grantedSelector: { paths: ["docs"], versionId: null },
     });
     await sessions.closeAll();
   });
@@ -647,7 +649,10 @@ describe("EngineRelayClient", () => {
     ).store;
 
     await expect(
-      client.pullShareView({ shareId: "share-revoked" }),
+      client.pullShareView({
+        shareId: "share-revoked",
+        grantedSelector: { paths: ["docs"], versionId: null },
+      }),
     ).rejects.toBeInstanceOf(ShareUnavailableError);
     await expect(
       refreshSharedViewOnce({
@@ -870,7 +875,10 @@ describe("EngineRelayClient", () => {
     ).resolves.toMatchObject({ fetched: 2, applied: 2, nextCursor: 2 });
     expect(channelPulls).toBe(2);
 
-    const view = await client.pullShareView({ shareId: "share-view" });
+    const view = await client.pullShareView({
+      shareId: "share-view",
+      grantedSelector: { paths: ["docs"], versionId: null },
+    });
     expect(view).toMatchObject({
       fetched: 2,
       applied: 2,
