@@ -2037,6 +2037,49 @@ describe("CLI socket server", () => {
     expect(errors).toEqual([]);
   });
 
+  it("reads a permanent code only from a daemon refusal, not any Error", async () => {
+    // MUTATION: widen the guard from DaemonRefusalError to Error -> a plain
+    // Error whose message happens to read "run-not-found" ends the retries.
+    // ChatsLoopbackEngine throws exactly that (chatsLoopbackEngine.ts:2909) and
+    // never wraps it into a wire error, so the narrowing carries real weight.
+    await seedDispatchThread("thread_plain_error");
+    await dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_plain_error_trigger",
+      threadId: "thread_plain_error",
+    });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for plain-error linkage.");
+    let attempts = 0;
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage() {
+          attempts += 1;
+          throw new Error("run-not-found");
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkRecoveryRetryMs = 60_000;
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Plain error provenance",
+      body: "A message string is not a refusal taxonomy.",
+    });
+
+    expect(attempts).toBe(3);
+    expect(result.warning).toContain(
+      "agent-run provenance could not be recorded after 3 attempts",
+    );
+  });
+
   it("forwards a deadline to every provenance RPC attempt", async () => {
     await seedDispatchThread("thread_deadline");
     await dispatchStore.recordTrigger({
