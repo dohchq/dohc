@@ -50,23 +50,42 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// when a pull cursor commits and `sync_relay_push_state` only when a push
 /// succeeds; both run behind `relay-not-configured`, which the desktop
 /// satisfies only for a workspace the user explicitly enabled cloud sync on
-/// (`RegistryEntry.remote` plus matching credentials). `adopt_join_identity`
-/// below already treats these two tables as this workspace's replication
-/// position; this is the same fact read the other way round.
+/// (`RegistryEntry.remote` plus matching credentials).
+///
+/// These two tables are a SUBSET of what `adopt_join_identity` below calls
+/// pristine local replication state. That check is deliberately wider — it also
+/// rejects `replication_log`, `replication_peers`, the `shared_channel_*`
+/// tables, `share_view_cursors`, `chat_pending_replication` and
+/// `ydoc_deferred_updates`, because adoption must refuse on ANY prior
+/// replication activity. This predicate wants the narrower question: has THIS
+/// workspace exchanged data with a relay. Do not widen one to match the other.
 ///
 /// The identity is checked as well, because Y.Doc base origination consults
 /// this BEFORE it claims a base: [`journal_local_op_in_tx`] refuses without an
 /// identity, and a refusal raised inside the append transaction would roll the
 /// user's edit back with it.
 ///
-/// KNOWN WINDOW. This reads past contact, not current enrolment, so a freshly
-/// enrolled workspace answers `false` until its first push or pull commits. An
-/// edit inside that window does not originate. Nothing here retries, and #548
-/// owns the retrigger. The window costs at most one edit: origination is asked
-/// again on the next append, the base is a full state that carries everything
-/// typed inside the window, and a local-only close refuses until the markdown
-/// artifact is durable (`close_session` raises `UnsettledClose`), so a reopened
-/// document seeds from that markdown and originates then.
+/// No `bounded` guard, unlike its neighbours here. Every caller passes a
+/// `DocKey`'s `workspace_id`, which `DocKey::new` already bounds by
+/// `MAX_IDENTIFIER_BYTES`. Re-checking it would add a rejection path that runs
+/// inside an append transaction and can only fire on input the type forbids.
+///
+/// KNOWN WINDOW, and a known LATCH. This reads past contact, not current
+/// enrolment.
+///
+/// The window: a freshly enrolled workspace answers `false` until its first
+/// push or pull commits, so an edit inside that window does not originate.
+/// Nothing here retries, and #548 owns the retrigger. It costs at most one
+/// edit — origination is asked again on the next append, the base is a full
+/// state that carries everything typed inside the window, and a local-only
+/// close refuses until the markdown artifact is durable (`close_session` raises
+/// `UnsettledClose`), so a reopened document seeds from that markdown and
+/// originates then.
+///
+/// The latch: nothing deletes a position row, so this keeps answering `true`
+/// after the user signs out or unbinds the workspace. #558 owns that. Both come
+/// from the same root — the engine has no durable, revocable record of current
+/// enrolment — and one such record replaces this predicate and closes both.
 pub fn workspace_replicates_with_relay_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
