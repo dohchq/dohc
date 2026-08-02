@@ -1480,14 +1480,20 @@ export function DesktopWorkspaceShell(props: {
   // Bumped after a version switch/merge/conflict resolution so open editors
   // re-read their file content immediately (FileInspector refreshKey).
   const [versionEpoch, setVersionEpoch] = useState(0);
+  // An unreadable settings file reads as opted out, so the workspace records
+  // nothing. That must never be silent: the warning names the file and reaches
+  // the notice center, not only the Settings dialog.
+  const [settingsWarning, setSettingsWarning] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     setVersionsEnabled(false);
+    setSettingsWarning(null);
     void bridge()
       .getWorkspaceSettings({ workspaceId })
       .then((result) => {
         if (cancelled) return;
         setVersionsEnabled(result.settings.experimental.workspaceEngineAlpha);
+        setSettingsWarning(result.warning ?? null);
       })
       .catch(() => {
         // Settings unavailable reads as flag off — never a broken shell.
@@ -3047,6 +3053,7 @@ export function DesktopWorkspaceShell(props: {
         syncStatus={syncStatus}
         agentActive={agentActive}
         conflictSummaries={conflictSummaries}
+        {...(settingsWarning ? { settingsWarning } : {})}
         onConnectCloud={() => setCloudOpen(true)}
         onOpenHistory={openHistoryView}
         onOpenConflicts={() => setConflictReviewOpen(true)}

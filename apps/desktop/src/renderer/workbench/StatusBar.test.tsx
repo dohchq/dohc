@@ -63,6 +63,7 @@ function renderBar(
       syncStatus={props.syncStatus ?? null}
       agentActive={props.agentActive ?? false}
       conflictSummaries={props.conflictSummaries ?? []}
+      {...(props.settingsWarning ? { settingsWarning: props.settingsWarning } : {})}
       onConnectCloud={() => {}}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
@@ -73,7 +74,7 @@ function renderBar(
       {...(props.onDismissAgentNotification
         ? { onDismissAgentNotification: props.onDismissAgentNotification }
         : {})}
-      onOpenSettings={() => {}}
+      onOpenSettings={props.onOpenSettings ?? (() => {})}
       onToggleTheme={() => {}}
       onContextMenu={props.onContextMenu ?? (() => {})}
     />,
@@ -266,6 +267,47 @@ describe("notice center", () => {
     expect(notice.textContent).toContain(
       "Both copies are safe. Review the differences to choose what stays.",
     );
+  });
+
+  // AUDIT-OPTOUT: an unreadable settings file reads as opted out, so nothing is
+  // recorded. The flip must never be silent, and it must not claim the user
+  // turned the engine off in Settings.
+  it("names the unreadable settings file instead of blaming the engine setting", async () => {
+    const onOpenSettings = vi.fn();
+    renderBar({
+      onOpenSettings,
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingOff: true,
+      },
+      settingsWarning:
+        "Workspace settings could not be read. dohc records no history for this workspace until you fix /ws/.dohc/settings.local.json.",
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-workspace-settings-unreadable");
+    expect(notice.textContent).toContain("History is off for this workspace");
+    expect(notice.textContent).toContain("/ws/.dohc/settings.local.json");
+    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
+    // The notice owes a Next the user can act on, as a control.
+    await userEvent.click(within(notice).getByRole("button", { name: "Open Settings" }));
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  it("blames the engine setting when the settings file reads normally", async () => {
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingOff: true,
+      },
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(
+      screen.getByTestId("notice-history-recording-off").textContent,
+    ).toContain("The workspace engine is turned off in Settings");
   });
 
   it("surfaces an unmatched remote conflict resolution as a review notice (0P-C)", async () => {

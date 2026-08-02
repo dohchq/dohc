@@ -78,7 +78,11 @@ export function NoticeCenter(props: {
   syncStatus: SyncStatusResult | null;
   agentActive: boolean;
   conflictSummaries: string[];
+  // Set when this workspace's settings file exists but cannot be read. It
+  // reads as opted out, so no history is recorded — the warning names the file.
+  settingsWarning?: string;
   onOpenHistory: () => void;
+  onOpenSettings: () => void;
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
@@ -268,11 +272,22 @@ export function NoticeCenter(props: {
       });
     }
 
-    // Persistent while true (WS-H1 retirement Phase C): an engine opt-out
+    // Persistent while true (WS-H1 retirement Phase C): no engine capture
     // means NO history recorder exists at all — the legacy recorder is
-    // retired. Same pattern as the capture-failure notice above: honest,
-    // persistent, never spammy (the flag only changes at workspace open).
-    if (props.syncStatus?.historyRecordingOff) {
+    // retired. Honest, persistent, never spammy (both flags change only at
+    // workspace open). An unreadable settings file also reads as opted out,
+    // and it takes the first branch: the second names Settings as the cause,
+    // which would be a lie for a file the user never edited.
+    if (props.settingsWarning) {
+      next.push({
+        id: "workspace-settings-unreadable",
+        tone: "warning",
+        title: "History is off for this workspace",
+        body: props.settingsWarning,
+        action: { label: "Open Settings", onClick: props.onOpenSettings },
+        Icon: AlertTriangle,
+      });
+    } else if (props.syncStatus?.historyRecordingOff) {
       next.push({
         id: "history-recording-off",
         tone: "warning",
@@ -328,7 +343,9 @@ export function NoticeCenter(props: {
     props.onDismissAgentNotification,
     props.onOpenConflicts,
     props.onOpenHistory,
+    props.onOpenSettings,
     props.onDismissSyncReview,
+    props.settingsWarning,
     props.syncStatus,
     installPending,
     installUpdate,

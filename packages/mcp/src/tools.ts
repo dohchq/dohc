@@ -43,6 +43,7 @@ import {
   type CliVerb,
 } from "@dohc/cli/protocol";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { workspaceEngineEnabledInSettings } from "@dohc/workspace-contracts/workspace-settings";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -204,32 +205,36 @@ async function readFileWindowWithDigest(
 
 // PR 0N-1: is this workspace on the workspace engine? MCP reads the SAME
 // per-workspace settings file the desktop reads (.dohc/settings.local.json,
-// workspaceSettingsFile.ts) and mirrors its resolution rule. WS-H1 flag
-// flip: the engine is the DEFAULT — an absent key, a missing file, or any
-// refused/failed read (symlink, oversized, parse error) resolves ON, exactly
-// like the desktop's schema default; only an explicit
-// `workspaceEngineAlpha: false` opts the workspace out. Cheap enough to read
-// per mutating call — the flag can flip between desktop opens.
+// workspaceSettingsFile.ts) THROUGH THE SAME SCHEMA — the shared contract, not
+// a copy of it, because a hand-mirrored rule is how the two answers drift.
+// WS-H1 flag flip: the engine is the DEFAULT — an absent group or a missing
+// file resolves ON; only an explicit `workspaceEngineAlpha: false` opts the
+// workspace out. A file that EXISTS but cannot be trusted (symlink,
+// non-regular, oversized, escaped .dohc, unparseable JSON, or any body the
+// schema rejects) may hold that opt-out, so it resolves OFF and the tool
+// reports no recorder rather than naming one that records nothing. Cheap
+// enough to read per mutating call — the flag can flip between desktop opens.
 const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 
 export async function isWorkspaceEngineFlagged(ctx: ToolContext): Promise<boolean> {
+  const path = join(ctx.root, ".dohc", "settings.local.json");
   try {
-    const path = join(ctx.root, ".dohc", "settings.local.json");
     const stats = await lstat(path);
     if (
       stats.isSymbolicLink() ||
       !stats.isFile() ||
       stats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES
     ) {
-      return true;
+      return false;
     }
-    if (!(await isWithinRealRoot(ctx.root, path))) return true;
-    const raw = JSON.parse(await readFile(path, "utf8")) as {
-      experimental?: { workspaceEngineAlpha?: unknown };
-    };
-    return raw?.experimental?.workspaceEngineAlpha !== false;
-  } catch {
-    return true;
+    if (!(await isWithinRealRoot(ctx.root, path))) return false;
+    return workspaceEngineEnabledInSettings(
+      JSON.parse(await readFile(path, "utf8")),
+    );
+  } catch (error) {
+    // Only an ABSENT file reads as the default: a new workspace must not be
+    // born opted out. Every other failure may be hiding an opt-out.
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
   }
 }
 

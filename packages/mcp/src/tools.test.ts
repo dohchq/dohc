@@ -38,9 +38,11 @@ import {
   share,
   testSite,
   writeWorkspaceFile,
+  isWorkspaceEngineFlagged,
   workspaceStatus,
   type ToolContext,
 } from "./tools";
+import { DEFAULT_WORKSPACE_SETTINGS } from "@dohc/workspace-contracts/workspace-settings";
 
 // Keep these split so siteNoLegacyAppModel.test.ts does not flag this
 // compatibility regression fixture as active legacy guidance.
@@ -1377,6 +1379,92 @@ describe("mcp tools operate on allowed paths", () => {
       });
       expect(queried.ok).toBe(true);
       if (queried.ok) expect(queried.rows.length).toBe(1000);
+    });
+  });
+});
+
+
+// AUDIT-OPTOUT: MCP resolves the settings file through the SAME schema the
+// desktop uses (@dohc/workspace-contracts/workspace-settings). A file that
+// exists but cannot be trusted may hold the opt-out, so it resolves OFF in
+// both readers. A mutating tool that named a recorder there would tell the
+// agent something false.
+describe("workspace engine flag", () => {
+  const settingsPath = (root: string) => join(root, ".dohc", "settings.local.json");
+  const validSettings = (workspaceEngineAlpha: boolean) =>
+    JSON.stringify({
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      experimental: { workspaceEngineAlpha },
+    });
+
+  it("reads an absent file as on and an explicit opt-out as off", async () => {
+    await withWorkspace(async (ctx) => {
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(true);
+
+      await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+      await writeFile(settingsPath(ctx.root), validSettings(true));
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(true);
+
+      await writeFile(settingsPath(ctx.root), validSettings(false));
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+      await expect(
+        writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" }),
+      ).resolves.toMatchObject({ ok: true, historyRecording: "off" });
+    });
+  });
+
+  // Every one of these reads OFF in the desktop reader. A hand-mirrored rule
+  // answered ON for the schema-invalid bodies, which is why both readers now
+  // share one schema.
+  it("reads every unparseable and schema-invalid body as opted out", async () => {
+    const bodies = [
+      "{not json",
+      JSON.stringify({ version: 2 }),
+      JSON.stringify({ experimental: { workspaceEngineAlpha: "false" } }),
+      JSON.stringify({}),
+      JSON.stringify([]),
+      JSON.stringify(null),
+    ];
+    for (const body of bodies) {
+      await withWorkspace(async (ctx) => {
+        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+        await writeFile(settingsPath(ctx.root), body);
+        await expect(isWorkspaceEngineFlagged(ctx), body).resolves.toBe(false);
+      });
+    }
+  });
+
+  it("reads a non-regular, symlinked, or oversized settings file as opted out", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(settingsPath(ctx.root), { recursive: true });
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+      await rm(settingsPath(ctx.root), { recursive: true });
+
+      const outside = join(ctx.home, "settings.local.json");
+      await writeFile(outside, validSettings(true));
+      await symlink(outside, settingsPath(ctx.root));
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+      await rm(settingsPath(ctx.root));
+
+      await writeFile(
+        settingsPath(ctx.root),
+        JSON.stringify({
+          ...JSON.parse(validSettings(true)),
+          padding: "x".repeat(256 * 1024),
+        }),
+      );
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+    });
+  });
+
+  it("reads a settings file that escapes the workspace as opted out", async () => {
+    await withWorkspace(async (ctx) => {
+      const outside = join(ctx.home, "dohc-meta");
+      await mkdir(outside, { recursive: true });
+      await writeFile(join(outside, "settings.local.json"), validSettings(true));
+      await symlink(outside, join(ctx.root, ".dohc"), "dir");
+
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
     });
   });
 });

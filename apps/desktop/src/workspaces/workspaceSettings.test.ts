@@ -12,11 +12,13 @@ import { join } from "node:path";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import { workspaceEngineEnabled } from "./engineCaptureGate";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
   parseWorkspaceSettings,
   workspaceSettingsModified,
+  WorkspaceSettingsResult,
 } from "./workspaceSettings";
 import {
   MAX_WORKSPACE_SETTINGS_FILE_BYTES,
@@ -192,22 +194,39 @@ describe("workspace settings file store", () => {
     expect(result.settings.experimental.workspaceEngineAlpha).toBe(false);
   });
 
-  it("corrupt, unsupported, and oversized files recover to defaults", async () => {
+  it("corrupt, unsupported, and oversized files read as opted out and name the file", async () => {
+    // AUDIT-OPTOUT: a file we cannot read may hold the opt-out. Reading it as
+    // defaults (engine ON) would record for a workspace that asked for none.
     const corrupt = await tempRoot();
     await writeWorkspaceSettingsFile(corrupt, DEFAULT_WORKSPACE_SETTINGS);
     await writeFile(join(corrupt, ".dohc", WORKSPACE_SETTINGS_FILE), "{not json");
-    expect(await readWorkspaceSettingsFile(corrupt)).toMatchObject({
-      settings: DEFAULT_WORKSPACE_SETTINGS,
-      source: "recovered",
-    });
+    const corruptResult = await readWorkspaceSettingsFile(corrupt);
+    expect(corruptResult.source).toBe("recovered");
+    expect(corruptResult.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(corruptResult.warning).toContain(
+      join(corrupt, ".dohc", WORKSPACE_SETTINGS_FILE),
+    );
 
-    const future = await tempRoot();
-    await writeWorkspaceSettingsFile(future, DEFAULT_WORKSPACE_SETTINGS);
-    await writeFile(join(future, ".dohc", WORKSPACE_SETTINGS_FILE), JSON.stringify({ version: 2 }));
-    expect(await readWorkspaceSettingsFile(future)).toMatchObject({
-      settings: DEFAULT_WORKSPACE_SETTINGS,
-      source: "recovered",
-    });
+    // The same table packages/mcp asserts against isWorkspaceEngineFlagged.
+    // Both readers share one schema, so both must answer OFF for every body.
+    for (const body of [
+      JSON.stringify({ version: 2 }),
+      JSON.stringify({ experimental: { workspaceEngineAlpha: "false" } }),
+      JSON.stringify({}),
+      JSON.stringify([]),
+      JSON.stringify(null),
+    ]) {
+      const invalid = await tempRoot();
+      await writeWorkspaceSettingsFile(invalid, DEFAULT_WORKSPACE_SETTINGS);
+      await writeFile(join(invalid, ".dohc", WORKSPACE_SETTINGS_FILE), body);
+      const invalidResult = await readWorkspaceSettingsFile(invalid);
+      expect(invalidResult.source, body).toBe("recovered");
+      expect(
+        invalidResult.settings.experimental.workspaceEngineAlpha,
+        body,
+      ).toBe(false);
+      expect(invalidResult.warning, body).toContain("could not be read");
+    }
 
     const huge = await tempRoot();
     await writeWorkspaceSettingsFile(huge, DEFAULT_WORKSPACE_SETTINGS);
@@ -215,10 +234,24 @@ describe("workspace settings file store", () => {
       join(huge, ".dohc", WORKSPACE_SETTINGS_FILE),
       JSON.stringify({ padding: "x".repeat(MAX_WORKSPACE_SETTINGS_FILE_BYTES) }),
     );
-    expect(await readWorkspaceSettingsFile(huge)).toMatchObject({
-      settings: DEFAULT_WORKSPACE_SETTINGS,
-      source: "recovered",
-    });
+    const hugeResult = await readWorkspaceSettingsFile(huge);
+    expect(hugeResult.source).toBe("recovered");
+    expect(hugeResult.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(hugeResult.warning).toContain("too large");
+
+    // The warning crosses the IPC boundary; a path must not overflow its bound.
+    expect(WorkspaceSettingsResult.parse(hugeResult)).toEqual(hugeResult);
+  });
+
+  it("an unreadable settings file stops the engine capture gate", async () => {
+    // The gate is the reader that decides whether anything is recorded, so the
+    // fail-closed read is asserted THROUGH it, not only at the file layer.
+    const root = await tempRoot();
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    expect(await workspaceEngineEnabled(root)).toBe(true);
+
+    await writeFile(join(root, ".dohc", WORKSPACE_SETTINGS_FILE), "{not json");
+    expect(await workspaceEngineEnabled(root)).toBe(false);
   });
 
   it("refuses to write through a symlinked .dohc and never lands files outside", async () => {
@@ -248,10 +281,11 @@ describe("workspace settings file store", () => {
     await unlink(join(root, ".dohc", WORKSPACE_SETTINGS_FILE));
     await symlink(outsideSettings, join(root, ".dohc", WORKSPACE_SETTINGS_FILE));
 
-    expect(await readWorkspaceSettingsFile(root)).toMatchObject({
-      settings: DEFAULT_WORKSPACE_SETTINGS,
-      source: "recovered",
-    });
+    const result = await readWorkspaceSettingsFile(root);
+    expect(result.source).toBe("recovered");
+    expect(result.settings.agents.mcpAutoStart).toBe(false);
+    expect(result.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(result.warning).toContain("not a file dohc can read");
   });
 });
 
