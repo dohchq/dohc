@@ -18,8 +18,19 @@ const outputDir = process.env.DOHC_FIXTURE_OUT
   : here;
 mkdirSync(outputDir, { recursive: true });
 
+// tsx lives in the pnpm virtual store of the working checkout, with an override
+// for an unusual layout. There is deliberately no shared-checkout fallback: the
+// oracle imports `@dohc/workspace-core`, whose link pnpm writes to
+// `packages/security-contract/node_modules/`, so a checkout without its own
+// install cannot run this generator no matter where tsx is found. Resolving tsx
+// elsewhere would only turn a clear "install the dependencies" SKIP into a
+// module-not-found stack trace.
 const require = createRequire(join(repoRoot, "package.json"));
-const tsxBases = [repoRoot, join(repoRoot, "node_modules/.pnpm")];
+const tsxBases = [
+  process.env.DOHC_TSX_BASE,
+  repoRoot,
+  join(repoRoot, "node_modules/.pnpm"),
+].filter(Boolean);
 let tsxApiPath = null;
 for (const base of tsxBases) {
   try {
@@ -31,7 +42,7 @@ for (const base of tsxBases) {
 }
 if (!tsxApiPath) {
   throw new Error(
-    `could not resolve tsx/esm/api from any base:\n${tsxBases.join("\n")}\nrun 'pnpm install --offline --frozen-lockfile' before regenerating security-contract fixtures`,
+    `could not resolve tsx/esm/api from any base:\n${tsxBases.join("\n")}\nrun 'pnpm install --offline --frozen-lockfile' or set DOHC_TSX_BASE before regenerating security-contract fixtures`,
   );
 }
 const { register } = await import(pathToFileURL(tsxApiPath).href);

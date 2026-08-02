@@ -512,8 +512,12 @@ survives the package's deletion, but less than I first claimed:
   while the Rust path floor diverged from its TypeScript twin. That was a
   pre-existing hole in the gate, not something R16 introduced, and it meant
   "parity survives" must not be used as the whole justification here.
-  **Closed by #368**: `check-fixture-drift.mjs` now regenerates both fixture
-  sets from a `fixtureSets` list, so security-contract parity is enforced too.
+  **Narrowed by #368**: `check-fixture-drift.mjs` now regenerates both fixture
+  sets from a `fixtureSets` list, so the committed security-contract fixture can
+  no longer go stale. That covers `enginePathFloor.ts` (15 path vectors, read
+  and write) and `chatWireIds.ts` (2 IDs) — not the whole package.
+  `effectivePolicy.ts`, ported by `crates/dohc-engine-files/src/search_policy.rs`
+  per that file's own header, still has no fixture and no drift guard (#477).
 
 Consequences, all owned by R16:
 

@@ -23,6 +23,10 @@ const fixtureSets = [
   {
     dir: "crates/dohc-engine-collab/tests/fixtures",
     oracle: "packages/ydoc-projection",
+    // The base override its generator reads when this checkout has no
+    // node_modules. Named per set: pointing a reader at the other set's
+    // variable is a remedy that does nothing.
+    dependencyOverrideEnv: "DOHC_YJS_BASE",
     // Y.Doc client IDs are randomly generated, so the encoded lineage changes
     // on every run even when its content is identical. The oracle-owned
     // projections, coverage, metadata, and expectations remain byte-stable and
@@ -54,6 +58,7 @@ const fixtureSets = [
   {
     dir: "crates/dohc-engine-sync/tests/fixtures",
     oracle: "packages/security-contract",
+    dependencyOverrideEnv: "DOHC_TSX_BASE",
     // The path-floor oracle classifies a fixed input list, so its whole output
     // is byte-stable. Nothing here may be excluded from the drift signal: this
     // is a cross-process security contract with a deliberate Rust twin.
@@ -136,6 +141,7 @@ function conciseGeneratorError(output) {
 function checkFixtureSet({
   dir,
   oracle,
+  dependencyOverrideEnv,
   volatileFields,
   oracleFailurePrefix,
   knownOracleFailures,
@@ -170,7 +176,7 @@ function checkFixtureSet({
           `SKIP: ${dir} fixture drift was not checked because ${dependency} could not be resolved.`,
         );
         console.warn(
-          "Install the JavaScript workspace dependencies or set DOHC_YJS_BASE, then rerun the check.",
+          `Install the JavaScript workspace dependencies or set ${dependencyOverrideEnv}, then rerun the check.`,
         );
         exitCode = 2;
       } else {
@@ -268,6 +274,15 @@ function checkFixtureSet({
         );
       }
     }
+  } catch (error) {
+    // An unreadable or malformed committed fixture would otherwise throw out
+    // through the caller's map and skip every later set, reporting a stack
+    // trace instead of a verdict.
+    console.error(`could not check ${dir}: ${error?.message ?? error}`);
+    console.error(
+      "Remediation: fix or regenerate the unreadable fixture, then re-run the fixture drift check.",
+    );
+    exitCode = 1;
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
