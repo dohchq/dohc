@@ -26,6 +26,13 @@ const INITIAL_MARKDOWN = "# Solo\n\nStart here.\n";
 
 let root = "";
 let requests: Request[] = [];
+// Armed by a test to make the next ydoc.settle requests refuse. The loopback
+// engine cannot refuse a settle, and it should not learn to: this is what the
+// DAEMON does — reject the request over the wire — so it belongs at the
+// transport, where the real client turns the envelope into the refusal the
+// close path reads.
+let settleRefusal: unknown = null;
+let captureErrors: string[] = [];
 let versioned: VersionedLoopbackEngine;
 let ydoc: YdocLoopbackEngine;
 let sessions: EngineWorkspaceSessions;
@@ -63,6 +70,9 @@ function daemonSessions(): EngineWorkspaceSessions {
           id: request.id,
           result: { running: true, degraded: false, terminal: false },
         };
+      }
+      if (request.method === "ydoc.settle" && settleRefusal !== null) {
+        throw settleRefusal;
       }
       if (request.method.startsWith("ydoc.")) {
         return await ydoc.sendRequest(request);
@@ -110,11 +120,25 @@ function methodCount(method: string): number {
   return requests.filter((request) => request.method === method).length;
 }
 
+// The envelope EngineClient rejects a refused request with. DaemonLiveAdapter
+// re-throws it as DaemonRefusalError, which is the shape the close path's
+// discriminator reads; a bare Error never reaches that path.
+function wireRefusal(
+  message: string,
+  code: "INVALID_PARAMS" | "INTERNAL" = "INVALID_PARAMS",
+): Error {
+  return Object.assign(new Error(message), {
+    wireError: { code, message, retry: "no" },
+  });
+}
+
 beforeEach(async () => {
   root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-ydoc-session-"));
   await mkdir(join(root, "notes"), { recursive: true });
   await writeFile(join(root, PATH), INITIAL_MARKDOWN, "utf8");
   requests = [];
+  settleRefusal = null;
+  captureErrors = [];
   versioned = new VersionedLoopbackEngine();
   versioned.seedTextFile({
     workspace: WORKSPACE_ID,
@@ -136,6 +160,7 @@ beforeEach(async () => {
     workspaceId: WORKSPACE_ID,
     rootPath: root,
     rustEngineSessions: sessions,
+    onError: (context) => captureErrors.push(context),
   });
 });
 
@@ -239,4 +264,96 @@ it("settles and closes the Rust Y.Doc session before a version switch", async ()
     "Unsaved draft edit.",
   );
   await session.close();
+});
+
+// #496. The daemon's own capture ingests an edit made outside dohc, which
+// moves the path's head; the close-settle that follows meets that moved head
+// and the engine refuses ConflictStaleTarget. Nothing here is a failure the
+// user must act on — the outside author's file is intact, this document's
+// text is in the CRDT and in History — so the close must be as quiet as the
+// close that wins the race.
+it("closes clean and reports changed-on-disk when the close settle meets a moved head", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed in dohc.");
+  // Flush first, so the debounced settle cannot fire against the refusal
+  // armed below and make this a NON-close settle failure by accident.
+  await session.settleNow();
+  states.length = 0;
+  captureErrors = [];
+
+  settleRefusal = wireRefusal("conflict-stale-target");
+  await expect(session.close()).resolves.toBeUndefined();
+
+  expect(states.at(-1)).toBe("changed-on-disk");
+  expect(states).not.toContain("error");
+  // Not an error channel event either: nothing failed to report.
+  expect(captureErrors).toEqual([]);
+  // The daemon session was released exactly as a clean close releases it.
+  expect(methodCount("ydoc.close")).toBe(1);
+
+  // And the path's guard lifted with it: a watcher event on this path is
+  // captured, not deferred behind a retained failing-close entry.
+  settleRefusal = null;
+  const writesBeforeWatcher = methodCount(VERSIONED_METHOD.textWrite);
+  await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
+  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  await capture.flush();
+  expect(methodCount(VERSIONED_METHOD.textWrite)).toBeGreaterThan(
+    writesBeforeWatcher,
+  );
+});
+
+// The narrowness guard for the downgrade above. Any other refusal means the
+// user's edits did NOT reach the engine, which is what the thrown settle
+// failure and the retryable `error` state exist to say.
+it("still throws when an ordinary settle failure fails the close", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed in dohc.");
+  await session.settleNow();
+  states.length = 0;
+  captureErrors = [];
+
+  settleRefusal = wireRefusal("persist-failed", "INTERNAL");
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  expect(states.at(-1)).toBe("error");
+  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
+});
+
+// The other half of the narrowness: the SAME refusal outside a close keeps
+// reporting `error`. That document stays open, so its retry advice is real.
+it("still reports an error for a stale-target settle while the document stays open", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed in dohc.");
+  await session.settleNow();
+  states.length = 0;
+  captureErrors = [];
+
+  settleRefusal = wireRefusal("conflict-stale-target");
+  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+
+  expect(states.at(-1)).toBe("error");
+  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
+  settleRefusal = null;
+  await session.close({ settle: false });
 });

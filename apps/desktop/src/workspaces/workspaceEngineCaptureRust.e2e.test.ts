@@ -357,3 +357,91 @@ it.skipIf(engine.missing)(
   },
   60_000,
 );
+
+// #496, staged deterministically instead of by hoping the scheduler
+// interleaves: the daemon's capture is FLUSHED past the outside edit (proved
+// by the new moment) before the close runs, so the close-settle is guaranteed
+// to meet a head that already moved. That is the ordering PR #495's drift e2e
+// deliberately left unasserted because it could not pin which side won.
+it.skipIf(engine.missing)(
+  "closes clean when the daemon's capture reached an outside edit first",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-race-"));
+    roots.push(root);
+    const markerDirectory = join(root, ".dohc", "engine");
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(
+      join(markerDirectory, "SHADOW_CLONE"),
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "utf8",
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const errors: string[] = [];
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-race",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context) => errors.push(context),
+    });
+    const outside = "written outside dohc\n";
+    try {
+      await writeFile(join(root, "note.md"), "base\n", "utf8");
+      await waitForPathMoments(capture, "note.md", 1);
+
+      const states: string[] = [];
+      const session = await capture.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+        onSaveState: (state) => states.push(state),
+      });
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, session.initialUpdate);
+      const before = Y.encodeStateVector(editor);
+      editor.getText("plainText").insert(0, "typed in dohc\n");
+      await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+      await session.settleNow();
+      const settledMoments = await waitForPathMoments(capture, "note.md", 1);
+
+      // The outside writer replaces the file, and the daemon's capture INGESTS
+      // it — the new moment is the proof. The path's head is now the outside
+      // author's text, so the close-settle below cannot be answered from this
+      // session's lineage.
+      await writeFile(join(root, "note.md"), outside, "utf8");
+      await waitForPathMoments(capture, "note.md", settledMoments.length + 1);
+      states.length = 0;
+      errors.length = 0;
+
+      // A clean close: the file belongs to the outside author, this document's
+      // text is in History, and nothing is left for the user to retry.
+      await expect(session.close()).resolves.toBeUndefined();
+      expect(states.at(-1)).toBe("changed-on-disk");
+      expect(states).not.toContain("error");
+      expect(errors).toEqual([]);
+
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+
+      const moments = await capture.listMoments({ limit: 100 });
+      const texts = await Promise.all(
+        moments.moments
+          .filter((moment) => moment.path === "note.md")
+          .map(async (moment) => {
+            const detail = await capture.readMoment(moment.id);
+            const payload = detail?.protected === false ? detail.moment.payload : undefined;
+            return payload?.after.text ?? "";
+          }),
+      );
+      expect(texts.some((text) => text.includes("typed in dohc"))).toBe(true);
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
+    }
+  },
+  60_000,
+);

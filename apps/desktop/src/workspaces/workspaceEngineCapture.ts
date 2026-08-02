@@ -27,6 +27,7 @@ import {
 import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import {
   openEngineYdocProviderSession,
+  isConflictStaleTargetRefusal,
   isYdocSessionNotFoundRefusal,
   YdocReleasedWithSettleFailureError,
   type EngineYdocProviderSession,
@@ -2422,11 +2423,32 @@ export function createWorkspaceEngineCapture(
           reportSaveState("saved", token);
         };
         const onSettleStart = (token: number) => reportSaveState("settling", token);
+        // #496. A CLOSE is the one settle that can meet a head another writer
+        // already moved: the daemon's capture ingests an edit made outside dohc
+        // and the close-settle then refuses ConflictStaleTarget. That is #495's
+        // changed-on-disk by a second route — the file holds the outside
+        // author's work, this document's text is in the CRDT and in History, and
+        // nothing failed that the user must retry. Report it as such and let the
+        // close finish clean, so how loud a close is stops depending on a race
+        // the user cannot see.
+        //
+        // Only the stale-target refusal, and only during a close. Every other
+        // settle failure is still a failure: it says the user's edits did NOT
+        // reach the engine, which is exactly what "error" and its retry advice
+        // are for. A stale target OUTSIDE a close keeps reporting `error` too —
+        // that document stays open, so its retry is real.
+        let closing = false;
+        const isCloseSettleDrift = (error: unknown): boolean =>
+          closing && isConflictStaleTargetRefusal(error);
         // The one place a background settle failure is observable. Log it with
         // the path and the wire error, and tell the editor the file on disk is
         // behind — a settle that never lands is the user's content going
         // nowhere.
         const onSettleError = (error: unknown, token: number) => {
+          if (isCloseSettleDrift(error)) {
+            reportSaveState("changed-on-disk", token);
+            return;
+          }
           onError(`ydoc settle of ${input.path}`, error);
           reportSaveState("error", token);
         };
@@ -2467,17 +2489,23 @@ export function createWorkspaceEngineCapture(
         const closeEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
+          closing = true;
           try {
             await session.close(opts);
           } catch (error) {
             if (error instanceof YdocReleasedWithSettleFailureError) {
               // The daemon session and its lease ARE gone — only the settle
               // failed. Lift the guard like a clean teardown (capture of the
-              // path must resume; nothing holds the reservation) and rethrow so
-              // the settle failure still surfaces to the caller.
+              // path must resume; nothing holds the reservation).
               if (liveYDocSessions.get(input.path) === entry) {
                 liveYDocSessions.delete(input.path);
               }
+              // #496: the settle met a head the daemon's capture had already
+              // moved. onSettleError has reported changed-on-disk, the release
+              // above is the same one a clean close performs, and there is no
+              // failure left to report — so this close IS clean. Every other
+              // settle failure still surfaces to the caller.
+              if (isCloseSettleDrift(error.cause)) return;
               throw error;
             }
             // The reservation may still be held and the on-disk state is
