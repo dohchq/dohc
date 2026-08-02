@@ -14,6 +14,7 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
+  EngineDaemonUnavailableError,
   EngineWorkspaceSessions,
   type EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
@@ -1312,7 +1313,21 @@ async function daemonDeathCapture(
   // delays are the record a test asserts against.
   const backoff = { delays: [] as number[] };
   const sessions = new EngineWorkspaceSessions(
-    { currentClient: () => daemonClient },
+    {
+      // The supervisor stops handing out a client once the daemon process is
+      // gone (EngineDaemonLifecycle.requireClient), so a caller that reaches
+      // for one during the outage never gets a stale transport to fail on.
+      // Returning the dead client here made a rebind look one attempt cheaper
+      // than production's.
+      currentClient: () => {
+        if (!state.daemonAlive) {
+          throw new EngineDaemonUnavailableError(
+            "Rust engine daemon is not available.",
+          );
+        }
+        return daemonClient;
+      },
+    },
     {
       sleep: async (delayMs) => {
         backoff.delays.push(delayMs);
@@ -1804,13 +1819,15 @@ it("a recovered session does not leave a stale release obligation behind", async
 // transport retry ladder (100+200+400+800+1000ms = 2.5s of the 3s budget)
 // would starve the cleanup that still can.
 //
-// The tests below price that bound as the backoff the path ASKS the supervisor
+// The bound is scoped to the quit teardown, which is the only close inside
+// that budget. A user closing a document keeps the ladder, so a daemon that
+// relaunches in a second still gives them a live session back.
+//
+// The tests below price both paths as the backoff each ASKS the supervisor
 // for, not as elapsed wall time: a wall-clock bound loose enough to survive a
 // loaded suite also passes a real regression on a quiet machine.
-//
-// `retryTransportErrors: false` allows two attempts, so at most ONE gap of the
-// supervisor's initial backoff.
-const BOUNDED_CLOSE_BACKOFF_MS = 100;
+const BOUNDED_CLOSE_BACKOFF_MS = [100];
+const TRANSPORT_LADDER_MS = [100, 200, 400, 800, 1_000];
 
 it("a settling close of a DEAD session against a down daemon takes one bounded backoff, not the ladder", async () => {
   const { rootPath, sessions, openProvider, state, backoff } =
@@ -1838,9 +1855,9 @@ it("a settling close of a DEAD session against a down daemon takes one bounded b
   // Only the close is priced: the set-up's own retries are not the subject.
   backoff.delays.length = 0;
   // The user quits before the supervisor's replacement is up.
-  await session.close().catch(() => undefined);
+  await session.close({ shuttingDown: true }).catch(() => undefined);
 
-  expect(backoff.delays).toEqual([BOUNDED_CLOSE_BACKOFF_MS]);
+  expect(backoff.delays).toEqual(BOUNDED_CLOSE_BACKOFF_MS);
   // And it never opened a generation it could not have reached.
   expect(state.generation).toBe(1);
 });
@@ -1848,7 +1865,7 @@ it("a settling close of a DEAD session against a down daemon takes one bounded b
 // The other half of the same quit: nothing was typed after the daemon died, so
 // the session is still on its LIVE generation and reaches its rebind from
 // close() rather than from the dead-session revive.
-it("a settling close of a session still LIVE when the daemon died takes one bounded backoff, not the ladder", async () => {
+it("a quit close of a session still LIVE when the daemon died takes one bounded backoff, not the ladder", async () => {
   const { rootPath, sessions, openProvider, state, backoff } =
     await daemonDeathCapture("dohc-ydoc-live-budget-", "ydoc-live-budget");
   const capture = createWorkspaceEngineCapture({
@@ -1869,12 +1886,41 @@ it("a settling close of a session still LIVE when the daemon died takes one boun
 
   state.daemonAlive = false;
   backoff.delays.length = 0;
+  await session.close({ shuttingDown: true }).catch(() => undefined);
+
+  expect(backoff.delays).toEqual(BOUNDED_CLOSE_BACKOFF_MS);
+  expect(state.generation).toBe(1);
+});
+
+// The scope of the bound, which is the other half of getting it right: the
+// same dead daemon and the same live session, closed the way a USER closes a
+// document. Here the wait is the point — the supervisor relaunches in about a
+// second, and a session that rode the ladder out comes back alive instead of
+// leaving the path's capture deferred until somebody reopens it.
+it("an ordinary close of the same session still rides the full transport ladder", async () => {
+  const { rootPath, sessions, openProvider, state, backoff } =
+    await daemonDeathCapture("dohc-ydoc-user-close-", "ydoc-user-close");
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-user-close",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+
+  state.daemonAlive = false;
+  backoff.delays.length = 0;
   await session.close().catch(() => undefined);
 
-  // Not even one gap here: the workspace binding is still cached, so the
-  // bounded rebind spends its first attempt on it and gives up. The ladder
-  // this replaces asked for 100+100+200+400+800+1000 ms.
-  expect(backoff.delays).toEqual([]);
+  expect(backoff.delays).toEqual(TRANSPORT_LADDER_MS);
   expect(state.generation).toBe(1);
 });
 
@@ -1903,7 +1949,7 @@ it("an explicit settle against a down daemon fails fast instead of blocking", as
 
   backoff.delays.length = 0;
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
-  expect(backoff.delays).toEqual([BOUNDED_CLOSE_BACKOFF_MS]);
+  expect(backoff.delays).toEqual(BOUNDED_CLOSE_BACKOFF_MS);
 
   await session.close({ settle: false }).catch(() => undefined);
   await capture.stop();
