@@ -2348,6 +2348,26 @@ export function createWorkspaceEngineCapture(
             // re-enter the session or wedge the settle chain.
           }
         };
+        // Updates that entered this document and are NOT yet in a committed
+        // settle. The close downgrade below needs proof that the text SETTLED,
+        // and a successful RELEASE is not that proof: `close_session` checks
+        // `last_settled_sha` only before a local-only PRUNE, while a
+        // replicated lineage — a synced workspace, promoted by `claim_base` on
+        // the first pulled `ydoc.update` — compacts instead and never prunes,
+        // so its release succeeds over unsettled text
+        // (crates/dohc-engine-collab/src/durable.rs). The desktop therefore
+        // evidences its own claim rather than inferring it from a release
+        // whose meaning depends on the regime.
+        //
+        // The count is coarse on purpose: an update that leaves the projection
+        // unchanged still marks the document unsettled. Over-counting only
+        // keeps a close LOUD, which is the behavior this correction started
+        // from; under-counting would report a save that never happened.
+        let unsettledUpdates = 0;
+        let updatesInSettle = 0;
+        const noteUpdate = (): void => {
+          unsettledUpdates += 1;
+        };
         const onSettled = async (
           result: {
             sha256: string;
@@ -2358,6 +2378,11 @@ export function createWorkspaceEngineCapture(
           },
           token: number,
         ) => {
+          // The settle COMMITTED — every branch below is about the FILE, not
+          // the lineage — so the updates it carried are a moment in History
+          // now. Updates that arrived while it ran are not, and stay counted.
+          unsettledUpdates -= updatesInSettle;
+          updatesInSettle = 0;
           // The settle committed, but the engine says the FILE did not move
           // (materialization blocked by containment — a symlinked target — with
           // the write pending a retry). Say so rather than report a save the
@@ -2422,7 +2447,13 @@ export function createWorkspaceEngineCapture(
           ]);
           reportSaveState("saved", token);
         };
-        const onSettleStart = (token: number) => reportSaveState("settling", token);
+        // Claim exactly what this settle can carry. The daemon serves one
+        // session's commands in order, so an update already sent is in the
+        // settle that follows it; one sent after this point is not.
+        const onSettleStart = (token: number) => {
+          updatesInSettle = unsettledUpdates;
+          reportSaveState("settling", token);
+        };
         // The one place a background settle failure is observable. Log it with
         // the path and the wire error, and tell the editor the file on disk is
         // behind — a settle that never lands is the user's content going
@@ -2463,7 +2494,10 @@ export function createWorkspaceEngineCapture(
               entry.status = "live";
             }
           },
-          onRemoteUpdate: input.onRemoteUpdate,
+          onRemoteUpdate: (update) => {
+            noteUpdate();
+            input.onRemoteUpdate(update);
+          },
           onSettled,
           onSettleStart,
           onSettleError,
@@ -2501,11 +2535,13 @@ export function createWorkspaceEngineCapture(
               // release completed, so it is the one signal that the session is
               // gone and the settle was the only casualty.
               //
-              // That same gate is what makes `changed-on-disk` TRUE here rather
-              // than merely quiet: the release prunes only over a lineage whose
-              // projection IS its last settle, so the document's text is a
-              // settled moment in History. With unsettled edits the release
-              // refuses, this error never arrives, and the failure stays loud.
+              // What makes `changed-on-disk` TRUE here rather than merely quiet
+              // is the second condition: every update this document received is
+              // in a committed settle, so its text IS a settled moment in
+              // History — which is where this state sends the user. The release
+              // cannot stand in for that check, because it only proves
+              // settlement for a local-only PRUNE; a replicated lineage
+              // compacts and releases cleanly over unsettled text.
               //
               // Being a close is structural — the provider constructs this
               // error nowhere else — so only the refusal itself is checked, on
@@ -2515,7 +2551,8 @@ export function createWorkspaceEngineCapture(
               if (
                 failure !== null &&
                 failure.error === error.cause &&
-                isConflictStaleTargetRefusal(error.cause)
+                isConflictStaleTargetRefusal(error.cause) &&
+                unsettledUpdates === 0
               ) {
                 reportSaveState("changed-on-disk", failure.token);
                 return;
@@ -2551,10 +2588,15 @@ export function createWorkspaceEngineCapture(
           initialUpdate: session.initialUpdate,
           contentKind: session.contentKind,
           path: session.path,
-          applyLocalUpdate: (update) => session.applyLocalUpdate(update),
+          applyLocalUpdate: (update) => {
+            noteUpdate();
+            return session.applyLocalUpdate(update);
+          },
           settleNow: (opts) => session.settleNow(opts),
-          applyExternalMarkdownEdit: (markdown) =>
-            session.applyExternalMarkdownEdit(markdown),
+          applyExternalMarkdownEdit: (markdown) => {
+            noteUpdate();
+            return session.applyExternalMarkdownEdit(markdown);
+          },
           close: closeEntry,
         };
       });

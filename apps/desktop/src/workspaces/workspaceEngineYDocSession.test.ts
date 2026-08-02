@@ -366,6 +366,40 @@ it("still reports an error for a stale-target settle while the document stays op
   await session.close({ settle: false });
 });
 
+// A RELEASE is not proof of settlement, and this is the lineage that shows it.
+// `close_session` checks `last_settled_sha` only before a local-only prune; a
+// REPLICATED lineage — any doc in a synced workspace, promoted by `claim_base`
+// on the first pulled `ydoc.update` — compacts instead and never prunes, so its
+// release SUCCEEDS with the typed text still unsettled
+// (crates/dohc-engine-collab/src/durable.rs). Staged here by letting the
+// release succeed while the close-settle refuses, which is exactly what that
+// lineage does. Reporting `changed-on-disk` over it would send the user to a
+// file and a History that hold their last save, not their last edit.
+it("keeps the close loud when a released lineage never settled the edits", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed in dohc.");
+  await session.settleNow();
+  states.length = 0;
+  captureErrors = [];
+
+  // Typed AFTER the last settle: this text is in no moment.
+  typeIntoBody(editor, "Typed again, never settled.");
+  settleRefusal = wireRefusal("conflict-stale-target");
+  // The release is left to SUCCEED — the replicated close.
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  expect(states).toEqual(["settling", "error"]);
+  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
+});
+
 // The P1 the first version of #496 shipped: the refusal is NOT the outcome.
 // With unsettled edits, the release that follows the refused close-settle
 // refuses too — the projection no longer matches `last_settled_sha`, so the
