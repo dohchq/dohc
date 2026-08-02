@@ -34,23 +34,20 @@ export interface EngineMoment {
 // Only a database that cannot be OPENED reads as "not ready, poll again", and
 // only by error CODE — never by matching message text, which is the rule the
 // relay helper already follows.
+//
+// `node:sqlite` reports EVERY sqlite failure as `code: "ERR_SQLITE_ERROR"` and
+// carries the real result code in `errcode`, so an absent engine.db arrives as
+// SQLITE_CANTOPEN (14), NOT as ENOENT. ENOENT stays for a filesystem-level
+// failure raised before sqlite sees the path.
+const SQLITE_CANTOPEN = 14;
+
 function isDbNotOpenable(error: unknown, dbOpened: boolean): boolean {
   if (dbOpened) return false;
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return code === "ENOENT" || code === "SQLITE_CANTOPEN";
+  if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return true;
+  return (error as { errcode?: unknown } | undefined)?.errcode === SQLITE_CANTOPEN;
 }
 
-// Every (table, column) this file reads. The engine applies its schema through
-// an ordered migration chain, and a later migration adds `payload_after_*` to a
-// baseline `moments`, so a read-only poll can observe the chain mid-flight (a
-// real race caught on Windows). This list is the readiness gate for that race:
-// a half-applied chain reads as "poll again" BEFORE any query runs, so after
-// the gate every query error throws.
-//
-// That split is the point. A swallowed query error becomes an EMPTY result, and
-// an empty result silently satisfies `toEqual([])`, `toBe(0)` and `toBe(false)`
-// at the call sites below. A name that is NOT on this list — a typo, a renamed
-// column, a wrong join column — reaches the query and fails loud.
+// Every (table, column) this file reads.
 const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   [
     "moments",
@@ -68,7 +65,29 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["replication_log", ["op_kind", "payload_json"]],
 ];
 
-function schemaMaterialized(db: EngineDb): boolean {
+// The engine builds its schema through an ordered migration ledger
+// (crates/dohc-engine-storage/src/migration.rs). `engine_migrations` holds one
+// row per migration and leaves `completed_at` NULL until that migration
+// finishes, so the LEDGER says whether the schema is still materializing — a
+// missing table never does.
+function schemaSettled(db: EngineDb): boolean {
+  const ledger = db
+    .prepare("SELECT name FROM pragma_table_info('engine_migrations')")
+    .all();
+  if (ledger.length === 0) return false;
+  const row = db
+    .prepare("SELECT COUNT(*) AS n FROM engine_migrations WHERE completed_at IS NULL")
+    .get() as { n: number } | undefined;
+  return Number(row?.n ?? 0) === 0;
+}
+
+// Once the ledger has settled, every name above MUST be there. A dropped or
+// renamed one throws and says which: treating it as "not ready" instead would
+// make the gate false forever, every helper would return 0/[]/false, and the
+// `toBe(0)` and `toEqual([])` call sites would pass on nothing — the shape this
+// file exists to remove.
+function requireSchema(db: EngineDb): void {
+  const missing: string[] = [];
   for (const [table, columns] of SCHEMA_READ_HERE) {
     const present = new Set(
       db
@@ -76,17 +95,26 @@ function schemaMaterialized(db: EngineDb): boolean {
         .all(table)
         .map((row) => String(row.name)),
     );
-    if (present.size === 0) return false;
-    for (const column of columns) if (!present.has(column)) return false;
+    if (present.size === 0) {
+      missing.push(table);
+      continue;
+    }
+    for (const column of columns) if (!present.has(column)) missing.push(`${table}.${column}`);
   }
-  return true;
+  if (missing.length > 0) {
+    throw new Error(
+      `engine.db has no ${missing.join(", ")}, and its migration ledger has settled: ` +
+        "these e2e readers query a schema the engine no longer has.",
+    );
+  }
 }
 
 export function withEngineDb<T>(rootPath: string, fn: (db: EngineDb) => T): T | null {
   let db: EngineDb | null = null;
   try {
     db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), { readOnly: true });
-    if (!schemaMaterialized(db)) return null;
+    if (!schemaSettled(db)) return null;
+    requireSchema(db);
     return fn(db);
   } catch (error) {
     if (isDbNotOpenable(error, db !== null)) return null;
