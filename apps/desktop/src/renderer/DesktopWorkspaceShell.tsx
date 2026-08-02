@@ -1367,6 +1367,11 @@ export function DesktopWorkspaceShell(props: {
   // request that FAILS never commits, so keying off "newest issued" would
   // block the close for as long as the app ran.
   const pendingFilesRequests = useRef(0);
+  // The newest request that FAILED. A failure is not an answer, so it cannot
+  // refute anything — but it does mean the tree may have moved in a way no
+  // surviving snapshot saw, which taints every older snapshot for the one
+  // purpose that cannot be undone. See the close below.
+  const failedFilesRequest = useRef(0);
   const [listingsSettled, setListingsSettled] = useState(0);
   const refreshFiles = useCallback(async () => {
     const request = ++filesRequest.current;
@@ -1378,6 +1383,9 @@ export function DesktopWorkspaceShell(props: {
       setFiles(result.files);
       setFolders(result.folders ?? []);
       setFilesLoaded(true);
+    } catch (error) {
+      if (request > failedFilesRequest.current) failedFilesRequest.current = request;
+      throw error;
     } finally {
       pendingFilesRequests.current -= 1;
       if (pendingFilesRequests.current === 0) {
@@ -1412,6 +1420,14 @@ export function DesktopWorkspaceShell(props: {
     // what is displayed), so a failed newer request leaves the older listing
     // authoritative instead of blocking the close for the rest of the session.
     if (pendingFilesRequests.current > 0) return;
+    // A failure since the displayed listing was issued means the tree may
+    // have changed in a way this snapshot never saw — refreshShareView pulls
+    // a file back and the listing that would have shown it is the one that
+    // failed. Closing on the older snapshot would then close a tab whose file
+    // exists. Waiting costs a delay; closing costs the user their tab, so the
+    // close waits for a success issued AFTER the failure. Not a deadlock: the
+    // next successful listing re-enables it.
+    if (committedFilesRequest.current <= failedFilesRequest.current) return;
     // A DIRTY tab is never closed. Closing it unmounts the keyed inspector
     // mid-draft, whose cleanup flushes best-effort to a path that no longer
     // exists; the write fails, the failure is swallowed, and the draft is

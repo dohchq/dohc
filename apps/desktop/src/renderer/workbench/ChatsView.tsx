@@ -1068,10 +1068,19 @@ export function ChatsView(props: {
         // what it already had: dropping to "unknown" would wipe the cached
         // invitations and share controls, and lock every joined channel, for
         // a refresh the user never asked for.
-        if (
-          (shares.answered || !options?.background) &&
-          sharesId > committedSharesRequest.current
-        ) {
+        //
+        // Preservation only applies over state that IS resolved, which the
+        // watermark records (it only ever advances on a commit for the
+        // current workspace, and the workspace switch resets it). With
+        // nothing resolved there is nothing to keep, and this response may be
+        // the only one coming — a background refresh supersedes any initial
+        // request still in flight — so it must settle the state even with a
+        // failed lookup. That commits "unknown", which fails closed, instead
+        // of leaving presence and the share controls waiting forever.
+        const sharesResolvedForWorkspace = committedSharesRequest.current > 0;
+        const keepCached =
+          options?.background && !shares.answered && sharesResolvedForWorkspace;
+        if (!keepCached && sharesId > committedSharesRequest.current) {
           committedSharesRequest.current = sharesId;
           setChannelShares(shares.value);
           setSharesWorkspaceId(workspaceId);
@@ -1184,6 +1193,7 @@ export function ChatsView(props: {
     setCreatingChannel(null);
     setChannelShares(null);
     setSharesWorkspaceId(null);
+    committedSharesRequest.current = 0;
     setSharePanelOpen(false);
     setShareEmail("");
     setShareReadOnly(false);

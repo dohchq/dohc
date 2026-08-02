@@ -970,11 +970,13 @@ describe("ui-state merge-on-load", () => {
     mark.mockRestore();
   });
 
-  // A failed request never commits, so gating the close on "the newest ISSUED
-  // id is the displayed one" would block it for the rest of the session and
-  // keep re-persisting tabs whose files are gone. The close waits for quiet
-  // instead, and the older listing is authoritative once the newer one fails.
-  it("closes on the older listing once a newer request fails", async () => {
+  // A failure is not an answer, so it cannot make an older snapshot
+  // authoritative for CLOSING: the listing that failed may have been the one
+  // that would have shown a file pulled back in. The close waits for a
+  // success issued after the failure. It is not blocked forever — the next
+  // successful listing re-enables it — and correctness beats eagerness for
+  // work that cannot be undone.
+  it("waits for a listing that succeeds after a failure before closing", async () => {
     const older = deferred<{
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
@@ -983,6 +985,10 @@ describe("ui-state merge-on-load", () => {
     const newer = new Promise<never>((_resolve, reject) => {
       failNewer = reject;
     });
+    const third = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
     let issued = 0;
     const bridge = makeBridge(
       Promise.resolve({
@@ -991,7 +997,10 @@ describe("ui-state merge-on-load", () => {
         activeTab: "b.md",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(() => (++issued === 1 ? older.promise : newer));
+    bridge.listWorkspaceFiles = vi.fn(() => {
+      issued += 1;
+      return issued === 1 ? older.promise : issued === 2 ? newer : third.promise;
+    });
     renderShell(bridge);
 
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
@@ -1007,16 +1016,99 @@ describe("ui-state merge-on-load", () => {
     });
     expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
 
-    // The newer request fails. Nothing else will arrive, so the older listing
-    // is the best answer there is and the close must proceed.
+    // The newer request fails. Everything has settled now, but that failure
+    // could have been the listing that would have shown the file pulled back
+    // in, so the older snapshot cannot authorise a close.
     await act(async () => {
       failNewer(new Error("listing failed"));
       await Promise.resolve();
+    });
+    expect(screen.getByTestId("tab-gone.md")).toBeTruthy();
+
+    // A listing issued after the failure answers, and still does not have the
+    // file. Now the close is authorised.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      third.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await third.promise;
     });
     await waitFor(() => {
       expect(screen.queryByTestId("tab-gone.md")).toBeNull();
     });
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  // Codex's scenario: the pull brings a file BACK, and the listing that would
+  // have shown it is the one that failed. Closing on the pre-pull snapshot
+  // would close a tab whose file exists.
+  it("does not close on a pre-pull snapshot when the post-pull listing failed", async () => {
+    const prePull = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let failPostPull!: (error: Error) => void;
+    const postPull = new Promise<never>((_resolve, reject) => {
+      failPostPull = reject;
+    });
+    const afterPull = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let issued = 0;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "pulled.md"],
+        activeTab: "b.md",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(() => {
+      issued += 1;
+      return issued === 1
+        ? prePull.promise
+        : issued === 2
+          ? postPull
+          : afterPull.promise;
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The pre-pull snapshot commits; it predates the file coming back.
+    await act(async () => {
+      prePull.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await prePull.promise;
+    });
+    // The listing that would have carried the pulled file fails.
+    await act(async () => {
+      failPostPull(new Error("listing failed"));
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+
+    // A later listing confirms the file is really there. Still no close.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      afterPull.resolve({
+        files: [
+          { path: "b.md", kind: "file" },
+          { path: "pulled.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await afterPull.promise;
+    });
+    expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
   });
 
   // CodeRabbit: reconciling commits through the direct setter (it must not set
