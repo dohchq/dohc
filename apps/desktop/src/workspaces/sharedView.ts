@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
+import { isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import {
-  RelayUnauthorizedError,
   ShareUnavailableError,
   type PullShareViewResult,
   type ShareViewChangedPath,
@@ -35,31 +35,31 @@ export interface PinnedShareSelector {
 }
 
 /**
- * Raised when a refresh could not resolve the share's selector, so it did NOT
- * pull. An unscoped pull enforces no containment, which would hand a relay
- * able to INDUCE this failure the one pull it is not checked on.
+ * Raised when a share record carries no readable pinned selector, so the
+ * refresh did NOT pull.
+ *
+ * The pin is part of the record contract: both accept paths resolve a
+ * selector from the relay and write it with the record, so a record without
+ * one is damaged. It is NOT repaired from the relay. Re-asking would let a
+ * relay that can damage or race a record restate a wider selector and have
+ * that become the pin — the exact widening the pin exists to stop. The way
+ * back is the accept flow, which pins before the record exists.
  */
-export class ShareScopeUnavailableError extends Error {
+export class SharePinInvalidError extends Error {
   constructor(readonly shareId: string) {
-    super(`The scope of share ${shareId} could not be read from the relay.`);
-    this.name = "ShareScopeUnavailableError";
+    super(
+      `Share ${shareId} has no readable pinned selector; ` +
+        "its record is damaged and the share must be added again.",
+    );
+    this.name = "SharePinInvalidError";
   }
 }
 
-/** How one refresh resolves the share's pinned selector. */
-export interface ShareScopeSource {
-  /** What the local record holds. Anything malformed reads as absent. */
-  recorded: unknown;
-  /** Asked ONCE, and only when the record holds no usable selector. */
-  fetch: () => Promise<PinnedShareSelector>;
-  /** Pin a fetched selector so no later refresh has to ask again. */
-  record: (selector: PinnedShareSelector) => void;
-}
-
 /**
- * A registry record is data, not a contract: read the selector back
- * defensively. Anything the relay could not have issued reads as absent,
- * which is repaired by the fetch below rather than passed to the engine.
+ * A registry record is data, not a contract: read the pinned selector back
+ * defensively, against the relay's OWN rules for the selector it issued.
+ * Anything the relay could not have issued is damage and reads as null, which
+ * fails the refresh closed rather than reaching the engine.
  */
 export function recordedShareSelector(
   value: unknown,
@@ -70,49 +70,23 @@ export function recordedShareSelector(
   const candidate = value as { paths?: unknown; versionId?: unknown };
   if (!Array.isArray(candidate.paths)) return null;
   if (!candidate.paths.every((path) => typeof path === "string")) return null;
-  if (candidate.versionId !== null && typeof candidate.versionId !== "string") {
+  // The version dimension decides whether a no-paths selector grants the whole
+  // tracked workspace, so a version id the relay could not have issued ("",
+  // " v1", or an unbounded one) must never read as one. Same rule, same place,
+  // as the relay applies at creation.
+  if (candidate.versionId !== null && !isValidShareVersionId(candidate.versionId)) {
     return null;
   }
   // Selects nothing, by the relay's own rule: `validateShareSelector` refuses
   // to create a selector with neither a path nor a version, and
-  // `pathVisibleThroughShare` serves nothing through one. A record holding it
-  // is damage, not a grant — re-fetch rather than pull against it.
+  // `pathVisibleThroughShare` serves nothing through one.
   if (candidate.paths.length === 0 && candidate.versionId === null) return null;
   return {
     paths: [...(candidate.paths as string[])],
-    versionId: candidate.versionId,
+    versionId: isValidShareVersionId(candidate.versionId)
+      ? candidate.versionId
+      : null,
   };
-}
-
-/**
- * Fetch-then-pin BEFORE the pull, never after: a record with no usable
- * selector gets one now, or this refresh does not pull at all.
- */
-async function pinnedShareSelector(
-  scope: ShareScopeSource,
-  shareId: string,
-): Promise<PinnedShareSelector> {
-  const recorded = recordedShareSelector(scope.recorded);
-  if (recorded !== null) return recorded;
-  let fetched: PinnedShareSelector;
-  try {
-    fetched = await scope.fetch();
-  } catch (error) {
-    // A revoked share answers 404 here exactly as the pull would, and an
-    // expired session must reach the handler that tells the user to sign in —
-    // wrapping either one would report a share as quietly "unchanged" while
-    // it is actually gone or locked out. Only an ordinary metadata failure
-    // leaves the scope unknown.
-    if (
-      error instanceof ShareUnavailableError ||
-      error instanceof RelayUnauthorizedError
-    ) {
-      throw error;
-    }
-    throw new ShareScopeUnavailableError(shareId);
-  }
-  scope.record(fetched);
-  return fetched;
 }
 
 // Containment before any disk write: the engine already restricts paths to
@@ -314,19 +288,13 @@ export async function refreshSharedViewOnce(input: {
   // Required at the factory boundary for the same reason: every rooted caller
   // must explicitly select its store implementation.
   store: CaptureVersionedTextStore;
-  // The scope this refresh enforces. Resolved BEFORE the pull, so no pull
-  // ever runs unscoped.
-  scope: ShareScopeSource;
+  // The scope this refresh enforces, exactly as the share record holds it.
+  // Read BEFORE the pull and never repaired from the relay, so no pull ever
+  // runs unscoped and no refresh can re-pin a wider selector.
+  pinnedSelector: unknown;
 }): Promise<RefreshSharedViewOutcome> {
-  let grantedSelector: PinnedShareSelector;
-  try {
-    grantedSelector = await pinnedShareSelector(input.scope, input.shareId);
-  } catch (error) {
-    if (error instanceof ShareUnavailableError) {
-      return { status: "ended", changedPaths: 0 };
-    }
-    throw error;
-  }
+  const grantedSelector = recordedShareSelector(input.pinnedSelector);
+  if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
   let pull;
   try {
     pull = await input.pull({

@@ -3,29 +3,20 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import {
   createShareViewDaemonHarness,
   type ShareViewDaemonHarness,
 } from "../testing/shareViewLoopbackTransport";
 import {
-  ShareScopeUnavailableError,
+  SharePinInvalidError,
   materializeSharedViewPaths,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
-  type ShareScopeSource,
 } from "./sharedView";
 
-// These tests drive the pull with a selector already pinned; the fetch-first
-// path has its own tests. A throwing `fetch` asserts that a pinned selector
-// never goes back to the relay. The selector is a REAL one — no paths and no
-// version selects nothing at all, which the engine refuses.
-const RECORDED_SCOPE: ShareScopeSource = {
-  recorded: { paths: ["docs"], versionId: null },
-  fetch: () => {
-    throw new Error("a recorded selector must not be re-fetched");
-  },
-  record: () => undefined,
-};
+// These tests drive the pull with the selector a share record pins. It is a
+// REAL selector — no paths and no version selects nothing at all, which the
+// engine refuses.
+const PINNED_SELECTOR = { paths: ["docs"], versionId: null };
 
 const WORKSPACE = "shared-view-ws";
 const SHARE_ID = "share-1";
@@ -89,7 +80,7 @@ async function refreshSharedViewOnce(
     rootDir: string;
     workspaceId: string;
     shareId: string;
-    scope?: ShareScopeSource;
+    pinnedSelector?: unknown;
   },
 ) {
   const target = { workspaceId: input.workspaceId, rootPath: input.rootDir };
@@ -102,7 +93,7 @@ async function refreshSharedViewOnce(
       relay: harness.relay,
       shareId: input.shareId,
       pull,
-      scope: input.scope ?? RECORDED_SCOPE,
+      pinnedSelector: input.pinnedSelector ?? PINNED_SELECTOR,
       store,
     });
   } finally {
@@ -119,6 +110,9 @@ class FakeShareRelay {
   ops: Array<Record<string, unknown>> = [];
   blobs = new Map<string, Buffer>();
   ended = false;
+  // The share metadata route is the ONLY route a re-pin could use. Counted so
+  // a test can prove that a refresh never reaches it.
+  metadataRequests = 0;
   private nextSeq = 1;
 
   addWrite(path: string, content: string): void {
@@ -184,6 +178,10 @@ class FakeShareRelay {
     if (this.ended) return notFound();
     const parts = parsed.pathname.split("/").filter(Boolean);
     if (parts[0] !== "sync" || parts[1] !== "shares" || parts[2] !== SHARE_ID) return notFound();
+    if (parts.length === 3) {
+      this.metadataRequests += 1;
+      return notFound();
+    }
     if (parts.length === 4 && parts[3] === "log") {
       const since = Number(parsed.searchParams.get("since") ?? 0);
       const rows = this.ops.filter((op) => Number(op.relaySeq) > since);
@@ -269,61 +267,77 @@ describe("shared view refresh", () => {
     ).toContain("share.view.pull");
   });
 
-  // The scope is resolved BEFORE the pull, and a pull only ever runs with one.
-  // A relay that cannot answer the metadata request is exactly the relay this
-  // enforcement exists for, so a failure there must not buy it an unchecked
-  // pull — it must buy it nothing.
-  it("does not pull at all when the pinned selector cannot be resolved", async () => {
-    const rootDir = await tempRoot();
-    const relay = new FakeShareRelay();
-    const harness = daemonHarness(relay);
-    relay.addWrite("docs/a.md", "body the relay must not get to send");
-    let pulls = 0;
+  // The pin is part of the share record's contract: both accept paths write a
+  // selector before the record exists, so a record without a readable one is
+  // DAMAGED. Every damaged shape must refuse the pull outright. It must not be
+  // repaired from the relay — that ask is the one a relay able to damage or
+  // race a record would answer with a wider scope, which is exactly the
+  // widening the pin exists to stop.
+  const damagedPins: Array<[string, unknown]> = [
+    ["absent — the record was never written with one", undefined],
+    ["null", null],
+    ["not an object", "docs"],
+    ["no paths array", { versionId: "v1" }],
+    ["a non-string path", { paths: ["docs", 7], versionId: null }],
+    // Selects NOTHING: the relay refuses to create this one
+    // (`empty_selector`) and serves nothing through it.
+    ["selects nothing", { paths: [], versionId: null }],
+    // A version id the relay could not have issued. These are the dangerous
+    // ones: the engine reads any version-bearing selector with no paths as
+    // granting every tracked path, so a damaged version must never be read as
+    // a version at all.
+    ["an empty version id", { paths: [], versionId: "" }],
+    ["a whitespace-only version id", { paths: [], versionId: "   " }],
+    ["a padded version id", { paths: [], versionId: " v1 " }],
+    ["an unbounded version id", { paths: [], versionId: "v".repeat(129) }],
+  ];
 
-    await expect(
-      refreshSharedViewOnceWithPull({
-        rootDir,
-        workspaceId: WORKSPACE,
-        relay: harness.relay,
-        shareId: SHARE_ID,
-        store: harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir }),
-        scope: {
-          recorded: undefined,
-          fetch: async () => {
-            throw new Error("relay metadata is unavailable");
-          },
-          record: () => undefined,
-        },
-        pull: async (input) => {
-          pulls += 1;
-          return await harness.pullFor({
+  for (const [label, pinnedSelector] of damagedPins) {
+    it(`refuses to pull when the pinned selector is ${label}`, async () => {
+      const rootDir = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      relay.addWrite("docs/a.md", "body the relay must not get to send");
+      let pulls = 0;
+
+      await expect(
+        refreshSharedViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store: harness.openStore({
             workspaceId: WORKSPACE,
             rootPath: rootDir,
-          })(input);
-        },
-      }),
-    ).rejects.toBeInstanceOf(ShareScopeUnavailableError);
+          }),
+          pinnedSelector,
+          pull: async (input) => {
+            pulls += 1;
+            return await harness.pullFor({
+              workspaceId: WORKSPACE,
+              rootPath: rootDir,
+            })(input);
+          },
+        }),
+      ).rejects.toBeInstanceOf(SharePinInvalidError);
 
-    expect(
-      pulls,
-      "MUTATION: falling back to an unscoped pull serves the relay that induced the failure",
-    ).toBe(0);
-    await expect(stat(join(rootDir, "docs/a.md"))).rejects.toMatchObject({
-      code: "ENOENT",
+      expect(
+        pulls,
+        `MUTATION: reading a ${label} pin as a grant pulls against a scope the relay never issued`,
+      ).toBe(0);
+      await expect(stat(join(rootDir, "docs/a.md"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await harness.closeAll();
     });
-    await harness.closeAll();
-  });
+  }
 
-  // A record holding no paths AND no version is not a whole-workspace grant.
-  // The relay refuses to CREATE that selector and serves nothing through one,
-  // so a record carrying it is damage — it must send this refresh back to the
-  // relay, not hand the engine the widest grant there is.
-  it("treats a pinned selector that selects nothing as damage, not a whole-workspace grant", async () => {
+  // The refusal names the constraint, so the handler above it can tell the
+  // user what to do instead of reporting "refreshed, nothing new" forever.
+  it("names the damaged record in the refusal", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
-    relay.addWrite("docs/a.md", "body the relay must not get to send");
-    let pulls = 0;
 
     await expect(
       refreshSharedViewOnceWithPull({
@@ -332,119 +346,49 @@ describe("shared view refresh", () => {
         relay: harness.relay,
         shareId: SHARE_ID,
         store: harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir }),
-        scope: {
-          recorded: { paths: [], versionId: null },
-          fetch: async () => {
-            throw new Error("relay metadata is unavailable");
-          },
-          record: () => undefined,
-        },
-        pull: async (input) => {
-          pulls += 1;
-          return await harness.pullFor({
-            workspaceId: WORKSPACE,
-            rootPath: rootDir,
-          })(input);
-        },
-      }),
-    ).rejects.toBeInstanceOf(ShareScopeUnavailableError);
-
-    expect(
-      pulls,
-      "MUTATION: reading a selector that selects nothing as a grant pulls the whole workspace",
-    ).toBe(0);
-    await expect(stat(join(rootDir, "docs/a.md"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-    await harness.closeAll();
-  });
-
-  // An expired session must SURFACE. Wrapping it as "the scope is
-  // unavailable" would make both refresh handlers report the share as
-  // quietly unchanged — the same "refreshed, nothing new" lie a previous
-  // review already fixed for the pull itself — and the mount handler's
-  // sign-in guidance would become unreachable.
-  it("lets an expired session through the scope lookup instead of masking it", async () => {
-    const rootDir = await tempRoot();
-    const relay = new FakeShareRelay();
-    const harness = daemonHarness(relay);
-    let pulls = 0;
-
-    await expect(
-      refreshSharedViewOnceWithPull({
-        rootDir,
-        workspaceId: WORKSPACE,
-        relay: harness.relay,
-        shareId: SHARE_ID,
-        store: harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir }),
-        scope: {
-          recorded: undefined,
-          fetch: async () => {
-            throw new RelayUnauthorizedError();
-          },
-          record: () => undefined,
-        },
+        pinnedSelector: undefined,
         pull: async () => {
-          pulls += 1;
           throw new Error("unreachable");
         },
       }),
-      "MUTATION: wrapping every failure hides an expired session behind 'unchanged'",
-    ).rejects.toBeInstanceOf(RelayUnauthorizedError);
-
-    expect(pulls).toBe(0);
+    ).rejects.toThrow(
+      /Share share-1 has no readable pinned selector; its record is damaged and the share must be added again\./u,
+    );
     await harness.closeAll();
   });
 
-  // …and the next refresh, once the relay answers, records the selector and
-  // pulls with it. The transitional window is zero unscoped pulls, not one.
-  it("records the fetched selector and pulls with it on the next refresh", async () => {
+  // A pinned selector is used EXACTLY as recorded, and the relay is never
+  // asked to restate it. There is no code path left that could.
+  it("pulls with the pinned selector and never asks the relay for another", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/a.md", "first body");
-    const recorded: Array<{ paths: string[]; versionId: string | null }> = [];
-    let fetches = 0;
 
     const first = await refreshSharedViewOnce(harness, {
       rootDir,
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
-      scope: {
-        recorded: undefined,
-        fetch: async () => {
-          fetches += 1;
-          return { paths: ["docs"], versionId: null };
-        },
-        record: (selector) => recorded.push(selector),
-      },
+      pinnedSelector: { paths: ["docs"], versionId: null },
     });
-
     expect(first).toEqual({ status: "updated", changedPaths: 1 });
-    expect(recorded).toEqual([{ paths: ["docs"], versionId: null }]);
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("first body");
 
-    // The pinned selector is now the scope, and it is NOT fetched again.
     relay.addWrite("docs/b.md", "second body");
     const second = await refreshSharedViewOnce(harness, {
       rootDir,
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
-      scope: {
-        recorded: recorded[0],
-        fetch: async () => {
-          fetches += 1;
-          return { paths: ["other"], versionId: null };
-        },
-        record: (selector) => recorded.push(selector),
-      },
+      pinnedSelector: { paths: ["docs"], versionId: null },
     });
-
     expect(second).toEqual({ status: "updated", changedPaths: 1 });
+
+    // The share metadata route is what a re-pin would have to call. Nothing
+    // in a refresh touches it.
     expect(
-      fetches,
-      "MUTATION: re-fetching a recorded selector lets the relay restate the grant on every pull",
-    ).toBe(1);
+      relay.metadataRequests,
+      "MUTATION: re-fetching the selector lets the relay restate the grant on every pull",
+    ).toBe(0);
   });
 
   // A read that fails must not cost the user the file they already had.

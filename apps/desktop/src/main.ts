@@ -359,10 +359,8 @@ import {
   relayUrlsMatch,
 } from "./workspaces/syncCode";
 import {
-  ShareScopeUnavailableError,
+  SharePinInvalidError,
   refreshSharedViewOnce,
-  type PinnedShareSelector,
-  type ShareScopeSource,
 } from "./workspaces/sharedView";
 import {
   assertMountableSelector,
@@ -4327,38 +4325,6 @@ function registerIpcHandlers(
     return undefined;
   });
 
-  // How a refresh resolves the share's pinned selector. A record that holds
-  // a usable one is used as is; a record that holds none (never pinned, or
-  // left damaged by a hand edit) is filled from the relay and persisted
-  // BEFORE the pull. If that fetch fails, refreshSharedViewOnce raises
-  // ShareScopeUnavailableError and no pull runs: a pull with no scope
-  // enforces no containment, and a relay that could induce the failure would
-  // be the one served by it.
-  function shareScopeSource(input: {
-    relay: SyncRelayConnection;
-    shareId: string;
-    recorded: unknown;
-    record: (selector: PinnedShareSelector) => void;
-  }): ShareScopeSource {
-    return {
-      recorded: input.recorded,
-      fetch: async () => {
-        const info = await fetchShareViewInfo({
-          relay: input.relay,
-          shareId: input.shareId,
-        });
-        // A file share that now answers as a chat-channel grant is not a
-        // scope this pull can enforce, so it is refused like any other
-        // unreadable selector rather than read as "grants everything".
-        if (info.selector === null) {
-          throw new ShareSelectorInvalidError(input.shareId);
-        }
-        return info.selector;
-      },
-      record: input.record,
-    };
-  }
-
   // Receive side: open a pasted share code as a READ-ONLY shared view.
   // Mirrors the join flow's ordering guarantees: everything is validated
   // BEFORE local state exists, the token only ever goes to the signed-in
@@ -4448,13 +4414,9 @@ function registerIpcHandlers(
         relay,
         shareId: parsed.shareId,
         store: sharedViewStoreFor(created),
-        scope: shareScopeSource({
-          relay,
-          shareId: parsed.shareId,
-          // Just fetched and pinned above: this open never re-fetches.
-          recorded: info.selector,
-          record: () => undefined,
-        }),
+        // Just pinned on the record above; the refresh reads it back through
+        // the same defensive parse every later refresh uses.
+        pinnedSelector: info.selector,
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
@@ -4518,9 +4480,6 @@ function registerIpcHandlers(
       rootPath: workspace.rootPath,
       relay,
     });
-    // Tracks the record as written, so the "ended" write below cannot erase a
-    // selector this refresh just recorded.
-    let current = shareView;
     let outcome;
     try {
       outcome = await refreshSharedViewOnce({
@@ -4529,15 +4488,7 @@ function registerIpcHandlers(
         relay,
         shareId: shareView.shareId,
         store: sharedViewStoreFor(workspace),
-        scope: shareScopeSource({
-          relay,
-          shareId: shareView.shareId,
-          recorded: shareView.grantedSelector,
-          record: (selector) => {
-            current = { ...shareView, grantedSelector: selector };
-            setWorkspaceShareView(workspace.workspaceId, current);
-          },
-        }),
+        pinnedSelector: shareView.grantedSelector,
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
@@ -4545,20 +4496,21 @@ function registerIpcHandlers(
           }),
       });
     } catch (error) {
-      if (error instanceof ShareScopeUnavailableError) {
-        // Nothing pulled and nothing changed. The next refresh tries again.
-        console.error("[desktop] shared view refresh skipped:", error.message);
-        return RefreshSharedViewResult.parse({
-          status: "unchanged",
-          changedPaths: 0,
-        });
+      // A damaged pin does not heal on the next try, and re-asking the relay
+      // for one would let it restate a wider scope. Say so instead of
+      // reporting "refreshed, nothing new" forever.
+      if (error instanceof SharePinInvalidError) {
+        throw new Error(
+          "This shared view's record is damaged, so it can't refresh safely. " +
+            "Remove it, then open the share code again.",
+        );
       }
       throw error;
     }
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
       // refreshing; the notice survives restarts.
-      setWorkspaceShareView(workspace.workspaceId, { ...current, ended: true });
+      setWorkspaceShareView(workspace.workspaceId, { ...shareView, ended: true });
       refreshNativeWorkspaceSurfaces();
     }
     notifyRenderer();
@@ -4680,13 +4632,9 @@ function registerIpcHandlers(
         mount,
         relay,
         openStore: sharedViewStoreFor,
-        scope: shareScopeSource({
-          relay,
-          shareId: parsed.shareId,
-          // Just fetched and pinned above: this open never re-fetches.
-          recorded: info.selector,
-          record: () => undefined,
-        }),
+        // Just pinned on the record above; read back through the same
+        // defensive parse every later refresh uses.
+        pinnedSelector: info.selector,
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
@@ -4792,22 +4740,7 @@ function registerIpcHandlers(
           mount,
           relay,
           openStore: sharedViewStoreFor,
-          scope: shareScopeSource({
-            relay,
-            shareId: mount.shareId,
-            recorded: mount.grantedSelector,
-            record: (selector) => {
-              const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-              setWorkspaceShareMounts(
-                workspace.workspaceId,
-                current.map((m) =>
-                  m.shareId === mount.shareId
-                    ? { ...m, grantedSelector: selector }
-                    : m,
-                ),
-              );
-            },
-          }),
+          pinnedSelector: mount.grantedSelector,
           pull: async (input) =>
             await daemonRelay.pullShareView({
               shareId: input.shareId,
@@ -4837,6 +4770,15 @@ function registerIpcHandlers(
         if (error instanceof RelayUnauthorizedError) {
           throw new Error(
             "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+          );
+        }
+        // A damaged pin is permanent, like the expired session above: no
+        // later refresh repairs it, and the relay must not be asked for a
+        // replacement scope. Reporting "unchanged" would hide it forever.
+        if (error instanceof SharePinInvalidError) {
+          throw new Error(
+            `The record for the share in "${mount.label}" is damaged, so it can't ` +
+              "refresh safely. Remove that share, then add it again.",
           );
         }
         // One mount's network failure must not stop the others; report it

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_SHARE_VERSION_ID_CHARS,
+  isValidShareVersionId,
+} from "@dohc/security-contract/share-selector";
+import {
   MAX_CHANNEL_WIRE_ID_CHARS,
   MAX_SHARE_PATHS,
   filterOpForShare,
@@ -78,6 +82,24 @@ describe("share selector validation", () => {
       ok: false,
       code: "invalid_version",
     });
+  });
+
+  // The version rule is shared with every recipient surface that reads a
+  // selector BACK (the desktop's share metadata parse and its registry
+  // record). Restating it per surface is what let "" through one reader while
+  // this one refused it — a no-paths selector that carries a version grants
+  // the whole tracked workspace.
+  it("refuses every version id the shared rule refuses", () => {
+    for (const versionId of ["", "   ", " v1", "v1 ", "v".repeat(MAX_SHARE_VERSION_ID_CHARS + 1)]) {
+      expect(
+        validateShareSelector({ versionId }),
+        `MUTATION: accepting ${JSON.stringify(versionId)} makes a no-paths selector a whole-workspace grant`,
+      ).toMatchObject({ ok: false, code: "invalid_version" });
+      expect(isValidShareVersionId(versionId)).toBe(false);
+    }
+    expect(
+      validateShareSelector({ versionId: "v".repeat(MAX_SHARE_VERSION_ID_CHARS) }),
+    ).toMatchObject({ ok: true });
   });
 
   it("round-trips through selector JSON and rejects malformed persisted selectors", () => {

@@ -33,23 +33,13 @@ import {
   relayTargetForShareMount,
 } from "./shareMounts";
 import { syncJoinedSharedChannels } from "./sharedChannels";
-import {
-  refreshSharedViewOnce,
-  type ShareScopeSource,
-} from "./sharedView";
+import { refreshSharedViewOnce } from "./sharedView";
 
-// Every test in this file pulls with a selector already pinned; the
-// fetch-first path has its own tests in sharedView.test.ts. A throwing
-// `fetch` is the assertion that a pinned selector never re-asks the relay.
-// The selector is a REAL one — no paths and no version selects nothing at
-// all, which the engine refuses.
-const RECORDED_SCOPE: ShareScopeSource = {
-  recorded: { paths: ["docs"], versionId: null },
-  fetch: () => {
-    throw new Error("a recorded selector must not be re-fetched");
-  },
-  record: () => undefined,
-};
+// Every test in this file pulls with the selector its share record pins. The
+// damaged-record path has its own tests in sharedView.test.ts. This is a REAL
+// selector — no paths and no version selects nothing at all, which the engine
+// refuses.
+const PINNED_SELECTOR = { paths: ["docs"], versionId: null };
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
 class MockDaemon implements EngineDaemonClient {
@@ -423,7 +413,7 @@ describe("EngineRelayClient", () => {
       relay,
       shareId: "share-view",
       store,
-      scope: RECORDED_SCOPE,
+      pinnedSelector: PINNED_SELECTOR,
       pull: async (input) =>
         await client.pullShareView({
           shareId: input.shareId,
@@ -472,13 +462,7 @@ describe("EngineRelayClient", () => {
       relay,
       shareId: "share-view",
       store,
-      scope: {
-        recorded: { paths: ["docs"], versionId: "v1" },
-        fetch: () => {
-          throw new Error("a recorded selector must not be re-fetched");
-        },
-        record: () => undefined,
-      },
+      pinnedSelector: { paths: ["docs"], versionId: "v1" },
       pull: async (input) =>
         await client.pullShareView({
           shareId: input.shareId,
@@ -557,7 +541,7 @@ describe("EngineRelayClient", () => {
         relay,
         shareId: "share-view",
         store,
-        scope: RECORDED_SCOPE,
+        pinnedSelector: PINNED_SELECTOR,
         pull: async (input) =>
           await client.pullShareView({
             shareId: input.shareId,
@@ -588,7 +572,7 @@ describe("EngineRelayClient", () => {
         relay,
         openStore: (workspace) =>
           createCaptureLiveStores(workspace, sessions).store,
-        scope: RECORDED_SCOPE,
+        pinnedSelector: PINNED_SELECTOR,
         pull: async (input) =>
           await mountRelay.pullShareView({
             shareId: input.shareId,
@@ -661,7 +645,7 @@ describe("EngineRelayClient", () => {
         relay,
         shareId: "share-revoked",
         store,
-        scope: RECORDED_SCOPE,
+        pinnedSelector: PINNED_SELECTOR,
         pull: async (input) =>
           await client.pullShareView({
             shareId: input.shareId,

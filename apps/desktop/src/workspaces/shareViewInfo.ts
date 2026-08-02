@@ -1,3 +1,4 @@
+import { isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import {
   RelayUnauthorizedError,
   ShareUnavailableError,
@@ -83,13 +84,18 @@ function parseSelector(
   ) {
     throw new ShareSelectorInvalidError(shareId);
   }
+  // The version dimension is held to the relay's OWN rule, from the one
+  // place that states it. A version id the relay could not have issued is a
+  // response this client cannot enforce, not a share that follows main:
+  // reading it as `null` would silently downgrade a version share.
   if (record.versionId !== null && record.versionId !== undefined) {
-    if (typeof record.versionId !== "string" || record.versionId.length === 0) {
+    if (!isValidShareVersionId(record.versionId)) {
       throw new ShareSelectorInvalidError(shareId);
     }
   }
-  const versionId =
-    typeof record.versionId === "string" ? record.versionId : null;
+  const versionId = isValidShareVersionId(record.versionId)
+    ? record.versionId
+    : null;
   // The relay refuses to CREATE a selector that selects nothing, so a
   // response carrying one is not a grant — it is a relay this client cannot
   // enforce anything against.

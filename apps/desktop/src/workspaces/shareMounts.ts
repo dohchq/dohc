@@ -193,8 +193,9 @@ export async function refreshShareMountOnce(input: {
   mount: Pick<ShareMountRecord, "shareId" | "label">;
   relay: SyncRelayConnection;
   pull: Parameters<typeof refreshSharedViewOnce>[0]["pull"];
-  // Resolved before this mount pulls, exactly as a standalone view does.
-  scope: Parameters<typeof refreshSharedViewOnce>[0]["scope"];
+  // Read from the mount record before this pull, exactly as a standalone
+  // view does.
+  pinnedSelector: unknown;
   openStore: (workspace: {
     workspaceId: string;
     rootPath: string;
@@ -230,7 +231,7 @@ export async function refreshShareMountOnce(input: {
       relay: input.relay,
       shareId: input.mount.shareId,
       pull: input.pull,
-      scope: input.scope,
+      pinnedSelector: input.pinnedSelector,
       store,
     });
     if (repaired === 0) return outcome;

@@ -1,4 +1,8 @@
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import {
+  MAX_SHARE_VERSION_ID_CHARS,
+  isValidShareVersionId,
+} from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { RELAY_ERRORS } from "./errorCodes";
 
@@ -22,7 +26,6 @@ import { RELAY_ERRORS } from "./errorCodes";
 
 export const MAX_SHARE_PATHS = 100;
 export const MAX_SHARE_PATH_CHARS = 1024;
-export const MAX_SHARE_VERSION_ID_CHARS = 128;
 export const MAX_CHANNEL_WIRE_ID_CHARS = 256;
 
 export const MAIN_VERSION_ID = "main";
@@ -217,16 +220,13 @@ export function validateShareSelector(input: {
   }
   let versionId: string | null = null;
   if (input.versionId !== undefined && input.versionId !== null) {
-    if (
-      typeof input.versionId !== "string" ||
-      input.versionId.trim() !== input.versionId ||
-      input.versionId.length === 0 ||
-      input.versionId.length > MAX_SHARE_VERSION_ID_CHARS
-    ) {
+    // One rule, one place: `isValidShareVersionId` is the same check every
+    // recipient surface re-applies when it reads a selector back.
+    if (!isValidShareVersionId(input.versionId)) {
       return {
         ok: false,
         code: RELAY_ERRORS.invalid_version.code,
-        message: "versionId is not valid",
+        message: `versionId must be a non-empty trimmed string of at most ${MAX_SHARE_VERSION_ID_CHARS} characters`,
       };
     }
     versionId = input.versionId;

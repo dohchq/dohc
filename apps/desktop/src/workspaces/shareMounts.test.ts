@@ -19,21 +19,12 @@ import {
   removeMountFolder,
   validMountLabel,
 } from "./shareMounts";
-import type { ShareScopeSource } from "./sharedView";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
-// These tests drive the pull with a selector already pinned; the fetch-first
-// path has its own tests. A throwing `fetch` asserts that a pinned selector
-// never goes back to the relay. No paths selects the whole tracked workspace
-// only WITH a version — no paths and no version selects nothing at all, which
-// the engine refuses.
-const RECORDED_SCOPE: ShareScopeSource = {
-  recorded: { paths: [], versionId: "shared-version" },
-  fetch: () => {
-    throw new Error("a recorded selector must not be re-fetched");
-  },
-  record: () => undefined,
-};
+// These tests drive the pull with the selector a mount record pins. No paths
+// selects the whole tracked workspace only WITH a version — no paths and no
+// version selects nothing at all, which the engine refuses.
+const PINNED_SELECTOR = { paths: [], versionId: "shared-version" };
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 
 const SHARE_ID = "share-1";
@@ -84,7 +75,7 @@ async function refreshShareMountOnce(
   input: {
     hostRoot: string;
     mount: { shareId: string; label: string };
-    scope?: ShareScopeSource;
+    pinnedSelector?: unknown;
     openStore?: (workspace: {
       workspaceId: string;
       rootPath: string;
@@ -104,7 +95,7 @@ async function refreshShareMountOnce(
     mount: input.mount,
     relay: harness.relay,
     pull,
-    scope: input.scope ?? RECORDED_SCOPE,
+    pinnedSelector: input.pinnedSelector ?? PINNED_SELECTOR,
     openStore: input.openStore ?? harness.openStore,
   });
 }
