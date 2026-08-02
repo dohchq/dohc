@@ -2845,10 +2845,22 @@ export function createWorkspaceEngineCapture(
           momentOrder: moment.momentOrder,
           protected: true,
         }));
-      // Merge newest-first; ties keep text before protected (stable).
-      const merged = [...textMoments, ...protectedInWindow].sort(
-        (a, b) => b.recordedAtMs - a.recordedAtMs,
-      );
+      // Merge newest-first on a stated total order, because ties are the
+      // daemon's normal regime: one reconcile pass stamps every moment it
+      // produces with the same wall clock, and the two timelines' orders come
+      // from independent counters, so time alone cannot rank them. The rule:
+      // newer recordedAtMs first, then text before protected, then higher
+      // momentOrder (a counter each store keeps for itself, so it ranks only
+      // moments of the same kind), then lower id. The renderer shows this
+      // order as given, so it is what the user reads.
+      const merged = [...textMoments, ...protectedInWindow].sort((a, b) => {
+        if (a.recordedAtMs !== b.recordedAtMs) {
+          return b.recordedAtMs - a.recordedAtMs;
+        }
+        if (a.protected !== b.protected) return a.protected ? 1 : -1;
+        if (a.momentOrder !== b.momentOrder) return b.momentOrder - a.momentOrder;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
       return {
         moments: merged,
         nextBeforeMomentOrder: page.nextBeforeMomentOrder,

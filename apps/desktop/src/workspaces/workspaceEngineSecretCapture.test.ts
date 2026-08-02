@@ -355,4 +355,71 @@ describe("listMoments protected pagination", () => {
     expect(secretStore.listSecretMoments).toHaveBeenCalledTimes(3);
     await engine.stop();
   });
+
+  // One daemon reconcile pass stamps every moment it produces with the same
+  // wall clock, so a tie is the normal case, not a rarity. The merge states
+  // the order instead of inheriting it from Array#sort stability: newer
+  // recordedAtMs first, then text before protected, then higher momentOrder,
+  // then lower id. Ids here are chosen so that dropping any one rule reorders
+  // the result.
+  it("orders same-millisecond moments by the stated rule, whatever order they arrive in", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    await loopback.sendRequest({
+      id: 1,
+      method: VERSIONED_METHOD.versionsEnsureMain,
+      workspace: "engine-secret-test",
+      params: { workspaceId: "engine-secret-test" },
+    });
+    // "aaa-text" is written first, so it holds the LOWER momentOrder even
+    // though its id sorts first.
+    const textWrites: ReadonlyArray<[string, number]> = [
+      ["older-text", 400],
+      ["aaa-text", 500],
+      ["zz-text", 500],
+    ];
+    let requestId = 2;
+    for (const [momentId, nowMs] of textWrites) {
+      await loopback.sendRequest({
+        id: requestId++,
+        method: VERSIONED_METHOD.textWrite,
+        workspace: "engine-secret-test",
+        params: {
+          workspaceId: "engine-secret-test",
+          versionId: "main",
+          path: `${momentId}.md`,
+          text: momentId,
+          origin: "api",
+          momentId,
+          nowMs,
+        },
+      });
+    }
+    // Both tie the text moments AND sort before them by id, so text-before-
+    // protected has to come from the rule, not from the ids.
+    const first = secretMoment("aa-secret", 500);
+    const second = secretMoment("ab-secret", 500);
+
+    async function mergedIds(
+      order: ReadonlyArray<ReturnType<typeof secretMoment>>,
+    ): Promise<string[]> {
+      const secretStore = {
+        listSecretMoments: vi.fn(async () => [...order]),
+      } as unknown as SecretFileStore;
+      const engine = daemonCapture(root, loopback, undefined, secretStore);
+      const page = await engine.listMoments();
+      await engine.stop();
+      return page.moments.map((moment) => moment.id);
+    }
+
+    const expected = [
+      "zz-text",
+      "aaa-text",
+      "aa-secret",
+      "ab-secret",
+      "older-text",
+    ];
+    expect(await mergedIds([first, second])).toEqual(expected);
+    expect(await mergedIds([second, first])).toEqual(expected);
+  });
 });
