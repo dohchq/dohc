@@ -2437,18 +2437,20 @@ export function createWorkspaceEngineCapture(
         // reach the engine, which is exactly what "error" and its retry advice
         // are for. A stale target OUTSIDE a close keeps reporting `error` too —
         // that document stays open, so its retry is real.
-        let closing = false;
-        const isCloseSettleDrift = (error: unknown): boolean =>
-          closing && isConflictStaleTargetRefusal(error);
         // The one place a background settle failure is observable. Log it with
         // the path and the wire error, and tell the editor the file on disk is
         // behind — a settle that never lands is the user's content going
         // nowhere.
+        //
+        // #496 corrects this report from the close path below, and only ever
+        // DOWNWARDS in loudness. Reporting the failure first and withdrawing it
+        // once the release proves it benign is deliberate: a report deferred
+        // until the outcome is known can be dropped, and a dropped settle
+        // failure is the silent loss this callback exists to prevent. An extra
+        // `error` that gets corrected cannot lose anything.
+        let lastSettleFailure: { error: unknown; token: number } | null = null;
         const onSettleError = (error: unknown, token: number) => {
-          if (isCloseSettleDrift(error)) {
-            reportSaveState("changed-on-disk", token);
-            return;
-          }
+          lastSettleFailure = { error, token };
           onError(`ydoc settle of ${input.path}`, error);
           reportSaveState("error", token);
         };
@@ -2489,7 +2491,6 @@ export function createWorkspaceEngineCapture(
         const closeEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
-          closing = true;
           try {
             await session.close(opts);
           } catch (error) {
@@ -2501,11 +2502,38 @@ export function createWorkspaceEngineCapture(
                 liveYDocSessions.delete(input.path);
               }
               // #496: the settle met a head the daemon's capture had already
-              // moved. onSettleError has reported changed-on-disk, the release
-              // above is the same one a clean close performs, and there is no
-              // failure left to report — so this close IS clean. Every other
-              // settle failure still surfaces to the caller.
-              if (isCloseSettleDrift(error.cause)) return;
+              // moved — an edit made outside dohc, ingested before this close.
+              //
+              // THIS error, not the refusal, is what makes that benign. The
+              // refusal alone proves nothing: the release that follows it can
+              // refuse too (`UnsettledClose`, when the CRDT projection no
+              // longer matches `last_settled_sha` —
+              // crates/dohc-engine-collab/src/durable.rs), and the daemon then
+              // REINSERTS the session entry (crates/dohc-workspace-engine/
+              // src/lib.rs, ydoc_close_inner) — the doc stays reserved, live,
+              // and unsaved. The provider throws this error only after the
+              // release completed, so it is the one signal that the session is
+              // gone and the settle was the only casualty.
+              //
+              // That same gate is what makes `changed-on-disk` TRUE here rather
+              // than merely quiet: the release prunes only over a lineage whose
+              // projection IS its last settle, so the document's text is a
+              // settled moment in History. With unsettled edits the release
+              // refuses, this error never arrives, and the failure stays loud.
+              //
+              // Being a close is structural — the provider constructs this
+              // error nowhere else — so only the refusal itself is checked, on
+              // the exact settle whose failure was reported, so the correction
+              // can never withdraw a DIFFERENT failure's `error`.
+              const failure = lastSettleFailure;
+              if (
+                failure !== null &&
+                failure.error === error.cause &&
+                isConflictStaleTargetRefusal(error.cause)
+              ) {
+                reportSaveState("changed-on-disk", failure.token);
+                return;
+              }
               throw error;
             }
             // The reservation may still be held and the on-disk state is

@@ -32,6 +32,11 @@ let requests: Request[] = [];
 // transport, where the real client turns the envelope into the refusal the
 // close path reads.
 let settleRefusal: unknown = null;
+// The same, for the RELEASE. The daemon refuses a local-only prune-close with
+// `unsettled-close` when the CRDT projection no longer matches
+// `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and REINSERTS
+// the session entry, so the doc stays reserved.
+let closeRefusal: unknown = null;
 let captureErrors: string[] = [];
 let versioned: VersionedLoopbackEngine;
 let ydoc: YdocLoopbackEngine;
@@ -73,6 +78,9 @@ function daemonSessions(): EngineWorkspaceSessions {
       }
       if (request.method === "ydoc.settle" && settleRefusal !== null) {
         throw settleRefusal;
+      }
+      if (request.method === "ydoc.close" && closeRefusal !== null) {
+        throw closeRefusal;
       }
       if (request.method.startsWith("ydoc.")) {
         return await ydoc.sendRequest(request);
@@ -138,6 +146,7 @@ beforeEach(async () => {
   await writeFile(join(root, PATH), INITIAL_MARKDOWN, "utf8");
   requests = [];
   settleRefusal = null;
+  closeRefusal = null;
   captureErrors = [];
   versioned = new VersionedLoopbackEngine();
   versioned.seedTextFile({
@@ -268,10 +277,10 @@ it("settles and closes the Rust Y.Doc session before a version switch", async ()
 
 // #496. The daemon's own capture ingests an edit made outside dohc, which
 // moves the path's head; the close-settle that follows meets that moved head
-// and the engine refuses ConflictStaleTarget. Nothing here is a failure the
-// user must act on — the outside author's file is intact, this document's
-// text is in the CRDT and in History — so the close must be as quiet as the
-// close that wins the race.
+// and the engine refuses ConflictStaleTarget. The RELEASE then succeeds, which
+// is what makes the refusal benign: the outside author's file is intact, and a
+// release that prunes proves this document's text is a settled moment in
+// History. So the close must end as quiet as the close that wins the race.
 it("closes clean and reports changed-on-disk when the close settle meets a moved head", async () => {
   const states: string[] = [];
   const session = await capture.openYDocSession({
@@ -290,10 +299,9 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   settleRefusal = wireRefusal("conflict-stale-target");
   await expect(session.close()).resolves.toBeUndefined();
 
-  expect(states.at(-1)).toBe("changed-on-disk");
-  expect(states).not.toContain("error");
-  // Not an error channel event either: nothing failed to report.
-  expect(captureErrors).toEqual([]);
+  // The refusal is reported the moment it happens and WITHDRAWN once the
+  // release proves it benign. The editor's last word is what it acts on.
+  expect(states).toEqual(["settling", "error", "changed-on-disk"]);
   // The daemon session was released exactly as a clean close releases it.
   expect(methodCount("ydoc.close")).toBe(1);
 
@@ -356,4 +364,42 @@ it("still reports an error for a stale-target settle while the document stays op
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
   settleRefusal = null;
   await session.close({ settle: false });
+});
+
+// The P1 the first version of #496 shipped: the refusal is NOT the outcome.
+// With unsettled edits, the release that follows the refused close-settle
+// refuses too — the projection no longer matches `last_settled_sha`, so the
+// daemon refuses the prune and reinserts the session entry. The doc is still
+// reserved, still live, and its text is not on disk. A close that reported
+// "changed on disk" here would be telling the user to go read a file that does
+// not hold their work, about a session nobody released.
+it("keeps a stale-target close loud when the release fails too", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed in dohc.");
+  await session.settleNow();
+  states.length = 0;
+  captureErrors = [];
+
+  settleRefusal = wireRefusal("conflict-stale-target");
+  closeRefusal = wireRefusal("unsettled-close");
+  await expect(session.close()).rejects.toThrow(/unsettled-close/);
+
+  // Loud, and it STAYS loud: no correction may follow a release that failed.
+  expect(states).toEqual(["settling", "error"]);
+  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
+  // And the path keeps its guard, because the reservation was never released:
+  // a watcher event stays deferred behind the failing-close entry.
+  settleRefusal = null;
+  closeRefusal = null;
+  const writesBeforeWatcher = methodCount(VERSIONED_METHOD.textWrite);
+  await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
+  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  await capture.flush();
+  expect(methodCount(VERSIONED_METHOD.textWrite)).toBe(writesBeforeWatcher);
 });

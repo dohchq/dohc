@@ -418,12 +418,14 @@ it.skipIf(engine.missing)(
       states.length = 0;
       errors.length = 0;
 
-      // A clean close: the file belongs to the outside author, this document's
-      // text is in History, and nothing is left for the user to retry.
+      // A clean close: nothing was typed since the settle, so the release
+      // prunes, which is what proves the refusal benign — the file belongs to
+      // the outside author and this document's text is a settled moment in
+      // History. The refusal is still reported as it happens and withdrawn
+      // after the release; the editor's LAST word is what it acts on.
       await expect(session.close()).resolves.toBeUndefined();
-      expect(states.at(-1)).toBe("changed-on-disk");
-      expect(states).not.toContain("error");
-      expect(errors).toEqual([]);
+      expect(states).toEqual(["settling", "error", "changed-on-disk"]);
+      expect(errors).toEqual(["ydoc settle of note.md"]);
 
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
 
@@ -572,4 +574,89 @@ it.skipIf(engine.missing || process.platform !== "win32")(
     }
   },
   120_000,
+);
+
+// The half a refusal cannot answer, driven against the real daemon. Same race
+// as above, but the user has UNSETTLED edits when the close runs: the
+// close-settle refuses ConflictStaleTarget exactly as before, and then the
+// release refuses too — a local-only prune needs the CRDT projection to equal
+// `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and the
+// daemon REINSERTS the session entry on that refusal
+// (crates/dohc-workspace-engine/src/lib.rs, ydoc_close_inner). The doc stays
+// reserved, live, and unsaved, so the failure must stay loud. Deciding this
+// at the refusal instead of after the release reported "changed on disk" over
+// exactly this state.
+it.skipIf(engine.missing)(
+  "keeps the close loud when unsettled edits meet an already-moved head",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-loud-"));
+    roots.push(root);
+    const markerDirectory = join(root, ".dohc", "engine");
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(
+      join(markerDirectory, "SHADOW_CLONE"),
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "utf8",
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const errors: string[] = [];
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-loud",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context) => errors.push(context),
+    });
+    const outside = "written outside dohc\n";
+    try {
+      await writeFile(join(root, "note.md"), "base\n", "utf8");
+      await waitForPathMoments(capture, "note.md", 1);
+
+      const states: string[] = [];
+      const session = await capture.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+        onSaveState: (state) => states.push(state),
+      });
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, session.initialUpdate);
+      const type = async (text: string) => {
+        const before = Y.encodeStateVector(editor);
+        editor.getText("plainText").insert(0, text);
+        await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+      };
+      await type("typed in dohc\n");
+      await session.settleNow();
+      const settledMoments = await waitForPathMoments(capture, "note.md", 1);
+
+      await writeFile(join(root, "note.md"), outside, "utf8");
+      await waitForPathMoments(capture, "note.md", settledMoments.length + 1);
+
+      // The difference from the clean case: text the engine has journaled but
+      // never settled, so the projection no longer equals `last_settled_sha`
+      // and the release cannot prune.
+      await type("never settled\n");
+      states.length = 0;
+      errors.length = 0;
+
+      await expect(session.close()).rejects.toThrow();
+      expect(states.at(-1)).toBe("error");
+      expect(states).not.toContain("changed-on-disk");
+      expect(errors).toContain("ydoc settle of note.md");
+
+      // The outside author still owns the file, and the unsettled text is not
+      // in it — which is why "changed on disk" would have been a lie.
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
+    }
+  },
+  60_000,
 );
