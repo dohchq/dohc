@@ -119,11 +119,31 @@ function conflictState(
       metadataCorrelationId: null,
     };
   }
-  if (
-    typeof value.objectId !== "string" ||
-    typeof value.latestMomentId !== "string" ||
-    typeof value.text !== "string"
-  ) {
+  if (typeof value.objectId !== "string" || typeof value.latestMomentId !== "string") {
+    throw new Error("conflict snapshot fixture is missing required head fields");
+  }
+  // A binary side carries its content address and head identity, never a text
+  // snapshot -- the daemon shape `conflict_state_json` emits.
+  if (value.contentKind === "binary") {
+    // Coercing here would turn a missing hash into the STRING "undefined" and a
+    // missing length into NaN, and the fixture would sail on describing a head
+    // that cannot exist. Reject, the way the object id above does.
+    if (typeof value.sha256 !== "string" || typeof value.byteLength !== "number") {
+      throw new Error("binary conflict fixture is missing its content address or size");
+    }
+    return {
+      path,
+      contentKind: "binary",
+      snapshot: null,
+      binarySha256: value.sha256,
+      binaryByteLength: value.byteLength,
+      binaryObjectId: value.objectId,
+      binaryLatestMomentId: value.latestMomentId,
+      metadataSummary: null,
+      metadataCorrelationId: null,
+    };
+  }
+  if (typeof value.text !== "string") {
     throw new Error("conflict snapshot fixture is missing required text fields");
   }
   const snapshot = {
@@ -144,12 +164,33 @@ function conflictState(
   };
 }
 
-function liveTextStateMatches(
+// A side is present when it holds EITHER a text snapshot or a binary head.
+// Testing only for a snapshot reads every binary side as an absent one, which
+// turns "keep the other version's image" into "delete the file".
+function sidePresent(side: ConflictRecord["current"]): boolean {
+  return side.snapshot !== null || side.binarySha256 !== null;
+}
+
+function liveStateMatches(
   live: JsonValue,
   recorded: ConflictRecord["current"],
   targetPath: string,
 ): boolean {
-  if (recorded.contentKind !== "text") return false;
+  // A binary side is as strict as a text one: same path, same bytes, and the
+  // same head identity, so a recreated same-bytes head cannot pass
+  // (`live_state_matches_conflict_current` in crates/dohc-engine-domain).
+  if (recorded.contentKind === "binary") {
+    if (live === null || typeof live !== "object" || Array.isArray(live)) {
+      return false;
+    }
+    return (
+      live.contentKind === "binary" &&
+      live.path === recorded.path &&
+      live.sha256 === recorded.binarySha256 &&
+      live.objectId === recorded.binaryObjectId &&
+      live.latestMomentId === recorded.binaryLatestMomentId
+    );
+  }
   if (recorded.snapshot === null) {
     return live === null && targetPath === recorded.path;
   }
@@ -171,6 +212,14 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
   private readonly conflicts = new Map<string, ConflictRecord>();
   private conflictClock = 1;
   private internalRequestId = -1;
+
+  private dropHeadAfter: string | null = null;
+
+  /// Model a head that vanished between the resolve write and the desktop's
+  /// read-back: a concurrent delete, or an engine that acked a write it lost.
+  dropHeadAfterBinaryResolve(path: string): void {
+    this.dropHeadAfter = path;
+  }
 
   private conflictKey(workspace: string, conflictId: string): string {
     return `${workspace}\u0000${conflictId}`;
@@ -228,7 +277,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
           path: existing.path,
         },
       });
-      if (!liveTextStateMatches(live.result, existing.current, existing.path)) {
+      if (!liveStateMatches(live.result, existing.current, existing.path)) {
         throw new Error("conflict-stale-target");
       }
       const resolution = String(local.resolution);
@@ -259,8 +308,55 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         };
       }
 
-      if (resolution === "apply-incoming" && existing.incoming.snapshot === null) {
-        const deletion = existing.current.snapshot === null
+      if (resolution === "apply-incoming" && existing.incoming.contentKind === "binary") {
+        // Binary bytes never ride in a resolve result: the daemon writes the
+        // head and reports `write: null`. The desktop has to read the head
+        // back to mirror it, which is the branch under test.
+        const source = await super.sendRequest({
+          id: this.internalRequestId--,
+          method: VERSIONED_METHOD.binaryRead,
+          workspace,
+          params: { versionId: existing.sourceVersionId, path: existing.path },
+        });
+        const bytesBase64 = (source.result as JsonObject | null)?.bytesBase64;
+        if (typeof bytesBase64 !== "string") {
+          throw new Error(`No binary bytes for ${existing.path}.`);
+        }
+        await super.sendRequest({
+          id: this.internalRequestId--,
+          method: VERSIONED_METHOD.binaryWrite,
+          workspace,
+          params: {
+            versionId: existing.targetVersionId,
+            path: existing.path,
+            bytesBase64,
+            objectId: String(local.objectId),
+            momentId: String(local.writeMomentId),
+            origin: String(local.metadataOrigin),
+          },
+        });
+        if (this.dropHeadAfter === existing.path) {
+          this.dropHeadAfter = null;
+          await super.sendRequest({
+            id: this.internalRequestId--,
+            method: VERSIONED_METHOD.textDelete,
+            workspace,
+            params: {
+              versionId: existing.targetVersionId,
+              path: existing.path,
+              origin: String(local.metadataOrigin),
+            },
+          });
+        }
+        this.conflicts.set(key, resolved);
+        return {
+          id: request.id,
+          result: { conflict: resolved, write: null, delete: null },
+        };
+      }
+
+      if (resolution === "apply-incoming" && !sidePresent(existing.incoming)) {
+        const deletion = !sidePresent(existing.current)
           ? null
           : await super.sendRequest({
               id: this.internalRequestId--,
@@ -366,6 +462,10 @@ async function writeBytes(root: string, path: string, contents: Uint8Array) {
 
 async function readText(root: string, path: string): Promise<string> {
   return readFile(join(root, path), "utf8");
+}
+
+async function readBytes(root: string, path: string): Promise<Buffer> {
+  return readFile(join(root, path));
 }
 
 function sha256Utf8(text: string): string {
@@ -934,6 +1034,114 @@ describe("mergeVersionIntoMain", () => {
     ]);
     await engine.stop();
     expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
+  });
+
+  it("mirrors a resolved binary side onto disk", async () => {
+    const root = await tempRoot();
+    const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa]);
+    const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xbb, 0xbb]);
+    await writeBytes(root, "logo.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]));
+    const loopback = new ConflictLoopbackEngine();
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    await writeBytes(root, "logo.png", draftBytes);
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+    await engine.switchVersion("main");
+    await writeBytes(root, "logo.png", mainBytes);
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+
+    const draftId = await versionIdByName(engine, "Draft");
+    const merge = await engine.mergeVersionIntoMain(draftId);
+    expect(merge.conflicts).toHaveLength(1);
+    const conflict = merge.conflicts[0]!;
+    expect(conflict.incoming.contentKind).toBe("binary");
+
+    const resolved = await engine.resolveConflict(conflict.id, {
+      kind: "apply-incoming",
+    });
+
+    // The engine reports no text write for bytes, so the folder only follows if
+    // the desktop reads the resolved head back and mirrors it.
+    expect(resolved.conflict.resolution).toBe("applied-incoming");
+    expect(await readBytes(root, "logo.png")).toEqual(draftBytes);
+    await engine.stop();
+  });
+
+  it("refuses a binary resolution whose engine head vanished", async () => {
+    // Going quiet here would leave the folder on the LOSING bytes while the
+    // engine reports the conflict resolved -- divergence the user cannot see.
+    //
+    // MUTATION: skip the missing-head branch and return success -> this
+    // resolves and the folder keeps main's bytes.
+    const root = await tempRoot();
+    const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xee]);
+    const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xff]);
+    await writeBytes(root, "logo.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]));
+    const loopback = new ConflictLoopbackEngine();
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    await writeBytes(root, "logo.png", draftBytes);
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+    await engine.switchVersion("main");
+    await writeBytes(root, "logo.png", mainBytes);
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+
+    const draftId = await versionIdByName(engine, "Draft");
+    const merge = await engine.mergeVersionIntoMain(draftId);
+    const conflict = merge.conflicts[0]!;
+    loopback.dropHeadAfterBinaryResolve("logo.png");
+
+    // The message reaches the conflict panel, so it must read as user copy:
+    // the file, what the folder still holds, and one instruction.
+    await expect(
+      engine.resolveConflict(conflict.id, { kind: "apply-incoming" }),
+    ).rejects.toThrow(
+      "dohc could not keep the copy you chose for logo.png. The folder still has the other copy. Open the merge again and choose once more.",
+    );
+    expect(await readBytes(root, "logo.png")).toEqual(mainBytes);
+    await engine.stop();
+  });
+
+  it("leaves the folder alone when a binary conflict keeps the current side", async () => {
+    const root = await tempRoot();
+    const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xcc]);
+    const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xdd, 0xdd]);
+    await writeBytes(root, "logo.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]));
+    const loopback = new ConflictLoopbackEngine();
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    await writeBytes(root, "logo.png", draftBytes);
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+    await engine.switchVersion("main");
+    await writeBytes(root, "logo.png", mainBytes);
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+
+    const draftId = await versionIdByName(engine, "Draft");
+    const merge = await engine.mergeVersionIntoMain(draftId);
+    const conflict = merge.conflicts[0]!;
+    expect(conflict.incoming.contentKind).toBe("binary");
+    const resolved = await engine.resolveConflict(conflict.id, {
+      kind: "keep-current",
+    });
+
+    // Both choices cannot mirror the same side.
+    expect(resolved.conflict.resolution).toBe("kept-current");
+    expect(resolved.conflict.chosenFrom).toBe("current");
+    expect(resolved.remaining).toHaveLength(0);
+    expect(await readBytes(root, "logo.png")).toEqual(mainBytes);
+    await engine.stop();
   });
 
   it("applies an absent incoming side as a delete", async () => {

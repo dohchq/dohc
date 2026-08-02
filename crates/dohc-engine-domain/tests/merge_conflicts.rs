@@ -192,7 +192,7 @@ fn empty_main_fork_compares_and_merges_its_first_file_with_an_absent_base() {
         comparison
             .incoming
             .as_ref()
-            .map(|snapshot| snapshot.text.as_str()),
+            .map(|side| side.snapshot.text.as_str()),
         Some("the branch's first file")
     );
 
@@ -1414,14 +1414,15 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
     );
 }
 
-/// M2 (BINHEAD): the three-way text merge must NEVER clobber a binary head. A
-/// fork forked before `a.md` existed (base absent) adds TEXT at `a.md`, while
-/// the target grows a BINARY head at `a.md`. The pre-fix merge read the binary
-/// head as absent (its `JOIN blobs` is binary-blind), saw current == base ==
-/// absent, fast-forwarded, and overwrote the binary head with text. It must fail
-/// closed instead — `binary-head-not-text` — and the binary head must survive.
+/// M2 (BINHEAD) + WS-G1: the three-way text merge must NEVER clobber a binary
+/// head. A fork forked before `a.md` existed (base absent) adds TEXT at `a.md`,
+/// while the target grows a BINARY head at `a.md`. The pre-fix merge read the
+/// binary head as absent (its `JOIN blobs` is binary-blind), saw
+/// current == base == absent, fast-forwarded, and overwrote the binary head
+/// with text. It must open a conflict instead, and the binary head must survive
+/// until the user picks a side.
 #[test]
-fn merge_refuses_to_clobber_a_binary_head_at_the_target() {
+fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
     let (_scratch, mut store) = open();
     // Seed an UNRELATED file on main so the fork carries a non-empty durable
     // fork base (else the merge short-circuits with `fork-base-not-found` before
@@ -1472,24 +1473,43 @@ fn merge_refuses_to_clobber_a_binary_head_at_the_target() {
         )
         .expect("fork text at a.md");
 
-    let err = VersionedTextStore::new(&mut store)
+    // The comparison reports the binary head as PRESENT, not as an empty path.
+    let comparison = VersionedTextStore::new(&mut store)
         .compare_text_file_versions(&CompareTextFileVersions {
             workspace_id: WS.to_owned(),
             target_version_id: "main".to_owned(),
             source_version_id: "feat".to_owned(),
             path: "a.md".to_owned(),
         })
-        .expect_err("text compare must reject a binary head");
-    assert_eq!(err.code(), "binary-head-not-text");
+        .expect("compare reads a binary head");
+    let current = comparison.current.as_ref().expect("binary head is present");
+    assert!(current.binary);
+    assert_eq!(current.snapshot.blob_sha256, bin_sha);
+    assert_eq!(current.byte_length, bin_bytes.len() as i64);
+    assert_eq!(comparison.status, ComparisonStatus::Diverged);
 
-    // The merge must fail closed — never clobber the binary head.
-    let err = VersionedTextStore::new(&mut store)
+    // The merge opens a conflict — never a clobbering fast-forward.
+    let result = VersionedTextStore::new(&mut store)
         .merge_text_file_from_version(
             &merge_input("a.md", "merge-a", "merge-a-conflict", "obj-merge-a"),
             &NO_FAULTS,
         )
-        .expect_err("merge must refuse to clobber a binary head");
-    assert_eq!(err.code(), "binary-head-not-text");
+        .expect("merge opens a binary conflict");
+    match result {
+        MergeTextFileResult::Conflict { conflict, .. } => {
+            assert_eq!(conflict.current.content_kind, ConflictContentKind::Binary);
+            assert_eq!(
+                conflict.current.binary_sha256.as_deref(),
+                Some(bin_sha.as_str())
+            );
+            assert_eq!(
+                conflict.current.binary_byte_length,
+                Some(bin_bytes.len() as i64)
+            );
+            assert_eq!(conflict.incoming.content_kind, ConflictContentKind::Text);
+        }
+        other => panic!("expected a binary conflict, got {other:?}"),
+    }
 
     // The binary head SURVIVES on main, unchanged.
     let (kind, blob, bin): (String, Option<String>, Option<String>) = store
@@ -1558,7 +1578,8 @@ fn exact_merge_retry_reconstructs_recorded_outcome_before_binary_head_comparison
     );
 
     // MUTATION: reconstruct by re-running the live comparison before consulting
-    // the recorded comparison -> this exact retry fails binary-head-not-text.
+    // the recorded comparison -> the replayed comparison reports main's LATER
+    // binary head instead of the text head the first merge acknowledged.
     let replay = VersionedTextStore::new(&mut store)
         .merge_text_file_from_version(&input, &NO_FAULTS)
         .expect("exact retry returns the recorded merge");

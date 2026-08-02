@@ -10,13 +10,13 @@
 use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
     ConflictRowUpdate, ConflictStatus, DeleteTextFile, DomainError, TextConflict, TextSnapshot,
-    WriteBinaryFile, WriteText, delete_text_in_tx, enqueue_delete, enqueue_write,
-    file_states_equal, insert_text_conflict_if_absent, live_state_matches_conflict_current,
-    load_text_conflict_in_tx, update_text_conflict_row, validate_delete_input,
-    validate_write_input, write_binary_file_in_tx, write_text_in_tx,
+    WriteBinaryFile, WriteText, conflict_state_preimage, delete_text_in_tx, enqueue_delete,
+    enqueue_write, file_states_equal, insert_text_conflict_if_absent,
+    live_state_matches_conflict_current, load_text_conflict_in_tx, update_text_conflict_row,
+    validate_delete_input, validate_write_input, write_binary_file_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::search_policy::SearchPolicySnapshot;
-use dohc_engine_storage::{EngineStore, FaultInjector, Preimage};
+use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -789,7 +789,7 @@ fn apply_mirrored_binary_write(
         }
         Err(err) => return Err(SyncError::Storage(err)),
     }
-    let preimage = state_preimage(live);
+    let preimage = conflict_state_preimage(live);
     let input = WriteBinaryFile {
         workspace_id: envelope.workspace_id.clone(),
         version_id: conflict.target_version_id.clone(),
@@ -857,7 +857,7 @@ fn apply_mirrored_text_write(
         now_ms: envelope.recorded_at_ms,
         request_id: None,
     };
-    let preimage = state_preimage(live);
+    let preimage = conflict_state_preimage(live);
     let mut written_object_id = None;
     let outcome = apply_within_savepoint(
         tx,
@@ -887,21 +887,6 @@ fn apply_mirrored_text_write(
         )?;
     }
     Ok(outcome)
-}
-
-fn state_preimage(state: &ConflictFileState) -> Preimage {
-    match state.content_kind {
-        ConflictContentKind::Text => state
-            .snapshot
-            .as_ref()
-            .map_or(Preimage::Absent, |snapshot| {
-                Preimage::Present(snapshot.blob_sha256.clone())
-            }),
-        ConflictContentKind::Binary => state
-            .binary_sha256
-            .as_ref()
-            .map_or(Preimage::Absent, |sha| Preimage::Present(sha.clone())),
-    }
 }
 
 /// Apply an incoming delete (an absent incoming side) inside its own savepoint,

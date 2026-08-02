@@ -1028,7 +1028,14 @@ describe("loopback contract enforcement", () => {
     });
   });
 
-  it("refuses text merges when any comparison head is binary", async () => {
+  it("opens a conflict when a binary head leaves the sides disagreeing", async () => {
+    // Only the SOURCE side can bring something to apply. When the bytes sit on
+    // the target alone, the source changed nothing and the merge is a no-op.
+    const expected = {
+      source: "conflict",
+      target: "unchanged",
+      "fork-base": "conflict",
+    } as const;
     for (const binarySide of ["source", "target", "fork-base"] as const) {
       const engine = new VersionedLoopbackEngine();
       if (binarySide === "fork-base") {
@@ -1068,16 +1075,44 @@ describe("loopback contract enforcement", () => {
         });
       }
 
-      await expect(
-        call(engine, 4, VERSIONED_METHOD.versionsMerge, {
-          sourceVersionId: named.id,
-          targetVersionId: "main",
-          path: "merge.bin",
-          origin: "api",
-          requestId: `binary-${binarySide}-merge`,
-        }),
-      ).rejects.toThrow("binary-head-not-text");
+      const merged = await call(engine, 4, VERSIONED_METHOD.versionsMerge, {
+        sourceVersionId: named.id,
+        targetVersionId: "main",
+        path: "merge.bin",
+        origin: "api",
+        requestId: `binary-${binarySide}-merge`,
+      });
+      // WS-G1: bytes have no fast-forward and no line merge, so sides that
+      // differ open a conflict the caller resolves by side.
+      expect((merged as { status: string }).status).toBe(expected[binarySide]);
     }
+  });
+
+  it("leaves a path whose bytes match on both sides uncontested", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedBinaryFile({ workspace: WORKSPACE, path: "same.bin", bytes: [7, 7] });
+    const named = decodeVersionRecord(
+      await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "binary-same",
+        fromVersionId: "main",
+      }),
+    );
+    engine.seedBinaryFile({
+      workspace: WORKSPACE,
+      versionId: named.id,
+      path: "same.bin",
+      bytes: [7, 7],
+    });
+
+    const merged = await call(engine, 2, VERSIONED_METHOD.versionsMerge, {
+      sourceVersionId: named.id,
+      targetVersionId: "main",
+      path: "same.bin",
+      origin: "api",
+      requestId: "binary-same-merge",
+    });
+    expect(merged).toMatchObject({ status: "unchanged", reason: "already-same" });
   });
 
   it("rejects malformed base64 binary writes", async () => {

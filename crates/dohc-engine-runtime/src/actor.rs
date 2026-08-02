@@ -10510,6 +10510,11 @@ fn conflict_resolve_on_store(
                 )
                 .map_err(search_domain)?;
             }
+            // A resolution onto BYTES needs no index work here. The write
+            // reuses the object already aliased to the path, and the search
+            // READER drops any candidate whose live head is binary
+            // (`search::query::live_head_is_binary`), which is the same
+            // freeze-then-filter contract every other binary overwrite uses.
             Ok(())
         })
         .map_err(RuntimeError::from)

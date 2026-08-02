@@ -125,19 +125,33 @@ export function versionConflictForIpc(conflict: {
   incoming: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
   base: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
 }): WorkspaceVersionConflict {
+  // Record-level kind answers ONE question: can these two sides be combined as
+  // text? Only the LIVE sides decide it. A binary BASE is history, and keying
+  // on it would hide two readable texts behind a binary notice; a binary
+  // CURRENT or INCOMING means there is no second text to combine, which is
+  // exactly when `resolve_text_conflict` refuses combined text.
   const contentKind =
-    conflict.current.contentKind === "binary" ||
-    conflict.incoming.contentKind === "binary" ||
-    conflict.base.contentKind === "binary"
+    conflict.current.contentKind === "binary" || conflict.incoming.contentKind === "binary"
       ? "binary"
       : "text";
-  const binarySide = (
-    side: { exists: boolean; sha256?: string; byteLength?: number },
-  ) =>
+  // Each side reports its OWN kind. A mixed conflict carries the readable
+  // text beside its binary sibling, so the user reads the side they can read
+  // instead of choosing blind between two "Binary file" notices.
+  const textSide = (side: {
+    exists: boolean;
+    text?: string;
+    contentKind?: "text" | "binary";
+  }) => (side.exists && side.contentKind !== "binary" ? (side.text ?? "") : null);
+  const binarySide = (side: {
+    exists: boolean;
+    contentKind?: "text" | "binary";
+    sha256?: string;
+    byteLength?: number;
+  }) =>
     // A side without a REAL content hash serializes as null — never
     // sha256: "", which fails the wire schema and would turn a mixed
     // binary/text conflict into an IPC error.
-    side.exists && side.sha256
+    side.exists && side.contentKind === "binary" && side.sha256
       ? {
           sha256: side.sha256,
           byteLength: side.byteLength ?? 0,
@@ -150,11 +164,9 @@ export function versionConflictForIpc(conflict: {
     targetVersionId: conflict.targetVersionId,
     origin: conflict.metadata?.origin === "sync" ? "sync" : "merge",
     contentKind,
-    currentText:
-      contentKind === "text" && conflict.current.exists ? (conflict.current.text ?? "") : null,
-    incomingText:
-      contentKind === "text" && conflict.incoming.exists ? (conflict.incoming.text ?? "") : null,
-    baseText: contentKind === "text" && conflict.base.exists ? (conflict.base.text ?? "") : null,
+    currentText: textSide(conflict.current),
+    incomingText: textSide(conflict.incoming),
+    baseText: textSide(conflict.base),
     ...(contentKind === "binary"
       ? {
           currentBinary: binarySide(conflict.current),

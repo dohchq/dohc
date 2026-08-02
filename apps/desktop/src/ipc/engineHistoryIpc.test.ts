@@ -163,4 +163,21 @@ describe("versionConflictForIpc binary sides", () => {
     expect(conflict.baseBinary).toBeNull();
     expect(WorkspaceVersionConflict.parse(conflict)).toEqual(conflict);
   });
+
+  it("renders both texts when only the base was binary", () => {
+    // WS-G1 opens a conflict for any path a binary head touches, including one
+    // whose bytes are only in the fork base. Both live sides are text and the
+    // user can read and combine them.
+    const conflict = versionConflictForIpc({
+      ...base,
+      path: "notes.md",
+      current: { exists: true, text: "main side" },
+      incoming: { exists: true, text: "feature side" },
+      base: { exists: true, contentKind: "binary", sha256: BINARY_SHA, byteLength: 5 },
+    });
+    expect(conflict.contentKind).toBe("text");
+    expect(conflict.currentText).toBe("main side");
+    expect(conflict.incomingText).toBe("feature side");
+    expect(WorkspaceVersionConflict.parse(conflict)).toEqual(conflict);
+  });
 });

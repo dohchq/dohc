@@ -1,15 +1,16 @@
-//! Adversarial regression probes for shard BINCONFLICT: binary conflict sides
-//! are persistable but NOT resolvable (RESOLVE/APPLY lands in
-//! R10-CONFLICT-COMPLETE), blob hydration is verified content-addressing, and
+//! Adversarial regression probes for binary conflict sides: what a side must
+//! carry to be persisted, what a resolve still refuses to do with bytes (WS-G1
+//! keeps combined TEXT and divergent MOVES closed), that a resolve measures the
+//! LIVE head before acting, blob hydration is verified content-addressing, and
 //! text conflicts are unaffected by the schema change. Each probe asserts a
 //! fail-closed invariant; a failing probe is a regression.
 
 use dohc_engine_domain::conflicts::hydrate_binary_conflict_blob;
 use dohc_engine_domain::{
-    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictStatus,
-    DomainError, EngineStore, NoFaults, ResolveConflictKind, ResolveTextConflict, TextConflict,
-    TextSnapshot, VersionedTextStore, WriteBinaryFile, WriteText, insert_text_conflict_if_absent,
-    load_text_conflict_in_tx, write_binary_file_in_tx,
+    BINARY_COMBINED_TEXT_REFUSAL, ConflictChoice, ConflictContentKind, ConflictFileState,
+    ConflictMetadata, ConflictStatus, DomainError, EngineStore, NoFaults, ResolveConflictKind,
+    ResolveTextConflict, TextConflict, TextSnapshot, VersionedTextStore, WriteBinaryFile,
+    WriteText, insert_text_conflict_if_absent, load_text_conflict_in_tx, write_binary_file_in_tx,
 };
 use dohc_engine_storage::blob::{binary_blob_count, get_binary_blob};
 use dohc_engine_storage::{
@@ -30,11 +31,10 @@ fn assert_invalid_input(err: &DomainError, expected_reason: &str) {
     }
 }
 
-/// The `binary_conflicts_unsupported()` refusal every binary resolve path
-/// must return.
+/// The refusal combined text must return for a conflict that touches bytes.
 #[track_caller]
-fn assert_binary_unsupported(err: &DomainError) {
-    assert_invalid_input(err, "binary conflict sides are not supported yet");
+fn assert_combined_text_refused(err: &DomainError) {
+    assert_invalid_input(err, BINARY_COMBINED_TEXT_REFUSAL);
 }
 
 fn open_store() -> (ScratchDir, EngineStore) {
@@ -168,11 +168,10 @@ fn incoming_text_snapshot(path: &str, text: &str) -> TextSnapshot {
     }
 }
 
-/// A conflict whose INCOMING side is binary must not be resolvable by ANY
-/// path — including KeepCurrent — until R10-CONFLICT-COMPLETE, and the
-/// refusal must be the typed binary-unsupported error.
+/// Keeping the CURRENT side of a conflict whose incoming side is binary writes
+/// nothing at all, so the live text head must survive byte for byte.
 #[test]
-fn keep_current_on_binary_incoming_fails_closed() {
+fn keep_current_on_binary_incoming_keeps_the_live_head() {
     let (_scratch, mut store) = open_store();
     let current = write_file(&mut store, "mixed.dat", "current text");
     let sha = hydrate(&mut store, b"incoming binary payload");
@@ -187,19 +186,29 @@ fn keep_current_on_binary_incoming_fails_closed() {
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect("open mixed conflict");
 
-    let err = VersionedTextStore::new(&mut store)
+    let result = VersionedTextStore::new(&mut store)
         .resolve_text_conflict(
             &resolve_input("kc-binary-incoming", ResolveConflictKind::KeepCurrent),
             &NoFaults,
         )
-        .expect_err("KeepCurrent must not resolve a conflict with a binary incoming side");
-    assert_binary_unsupported(&err);
+        .expect("keeping the current side never touches the incoming bytes");
+    assert_eq!(result.conflict.status, ConflictStatus::Resolved);
+    assert_eq!(result.conflict.chosen_from, ConflictChoice::Current);
+    assert!(result.write.is_none() && result.delete.is_none() && result.binary_write.is_none());
+    assert_eq!(
+        VersionedTextStore::new(&mut store)
+            .read_text(WS, "main", "mixed.dat")
+            .expect("read the live head")
+            .expect("the head is still text")
+            .text,
+        "current text"
+    );
 }
 
-/// ApplyIncoming with a binary BASE side (text incoming). The sync mirror path
-/// defers when ANY side is binary; local resolve holds the same line.
+/// A binary BASE is history, not a head. With text on both live sides, applying
+/// the incoming text clobbers no bytes, so it must go through.
 #[test]
-fn apply_incoming_with_binary_base_fails_closed() {
+fn apply_incoming_over_a_binary_base_writes_the_incoming_text() {
     let (_scratch, mut store) = open_store();
     let current = write_file(&mut store, "based.dat", "current text");
     let sha = hydrate(&mut store, b"binary base payload");
@@ -217,18 +226,75 @@ fn apply_incoming_with_binary_base_fails_closed() {
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect("open binary-base conflict");
 
-    let err = VersionedTextStore::new(&mut store)
+    let result = VersionedTextStore::new(&mut store)
         .resolve_text_conflict(
             &resolve_input("ai-binary-base", ResolveConflictKind::ApplyIncoming),
             &NoFaults,
         )
-        .expect_err("ApplyIncoming must not resolve a conflict with a binary base side");
-    assert_binary_unsupported(&err);
+        .expect("a binary base does not block a text-to-text resolution");
+    assert_eq!(
+        result
+            .write
+            .expect("the incoming text is written")
+            .snapshot
+            .text,
+        "incoming text"
+    );
+    assert!(result.binary_write.is_none());
 }
 
-/// KeepCurrent with binary BASE (both other sides text).
+/// The review panel renders a binary-BASE conflict as text -- two readable
+/// panes and a "combine by hand" action -- because both LIVE sides are text.
+/// Combined text must therefore resolve it. A guard keyed on the base would
+/// put a guaranteed refusal behind a rendered button.
+///
+/// MUTATION: key the combined-text guard on any side rather than the two live
+/// sides -> this refuses.
 #[test]
-fn keep_current_with_binary_base_fails_closed() {
+fn apply_merged_over_a_binary_base_writes_the_combined_text() {
+    let (_scratch, mut store) = open_store();
+    let current = write_file(&mut store, "combined.dat", "current text");
+    let sha = hydrate(&mut store, b"binary base for combine");
+    let c = conflict(
+        "am-binary-base",
+        "combined.dat",
+        ConflictFileState::binary("combined.dat", sha),
+        ConflictFileState::text("combined.dat", Some(current)),
+        ConflictFileState::text(
+            "combined.dat",
+            Some(incoming_text_snapshot("combined.dat", "incoming text")),
+        ),
+    );
+    store
+        .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
+        .expect("open binary-base conflict");
+
+    let result = VersionedTextStore::new(&mut store)
+        .resolve_text_conflict(
+            &resolve_input(
+                "am-binary-base",
+                ResolveConflictKind::ApplyMerged {
+                    text: "combined by hand".to_owned(),
+                },
+            ),
+            &NoFaults,
+        )
+        .expect("a binary base does not block combining two texts");
+    assert_eq!(result.conflict.chosen_from, ConflictChoice::Merged);
+    assert_eq!(
+        result
+            .write
+            .expect("the combined text is written")
+            .snapshot
+            .text,
+        "combined by hand"
+    );
+    assert!(result.binary_write.is_none());
+}
+
+/// KeepCurrent with a binary BASE (both live sides text) writes nothing.
+#[test]
+fn keep_current_with_binary_base_writes_nothing() {
     let (_scratch, mut store) = open_store();
     let current = write_file(&mut store, "kcbase.dat", "current text");
     let sha = hydrate(&mut store, b"binary base for keep-current");
@@ -243,13 +309,14 @@ fn keep_current_with_binary_base_fails_closed() {
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect("open conflict");
 
-    let err = VersionedTextStore::new(&mut store)
+    let result = VersionedTextStore::new(&mut store)
         .resolve_text_conflict(
             &resolve_input("kc-binary-base", ResolveConflictKind::KeepCurrent),
             &NoFaults,
         )
-        .expect_err("KeepCurrent must not resolve a conflict with a binary base side");
-    assert_binary_unsupported(&err);
+        .expect("a binary base does not block keeping the current side");
+    assert_eq!(result.conflict.chosen_from, ConflictChoice::Current);
+    assert!(result.write.is_none() && result.delete.is_none() && result.binary_write.is_none());
 }
 
 /// ApplyMerged must reject any binary side.
@@ -280,13 +347,15 @@ fn apply_merged_with_binary_side_fails_closed() {
             &NoFaults,
         )
         .expect_err("ApplyMerged must reject binary sides");
-    assert_binary_unsupported(&err);
+    assert_combined_text_refused(&err);
 }
 
-/// An all-binary conflict must fail closed on every resolve path, and the
-/// error must say WHY (binary unsupported), not claim staleness.
+/// A conflict whose recorded CURRENT side no longer describes the live head
+/// must fail closed on every resolve path. Nothing was ever written at
+/// `asset.bin`, so this all-binary row is stale on arrival — except for
+/// combined text, which bytes refuse before the head is ever measured.
 #[test]
-fn all_binary_resolve_fails_closed_with_binary_unsupported_error() {
+fn all_binary_resolve_over_an_absent_live_head_fails_closed() {
     let (_scratch, mut store) = open_store();
     let base = hydrate(&mut store, b"bin base");
     let cur = hydrate(&mut store, b"bin current");
@@ -305,25 +374,27 @@ fn all_binary_resolve_fails_closed_with_binary_unsupported_error() {
     for (label, kind) in [
         ("keep-current", ResolveConflictKind::KeepCurrent),
         ("apply-incoming", ResolveConflictKind::ApplyIncoming),
-        (
-            "apply-merged",
-            ResolveConflictKind::ApplyMerged {
-                text: "m".to_owned(),
-            },
-        ),
     ] {
         let err = VersionedTextStore::new(&mut store)
             .resolve_text_conflict(&resolve_input("all-binary", kind), &NoFaults)
-            .expect_err("all-binary resolve must fail closed");
+            .expect_err("a stale all-binary resolve must fail closed");
         assert!(
-            matches!(
-                &err,
-                DomainError::InvalidInput { reason }
-                    if *reason == "binary conflict sides are not supported yet"
-            ),
-            "{label}: expected the binary-unsupported refusal, got {err:?}",
+            matches!(&err, DomainError::ConflictStaleTarget),
+            "{label}: expected a stale-target refusal, got {err:?}",
         );
     }
+    let err = VersionedTextStore::new(&mut store)
+        .resolve_text_conflict(
+            &resolve_input(
+                "all-binary",
+                ResolveConflictKind::ApplyMerged {
+                    text: "m".to_owned(),
+                },
+            ),
+            &NoFaults,
+        )
+        .expect_err("combined text must never resolve bytes");
+    assert_combined_text_refused(&err);
 }
 
 /// A binary side whose sha exists ONLY in the text `blobs` table must still be
@@ -663,9 +734,10 @@ fn text_conflict_round_trip_unchanged() {
     assert!(loaded.incoming.binary_sha256.is_none());
 }
 
-/// Binary CURRENT side blocks every resolve (even text incoming).
+/// A binary CURRENT side recorded against a path that holds no live head is
+/// stale, and combined text is refused for bytes outright.
 #[test]
-fn binary_current_blocks_resolve() {
+fn binary_current_over_an_absent_live_head_blocks_resolve() {
     let (_scratch, mut store) = open_store();
     let sha = hydrate(&mut store, b"binary current bytes");
     let c = conflict(
@@ -684,15 +756,27 @@ fn binary_current_blocks_resolve() {
     for kind in [
         ResolveConflictKind::KeepCurrent,
         ResolveConflictKind::ApplyIncoming,
-        ResolveConflictKind::ApplyMerged {
-            text: "m".to_owned(),
-        },
     ] {
         let err = VersionedTextStore::new(&mut store)
             .resolve_text_conflict(&resolve_input("bin-current", kind), &NoFaults)
-            .expect_err("binary current must block resolve");
-        assert_binary_unsupported(&err);
+            .expect_err("a stale binary current must block resolve");
+        assert!(
+            matches!(&err, DomainError::ConflictStaleTarget),
+            "got {err:?}"
+        );
     }
+    let err = VersionedTextStore::new(&mut store)
+        .resolve_text_conflict(
+            &resolve_input(
+                "bin-current",
+                ResolveConflictKind::ApplyMerged {
+                    text: "m".to_owned(),
+                },
+            ),
+            &NoFaults,
+        )
+        .expect_err("combined text must never resolve bytes");
+    assert_combined_text_refused(&err);
 }
 
 /// Binary side with a text snapshot attached is rejected.

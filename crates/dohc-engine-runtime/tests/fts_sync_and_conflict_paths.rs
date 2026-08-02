@@ -8,7 +8,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace};
 use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
-use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
+use dohc_engine_storage::{EngineStore, StorageError, hex_sha256, put_binary_blob};
 use dohc_engine_sync::{
     ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, SyncError,
     apply_conflict_envelope, apply_envelope_with, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
@@ -869,4 +869,107 @@ async fn named_version_creation_leaves_search_uncertified_for_lazy_first_build()
     );
 
     supervisor.close(&db).expect("close reopened actor");
+}
+
+/// A path resolved onto BYTES must stop answering searches for the text it
+/// used to hold. Clicking such a hit would open a binary file.
+///
+/// The guarantee is the search READER's, not this resolve path's: the index
+/// freezes the stale row and `search::query::live_head_is_binary` drops the
+/// candidate. This pins that the new binary-resolve path leaves a head that
+/// filter recognizes -- a resolution that wrote its bytes under a head the
+/// reader could not see as binary would surface the dead text.
+#[tokio::test]
+async fn resolving_onto_a_binary_side_drops_the_indexed_text() {
+    const PATH: &str = "notes/becomes-binary.md";
+    const OLD: &str = "becomesbinaryoldneedle";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db path");
+
+    // The incoming side references bytes that are already hydrated -- the shape
+    // a merge or a replicated open records. Seed the blob before the actor
+    // takes the database.
+    let bytes = b"\x89PNG\xcc\xcc";
+    let sha256 = hex_sha256(bytes);
+    {
+        let mut store = EngineStore::open(&db, 1).expect("seed store");
+        store
+            .write_with(&NoFaults, |tx| put_binary_blob(tx, bytes).map(|_| ()))
+            .expect("hydrate the incoming bytes");
+    }
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1_000).expect("open actor").actor;
+
+    let current = actor
+        .capture_ingest(
+            capture_text(PATH, OLD, 1_100),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("seed current head")
+        .snapshot;
+    actor
+        .ensure_search_index(
+            scratch.path().to_path_buf(),
+            WS.to_owned(),
+            VERSION.to_owned(),
+            1_200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("certify actor index");
+    assert_eq!(
+        search_actor(&actor, scratch.path(), OLD, 1_250)
+            .await
+            .iter()
+            .map(|result| result.path.as_str())
+            .collect::<Vec<_>>(),
+        [PATH],
+        "the text head must be searchable before the resolution"
+    );
+
+    actor
+        .conflict_open(
+            Box::new(local_conflict(
+                "local-binary-conflict",
+                PATH,
+                current,
+                ConflictFileState::binary(PATH, sha256.clone()),
+                1_300,
+            )),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open the binary conflict");
+
+    actor
+        .conflict_resolve_indexed(
+            local_resolution("local-binary-conflict", "binary", 1_400),
+            scratch.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("apply the incoming binary side");
+
+    // The head really did become those bytes -- an empty result over an
+    // unchanged text head would pass this test for the wrong reason.
+    let head = actor
+        .read_text_inband(WS.to_owned(), VERSION.to_owned(), PATH.to_owned(), 1 << 20)
+        .await
+        .expect("read the resolved head")
+        .expect("the path still has a head");
+    assert_eq!(head.content_kind, "binary");
+    assert_eq!(head.blob_sha256, sha256);
+
+    assert!(
+        search_actor(&actor, scratch.path(), OLD, 1_500)
+            .await
+            .is_empty(),
+        "a head that became bytes must leave no searchable text behind"
+    );
 }

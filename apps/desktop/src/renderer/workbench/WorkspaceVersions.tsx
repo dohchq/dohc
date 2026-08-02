@@ -960,7 +960,9 @@ export function VersionMergeDialog(props: {
 function ConflictSidePane(props: {
   heading: string;
   text: string | null;
-  missingNote: string;
+  /// What the pane says when it has no text to show: this side is a binary
+  /// copy, or this side has no file at all.
+  note: string;
 }) {
   return (
     <div className="flex min-w-0 flex-col overflow-hidden rounded-md border border-line">
@@ -969,7 +971,7 @@ function ConflictSidePane(props: {
       </div>
       {props.text === null ? (
         <p className="m-0 px-2 py-2 text-[11px] italic leading-4 text-subtle">
-          {props.missingNote}
+          {props.note}
         </p>
       ) : (
         <pre className="m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words px-2 py-1.5 font-mono text-[11px] leading-4 text-muted">
@@ -978,6 +980,17 @@ function ConflictSidePane(props: {
       )}
     </div>
   );
+}
+
+// What one side says when it carries no text: its size when it is a binary
+// copy, or the side's own "no file here" line. A side is never described by
+// its sibling's kind — a mixed conflict shows the readable text on one side
+// and the size on the other.
+function sideNote(
+  binary: { byteLength: number } | null | undefined,
+  missingNote: string,
+): string {
+  return binary ? `Binary copy, ${binary.byteLength} bytes` : missingNote;
 }
 
 // Side labels depend on where the conflict came from: a version merge names
@@ -1084,21 +1097,16 @@ function ConflictResolver(props: {
           data-testid="version-conflict-binary"
           className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
         >
-          Binary file. {labels.currentHeading}:{" "}
-          {conflict.currentBinary ? `${conflict.currentBinary.byteLength} bytes` : "no copy"};{" "}
-          {labels.incomingHeading.toLowerCase()}:{" "}
-          {conflict.incomingBinary ? `${conflict.incomingBinary.byteLength} bytes` : "no copy"}.
+          Binary file. Choose which copy to keep.
         </div>
       ) : null}
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-1.5">
-          {isBinary ? null : (
-            <ConflictSidePane
-              heading={labels.currentHeading}
-              text={conflict.currentText}
-              missingNote={labels.currentMissing}
-            />
-          )}
+          <ConflictSidePane
+            heading={labels.currentHeading}
+            text={conflict.currentText}
+            note={sideNote(conflict.currentBinary, labels.currentMissing)}
+          />
           <button
             type="button"
             data-testid="version-conflict-keep-current"
@@ -1110,13 +1118,11 @@ function ConflictResolver(props: {
           </button>
         </div>
         <div className="flex min-w-0 flex-col gap-1.5">
-          {isBinary ? null : (
-            <ConflictSidePane
-              heading={labels.incomingHeading}
-              text={conflict.incomingText}
-              missingNote={labels.incomingMissing}
-            />
-          )}
+          <ConflictSidePane
+            heading={labels.incomingHeading}
+            text={conflict.incomingText}
+            note={sideNote(conflict.incomingBinary, labels.incomingMissing)}
+          />
           <button
             type="button"
             data-testid="version-conflict-keep-incoming"

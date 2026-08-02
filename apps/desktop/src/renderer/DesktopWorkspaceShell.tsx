@@ -45,6 +45,7 @@ import { buildChatCollaboration } from "./collab/chatCollaboration";
 import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
+import { momentDiffSides } from "./workbench/momentDiffSides";
 import { CloudLogin } from "./CloudLogin";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { CommandPalette, type Command } from "./CommandPalette";
@@ -596,20 +597,23 @@ function EngineMomentDiffPage({
   // body shows "Contents are protected" instead. Restore still works (it
   // rides the encrypted path end to end).
   const isProtected = moment.protected === true;
-  const isBinary = moment.contentKind === "binary";
-  const before = isProtected || isBinary ? undefined : (moment.beforeText ?? undefined);
-  const after = isProtected || isBinary ? undefined : (moment.afterText ?? undefined);
-  const counts = isProtected || isBinary ? null : changedLineCounts(before, after);
-  // A null beforeText with beforeBinary set means the file EXISTED as binary
-  // before this moment (a binary->text transition), not that this change
-  // created it — restore brings the bytes back instead of removing the file.
-  const createdFile =
-    !isProtected && !isBinary && moment.beforeText === null && moment.beforeBinary === undefined;
+  // Each side presents by its OWN kind (see momentDiffSides).
+  const {
+    before,
+    after,
+    beforeIsBinary,
+    afterIsBinary,
+    bytesOnly,
+    createdFile,
+    byteLength: binaryByteLength,
+  } = momentDiffSides(moment);
+  const counts = isProtected || bytesOnly ? null : changedLineCounts(before, after);
+  // Restore returns the BEFORE state, so its wording follows that side.
   const restoreDetail = createdFile
     ? "This change created the file, so restoring removes it from the folder. It stays in history and you can undo."
     : isProtected
       ? "The protected file will be returned to how it was before this change. Its contents stay encrypted and are never shown."
-      : isBinary
+      : beforeIsBinary
         ? "The binary file will be returned byte-for-byte to how it was before this change."
       : "The file will be returned to how it was before this change.";
   // Restoring a create moment REMOVES the file ("deleted"): no open-file
@@ -761,7 +765,7 @@ function EngineMomentDiffPage({
           <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
             {isProtected ? (
               <Lock size={13} aria-hidden className="shrink-0 text-subtle" />
-            ) : isBinary ? (
+            ) : afterIsBinary ? (
               <FileArchive size={13} aria-hidden className="shrink-0 text-subtle" />
             ) : (
               <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
@@ -787,7 +791,7 @@ function EngineMomentDiffPage({
                 in history, search, or comparisons.
               </span>
             </div>
-          ) : isBinary ? (
+          ) : bytesOnly ? (
             <div
               data-testid="engine-diff-binary"
               className="flex flex-col items-center gap-1 px-4 py-10 text-center"
@@ -795,12 +799,24 @@ function EngineMomentDiffPage({
               <FileArchive size={16} aria-hidden className="text-subtle" />
               <span className="text-sm text-muted">Binary contents</span>
               <span className="text-xs text-subtle">
-                {moment.byteLength ?? 0} bytes are versioned byte-for-byte and
-                are not shown in text diffs.
+                {binaryByteLength} bytes are versioned byte-for-byte and are
+                not shown in text diffs.
               </span>
             </div>
           ) : (
-            <UnifiedDiffLines lines={diffLines} testId="engine-diff-lines" />
+            <>
+              {beforeIsBinary || afterIsBinary ? (
+                <p
+                  data-testid="engine-diff-binary-side"
+                  className="m-0 border-b border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-subtle"
+                >
+                  {afterIsBinary
+                    ? `This file became a binary file. Its ${moment.afterBinary?.byteLength ?? 0} bytes are not shown in text diffs.`
+                    : `This file was a binary file before this change. Its ${moment.beforeBinary?.byteLength ?? 0} bytes are not shown in text diffs.`}
+                </p>
+              ) : null}
+              <UnifiedDiffLines lines={diffLines} testId="engine-diff-lines" />
+            </>
           )}
         </section>
       </div>

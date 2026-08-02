@@ -2903,6 +2903,36 @@ export function createWorkspaceEngineCapture(
               [{ kind: "delete", path: result.delete.before.path }],
               policy,
             );
+          } else if (
+            result.conflict.chosenFrom === "incoming" &&
+            result.conflict.incoming.contentKind === "binary"
+          ) {
+            // Binary bytes never ride in a resolve result, so the engine
+            // reports no write. Read back the head the resolution wrote and
+            // mirror it, or the folder keeps the losing side's bytes.
+            const head = await engine.readTextFile({
+              workspaceId,
+              versionId: result.conflict.targetVersionId,
+              path: result.conflict.path,
+            });
+            if (!head) {
+              // Going quiet here would leave the folder on the LOSING bytes
+              // while the engine reports the conflict resolved. This message
+              // reaches the conflict panel, so it stays in the user's nouns;
+              // the precise state goes on the cause, for the log.
+              throw new Error(
+                `dohc could not keep the copy you chose for ${result.conflict.path}. The folder still has the other copy. Open the merge again and choose once more.`,
+                {
+                  cause: new Error(
+                    `resolved conflict ${result.conflict.id} has no head at ${result.conflict.path} in ${result.conflict.targetVersionId}`,
+                  ),
+                },
+              );
+            }
+            await materialize(
+              [await materializeWriteForSnapshot(engine, head)],
+              policy,
+            );
           }
         }
         const remaining = await engine.listTextConflicts({

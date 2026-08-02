@@ -35,15 +35,32 @@ pub enum ComparisonStatus {
     Diverged,
 }
 
+/// One present side of a version comparison.
+///
+/// A binary head keeps the store's text-view convention (`snapshot_text_view`):
+/// empty text, with `blob_sha256` holding its BINARY content address. The byte
+/// length that view has no place for rides alongside, because the conflict a
+/// binary side opens must report it.
+///
+/// Every field is required. A merge ledger record written before sides carried
+/// a content kind does not decode as this shape, and must not: a defaulted
+/// `binary` would let an old record replay as text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComparisonSide {
+    pub snapshot: TextSnapshot,
+    pub binary: bool,
+    pub byte_length: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionedTextComparison {
     pub workspace_id: String,
     pub path: String,
     pub target_version_id: String,
     pub source_version_id: String,
-    pub base: Option<TextSnapshot>,
-    pub current: Option<TextSnapshot>,
-    pub incoming: Option<TextSnapshot>,
+    pub base: Option<ComparisonSide>,
+    pub current: Option<ComparisonSide>,
+    pub incoming: Option<ComparisonSide>,
     pub status: ComparisonStatus,
 }
 
@@ -220,16 +237,34 @@ pub fn file_states_equal(left: &Option<TextSnapshot>, right: &Option<TextSnapsho
     }
 }
 
+/// Content equality for two comparison sides. A binary side compares by its
+/// content address, never by the empty text its view carries — two different
+/// binary heads both read as `""` and would otherwise compare EQUAL.
+pub fn comparison_sides_equal(
+    left: &Option<ComparisonSide>,
+    right: &Option<ComparisonSide>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) if left.binary != right.binary => false,
+        (Some(left), Some(right)) if left.binary => {
+            left.snapshot.blob_sha256 == right.snapshot.blob_sha256
+        }
+        (Some(left), Some(right)) => left.snapshot.text == right.snapshot.text,
+        _ => false,
+    }
+}
+
 pub fn comparison_status(
-    base: &Option<TextSnapshot>,
-    current: &Option<TextSnapshot>,
-    incoming: &Option<TextSnapshot>,
+    base: &Option<ComparisonSide>,
+    current: &Option<ComparisonSide>,
+    incoming: &Option<ComparisonSide>,
 ) -> ComparisonStatus {
-    if file_states_equal(current, incoming) {
+    if comparison_sides_equal(current, incoming) {
         ComparisonStatus::Same
-    } else if file_states_equal(current, base) {
+    } else if comparison_sides_equal(current, base) {
         ComparisonStatus::IncomingChanged
-    } else if file_states_equal(incoming, base) {
+    } else if comparison_sides_equal(incoming, base) {
         ComparisonStatus::CurrentChanged
     } else {
         ComparisonStatus::Diverged
@@ -304,7 +339,7 @@ impl VersionedTextStore<'_> {
                 path: input.path.clone(),
             };
             let comparison = compare_text_file_versions_in_db(tx, &compare_input)?;
-            if file_states_equal(&comparison.current, &comparison.incoming) {
+            if comparison_sides_equal(&comparison.current, &comparison.incoming) {
                 let result = MergeTextFileResult::Unchanged {
                     reason: MergeUnchangedReason::AlreadySame,
                     comparison,
@@ -312,7 +347,7 @@ impl VersionedTextStore<'_> {
                 };
                 return finish_merge(tx, input, &payload_hash, result, &after);
             }
-            if file_states_equal(&comparison.incoming, &comparison.base) {
+            if comparison_sides_equal(&comparison.incoming, &comparison.base) {
                 let result = MergeTextFileResult::Unchanged {
                     reason: MergeUnchangedReason::SourceUnchanged,
                     comparison,
@@ -320,17 +355,28 @@ impl VersionedTextStore<'_> {
                 };
                 return finish_merge(tx, input, &payload_hash, result, &after);
             }
+            // WS-G1. Equal bytes are already uncontested above. What remains is
+            // decided by which side each branch READS.
+            //
+            // The fast-forward writes the incoming side through the TEXT write
+            // and delete seams, so it needs both LIVE sides to be text. The base
+            // does not gate it: a binary base can never compare equal to a text
+            // current anyway, because the kinds differ.
+            let live_sides_binary = [&comparison.current, &comparison.incoming]
+                .into_iter()
+                .flatten()
+                .any(|side| side.binary);
 
-            if file_states_equal(&comparison.current, &comparison.base) {
+            if !live_sides_binary && comparison_sides_equal(&comparison.current, &comparison.base) {
                 if let Some(incoming) = &comparison.incoming {
-                    let write_input = merge_write_input(input, &incoming.text);
+                    let write_input = merge_write_input(input, &incoming.snapshot.text);
                     validate_write_input(&write_input)?;
                     let write = write_text_in_tx(tx, &write_input)?;
                     let preimage = comparison
                         .current
                         .as_ref()
-                        .map_or(Preimage::Absent, |snapshot| {
-                            Preimage::Present(snapshot.blob_sha256.clone())
+                        .map_or(Preimage::Absent, |side| {
+                            Preimage::Present(side.snapshot.blob_sha256.clone())
                         });
                     enqueue_write(tx, &write, preimage, "merge")?;
                     let result = MergeTextFileResult::Write { comparison, write };
@@ -344,10 +390,21 @@ impl VersionedTextStore<'_> {
                 return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
+            // The line merge is the one branch that READS the base, so all three
+            // sides must be text. A binary head's text view is EMPTY, and an
+            // ancestor that reads as "" would let an emptied text head compare
+            // equal to it and fast-forward the incoming text over content it
+            // never shared a line with.
             if let (Some(base), Some(current), Some(incoming)) =
                 (&comparison.base, &comparison.current, &comparison.incoming)
-                && let MarkdownMergeResult::Merged(text) =
-                    merge_markdown(&base.text, &current.text, &incoming.text)
+                && !base.binary
+                && !current.binary
+                && !incoming.binary
+                && let MarkdownMergeResult::Merged(text) = merge_markdown(
+                    &base.snapshot.text,
+                    &current.snapshot.text,
+                    &incoming.snapshot.text,
+                )
             {
                 let write_input = merge_write_input(input, &text);
                 validate_write_input(&write_input)?;
@@ -355,7 +412,7 @@ impl VersionedTextStore<'_> {
                 enqueue_write(
                     tx,
                     &write,
-                    Preimage::Present(current.blob_sha256.clone()),
+                    Preimage::Present(current.snapshot.blob_sha256.clone()),
                     "merge",
                 )?;
                 let result = MergeTextFileResult::Write { comparison, write };
@@ -760,37 +817,6 @@ fn compare_text_file_versions_in_db(
     {
         return Err(DomainError::ForkBaseNotFound);
     }
-    // BINHEAD: the three-way text comparison below reads snapshots via an inner
-    // `JOIN blobs`, so a binary head (`blob_sha256 = NULL`) reads as ABSENT. If
-    // any of the three sides holds a binary head at this path, a text merge
-    // could see current == base == absent, fast-forward, and CLOBBER the binary
-    // head with `write_text_in_tx`. Fail closed instead: the binary head
-    // survives untouched and the caller sees `binary-head-not-text` rather than
-    // a silent overwrite. A binary-aware three-way merge is the tracked
-    // TextSnapshot→content-aware refactor follow-up; this guard only closes the
-    // clobber hole.
-    if binary_head_present(
-        conn,
-        "snapshots",
-        &input.workspace_id,
-        &input.target_version_id,
-        &input.path,
-    )? || binary_head_present(
-        conn,
-        "snapshots",
-        &input.workspace_id,
-        &input.source_version_id,
-        &input.path,
-    )? || binary_head_present(
-        conn,
-        "fork_base_snapshots",
-        &input.workspace_id,
-        &input.source_version_id,
-        &input.path,
-    )? {
-        return Err(DomainError::BinaryHeadNotText);
-    }
-
     let base = select_snapshot(
         conn,
         "fork_base_snapshots",
@@ -825,60 +851,124 @@ fn compare_text_file_versions_in_db(
     })
 }
 
-/// True when `path` holds a live BINARY head in `table` for `version_id`. The
-/// text-merge comparison ([`select_snapshot`]) is blind to binary heads because
-/// its inner `JOIN blobs` drops any row with `blob_sha256 = NULL`, so a merge
-/// gate must consult this before deciding — otherwise it treats a binary head as
-/// an unoccupied path and clobbers it.
-fn binary_head_present(
-    conn: &Connection,
-    table: &str,
-    workspace_id: &str,
-    version_id: &str,
-    path: &str,
-) -> Result<bool, DomainError> {
-    let sql = format!(
-        "SELECT 1 FROM {table} \
-         WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 \
-         AND content_kind = 'binary'"
-    );
-    conn.query_row(&sql, params![workspace_id, version_id, path], |_| Ok(()))
-        .optional()
-        .map(|found| found.is_some())
-        .map_err(DomainError::sql_corrupt)
-}
-
+/// Read the head at `path` in `table` as a comparison side. Both joins are
+/// LEFT joins: an inner `JOIN blobs` drops a binary head (`blob_sha256 = NULL`)
+/// and would report an occupied path as ABSENT, which is what let a text merge
+/// fast-forward over binary bytes.
 fn select_snapshot(
     conn: &Connection,
     table: &str,
     workspace_id: &str,
     version_id: &str,
     path: &str,
-) -> Result<Option<TextSnapshot>, DomainError> {
+) -> Result<Option<ComparisonSide>, DomainError> {
+    type SideRow = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<i64>,
+    );
     let sql = format!(
         "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
          s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
-         s.metadata_correlation_id FROM {table} s \
-         JOIN blobs b ON b.sha256 = s.blob_sha256 \
+         s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
+         s.binary_sha256, bb.byte_length FROM {table} s \
+         LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+         LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
          WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3"
     );
-    conn.query_row(&sql, params![workspace_id, version_id, path], |row| {
-        Ok(TextSnapshot {
+    let row: Option<SideRow> = conn
+        .query_row(&sql, params![workspace_id, version_id, path], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+            ))
+        })
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((
+        object_id,
+        snapshot_path,
+        text,
+        blob_sha256,
+        updated_at_ms,
+        latest_moment_id,
+        metadata_origin,
+        metadata_summary,
+        metadata_correlation_id,
+        content_kind,
+        binary_sha256,
+        binary_byte_length,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let (binary, text, content_sha256, byte_length) = match content_kind.as_str() {
+        "text" => {
+            let text = text.ok_or(DomainError::StateCorrupt {
+                reason: "text snapshot is missing its blob",
+            })?;
+            let sha256 = blob_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "text snapshot is missing its hash",
+            })?;
+            let byte_length = text.len() as i64;
+            (false, text, sha256, byte_length)
+        }
+        "binary" => {
+            let sha256 = binary_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "binary snapshot is missing its blob",
+            })?;
+            let byte_length = binary_byte_length.ok_or(DomainError::StateCorrupt {
+                reason: "binary snapshot is missing its byte length",
+            })?;
+            if byte_length < 0 {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary snapshot has an invalid byte length",
+                });
+            }
+            (true, String::new(), sha256, byte_length)
+        }
+        _ => {
+            return Err(DomainError::StateCorrupt {
+                reason: "snapshot has an unknown content kind",
+            });
+        }
+    };
+    Ok(Some(ComparisonSide {
+        snapshot: TextSnapshot {
             workspace_id: workspace_id.to_owned(),
             version_id: version_id.to_owned(),
-            object_id: row.get(0)?,
-            path: row.get(1)?,
-            text: row.get(2)?,
-            blob_sha256: row.get(3)?,
-            updated_at_ms: row.get(4)?,
-            latest_moment_id: row.get(5)?,
-            metadata_origin: row.get(6)?,
-            metadata_summary: row.get(7)?,
-            metadata_correlation_id: row.get(8)?,
-        })
-    })
-    .optional()
-    .map_err(DomainError::sql_corrupt)
+            object_id,
+            path: snapshot_path,
+            text,
+            blob_sha256: content_sha256,
+            updated_at_ms,
+            latest_moment_id,
+            metadata_origin,
+            metadata_summary,
+            metadata_correlation_id,
+        },
+        binary,
+        byte_length,
+    }))
 }
 
 fn merge_write_input(input: &MergeTextFileFromVersion, text: &str) -> WriteText {
@@ -929,9 +1019,26 @@ fn conflict_from_comparison(
         chosen_from: ConflictChoice::Current,
         resolution: None,
         metadata: ConflictMetadata::origin(input.metadata_origin.clone()),
-        base: ConflictFileState::text(comparison.path.clone(), comparison.base.clone()),
-        current: ConflictFileState::text(comparison.path.clone(), comparison.current.clone()),
-        incoming: ConflictFileState::text(comparison.path.clone(), comparison.incoming.clone()),
+        base: conflict_side(&comparison.path, &comparison.base),
+        current: conflict_side(&comparison.path, &comparison.current),
+        incoming: conflict_side(&comparison.path, &comparison.incoming),
+    }
+}
+
+/// A comparison side as a conflict side. A binary side carries its full head
+/// identity (object + latest moment), so the exact-head gate on resolve is as
+/// strict for bytes as it is for text.
+fn conflict_side(path: &str, side: &Option<ComparisonSide>) -> ConflictFileState {
+    match side {
+        Some(side) if side.binary => ConflictFileState::binary_head(
+            path.to_owned(),
+            side.snapshot.blob_sha256.clone(),
+            side.byte_length,
+            side.snapshot.object_id.clone(),
+            side.snapshot.latest_moment_id.clone(),
+        ),
+        Some(side) => ConflictFileState::text(path.to_owned(), Some(side.snapshot.clone())),
+        None => ConflictFileState::text(path.to_owned(), None),
     }
 }
 
