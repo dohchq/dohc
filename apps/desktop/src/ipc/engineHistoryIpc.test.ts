@@ -5,11 +5,17 @@ import {
   type EngineMomentAuthorNamer,
 } from "./engineHistoryIpc";
 import {
+  CompareWorkspaceVersionsResult,
   EngineMomentDetailRecord,
-  MOMENT_TEXT_MAX_CHARS,
+  ENGINE_TEXT_MAX_CHARS,
+  ListWorkspaceVersionConflictsResult,
   WorkspaceVersionConflict,
 } from "./bridgeContract";
-import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
+import { compareVersionFiles } from "@dohc/workspace-core/versionCompare";
+import type {
+  TextFileSnapshot,
+  VersionedTextMoment,
+} from "@dohc/workspace-contracts/engine";
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
 
 const namer: EngineMomentAuthorNamer = (author) =>
@@ -146,12 +152,12 @@ describe("moment bodies the engine accepted cross the bridge", () => {
   });
 
   it("carries a body at the engine's own text contract", () => {
-    // Stated absolutely, not as MOMENT_TEXT_MAX_CHARS: the bound the bridge
+    // Stated absolutely, not as ENGINE_TEXT_MAX_CHARS: the bound the bridge
     // owes is the engine's MAX_TEXT_BYTES
     // (`crates/dohc-engine-domain/src/store.rs`), so lowering the bridge
     // constant must fail this, never move it.
     const engineMaxTextBytes = 10 * 1024 * 1024;
-    expect(MOMENT_TEXT_MAX_CHARS).toBe(engineMaxTextBytes);
+    expect(ENGINE_TEXT_MAX_CHARS).toBe(engineMaxTextBytes);
     const body = "x".repeat(engineMaxTextBytes);
     const record = engineMomentDetailForIpc(
       detailWith({ before: null, after: textSide(body) }),
@@ -164,14 +170,14 @@ describe("moment bodies the engine accepted cross the bridge", () => {
     // Over the engine's own contract, so no stored body reaches here — but a
     // reader who hits it gets the limit, not a bare Zod string complaint.
     const record = engineMomentDetailForIpc(
-      detailWith({ before: null, after: textSide("x".repeat(MOMENT_TEXT_MAX_CHARS + 1)) }),
+      detailWith({ before: null, after: textSide("x".repeat(ENGINE_TEXT_MAX_CHARS + 1)) }),
       namer,
     );
     const parsed = EngineMomentDetailRecord.safeParse(record);
     expect(parsed.success).toBe(false);
     const message = parsed.success ? "" : parsed.error.issues[0]!.message;
-    expect(message).toContain(String(MOMENT_TEXT_MAX_CHARS + 1));
-    expect(message).toContain(String(MOMENT_TEXT_MAX_CHARS));
+    expect(message).toContain(String(ENGINE_TEXT_MAX_CHARS + 1));
+    expect(message).toContain(String(ENGINE_TEXT_MAX_CHARS));
     expect(message).toContain("characters");
     expect(message).toContain("moment body");
   });
@@ -231,5 +237,108 @@ describe("versionConflictForIpc binary sides", () => {
     expect(conflict.currentText).toBe("main side");
     expect(conflict.incomingText).toBe("feature side");
     expect(WorkspaceVersionConflict.parse(conflict)).toEqual(conflict);
+  });
+});
+
+// Same LAST-gate pairing as the moment bodies above: main runs
+// `ListWorkspaceVersionConflictsResult.parse` on exactly what
+// `versionConflictForIpc` produced (main.ts listWorkspaceVersionConflicts
+// handler), and conflict sides are the engine's stored bodies passed verbatim.
+describe("version texts the engine accepted cross the bridge", () => {
+  // compareVersionFiles reads snapshot listings and nothing else, so one path
+  // per version is the whole input the compare rows come from.
+  function storeWithTextFile(textByVersionId: Record<string, string>) {
+    return {
+      listTextFiles: async ({
+        versionId,
+      }: {
+        versionId: string;
+      }): Promise<TextFileSnapshot[]> => [
+        {
+          objectId: "object_1",
+          versionId,
+          path: "notes.md",
+          text: textByVersionId[versionId] ?? "",
+          updatedAtMs: 100,
+          latestMomentId: `moment_${versionId}`,
+          metadata: { origin: "local-file" },
+        },
+      ],
+    };
+  }
+
+  const base = {
+    id: "conflict_big",
+    path: "notes.md",
+    sourceVersionId: "version_feature",
+    targetVersionId: "main",
+  };
+
+  it("lists a conflict whose side is larger than the old 2 MB bound", () => {
+    // The unrecoverable case from the issue: resolving needs a conflictId that
+    // only this listing supplies, so a rejected listing left the user stuck.
+    const side = "x".repeat(3 * 1024 * 1024);
+    const conflict = versionConflictForIpc({
+      ...base,
+      current: { exists: true, text: side },
+      incoming: { exists: true, text: "feature side" },
+      base: { exists: false },
+    });
+    const listed = ListWorkspaceVersionConflictsResult.parse({ conflicts: [conflict] });
+    expect(listed.conflicts[0]!.currentText).toBe(side);
+    expect(listed.conflicts[0]!.conflictId).toBe("conflict_big");
+  });
+
+  it("compares a file whose sides are larger than the old 2 MB bound", async () => {
+    // main.ts compareWorkspaceVersions parses exactly what compareVersionFiles
+    // returned, so this is the compare channel's real pairing.
+    const currentText = "x".repeat(3 * 1024 * 1024);
+    const incomingText = `${currentText}tail`;
+    const files = await compareVersionFiles(
+      storeWithTextFile({ main: currentText, version_feature: incomingText }),
+      {
+        workspaceId: "ws-engine",
+        sourceVersionId: "version_feature",
+        targetVersionId: "main",
+      },
+    );
+    const compared = CompareWorkspaceVersionsResult.parse({ files });
+    expect(compared.files[0]!.currentText).toBe(currentText);
+    expect(compared.files[0]!.incomingText).toBe(incomingText);
+  });
+
+  it("carries a conflict side at the engine's own text contract", () => {
+    // Stated absolutely, not as ENGINE_TEXT_MAX_CHARS: the bound the bridge
+    // owes is the engine's MAX_TEXT_BYTES
+    // (`crates/dohc-engine-domain/src/store.rs`), so lowering the bridge
+    // constant must fail this, never move it.
+    const engineMaxTextBytes = 10 * 1024 * 1024;
+    expect(ENGINE_TEXT_MAX_CHARS).toBe(engineMaxTextBytes);
+    const side = "x".repeat(engineMaxTextBytes);
+    const conflict = versionConflictForIpc({
+      ...base,
+      current: { exists: true, text: side },
+      incoming: { exists: false },
+      base: { exists: false },
+    });
+    expect(WorkspaceVersionConflict.parse(conflict).currentText).toBe(side);
+  });
+
+  it("names the constraint, limit, unit, and observed size when a side is over", () => {
+    // Over the engine's own contract, so no stored side reaches here — but a
+    // reader who hits it gets the limit, not a bare Zod string complaint.
+    const conflict = versionConflictForIpc({
+      ...base,
+      current: { exists: true, text: "x".repeat(ENGINE_TEXT_MAX_CHARS + 1) },
+      incoming: { exists: false },
+      base: { exists: false },
+    });
+    const parsed = WorkspaceVersionConflict.safeParse(conflict);
+    expect(parsed.success).toBe(false);
+    const message = parsed.success ? "" : parsed.error.issues[0]!.message;
+    expect(message).toContain(String(ENGINE_TEXT_MAX_CHARS + 1));
+    expect(message).toContain(String(ENGINE_TEXT_MAX_CHARS));
+    expect(message).toContain("characters");
+    expect(message).toContain("version text");
   });
 });

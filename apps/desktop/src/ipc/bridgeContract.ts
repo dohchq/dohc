@@ -68,6 +68,29 @@ const WORKSPACE_ID = z
   .max(200)
   .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
+
+// Stored-body fields are the exception to the caps above: they carry text the
+// ENGINE already accepted, not text a renderer supplied. The engine accepts a
+// text write up to MAX_TEXT_BYTES — 10 MiB of UTF-8
+// (`crates/dohc-engine-domain/src/store.rs`) — and it never gates a settle on
+// the smaller in-band response cap (`crates/dohc-engine-runtime/src/actor.rs`
+// settle), so an over-cap document lands on disk like any other. The bridge
+// carries the same contract, so a body the engine stored can always reach the
+// renderer. Zod counts UTF-16 code units and UTF-8 never spends less than one
+// byte per code unit, so this character bound admits every body the engine
+// could hold.
+export const ENGINE_TEXT_MAX_CHARS = 10 * 1024 * 1024;
+function engineStoredText(label: string) {
+  return z.string().refine(
+    (text) => text.length <= ENGINE_TEXT_MAX_CHARS,
+    (text) => ({
+      message:
+        `${label} is ${text.length} characters; the IPC bridge carries at most ` +
+        `${ENGINE_TEXT_MAX_CHARS} characters (the engine's 10 MiB UTF-8 text cap)`,
+    }),
+  );
+}
+
 const SITE_ROOT_STRING = PATH_STRING.superRefine((value, ctx) => {
   if (
     value.includes("\0") ||
@@ -669,21 +692,7 @@ export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 // workspaces reject.
 const MOMENT_ID = z.string().min(1).max(200);
 
-// A moment body is whatever the engine stored, and the engine accepts a text
-// write up to MAX_TEXT_BYTES — 10 MiB of UTF-8
-// (`crates/dohc-engine-domain/src/store.rs`). The bridge carries the same
-// contract, so a body the engine accepted can always reach the renderer.
-// Zod counts UTF-16 code units and UTF-8 never spends less than one byte per
-// code unit, so this character bound admits every body the engine could hold.
-export const MOMENT_TEXT_MAX_CHARS = 10 * 1024 * 1024;
-const MOMENT_TEXT = z.string().refine(
-  (text) => text.length <= MOMENT_TEXT_MAX_CHARS,
-  (text) => ({
-    message:
-      `moment body is ${text.length} characters; the IPC bridge carries at most ` +
-      `${MOMENT_TEXT_MAX_CHARS} characters (the engine's 10 MiB UTF-8 text cap)`,
-  }),
-);
+const MOMENT_TEXT = engineStoredText("moment body");
 
 export const EngineMomentRecord = z.object({
   id: MOMENT_ID,
@@ -1568,9 +1577,11 @@ export type PresenceResult = z.infer<typeof PresenceResult>;
 // attached (flag on) — for unflagged workspaces they reject.
 const VERSION_ID = z.string().min(1).max(200);
 export const WORKSPACE_VERSION_NAME_MAX = 80;
-// Versions cover engine-owned text files (<=128KiB each during alpha); the
-// bound is defensive headroom, not a promise of 2MB texts.
-const VERSION_TEXT = z.string().max(2_000_000);
+// Conflict and compare sides are the same hydrated stored bodies the timeline
+// carries, passed through verbatim (`engineHistoryIpc.ts` versionConflictForIpc,
+// `versionCompare.ts`), so they carry the engine's own text contract. A
+// combined resolution is written back through the same contract.
+const VERSION_TEXT = engineStoredText("version text");
 
 export const WorkspaceVersionRecord = z.object({
   id: VERSION_ID,
