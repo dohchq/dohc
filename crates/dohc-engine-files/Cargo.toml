@@ -46,10 +46,12 @@ file-id = "0.2"
 # resolution. Both the runtime's local index path and sync's replicated index
 # path consume this one implementation.
 #
-# `preserve_order` keeps a parsed table in DOCUMENT order. The TypeScript oracle
-# reports one error per unknown key in the order the keys appear in the file, so
-# without it a policy with two unknown keys reported them alphabetically here and
-# the two ports disagreed about which error a user's agent reads first.
+# `preserve_order` keeps a parsed table in DOCUMENT order, which the unknown-key
+# error order depends on: the TypeScript oracle walks `Object.keys`, so it reports
+# array-index keys first and every other key in INSERTION order. Without this the
+# table was a `BTreeMap` and the two ports disagreed about which error a user's
+# agent reads first. `search_policy::js_property_order` puts the array-index half
+# of that rule back; document order is the half only the parser can supply.
 toml = { version = "0.9", features = ["preserve_order"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -415,6 +415,18 @@
       ]
     },
     {
+      "name": "unknown-top-level-keys-integer-like",
+      "toml": "zeta = 1\n2 = 2\n1 = 3\n",
+      "ok": false,
+      "errors": [
+        "unknown top-level key: 1",
+        "unknown top-level key: 2",
+        "unknown top-level key: zeta",
+        "policy must contain exactly one top-level key: rule",
+        "rule must be an array of tables"
+      ]
+    },
+    {
       "name": "rule-not-array",
       "toml": "rule = \"not-array\"\n",
       "ok": false,
@@ -485,6 +497,36 @@
       "errors": [
         "rule 1: unknown key: zeta",
         "rule 1: unknown key: alpha"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-integer-like",
+      "toml": "[[rule]]\npath = \"x.md\"\nzeta = 1\n2 = 2\n1 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 1",
+        "rule 1: unknown key: 2",
+        "rule 1: unknown key: zeta"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-non-canonical-integers",
+      "toml": "[[rule]]\npath = \"x.md\"\n\"01\" = 1\n\"+1\" = 2\n1 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 1",
+        "rule 1: unknown key: 01",
+        "rule 1: unknown key: +1"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-array-index-boundary",
+      "toml": "[[rule]]\npath = \"x.md\"\n4294967295 = 1\n4294967294 = 2\n0 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 0",
+        "rule 1: unknown key: 4294967294",
+        "rule 1: unknown key: 4294967295"
       ]
     },
     {
@@ -640,6 +682,16 @@
       "ok": false,
       "errors": [
         "rule 1: unknown key: tracked"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-integer-like",
+      "toml": "[[rule]]\npath = \"x.md\"\nzeta = 1\n2 = 2\n1 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 1",
+        "rule 1: unknown key: 2",
+        "rule 1: unknown key: zeta"
       ]
     },
     {

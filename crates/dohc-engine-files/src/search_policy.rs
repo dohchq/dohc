@@ -317,6 +317,44 @@ pub fn policy_glob_matches(pattern: &str, path: &str) -> bool {
 
 // ------------------------------------------------------------------ toml parse
 
+/// The key order the oracle reports one unknown-key error per key in.
+///
+/// The oracle walks `Object.keys` of the parsed table, so its order is JavaScript
+/// property enumeration order (`OrdinaryOwnPropertyKeys`): every ARRAY INDEX key
+/// first in ascending numeric order, then every remaining key in insertion order.
+/// TOML allows bare integer keys, so a policy file can reach that rule, and the
+/// first error is what a user's agent reads back from a rejected policy file.
+fn js_property_order(table: &toml::Table) -> Vec<&str> {
+    let mut indexed: Vec<(u32, &str)> = Vec::new();
+    let mut named: Vec<&str> = Vec::new();
+    for key in table.keys() {
+        match array_index(key) {
+            // Duplicate keys cannot reach here: TOML rejects them as a syntax
+            // error, so no two entries share an index and the sort is total.
+            Some(index) => indexed.push((index, key.as_str())),
+            None => named.push(key.as_str()),
+        }
+    }
+    indexed.sort_unstable_by_key(|(index, _)| *index);
+    indexed
+        .into_iter()
+        .map(|(_, key)| key)
+        .chain(named)
+        .collect()
+}
+
+/// A JavaScript ARRAY INDEX: the canonical decimal form of an integer in
+/// `0..=4294967294`. A key that does not round-trip through `ToString(ToUint32)`
+/// — `01`, `+1`, `1.0`, `-1` — is an ordinary string key, and so is `4294967295`,
+/// which is one past the last index.
+fn array_index(key: &str) -> Option<u32> {
+    if key.starts_with('+') || (key.len() > 1 && key.starts_with('0')) {
+        return None;
+    }
+    let index: u32 = key.parse().ok()?;
+    if index == u32::MAX { None } else { Some(index) }
+}
+
 /// Parse `.dohc/files.toml`. Collects ALL shape errors in one pass (never a
 /// partial application), matching `parseFilesPolicy` (`effectivePolicy.ts`).
 pub fn parse_files_policy(toml_text: &str) -> Result<Vec<FilesPolicyRule>, Vec<String>> {
@@ -334,8 +372,8 @@ pub fn parse_files_policy(toml_text: &str) -> Result<Vec<FilesPolicyRule>, Vec<S
                 errors.push(format!("{label}: rule entry must be an object"));
                 continue;
             };
-            for key in rule.keys() {
-                if !matches!(key.as_str(), "path" | "tracked" | "searchable") {
+            for key in js_property_order(rule) {
+                if !matches!(key, "path" | "tracked" | "searchable") {
                     errors.push(format!("{label}: unknown key: {key}"));
                 }
             }
@@ -376,8 +414,8 @@ pub fn parse_visibility_policy(toml_text: &str) -> Result<Vec<VisibilityPolicyRu
                 errors.push(format!("{label}: rule entry must be an object"));
                 continue;
             };
-            for key in rule.keys() {
-                if !matches!(key.as_str(), "path" | "visibility" | "export") {
+            for key in js_property_order(rule) {
+                if !matches!(key, "path" | "visibility" | "export") {
                     errors.push(format!("{label}: unknown key: {key}"));
                 }
             }
@@ -425,7 +463,7 @@ fn validate_top_level<'a>(
     parsed: &'a toml::Table,
     errors: &mut Vec<String>,
 ) -> Option<&'a toml::Value> {
-    for key in parsed.keys() {
+    for key in js_property_order(parsed) {
         if key != "rule" {
             errors.push(format!("unknown top-level key: {key}"));
         }

@@ -176,6 +176,7 @@ const filesPolicyCases = [
   ["empty-document", ""],
   ["only-unknown-top-level-key", "foo = 1\n"],
   ["unknown-top-level-key-with-rules", 'version = true\n[[rule]]\npath = "x.md"\n'],
+  ["unknown-top-level-keys-integer-like", "zeta = 1\n2 = 2\n1 = 3\n"],
   ["rule-not-array", 'rule = "not-array"\n'],
   ["rule-is-table", '[rule]\npath = "x.md"\n'],
   ["rule-entry-not-table", "rule = [1]\n"],
@@ -185,6 +186,14 @@ const filesPolicyCases = [
   ["non-string-path", "[[rule]]\npath = 1\n"],
   ["unknown-rule-key", '[[rule]]\npath = "x.md"\nmode = true\n'],
   ["unknown-rule-keys-out-of-order", '[[rule]]\npath = "x.md"\nzeta = 1\nalpha = 2\n'],
+  // TOML allows bare integer keys, and the oracle reports one error per key in
+  // `Object.keys` order: JavaScript enumerates ARRAY INDEX keys first, ascending
+  // numerically, then every other key in insertion order. A key that does not
+  // round-trip through `ToString(ToUint32)` (`01`, `+1`) is an ordinary string
+  // key, and so is `4294967295`, one past the last index.
+  ["unknown-rule-keys-integer-like", '[[rule]]\npath = "x.md"\nzeta = 1\n2 = 2\n1 = 3\n'],
+  ["unknown-rule-keys-non-canonical-integers", '[[rule]]\npath = "x.md"\n"01" = 1\n"+1" = 2\n1 = 3\n'],
+  ["unknown-rule-keys-array-index-boundary", '[[rule]]\npath = "x.md"\n4294967295 = 1\n4294967294 = 2\n0 = 3\n'],
   ["tracked-not-boolean", '[[rule]]\npath = "x.md"\ntracked = "false"\n'],
   ["searchable-not-boolean", '[[rule]]\npath = "x.md"\nsearchable = 1\n'],
   ["invalid-path-glob", '[[rule]]\npath = "bad/**/x.md"\ntracked = false\n'],
@@ -205,6 +214,7 @@ const visibilityPolicyCases = [
   ["rule-entry-not-table", 'rule = ["x"]\n'],
   ["missing-path", '[[rule]]\nexport = "included"\n'],
   ["unknown-rule-key", '[[rule]]\npath = "x.md"\ntracked = true\n'],
+  ["unknown-rule-keys-integer-like", '[[rule]]\npath = "x.md"\nzeta = 1\n2 = 2\n1 = 3\n'],
   ["visibility-not-string", "[[rule]]\npath = \"x.md\"\nvisibility = true\n"],
   ["visibility-unknown-value", '[[rule]]\npath = "x.md"\nvisibility = "public"\n'],
   ["export-unknown-value", '[[rule]]\npath = "x.md"\nexport = "public"\n'],
