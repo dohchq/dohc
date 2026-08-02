@@ -27,9 +27,14 @@ const requiredSteps = [
 ];
 
 // The summary field is a list of rows joined by one space and nothing else. A
-// row is `name=STATUS`, and a FAIL or SKIP row may carry `[reason]` — the
-// free-form text the gate writes for a human. A name holds spaces and hyphens
-// (`clippy -D warnings`) but never an `=`.
+// row is `name=STATUS`. A name holds spaces and hyphens (`clippy -D warnings`)
+// but never an `=`.
+//
+// The gate writes a free-form `[reason]` beside a step, but only beside one
+// that failed the run — so only a FAIL verdict carries reasons, and this
+// checker reads a summary only after the verdict field reads PASS. The
+// summaries it parses hold no reason text, which is why it refuses to read
+// any: reason text is the one place a forged row can hide.
 //
 // The list is read in order, from its first character, and every character
 // must belong to a row. Scanning the field for anything shaped like a row is
@@ -38,7 +43,6 @@ const requiredSteps = [
 // status, and a `cargo-audit=PASS` written inside another row's reason for a
 // step that never ran.
 const ROW_HEAD = /(?<name>[^=]+)=(?<status>PASS|FAIL|SKIP)/y;
-const REASON_END = /\](?= |$)/g;
 
 /** `name -> [status, ...]`, one entry per row, or a throw if this is no list. */
 function parseStepRows(summary) {
@@ -57,22 +61,18 @@ function parseStepRows(summary) {
     const { name, status } = head.groups;
     at = ROW_HEAD.lastIndex;
 
-    // A reason belongs to the row that opened it, so its text is never read as
-    // more rows. It can hold `]` itself (`[build].target`), so it ends at the
-    // first `]` a row separator follows. Only a FAIL or SKIP row has one.
-    if (status !== "PASS" && summary[at] === "[") {
-      REASON_END.lastIndex = at;
-      const closed = REASON_END.exec(summary);
-      if (!closed) {
-        throw new Error(
-          `step row \`${name}=${status}\` opens a \`[reason]\` that no \`]\` closes before a row separator`,
-        );
-      }
-      at = closed.index + 1;
+    // A reason is free-form text, so no rule can say where it ends without the
+    // writer's help: `other=SKIP[x] cargo-audit=PASS z=SKIP[y]]` closes at
+    // whichever `]` the reader picks, and one of those readings mints a
+    // `cargo-audit=PASS` row out of the reason's own text.
+    if (summary[at] === "[") {
+      throw new Error(
+        `step row \`${name}=${status}\` carries a \`[reason]\`, which only a failed run writes; a PASS verdict's summary is \`name=STATUS\` rows and nothing else`,
+      );
     }
 
     // The row ends here or it is not that row: `native target=PASS-ignored`
-    // and `native target=PASS[reason]` are not `native target=PASS`.
+    // is not `native target=PASS`.
     if (at < summary.length && summary[at] !== " ") {
       throw new Error(
         `step row \`${name}=${status}\` must end at a space or the end of the summary, found ${from(at)}`,

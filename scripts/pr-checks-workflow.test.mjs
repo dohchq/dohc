@@ -146,21 +146,23 @@ test("a status ends at the row's end, not at a word boundary", () => {
   }
 });
 
-test("a row's reason is part of that row, not more rows", () => {
-  // The last required row is gone and its name written inside another row's
-  // reason. An optional step may report SKIP beside an overall PASS, so this
-  // line reads as a run whose advisory scan passed while the summary never
-  // reported it.
-  assert.throws(
-    () =>
-      requireCiPassVerdict(
-        passVerdict.replace(
-          "cargo-audit=PASS",
-          "other=SKIP[x=cargo-audit=PASS]",
-        ),
-      ),
-    /0 rows for required CI gate step `cargo-audit`/,
-  );
+test("a PASS summary may not carry a `[reason]`, so no row can hide in one", () => {
+  // Each forgery deletes the last required row and writes its name inside
+  // another row's reason. Only a failed run writes a reason, so a PASS line
+  // carrying one is already not a line this gate produced -- and reading the
+  // reason at all is what makes the forgery work, because free-form text has
+  // no end a reader can find. The second vector proves it: whichever `]` the
+  // reader treats as the close, the other reading mints rows from the text.
+  for (const forgery of [
+    "other=SKIP[x=cargo-audit=PASS]",
+    "other=SKIP[x] cargo-audit=PASS z=SKIP[y]]",
+  ]) {
+    assert.throws(
+      () => requireCiPassVerdict(passVerdict.replace("cargo-audit=PASS", forgery)),
+      /step row `other=SKIP` carries a `\[reason\]`/,
+      forgery,
+    );
+  }
 });
 
 test("the gate name is required in its own field, not anywhere in the line", () => {
