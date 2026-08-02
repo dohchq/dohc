@@ -104,6 +104,11 @@ describe("workspace engine policy globs", () => {
     ["secrets/**", "secrets", false],
     ["**", "anything/deep.md", true],
     ["**", ".dohc/files.toml", true],
+    // `*` matches zero or more characters, never fewer than zero: a pattern
+    // whose prefix and suffix overlap in the candidate must not match.
+    ["draft*draft.md", "draftdraft.md", true],
+    ["draft*draft.md", "draft-1-draft.md", true],
+    ["draft*draft.md", "draft.md", false],
   ])("matches %s against %s as %s", (pattern, path, shouldMatch) => {
     expect(validatePolicyGlob(pattern)).toEqual({ ok: true });
     expect(policyGlobMatches(pattern, path)).toBe(shouldMatch);

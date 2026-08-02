@@ -1,0 +1,1474 @@
+{
+  "globValidation": [
+    {
+      "pattern": "",
+      "ok": false,
+      "reason": "glob must not be empty"
+    },
+    {
+      "pattern": "/rooted/x.md",
+      "ok": false,
+      "reason": "glob must be workspace-relative, without a leading slash"
+    },
+    {
+      "pattern": "!private/**",
+      "ok": false,
+      "reason": "glob negation is not supported"
+    },
+    {
+      "pattern": "dir\\file.md",
+      "ok": false,
+      "reason": "glob backslash escapes are not supported"
+    },
+    {
+      "pattern": "bad?",
+      "ok": false,
+      "reason": "glob character classes, braces, and ? are not supported"
+    },
+    {
+      "pattern": "bad[abc]",
+      "ok": false,
+      "reason": "glob character classes, braces, and ? are not supported"
+    },
+    {
+      "pattern": "bad]",
+      "ok": false,
+      "reason": "glob character classes, braces, and ? are not supported"
+    },
+    {
+      "pattern": "bad{a,b}",
+      "ok": false,
+      "reason": "glob character classes, braces, and ? are not supported"
+    },
+    {
+      "pattern": "bad}",
+      "ok": false,
+      "reason": "glob character classes, braces, and ? are not supported"
+    },
+    {
+      "pattern": "dir//file.md",
+      "ok": false,
+      "reason": "glob must not contain empty path segments"
+    },
+    {
+      "pattern": "dir/",
+      "ok": false,
+      "reason": "glob must not contain empty path segments"
+    },
+    {
+      "pattern": "../outside",
+      "ok": false,
+      "reason": "glob must not contain .. segments"
+    },
+    {
+      "pattern": "a/../b",
+      "ok": false,
+      "reason": "glob must not contain .. segments"
+    },
+    {
+      "pattern": "a/**/b",
+      "ok": false,
+      "reason": "** is only supported as the final segment"
+    },
+    {
+      "pattern": "**/a.md",
+      "ok": false,
+      "reason": "** is only supported as the final segment"
+    },
+    {
+      "pattern": "foo**",
+      "ok": false,
+      "reason": "** must occupy a complete final segment"
+    },
+    {
+      "pattern": "a/**b",
+      "ok": false,
+      "reason": "** must occupy a complete final segment"
+    },
+    {
+      "pattern": "a*b*c",
+      "ok": false,
+      "reason": "only one * is supported per path segment"
+    },
+    {
+      "pattern": "a/b*c*d.md",
+      "ok": false,
+      "reason": "only one * is supported per path segment"
+    },
+    {
+      "pattern": "/bad?",
+      "ok": false,
+      "reason": "glob must be workspace-relative, without a leading slash"
+    },
+    {
+      "pattern": "!bad[",
+      "ok": false,
+      "reason": "glob negation is not supported"
+    },
+    {
+      "pattern": "**",
+      "ok": true
+    },
+    {
+      "pattern": "*",
+      "ok": true
+    },
+    {
+      "pattern": "*.md",
+      "ok": true
+    },
+    {
+      "pattern": "notes/*.md",
+      "ok": true
+    },
+    {
+      "pattern": "notes/**",
+      "ok": true
+    },
+    {
+      "pattern": "a/b/c.md",
+      "ok": true
+    },
+    {
+      "pattern": "./notes/a.md",
+      "ok": true
+    },
+    {
+      "pattern": ".dohc/**",
+      "ok": true
+    },
+    {
+      "pattern": "ab*b",
+      "ok": true
+    },
+    {
+      "pattern": "café*.md",
+      "ok": true
+    },
+    {
+      "pattern": "A*.MD",
+      "ok": true
+    }
+  ],
+  "globMatches": [
+    {
+      "pattern": "**",
+      "path": "a/b",
+      "matches": true
+    },
+    {
+      "pattern": "**",
+      "path": "",
+      "matches": false
+    },
+    {
+      "pattern": "**",
+      "path": ".dohc/files.toml",
+      "matches": true
+    },
+    {
+      "pattern": "**",
+      "path": "a",
+      "matches": true
+    },
+    {
+      "pattern": "dir/**",
+      "path": "dir/a",
+      "matches": true
+    },
+    {
+      "pattern": "dir/**",
+      "path": "dir/a/b",
+      "matches": true
+    },
+    {
+      "pattern": "dir/**",
+      "path": "dir",
+      "matches": false
+    },
+    {
+      "pattern": "dir/**",
+      "path": "dir/",
+      "matches": true
+    },
+    {
+      "pattern": "dir/**",
+      "path": "dir/a/",
+      "matches": true
+    },
+    {
+      "pattern": "dir/**",
+      "path": "dirx/a",
+      "matches": false
+    },
+    {
+      "pattern": "dir/**",
+      "path": "",
+      "matches": false
+    },
+    {
+      "pattern": "*/**",
+      "path": "a/b/c",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "path": "a.md",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "path": "a/b",
+      "matches": false
+    },
+    {
+      "pattern": "*",
+      "path": "",
+      "matches": true
+    },
+    {
+      "pattern": "*.md",
+      "path": "notes.md",
+      "matches": true
+    },
+    {
+      "pattern": "*.md",
+      "path": "a/notes.md",
+      "matches": false
+    },
+    {
+      "pattern": "*.md",
+      "path": ".md",
+      "matches": true
+    },
+    {
+      "pattern": "*.md",
+      "path": "md",
+      "matches": false
+    },
+    {
+      "pattern": "notes/*.md",
+      "path": "notes/a.md",
+      "matches": true
+    },
+    {
+      "pattern": "notes/*.md",
+      "path": "notes/sub/a.md",
+      "matches": false
+    },
+    {
+      "pattern": "notes/*.md",
+      "path": "notes/.md",
+      "matches": true
+    },
+    {
+      "pattern": "notes/*.md",
+      "path": "notes",
+      "matches": false
+    },
+    {
+      "pattern": "notes/today.md",
+      "path": "notes/today.md",
+      "matches": true
+    },
+    {
+      "pattern": "notes/today.md",
+      "path": "notes/other.md",
+      "matches": false
+    },
+    {
+      "pattern": "notes/today.md",
+      "path": "notes/today.md/x",
+      "matches": false
+    },
+    {
+      "pattern": "notes/*.MD",
+      "path": "notes/a.md",
+      "matches": false
+    },
+    {
+      "pattern": "NOTES/a.md",
+      "path": "notes/a.md",
+      "matches": false
+    },
+    {
+      "pattern": "./notes/a.md",
+      "path": "notes/a.md",
+      "matches": false
+    },
+    {
+      "pattern": "./notes/a.md",
+      "path": "./notes/a.md",
+      "matches": true
+    },
+    {
+      "pattern": "a/b/c.md",
+      "path": "a/b/c.md/",
+      "matches": false
+    },
+    {
+      "pattern": "ab*b",
+      "path": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "ab*b",
+      "path": "abb",
+      "matches": true
+    },
+    {
+      "pattern": "ab*b",
+      "path": "abxb",
+      "matches": true
+    },
+    {
+      "pattern": "café*é",
+      "path": "café",
+      "matches": false
+    },
+    {
+      "pattern": "café*é",
+      "path": "caféxé",
+      "matches": true
+    },
+    {
+      "pattern": "café*.md",
+      "path": "café.md",
+      "matches": true
+    },
+    {
+      "pattern": "café*.md",
+      "path": "caf.md",
+      "matches": false
+    }
+  ],
+  "filesPolicy": [
+    {
+      "name": "valid-multi-rule",
+      "toml": "[[rule]]\npath = \"drafts/**\"\ntracked = false\nsearchable = false\n\n[[rule]]\npath = \"docs/*.md\"\nsearchable = true\n",
+      "ok": true,
+      "rules": [
+        {
+          "path": "drafts/**",
+          "tracked": false,
+          "searchable": false
+        },
+        {
+          "path": "docs/*.md",
+          "searchable": true
+        }
+      ]
+    },
+    {
+      "name": "valid-inline-array",
+      "toml": "rule = [{ path = \"a.md\", tracked = true }]\n",
+      "ok": true,
+      "rules": [
+        {
+          "path": "a.md",
+          "tracked": true
+        }
+      ]
+    },
+    {
+      "name": "valid-empty-rule-array",
+      "toml": "rule = []\n",
+      "ok": true,
+      "rules": []
+    },
+    {
+      "name": "valid-path-only",
+      "toml": "[[rule]]\npath = \"**\"\n",
+      "ok": true,
+      "rules": [
+        {
+          "path": "**"
+        }
+      ]
+    },
+    {
+      "name": "empty-document",
+      "toml": "",
+      "ok": false,
+      "errors": [
+        "policy must contain exactly one top-level key: rule",
+        "rule must be an array of tables"
+      ]
+    },
+    {
+      "name": "only-unknown-top-level-key",
+      "toml": "foo = 1\n",
+      "ok": false,
+      "errors": [
+        "unknown top-level key: foo",
+        "policy must contain exactly one top-level key: rule",
+        "rule must be an array of tables"
+      ]
+    },
+    {
+      "name": "unknown-top-level-key-with-rules",
+      "toml": "version = true\n[[rule]]\npath = \"x.md\"\n",
+      "ok": false,
+      "errors": [
+        "unknown top-level key: version",
+        "policy must contain exactly one top-level key: rule"
+      ]
+    },
+    {
+      "name": "unknown-top-level-keys-integer-like",
+      "toml": "zeta = 1\n2 = 2\n1 = 3\n",
+      "ok": false,
+      "errors": [
+        "unknown top-level key: 1",
+        "unknown top-level key: 2",
+        "unknown top-level key: zeta",
+        "policy must contain exactly one top-level key: rule",
+        "rule must be an array of tables"
+      ]
+    },
+    {
+      "name": "rule-not-array",
+      "toml": "rule = \"not-array\"\n",
+      "ok": false,
+      "errors": [
+        "rule must be an array of tables"
+      ]
+    },
+    {
+      "name": "rule-is-table",
+      "toml": "[rule]\npath = \"x.md\"\n",
+      "ok": false,
+      "errors": [
+        "rule must be an array of tables"
+      ]
+    },
+    {
+      "name": "rule-entry-not-table",
+      "toml": "rule = [1]\n",
+      "ok": false,
+      "errors": [
+        "rule 1: rule entry must be an object"
+      ]
+    },
+    {
+      "name": "rule-entry-array",
+      "toml": "rule = [[1]]\n",
+      "ok": false,
+      "errors": [
+        "rule 1: rule entry must be an object"
+      ]
+    },
+    {
+      "name": "missing-path",
+      "toml": "[[rule]]\ntracked = false\n",
+      "ok": false,
+      "errors": [
+        "rule 1: path is required and must be a non-empty string"
+      ]
+    },
+    {
+      "name": "empty-path",
+      "toml": "[[rule]]\npath = \"\"\n",
+      "ok": false,
+      "errors": [
+        "rule 1: path is required and must be a non-empty string"
+      ]
+    },
+    {
+      "name": "non-string-path",
+      "toml": "[[rule]]\npath = 1\n",
+      "ok": false,
+      "errors": [
+        "rule 1: path is required and must be a non-empty string"
+      ]
+    },
+    {
+      "name": "unknown-rule-key",
+      "toml": "[[rule]]\npath = \"x.md\"\nmode = true\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: mode"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-out-of-order",
+      "toml": "[[rule]]\npath = \"x.md\"\nzeta = 1\nalpha = 2\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: zeta",
+        "rule 1: unknown key: alpha"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-integer-like",
+      "toml": "[[rule]]\npath = \"x.md\"\nzeta = 1\n2 = 2\n1 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 1",
+        "rule 1: unknown key: 2",
+        "rule 1: unknown key: zeta"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-non-canonical-integers",
+      "toml": "[[rule]]\npath = \"x.md\"\n\"01\" = 1\n\"+1\" = 2\n1 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 1",
+        "rule 1: unknown key: 01",
+        "rule 1: unknown key: +1"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-array-index-boundary",
+      "toml": "[[rule]]\npath = \"x.md\"\n4294967295 = 1\n4294967294 = 2\n0 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 0",
+        "rule 1: unknown key: 4294967294",
+        "rule 1: unknown key: 4294967295"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-named-before-array-index-boundary",
+      "toml": "[[rule]]\npath = \"x.md\"\nzeta = 1\n4294967295 = 2\n0 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 0",
+        "rule 1: unknown key: zeta",
+        "rule 1: unknown key: 4294967295"
+      ]
+    },
+    {
+      "name": "tracked-not-boolean",
+      "toml": "[[rule]]\npath = \"x.md\"\ntracked = \"false\"\n",
+      "ok": false,
+      "errors": [
+        "rule 1: tracked must be a boolean"
+      ]
+    },
+    {
+      "name": "searchable-not-boolean",
+      "toml": "[[rule]]\npath = \"x.md\"\nsearchable = 1\n",
+      "ok": false,
+      "errors": [
+        "rule 1: searchable must be a boolean"
+      ]
+    },
+    {
+      "name": "invalid-path-glob",
+      "toml": "[[rule]]\npath = \"bad/**/x.md\"\ntracked = false\n",
+      "ok": false,
+      "errors": [
+        "rule 1: invalid path glob \"bad/**/x.md\": ** is only supported as the final segment"
+      ]
+    },
+    {
+      "name": "second-rule-invalid-rejects-all",
+      "toml": "[[rule]]\npath = \"ok.md\"\ntracked = false\n[[rule]]\npath = \"bad[\"\n",
+      "ok": false,
+      "errors": [
+        "rule 2: invalid path glob \"bad[\": glob character classes, braces, and ? are not supported"
+      ]
+    },
+    {
+      "name": "toml-syntax-error",
+      "toml": "[[rule]\npath = \"x.md\"\n",
+      "ok": false,
+      "parserMessage": true,
+      "errors": [
+        "invalid TOML: Invalid TOML document: each key-value declaration must be followed by an end-of-line\n\n1:  [[rule]\n2:  path = \"x.md\"\n    ^\n"
+      ]
+    },
+    {
+      "name": "toml-duplicate-key",
+      "toml": "[[rule]]\npath = \"a.md\"\npath = \"b.md\"\n",
+      "ok": false,
+      "parserMessage": true,
+      "errors": [
+        "invalid TOML: Invalid TOML document: trying to redefine an already defined table or value\n\n2:  path = \"a.md\"\n3:  path = \"b.md\"\n    ^\n"
+      ]
+    },
+    {
+      "name": "toml-duplicate-table",
+      "toml": "[table]\nx = 1\n\n[table]\ny = 2\n",
+      "ok": false,
+      "parserMessage": true,
+      "errors": [
+        "invalid TOML: Invalid TOML document: trying to redefine an already defined table or value\n\n4:  [table]\n     ^\n5:  y = 2\n"
+      ]
+    }
+  ],
+  "visibilityPolicy": [
+    {
+      "name": "valid-multi-rule",
+      "toml": "[[rule]]\npath = \"private/**\"\nvisibility = \"hidden\"\nexport = \"redacted\"\n\n[[rule]]\npath = \"docs/*.md\"\nvisibility = \"visible\"\n",
+      "ok": true,
+      "rules": [
+        {
+          "path": "private/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        },
+        {
+          "path": "docs/*.md",
+          "visibility": "visible"
+        }
+      ]
+    },
+    {
+      "name": "valid-export-only",
+      "toml": "[[rule]]\npath = \"a.md\"\nexport = \"excluded\"\n",
+      "ok": true,
+      "rules": [
+        {
+          "path": "a.md",
+          "export": "excluded"
+        }
+      ]
+    },
+    {
+      "name": "valid-included-export",
+      "toml": "[[rule]]\npath = \"a.md\"\nexport = \"included\"\n",
+      "ok": true,
+      "rules": [
+        {
+          "path": "a.md",
+          "export": "included"
+        }
+      ]
+    },
+    {
+      "name": "valid-empty-rule-array",
+      "toml": "rule = []\n",
+      "ok": true,
+      "rules": []
+    },
+    {
+      "name": "empty-document",
+      "toml": "",
+      "ok": false,
+      "errors": [
+        "policy must contain exactly one top-level key: rule",
+        "rule must be an array of tables"
+      ]
+    },
+    {
+      "name": "unknown-top-level-key-with-rules",
+      "toml": "other = true\n[[rule]]\npath = \"x.md\"\n",
+      "ok": false,
+      "errors": [
+        "unknown top-level key: other",
+        "policy must contain exactly one top-level key: rule"
+      ]
+    },
+    {
+      "name": "rule-not-array",
+      "toml": "rule = \"not-array\"\n",
+      "ok": false,
+      "errors": [
+        "rule must be an array of tables"
+      ]
+    },
+    {
+      "name": "rule-entry-not-table",
+      "toml": "rule = [\"x\"]\n",
+      "ok": false,
+      "errors": [
+        "rule 1: rule entry must be an object"
+      ]
+    },
+    {
+      "name": "missing-path",
+      "toml": "[[rule]]\nexport = \"included\"\n",
+      "ok": false,
+      "errors": [
+        "rule 1: path is required and must be a non-empty string"
+      ]
+    },
+    {
+      "name": "unknown-rule-key",
+      "toml": "[[rule]]\npath = \"x.md\"\ntracked = true\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: tracked"
+      ]
+    },
+    {
+      "name": "unknown-rule-keys-integer-like",
+      "toml": "[[rule]]\npath = \"x.md\"\nzeta = 1\n2 = 2\n1 = 3\n",
+      "ok": false,
+      "errors": [
+        "rule 1: unknown key: 1",
+        "rule 1: unknown key: 2",
+        "rule 1: unknown key: zeta"
+      ]
+    },
+    {
+      "name": "visibility-not-string",
+      "toml": "[[rule]]\npath = \"x.md\"\nvisibility = true\n",
+      "ok": false,
+      "errors": [
+        "rule 1: visibility must be \"visible\" or \"hidden\""
+      ]
+    },
+    {
+      "name": "visibility-unknown-value",
+      "toml": "[[rule]]\npath = \"x.md\"\nvisibility = \"public\"\n",
+      "ok": false,
+      "errors": [
+        "rule 1: visibility must be \"visible\" or \"hidden\""
+      ]
+    },
+    {
+      "name": "export-unknown-value",
+      "toml": "[[rule]]\npath = \"x.md\"\nexport = \"public\"\n",
+      "ok": false,
+      "errors": [
+        "rule 1: export must be \"included\", \"excluded\", or \"redacted\""
+      ]
+    },
+    {
+      "name": "export-not-string",
+      "toml": "[[rule]]\npath = \"x.md\"\nexport = 1\n",
+      "ok": false,
+      "errors": [
+        "rule 1: export must be \"included\", \"excluded\", or \"redacted\""
+      ]
+    },
+    {
+      "name": "invalid-path-glob",
+      "toml": "[[rule]]\npath = \"../x.md\"\nvisibility = \"hidden\"\n",
+      "ok": false,
+      "errors": [
+        "rule 1: invalid path glob \"../x.md\": glob must not contain .. segments"
+      ]
+    },
+    {
+      "name": "second-rule-invalid-rejects-all",
+      "toml": "[[rule]]\npath = \"ok.md\"\nvisibility = \"hidden\"\n[[rule]]\npath = \"bad?\"\n",
+      "ok": false,
+      "errors": [
+        "rule 2: invalid path glob \"bad?\": glob character classes, braces, and ? are not supported"
+      ]
+    },
+    {
+      "name": "toml-syntax-error",
+      "toml": "visibility = \"hidden\n",
+      "ok": false,
+      "parserMessage": true,
+      "errors": [
+        "invalid TOML: Invalid TOML document: control characters are not allowed in strings\n\n1:  visibility = \"hidden\n                        ^\n"
+      ]
+    }
+  ],
+  "resolution": [
+    {
+      "name": "no-policy-tracked-default",
+      "path": "notes/public.md",
+      "filesPolicy": null,
+      "visibilityPolicy": null,
+      "result": {
+        "path": "notes/public.md",
+        "tracked": true,
+        "versioned": true,
+        "searchable": true,
+        "visibility": "visible",
+        "export": "included",
+        "captureOwned": true,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "no-policy-secret-floor",
+      "path": ".env",
+      "filesPolicy": null,
+      "visibilityPolicy": null,
+      "result": {
+        "path": ".env",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "secret"
+      }
+    },
+    {
+      "name": "no-policy-ignored-floor",
+      "path": ".dohc/files.toml",
+      "filesPolicy": null,
+      "visibilityPolicy": null,
+      "result": {
+        "path": ".dohc/files.toml",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "ignored"
+      }
+    },
+    {
+      "name": "empty-policy-arrays",
+      "path": "notes/public.md",
+      "filesPolicy": [],
+      "visibilityPolicy": [],
+      "result": {
+        "path": "notes/public.md",
+        "tracked": true,
+        "versioned": true,
+        "searchable": true,
+        "visibility": "visible",
+        "export": "included",
+        "captureOwned": true,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "secret-floor-denies-escalation",
+      "path": "config/.env",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "config/.env",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "secret"
+      }
+    },
+    {
+      "name": "ignored-floor-denies-escalation",
+      "path": ".dohc/files.toml",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": ".dohc/files.toml",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "ignored"
+      }
+    },
+    {
+      "name": "ignored-floor-node-modules",
+      "path": "node_modules/pkg/index.js",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "node_modules/pkg/index.js",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "ignored"
+      }
+    },
+    {
+      "name": "ignored-floor-git",
+      "path": "notes/.git/config",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "notes/.git/config",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "ignored"
+      }
+    },
+    {
+      "name": "ignored-floor-shared-with-me",
+      "path": "shared-with-me/alex/brief.md",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "shared-with-me/alex/brief.md",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "ignored"
+      }
+    },
+    {
+      "name": "ignored-floor-write-temp",
+      "path": "nested/.dohc-write-temp",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "nested/.dohc-write-temp",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "ignored"
+      }
+    },
+    {
+      "name": "ignored-floor-traversal",
+      "path": "a/../b.md",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "a/../b.md",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "ignored"
+      }
+    },
+    {
+      "name": "ignored-floor-absolute",
+      "path": "C:/absolute.md",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "C:/absolute.md",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "ignored"
+      }
+    },
+    {
+      "name": "secret-floor-percent-encoded",
+      "path": "encoded/secrets%2eenv",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "encoded/secrets%2eenv",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "excluded",
+        "captureOwned": false,
+        "floor": "secret"
+      }
+    },
+    {
+      "name": "blanket-then-directory-rule",
+      "path": "docs/guide.md",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "docs/guide.md",
+        "tracked": true,
+        "versioned": true,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "redacted",
+        "captureOwned": true,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "blanket-then-file-rule",
+      "path": "docs/private.md",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "docs/private.md",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "redacted",
+        "captureOwned": false,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "unmatched-path-keeps-defaults",
+      "path": "notes/plan.md",
+      "filesPolicy": [
+        {
+          "path": "**",
+          "tracked": true,
+          "searchable": true
+        },
+        {
+          "path": "docs/**",
+          "searchable": false
+        },
+        {
+          "path": "docs/private.md",
+          "tracked": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "**",
+          "visibility": "visible",
+          "export": "included"
+        },
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "notes/plan.md",
+        "tracked": true,
+        "versioned": true,
+        "searchable": true,
+        "visibility": "visible",
+        "export": "included",
+        "captureOwned": true,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "later-rule-wins-per-set-field-only",
+      "path": "docs/a.md",
+      "filesPolicy": [
+        {
+          "path": "docs/**",
+          "tracked": false,
+          "searchable": false
+        },
+        {
+          "path": "docs/a.md",
+          "tracked": true
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "redacted"
+        },
+        {
+          "path": "docs/a.md",
+          "export": "included"
+        }
+      ],
+      "result": {
+        "path": "docs/a.md",
+        "tracked": true,
+        "versioned": true,
+        "searchable": false,
+        "visibility": "hidden",
+        "export": "included",
+        "captureOwned": true,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "tracked-false-does-not-force-searchable-false",
+      "path": "docs/a.md",
+      "filesPolicy": [
+        {
+          "path": "docs/**",
+          "tracked": false,
+          "searchable": true
+        }
+      ],
+      "visibilityPolicy": null,
+      "result": {
+        "path": "docs/a.md",
+        "tracked": false,
+        "versioned": false,
+        "searchable": true,
+        "visibility": "visible",
+        "export": "included",
+        "captureOwned": false,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "non-matching-rules-are-skipped",
+      "path": "notes/a.md",
+      "filesPolicy": [
+        {
+          "path": "docs/**",
+          "tracked": false,
+          "searchable": false
+        }
+      ],
+      "visibilityPolicy": [
+        {
+          "path": "docs/**",
+          "visibility": "hidden",
+          "export": "excluded"
+        }
+      ],
+      "result": {
+        "path": "notes/a.md",
+        "tracked": true,
+        "versioned": true,
+        "searchable": true,
+        "visibility": "visible",
+        "export": "included",
+        "captureOwned": true,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "visibility-rules-do-not-touch-files-fields",
+      "path": "notes/a.md",
+      "filesPolicy": null,
+      "visibilityPolicy": [
+        {
+          "path": "notes/*.md",
+          "visibility": "hidden",
+          "export": "redacted"
+        }
+      ],
+      "result": {
+        "path": "notes/a.md",
+        "tracked": true,
+        "versioned": true,
+        "searchable": true,
+        "visibility": "hidden",
+        "export": "redacted",
+        "captureOwned": true,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "files-rules-do-not-touch-visibility-fields",
+      "path": "notes/a.md",
+      "filesPolicy": [
+        {
+          "path": "notes/*.md",
+          "tracked": false,
+          "searchable": false
+        }
+      ],
+      "visibilityPolicy": null,
+      "result": {
+        "path": "notes/a.md",
+        "tracked": false,
+        "versioned": false,
+        "searchable": false,
+        "visibility": "visible",
+        "export": "included",
+        "captureOwned": false,
+        "floor": "tracked"
+      }
+    },
+    {
+      "name": "star-rule-matches-dotfile-name",
+      "path": "config/.keep",
+      "filesPolicy": [
+        {
+          "path": "config/*",
+          "searchable": false
+        }
+      ],
+      "visibilityPolicy": null,
+      "result": {
+        "path": "config/.keep",
+        "tracked": true,
+        "versioned": true,
+        "searchable": false,
+        "visibility": "visible",
+        "export": "included",
+        "captureOwned": true,
+        "floor": "tracked"
+      }
+    }
+  ]
+}

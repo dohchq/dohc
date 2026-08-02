@@ -66,6 +66,18 @@ const fixtureSets = [
     oracleFailurePrefix: "",
     knownOracleFailures: new Map(),
   },
+  {
+    dir: "crates/dohc-engine-files/tests/fixtures",
+    oracle: "packages/security-contract",
+    dependencyOverrideEnv: "DOHC_TSX_BASE",
+    // `effectivePolicy.ts`: glob validation and matching, TOML rule parsing,
+    // and effective-policy resolution, all classified from fixed inputs, so the
+    // whole output is byte-stable. Same cross-process security contract, same
+    // deliberate Rust twin (`search_policy.rs`), same rule: nothing excluded.
+    volatileFields: [],
+    oracleFailurePrefix: "",
+    knownOracleFailures: new Map(),
+  },
 ];
 
 function fixtureNames(directory) {
