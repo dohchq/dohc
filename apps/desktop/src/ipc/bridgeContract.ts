@@ -84,7 +84,8 @@ const PATH_STRING = z.string().min(1).max(4096);
 // arrives. The daemon caps one wire string at 8 MiB (`WireLimits`,
 // `crates/dohc-engine-protocol/src/limits.rs`), so a larger body reaches the
 // renderer only by blob hydration. `versionedText.read` and the moment
-// timeline hydrate; the conflict and compare lanes do not — see VERSION_TEXT.
+// timeline hydrate, and compare rows inherit that through `listTextFiles`.
+// Conflict listing is the one lane that does not — see VERSION_TEXT.
 //
 // One REQUEST field shares the schema — the combined conflict resolution at
 // VERSION_TEXT. There this bound is only a ceiling on what crosses IPC; the
@@ -1591,13 +1592,18 @@ export const WORKSPACE_VERSION_NAME_MAX = 80;
 // carries, passed through verbatim (`engineHistoryIpc.ts` versionConflictForIpc,
 // `versionCompare.ts`), so they carry the engine's own text contract.
 //
-// This raise fixes the 2 MB to ~8 MB band, where the bridge was the only
-// rejecting gate. It does not make every stored side listable. The daemon
-// serializes a conflict's three sides in band and refuses the page with
-// `conflict-row-exceeds-wire-limit` above 8 MiB minus envelope headroom
-// (`crates/dohc-workspace-engine/src/lib.rs:244-248,7482-7491`), and neither
-// the conflict nor the compare lane hydrates an over-cap side out of band.
-// #537 tracks that. The bound stays the engine's storage contract rather than
+// Compare rows use this bound to its full height: `compareVersionFiles` reads
+// them through `listTextFiles`, which hydrates each over-cap body by
+// `readTextFile` -> `readTextBlob`, so a compare side at the engine's contract
+// does arrive.
+//
+// Conflict listing is the exception. The daemon serializes a conflict's three
+// sides in band and refuses the page with `conflict-row-exceeds-wire-limit`
+// above 8 MiB minus envelope headroom
+// (`crates/dohc-workspace-engine/src/lib.rs:244-248,7482-7491`), and
+// `listTextConflicts` has no hydration branch. So this raise fixes the 2 MB to
+// ~8 MB band, where the bridge was the only rejecting gate, and #537 tracks
+// the tail above it. The bound stays the engine's storage contract rather than
 // the transport's current ceiling: a second hand-copied constant is the drift
 // #517 was filed about, and it would have to move again when #537 lands.
 //
