@@ -658,6 +658,12 @@ export const SyncStatusResult = z.object({
   // sentence names a full path. Optional so older producers/fixtures keep
   // parsing.
   settingsWarning: z.string().min(1).max(4600).optional(),
+  // Additive (#505): true when the recorder could not be BUILT at workspace
+  // open — a failure, not a decision. `historyRecordingOff` is true as well
+  // (nothing records either way), so the notice must read this first: the
+  // opt-out copy names Settings, which nobody touched here. Optional so older
+  // producers/fixtures keep parsing.
+  historyRecordingUnavailable: z.boolean().optional(),
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),

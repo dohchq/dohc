@@ -33,6 +33,11 @@ interface WatchedWorkspace {
   // instead of blaming the Settings toggle, and the renderer never answers
   // the question from a read of its own.
   settingsWarning: string | null;
+  // True when building the recorder THREW (#505). The workspace records
+  // nothing either way, but the cause is a failure, not the user's Settings
+  // choice — the notice states which, so a real failure never wears the
+  // opt-out's copy.
+  historyRecordingUnavailable: boolean;
   // True while the engine capture (this workspace's SOLE history recorder)
   // is failing. Drives the persistent history-capture notice: set on the
   // first failed capture pass, cleared when a later pass succeeds, notify()
@@ -136,6 +141,7 @@ export function createWorkspaceActivity(
       historyCaptureFailed: w?.captureFailed ?? false,
       historyRecordingOff: w?.historyRecordingOff ?? false,
       ...(w?.settingsWarning ? { settingsWarning: w.settingsWarning } : {}),
+      historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       syncFailing: snap?.syncFailing ?? false,
     };
   }
@@ -151,6 +157,7 @@ export function createWorkspaceActivity(
         capture: null,
         historyRecordingOff: false,
         settingsWarning: null,
+        historyRecordingUnavailable: false,
         captureFailed: false,
         agentRun: null,
       };
@@ -191,6 +198,11 @@ export function createWorkspaceActivity(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,
             error,
           );
+          // The build FAILED — the user chose nothing. Carry that apart from
+          // the opt-out (#505) so the notice states the true cause. The error
+          // itself stays in the log: it is developer-facing, and the notice
+          // owes the user a state and a next step, not a stack.
+          entry.historyRecordingUnavailable = true;
         }
         // No capture => no recorder of any kind (Phase C removed legacy
         // recording). Make that honest and visible, not silent.

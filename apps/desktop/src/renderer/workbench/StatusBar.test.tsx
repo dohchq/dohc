@@ -309,6 +309,34 @@ describe("notice center", () => {
     expect(
       screen.getByTestId("notice-history-recording-off").textContent,
     ).toContain("The workspace engine is turned off in Settings");
+    expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
+  });
+
+  // #505: the recorder failed to build. Nothing records, exactly as for the
+  // opt-out — so the two states arrive at this surface together and only the
+  // cause separates them. The failure must not wear the opt-out's copy.
+  it("names the failure when the recorder could not be built", async () => {
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingOff: true,
+        historyRecordingUnavailable: true,
+      },
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-history-recording-unavailable");
+    expect(notice.textContent).toContain("History is off for this workspace");
+    expect(notice.textContent).toContain(
+      "dohc could not start recording history for this workspace.",
+    );
+    // The Next: main builds the recorder once per app session, so a reopen
+    // retries nothing.
+    expect(notice.textContent).toContain("Restart dohc to try again.");
+    // Never the opt-out's cause, and never both notices at once.
+    expect(notice.textContent).not.toContain("turned off in Settings");
+    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
   });
 
   it("surfaces an unmatched remote conflict resolution as a review notice (0P-C)", async () => {

@@ -272,13 +272,15 @@ export function NoticeCenter(props: {
     // Persistent while true (WS-H1 retirement Phase C): no engine capture
     // means NO history recorder exists at all — the legacy recorder is
     // retired. Honest, persistent, never spammy (both flags change only at
-    // workspace open). An unreadable settings file also reads as opted out,
-    // and it takes the first branch: the second names Settings as the cause,
-    // which would be a lie for a file the user never edited.
+    // workspace open). Three causes end in no recorder, and only the LAST is
+    // the user's Settings choice — so each earlier cause claims the notice
+    // first. An unreadable settings file reads as opted out; a recorder that
+    // failed to build never got that far. Naming Settings for either would be
+    // a lie about a setting the user never touched.
     //
-    // Both facts come from ONE read — main's, at workspace open, the read
-    // that decided whether anything is recorded (#483). A second read here
-    // could name a cause that never happened, or promise "no history" for a
+    // The causes come from ONE read — main's, at workspace open, riding the
+    // status the renderer already consumes (#483). A second read here could
+    // name a cause that never happened, or promise "no history" for a
     // workspace that is recording.
     if (props.syncStatus?.settingsWarning) {
       next.push({
@@ -287,6 +289,19 @@ export function NoticeCenter(props: {
         title: "History is off for this workspace",
         body: props.syncStatus.settingsWarning,
         action: { label: "Open Settings", onClick: props.onOpenSettings },
+        Icon: AlertTriangle,
+      });
+    } else if (props.syncStatus?.historyRecordingUnavailable) {
+      // #505: the recorder could not be BUILT at open. Nothing records, so
+      // historyRecordingOff is true as well — but that branch names Settings
+      // as the cause, and the user changed no setting. State the failure and
+      // the one step that retries it: main builds the recorder once per
+      // workspace per app session, so reopening the workspace re-reads nothing.
+      next.push({
+        id: "history-recording-unavailable",
+        tone: "warning",
+        title: "History is off for this workspace",
+        body: "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.",
         Icon: AlertTriangle,
       });
     } else if (props.syncStatus?.historyRecordingOff) {
