@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { workspaceEngineEnabled } from "./engineCaptureGate";
 import {
@@ -24,11 +24,31 @@ import {
 import {
   MAX_WORKSPACE_SETTINGS_FILE_BYTES,
   readWorkspaceSettingsFile,
+  resetWorkspaceSettingsFile,
   saveWorkspaceSettingsFile,
   WORKSPACE_SETTINGS_FILE,
   writeWorkspaceSettingsFile,
 } from "./workspaceSettingsFile";
 import { startWorkspaceWatch } from "./workspaceWatcher";
+
+// A seam for the write-ordering test below: every settings read and write
+// resolves the metadata directory first, so a gate here can hold ONE of them
+// open while another write is fired. Pass-through until a test arms it.
+const metadataGate = vi.hoisted(() => ({ pending: null as Promise<void> | null }));
+vi.mock("./workspaceMetadata", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./workspaceMetadata")>();
+  return {
+    ...actual,
+    resolveWorkspaceMetadataDir: async (rootPath: string) => {
+      const gate = metadataGate.pending;
+      if (gate) {
+        metadataGate.pending = null;
+        await gate;
+      }
+      return actual.resolveWorkspaceMetadataDir(rootPath);
+    },
+  };
+});
 
 const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
@@ -210,7 +230,7 @@ describe("workspace settings file store", () => {
     );
     // Repairing the file is only half the fix: the capture decision is made at
     // workspace open, so nothing is recorded until the workspace is reopened.
-    expect(corruptResult.warning).toContain("Then reopen the workspace.");
+    expect(corruptResult.warning).toContain("Then restart dohc.");
 
     // The same table packages/mcp asserts against isWorkspaceEngineFlagged.
     // Both readers share one schema, so both must answer OFF for every body.
@@ -285,7 +305,7 @@ describe("workspace settings file store", () => {
     expect(WorkspaceSettingsResult.parse(refused)).toEqual(refused);
 
     // Reset is the named way out, and it must actually work here.
-    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    await resetWorkspaceSettingsFile(root);
     expect((await readWorkspaceSettingsFile(root)).source).toBe("stored");
   });
 
@@ -377,6 +397,40 @@ describe("workspace settings file store", () => {
     expect(onDisk.settings.files.attachmentFolderName).toBe("media");
   });
 
+  it("a reset lands last over a save already in flight", async () => {
+    // Reset shares the save queue. Off it, a patch already reading the file
+    // writes its merge back AFTER the reset returns, so the dialog says the
+    // reset landed while the file sits somewhere the user never asked for.
+    const root = await tempRoot();
+    await writeWorkspaceSettingsFile(root, {
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      files: { attachmentLocation: "global-folder", attachmentFolderName: "media" },
+    });
+
+    let release!: () => void;
+    metadataGate.pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const save = saveWorkspaceSettingsFile(root, {
+      privacy: { confirmExternalLinks: false },
+    });
+    // Let the save reach the gate, so the reset is fired at a save in flight.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const reset = resetWorkspaceSettingsFile(root);
+    release();
+
+    const [saved, wasReset] = await Promise.all([save, reset]);
+    expect(saved.settings.privacy.confirmExternalLinks).toBe(false);
+    expect(wasReset.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
+    // The file ends where the user's LAST instruction put it. (The renderer
+    // drops the older save's reply: SettingsDialog bumps the same request
+    // token for a reset, so the stale response never repaints.)
+    expect(await readWorkspaceSettingsFile(root)).toEqual({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored",
+    });
+  });
+
   it("resets over a DIRECTORY sitting at the settings path", async () => {
     // The refusal points the user at Reset, so Reset has to work for every
     // state the reader calls unreadable — including a directory, which the
@@ -397,7 +451,9 @@ describe("workspace settings file store", () => {
     ).toBeTruthy();
 
     // What the Reset control does.
-    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    expect((await resetWorkspaceSettingsFile(root)).settings).toEqual(
+      DEFAULT_WORKSPACE_SETTINGS,
+    );
     expect(await readWorkspaceSettingsFile(root)).toEqual({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored",

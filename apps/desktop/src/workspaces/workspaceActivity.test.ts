@@ -137,7 +137,7 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
   // can neither invent a cause nor promise "no history" while recording.
   it("carries the open-time read's reason into the status", async () => {
     const warning =
-      "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then reopen the workspace.";
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: () => ({ capture: null, warning }),
     });

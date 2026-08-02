@@ -30,10 +30,12 @@ function unreadableSettings(
   return {
     settings: UNREADABLE_WORKSPACE_SETTINGS,
     source: "recovered",
-    // The capture decision is made at workspace open, so repairing the file
-    // is only half the fix: nothing is recorded until the workspace is opened
-    // again. The notice owes the user both steps.
-    warning: `${reason} dohc records no history for this workspace. Fix ${path}. Then reopen the workspace.`,
+    // Repairing the file is only half the fix, and the second half is a
+    // RESTART, not a reopen: main decides the recorder once per workspace per
+    // app session (openWorkspaceActivity retains every opened workspace, and
+    // workspaceActivity.open no-ops for one it already watches), so leaving
+    // the workspace and coming back re-reads nothing.
+    warning: `${reason} dohc records no history for this workspace. Fix ${path}. Then restart dohc.`,
   };
 }
 
@@ -70,34 +72,56 @@ export async function readWorkspaceSettingsFile(
   }
 }
 
-// Saves for ONE workspace run one at a time. Two controls changed before the
-// first save settles would otherwise both read the same old file, and the
-// later merge would drop the earlier patch while the dialog reported it saved.
-const settingsSaveQueues = new Map<string, Promise<unknown>>();
+// EVERY write for ONE workspace runs on this queue, one at a time. Two
+// controls changed before the first save settles would otherwise both read the
+// same old file, and the later merge would drop the earlier patch while the
+// dialog reported it saved. Reset joins the same queue for the same reason:
+// off it, a patch already in flight reads pre-reset settings and writes them
+// back after the reset returns, leaving the file somewhere the user never
+// asked for while the dialog says the reset landed.
+const settingsWriteQueues = new Map<string, Promise<unknown>>();
+
+function queueWorkspaceSettingsWrite<T>(
+  rootPath: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const queue = settingsWriteQueues.get(rootPath) ?? Promise.resolve();
+  // A failed write must not block the next one, so both settlements continue.
+  const result = queue.then(run, run);
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  settingsWriteQueues.set(rootPath, settled);
+  void settled.then(() => {
+    // Drop the entry only if no later write has taken the tail, so the map
+    // does not grow one promise per workspace for the life of the process.
+    if (settingsWriteQueues.get(rootPath) === settled) {
+      settingsWriteQueues.delete(rootPath);
+    }
+  });
+  return result;
+}
 
 export function saveWorkspaceSettingsFile(
   rootPath: string,
   patch: WorkspaceSettingsPatch,
 ): Promise<WorkspaceSettingsResult> {
-  const queue = settingsSaveQueues.get(rootPath) ?? Promise.resolve();
-  // A failed save must not block the next one, so both settlements continue.
-  const result = queue.then(
-    () => applyWorkspaceSettingsPatch(rootPath, patch),
-    () => applyWorkspaceSettingsPatch(rootPath, patch),
+  return queueWorkspaceSettingsWrite(rootPath, () =>
+    applyWorkspaceSettingsPatch(rootPath, patch),
   );
-  const settled = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  settingsSaveQueues.set(rootPath, settled);
-  void settled.then(() => {
-    // Drop the entry only if no later save has taken the tail, so the map does
-    // not grow one promise per workspace for the life of the process.
-    if (settingsSaveQueues.get(rootPath) === settled) {
-      settingsSaveQueues.delete(rootPath);
-    }
+}
+
+// What the Reset workspace control does: replace the file with the defaults.
+// This is also the way out the refusal names, so it must land even over a file
+// dohc cannot read — including a directory or a link at that path.
+export function resetWorkspaceSettingsFile(
+  rootPath: string,
+): Promise<WorkspaceSettingsResult> {
+  return queueWorkspaceSettingsWrite(rootPath, async () => {
+    await writeWorkspaceSettingsFile(rootPath, DEFAULT_WORKSPACE_SETTINGS);
+    return { settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" };
   });
-  return result;
 }
 
 // THE save path: the changed controls, applied to the file as it is NOW.

@@ -283,7 +283,7 @@ describe("notice center", () => {
         // #483: the cause rides main's open-time read, on the same status
         // that decided history is off. One read answers both.
         settingsWarning:
-          "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then reopen the workspace.",
+          "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.",
       },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));

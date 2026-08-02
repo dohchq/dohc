@@ -522,11 +522,10 @@ import {
   readCachedUserSettingsFile,
   writeUserSettingsFile,
 } from "./settings/userSettingsStore";
-import { DEFAULT_WORKSPACE_SETTINGS } from "./workspaces/workspaceSettings";
 import {
   readWorkspaceSettingsFile,
+  resetWorkspaceSettingsFile,
   saveWorkspaceSettingsFile,
-  writeWorkspaceSettingsFile,
 } from "./workspaces/workspaceSettingsFile";
 import {
   createSearchRegistry,
@@ -7127,11 +7126,9 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = WorkspaceSettingsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    await writeWorkspaceSettingsFile(workspace.rootPath, DEFAULT_WORKSPACE_SETTINGS);
-    return WorkspaceSettingsResult.parse({
-      settings: DEFAULT_WORKSPACE_SETTINGS,
-      source: "stored",
-    });
+    return WorkspaceSettingsResult.parse(
+      await resetWorkspaceSettingsFile(workspace.rootPath),
+    );
   });
 
   ipcMain.handle(CHANNELS.writeClipboardText, async (event, payload) => {

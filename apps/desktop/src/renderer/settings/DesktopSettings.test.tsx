@@ -40,18 +40,29 @@ const readyUpdateState = {
 type SettingsUpdateState = typeof idleUpdateState | typeof readyUpdateState;
 const getDefaultMcpConfig = async (_payload: { workspaceId: string }) => config;
 
+// The fake settings file. main merges each patch onto what is ON DISK, so the
+// double keeps that state: merging onto the defaults every time would model
+// less than the real save, and a second edit landing on a stale base would
+// look correct here.
+let workspaceSettingsOnDisk = DEFAULT_WORKSPACE_SETTINGS;
+
 async function readWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
-  return { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" };
+  return {
+    settings: workspaceSettingsOnDisk,
+    source: workspaceSettingsOnDisk === DEFAULT_WORKSPACE_SETTINGS ? "default" : "stored",
+  };
 }
 
 async function writeWorkspaceSettings(payload: {
   patch: WorkspaceSettingsPatch;
 }): Promise<WorkspaceSettingsResult> {
-  // Mirrors main: the patch is merged onto what the file holds.
-  return {
-    settings: mergeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS, payload.patch),
-    source: "stored",
-  };
+  workspaceSettingsOnDisk = mergeWorkspaceSettings(workspaceSettingsOnDisk, payload.patch);
+  return { settings: workspaceSettingsOnDisk, source: "stored" };
+}
+
+async function resetWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
+  workspaceSettingsOnDisk = DEFAULT_WORKSPACE_SETTINGS;
+  return { settings: workspaceSettingsOnDisk, source: "stored" };
 }
 
 const bridge = {
@@ -121,10 +132,7 @@ const bridge = {
   })),
   getWorkspaceSettings: vi.fn(readWorkspaceSettings),
   setWorkspaceSettings: vi.fn(writeWorkspaceSettings),
-  resetWorkspaceSettings: vi.fn(async () => ({
-    settings: DEFAULT_WORKSPACE_SETTINGS,
-    source: "stored" as const,
-  })),
+  resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
   writeClipboardText: vi.fn(async (_payload: { text: string }) => undefined),
   setTitlebarTheme: vi.fn(async () => undefined),
 };
@@ -151,10 +159,12 @@ function stubClipboard() {
 beforeEach(() => {
   mcpEnabled = false;
   updateReady = false;
-  // vi.clearAllMocks() clears calls, not implementations: restore the default
-  // reads so one test's unreadable file cannot leak into the next.
+  // vi.clearAllMocks() clears calls, not implementations: restore the fake
+  // file and the default reads so one test cannot leak into the next.
+  workspaceSettingsOnDisk = DEFAULT_WORKSPACE_SETTINGS;
   bridge.getWorkspaceSettings.mockImplementation(readWorkspaceSettings);
   bridge.setWorkspaceSettings.mockImplementation(writeWorkspaceSettings);
+  bridge.resetWorkspaceSettings.mockImplementation(resetWorkspaceSettings);
   document.documentElement.dataset.theme = "";
   document.documentElement.dataset.density = "";
   document.documentElement.dataset.reduceMotion = "";
@@ -964,7 +974,7 @@ describe("DesktopSettings", () => {
   // main refuses; the dialog must say so and must not claim a save happened.
   it("shows the refusal when the settings file cannot be read, and never says Saved", async () => {
     const warning =
-      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/settings.local.json. Then reopen the workspace.";
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/settings.local.json. Then restart dohc.";
     const refusal =
       "dohc did not save workspace settings. dohc cannot read /x/.dohc/settings.local.json. Fix that file. Or select Reset workspace in Advanced to replace it.";
     const onDisk = {
@@ -1011,6 +1021,36 @@ describe("DesktopSettings", () => {
         (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
       ).toBe("per-document"),
     );
+  });
+
+  // Each control saves on its own, and main merges each patch onto the file.
+  // An earlier edit must therefore survive the next one — the assertion that
+  // keeps the fake settings file above honest about what the real save does.
+  it("keeps an earlier edit when the next control is saved", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="files"
+        onClose={() => {}}
+      />,
+    );
+
+    await user.selectOptions(
+      await screen.findByTestId("attachment-location-select"),
+      "global-folder",
+    );
+    const input = await screen.findByTestId("attachment-folder-input");
+    await user.clear(input);
+    await user.type(input, "media");
+
+    await waitFor(() =>
+      expect((input as HTMLInputElement).value).toBe("media"),
+    );
+    expect(
+      (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
+    ).toBe("global-folder");
   });
 
   it("persists an edited attachment folder name", async () => {
