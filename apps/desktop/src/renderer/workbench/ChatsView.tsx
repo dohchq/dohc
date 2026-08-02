@@ -1248,13 +1248,19 @@ export function ChatsView(props: {
             });
           }
           // The listing above syncs joined shared channels before it reads, and
-          // that sync records a revoked or downgraded grant in the registry.
-          // Without the correction here the composer stays enabled on a channel
-          // the user can no longer post to. Ask only when this workspace has
-          // joined rows: a joined row only ever arrives through an explicit
-          // refresh, so there is nothing to discover here.
+          // the registry it syncs into decides what this workspace joined,
+          // whether a grant was revoked, and whether one was downgraded. Every
+          // one of those reaches the list as a channel this view would
+          // otherwise read as its own: sharing offered on someone else's
+          // channel, a composer on a read-only grant.
+          //
+          // So ask every pass. The rows are local — no relay, no engine — and
+          // asking only when this view already knew of a joined channel missed
+          // the first one, which is exactly when the surface is most wrong.
+          // Only an unresolved listing is skipped: nothing to correct yet, and
+          // channelIsLocked already fails closed until its owner settles it.
           const cachedShares = latestChannelShares.current;
-          if (cachedShares && cachedShares.joined.length > 0) {
+          if (cachedShares !== null) {
             const sharesTicket = takeCommitTicket();
             const refreshed = await bridge().listJoinedSharedChannels({ workspaceId });
             // ONLY the joined lane, which is all this read answers. Leaving the

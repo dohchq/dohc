@@ -1765,9 +1765,10 @@ describe("ChatsView live activity refresh", () => {
 
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("3");
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
-    // Nothing is joined here, so there is no grant to correct and no reason to
-    // ask the relay-backed lookup anything.
+    // The badge pass asked the local registry, and the relay-backed lookup not
+    // at all — its rows are not this reader's to answer.
     expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.listJoinedSharedChannels).toHaveBeenCalled();
   });
 
   // The editor marks a thread read and the shell bumps readRevision, whose
@@ -1985,6 +1986,105 @@ describe("ChatsView live activity refresh", () => {
       expect(screen.getByTestId("chats-channel-unread").textContent).toBe("4"),
     );
     expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1);
+  });
+
+  // Another mounted Chats view joins this workspace's FIRST shared channel.
+  // The listing then carries a channel this view has no grant row for, and a
+  // channel with no grant row reads as this workspace's own: sharing offered
+  // on someone else's channel, and a composer on a read-only grant.
+  it("resolves the first shared channel a view learns about from a write", async () => {
+    const sharedChannel = channel({
+      id: "channel-shared",
+      name: "shared-one",
+      slug: "shared-one",
+      wireId: "wire-shared",
+    });
+    let channelsIncludeShared = false;
+    bridgeMock.listChatChannels.mockImplementation(() =>
+      Promise.resolve({
+        channels: channelsIncludeShared ? [channel(), sharedChannel] : [channel()],
+        fileThreads: [],
+      }),
+    );
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    const user = userEvent.setup();
+    renderView();
+    await screen.findByTestId("chats-channel-name");
+
+    // The other view joins, so the registry now has a read-only grant and the
+    // channel is pulled locally. This view hears about it as workspace activity.
+    channelsIncludeShared = true;
+    bridgeMock.listJoinedSharedChannels.mockResolvedValue({
+      joined: [
+        {
+          shareId: "share-joined",
+          channelWireId: "wire-shared",
+          granterEmail: "owner@example.com",
+          access: "read-only" as const,
+          ended: false,
+        },
+      ],
+    });
+    act(() => emitWorkspaceActivity());
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("chats-channel")).toHaveLength(2),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
+        "Shared by owner@example.com — read-only",
+      ),
+    );
+
+    // Opening it is honest: read-only, and no composer to post with.
+    await user.click(screen.getAllByTestId("chats-channel")[1]);
+    expect((await screen.findByTestId("chats-readonly-note")).textContent).toContain(
+      "read-only for you",
+    );
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+  });
+
+  // The other side of that rule. While the share metadata is unresolved there
+  // is nothing to correct, and a badge pass that claimed the joined lane
+  // anyway would starve the listing that owns BOTH lanes — leaving "unknown"
+  // on screen, which locks every channel including this workspace's own.
+  it("lets the first share listing settle even when a badge pass ran first", async () => {
+    let answerShares!: (value: {
+      granted: unknown[];
+      received: unknown[];
+      joined: unknown[];
+    }) => void;
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return new Promise((resolve) => {
+          answerShares = resolve;
+        });
+      }
+      return Promise.resolve({ granted: [], received: [], joined: [] });
+    });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    const user = userEvent.setup();
+    renderView();
+    await waitFor(() => expect(shareReads).toBe(1));
+
+    // A write lands before the share metadata has resolved.
+    act(() => emitWorkspaceActivity());
+    await screen.findByTestId("chats-channel-name");
+
+    await act(async () => {
+      answerShares({ granted: [], received: [], joined: [] });
+      await Promise.resolve();
+    });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
   // A background failure is fast when the relay is refusing, and the load it
