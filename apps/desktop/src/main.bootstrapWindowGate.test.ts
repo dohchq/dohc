@@ -122,6 +122,10 @@ describe("bootstrap window gate", () => {
       "sendWorkspaceActivated(window, activatedWorkspace)",
       listenerAt,
     );
+    const residualDrainAt = mainSource.indexOf(
+      "void flushPendingOpenPaths(window);",
+      sendAt,
+    );
     const openGateAt = mainSource.indexOf("bootstrapComplete = true", drainAt);
 
     // The renderer subscribes when it loads, so the drained path has to reach
@@ -131,7 +135,16 @@ describe("bootstrap window gate", () => {
     expect(mergeAt).toBeGreaterThan(drainAt);
     expect(listenerAt).toBeGreaterThan(mergeAt);
     expect(sendAt).toBeGreaterThan(listenerAt);
+    // A path can arrive while the drain above awaits: it is queued behind an
+    // open gate, so the listener has to flush the remainder or it sits there.
+    expect(residualDrainAt).toBeGreaterThan(sendAt);
     expect(openGateAt).toBeGreaterThan(drainAt);
+  });
+
+  // The listener carries the residual drain, so a launch with no workspace to
+  // activate must still register it.
+  it("registers the activation listener unconditionally", () => {
+    expect(mainSource).toContain('\n    window.webContents.once("did-finish-load"');
   });
 
   it("quits with a visible error when the bootstrap continuation throws", () => {

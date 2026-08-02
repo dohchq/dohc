@@ -7826,11 +7826,13 @@ if (!app.requestSingleInstanceLock()) {
     // the launch workspace would then override the path the user opened.
     const drainedWorkspace = await flushPendingOpenPaths();
     const activatedWorkspace = drainedWorkspace ?? initialActivatedWorkspace;
-    if (activatedWorkspace) {
-      window.webContents.once("did-finish-load", () => {
-        sendWorkspaceActivated(window, activatedWorkspace);
-      });
-    }
+    window.webContents.once("did-finish-load", () => {
+      if (activatedWorkspace) sendWorkspaceActivated(window, activatedWorkspace);
+      // A path that arrived while the drain above was awaiting is queued behind
+      // an open gate, so no later event is guaranteed to flush it. The renderer
+      // has subscribed by now, so this one lands — and being last, it wins.
+      void flushPendingOpenPaths(window);
+    });
     launchMarks.firstWindow();
     desktopMarks.markOnce("first-window");
     // The daemon is up, IPC is registered, and a window exists, so the deferred
