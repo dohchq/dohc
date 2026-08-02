@@ -169,6 +169,39 @@ function chatsDestinationKey(nav: ChatsNav | null): string {
   return nav.level;
 }
 
+function chatsFocusMessageId(nav: ChatsNav | null): string | undefined {
+  return nav && (nav.level === "thread" || nav.level === "dm")
+    ? nav.focusMessageId
+    : undefined;
+}
+
+// Two questions about one navigation, deliberately different.
+//
+// Did the user LEAVE the conversation? That scopes drafts: a draft belongs to
+// the conversation it was typed in, so a jump WITHIN that conversation must
+// not discard it.
+export function chatsNavigationLeavesConversation(
+  current: ChatsNav | null,
+  next: ChatsNav,
+): boolean {
+  return chatsDestinationKey(current) !== chatsDestinationKey(next);
+}
+
+// Did the user GO somewhere? That cancels a pending DM lookup. A focused
+// message IS somewhere — chatsNavigationRequiresRemount treats it as a new
+// jump for exactly that reason — so a backlink or feed item landing on another
+// message in the open conversation counts, even though the conversation did
+// not change and the draft typed there survives.
+export function chatsNavigationChangesDestination(
+  current: ChatsNav | null,
+  next: ChatsNav,
+): boolean {
+  return (
+    chatsNavigationLeavesConversation(current, next) ||
+    chatsFocusMessageId(current) !== chatsFocusMessageId(next)
+  );
+}
+
 export function chatsNavigationRequiresRemount(
   current: ChatsNav | null,
   next: ChatsNav,
@@ -1802,11 +1835,11 @@ export function DesktopWorkspaceShell(props: {
   // Reports that stay on the same conversation change nothing and cancel
   // nothing. Returns whether the destination actually moved.
   const setChatsDestination = useCallback((nav: ChatsNav) => {
-    const changed = chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav);
-    if (changed) invalidateDmNavigation(dmNavigationRequest);
+    if (chatsNavigationChangesDestination(chatsNav.current, nav)) {
+      invalidateDmNavigation(dmNavigationRequest);
+    }
     chatsNav.current = nav;
     setSelectedChatsNav(nav);
-    return changed;
   }, []);
   const onChatsNav = useCallback(
     (nav: ChatsNav) => {
@@ -1829,8 +1862,9 @@ export function DesktopWorkspaceShell(props: {
       // Read before the write: both answers are about the destination the
       // panel is leaving.
       const shouldRemount = chatsNavigationRequiresRemount(chatsNav.current, nav);
-      const destinationChanged = setChatsDestination(nav);
-      if (destinationChanged) {
+      const leftConversation = chatsNavigationLeavesConversation(chatsNav.current, nav);
+      setChatsDestination(nav);
+      if (leftConversation) {
         // Drafts are scoped to the conversation they were typed in. Until the
         // draft store is keyed per channel/thread, never seed one into a
         // different destination.

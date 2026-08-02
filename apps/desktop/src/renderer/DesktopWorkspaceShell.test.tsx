@@ -41,6 +41,8 @@ import {
 import { rendererMarks } from "../performance/rendererMarks";
 import {
   chatMentionOpenTarget,
+  chatsNavigationChangesDestination,
+  chatsNavigationLeavesConversation,
   chatsNavigationRequiresRemount,
   DesktopWorkspaceShell,
   graphChatOpenTarget,
@@ -440,6 +442,31 @@ describe("targeted chat navigation", () => {
         threadNav("thread-1"),
       ),
     ).toBe(false);
+  });
+
+  // Two keys, two purposes. Cancelling a pending DM lookup asks "did the user
+  // go somewhere?", and a focused message is somewhere. Scoping drafts asks
+  // the narrower "did they leave the conversation?", because the draft they
+  // typed there must survive a jump inside it.
+  it("separates leaving a conversation from going somewhere inside it", () => {
+    const focused = threadNav("thread-1", "message-1");
+    const otherMessage = threadNav("thread-1", "message-2");
+    const otherThread = threadNav("thread-2");
+
+    // A backlink to another message in the open thread: going somewhere...
+    expect(chatsNavigationChangesDestination(focused, otherMessage)).toBe(true);
+    // ...without leaving the conversation, so the draft stays.
+    expect(chatsNavigationLeavesConversation(focused, otherMessage)).toBe(false);
+
+    // Another conversation is both.
+    expect(chatsNavigationChangesDestination(focused, otherThread)).toBe(true);
+    expect(chatsNavigationLeavesConversation(focused, otherThread)).toBe(true);
+
+    // The panel re-reporting where it already is, is neither.
+    expect(
+      chatsNavigationChangesDestination(focused, threadNav("thread-1", "message-1")),
+    ).toBe(false);
+    expect(chatsNavigationLeavesConversation(focused, focused)).toBe(false);
   });
 
   it("keeps metadata-light file mentions and graph chats on their known file thread", () => {
