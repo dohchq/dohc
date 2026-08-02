@@ -4,6 +4,9 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const requiredSteps = [
+  // Without this row the platform in the verdict line is Node's unverified
+  // claim, which is what the line was before the gate asked rustc.
+  "native target",
   "fixture drift",
   "fmt --check",
   "clippy -D warnings",
