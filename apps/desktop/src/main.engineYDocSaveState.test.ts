@@ -41,11 +41,18 @@ describe("engine Y.Doc save-state reporting in main", () => {
     expect(handler.indexOf("return;", reportAt)).toBeLessThan(applyAt);
   });
 
-  it("advances the edit counter only on the path that actually journals", () => {
+  it("counts the edit when the session hands it to the settle, not on arrival", () => {
+    // The session QUEUES updates, so counting here — before the hand-over —
+    // credits a settle armed by an earlier update with edits still waiting in
+    // that queue, and the editor reads "Saved" over a partial file (#514).
+    // The count belongs in the hand-over callback, which fires when the
+    // update reaches the provider. What that callback promises is proved
+    // behaviorally in workspaces/workspaceEngineYDocSession.test.ts.
     const handler = handlerSource("engineYDocApplyUpdate");
-    expect(handler.indexOf("entry.dirtySeq = input.seq")).toBeLessThan(
-      handler.indexOf("entry.session.applyLocalUpdate("),
-    );
+    const applyAt = handler.indexOf("entry.session.applyLocalUpdate(");
+    const countAt = handler.indexOf("noteLocalEdit(");
+    expect(applyAt).toBeGreaterThan(-1);
+    expect(countAt).toBeGreaterThan(applyAt);
   });
 
   // The defaulted seq is pinned BEHAVIORALLY in ipc/bridgeContract.test.ts

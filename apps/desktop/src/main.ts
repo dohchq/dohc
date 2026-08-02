@@ -7600,10 +7600,14 @@ function registerIpcHandlers(
       );
       return;
     }
-    // Record the edit BEFORE handing it over: applyLocalUpdate arms the
-    // debounced settle, whose onSettleStart snapshots the journaled seq.
-    noteLocalEdit(entry.saveSeq, input.seq);
-    entry.session.applyLocalUpdate(input.update);
+    // Count the edit when it REACHES the settle, not when it arrives here.
+    // The session queues updates, so hand-over runs ahead of journaling: a
+    // settle armed by an earlier update would otherwise start while this one
+    // is still queued and report "Saved" for content it never carried — the
+    // indicator read Saved over a half-written 140 KiB document (#514).
+    entry.session.applyLocalUpdate(input.update, () =>
+      noteLocalEdit(entry.saveSeq, input.seq),
+    );
   });
 
   ipcMain.handle(CHANNELS.engineYDocClose, async (event, payload) => {

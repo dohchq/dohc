@@ -271,7 +271,12 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   EngineYdocProviderSession,
   "lineage" | "applyLocalUpdate" | "applyExternalMarkdownEdit" | "close"
 > & {
-  applyLocalUpdate(update: Uint8Array): void;
+  // `onArmed` fires when THIS update has reached the provider — journaled onto
+  // the session's journal chain and counted by the settle it arms. The call is
+  // queued, so that moment is later than the caller handing the update over,
+  // and a save-state bookkeeper that counts at hand-over instead vouches for
+  // edits still sitting in the queue (#514).
+  applyLocalUpdate(update: Uint8Array, onArmed?: () => void): void;
   applyExternalMarkdownEdit(markdown: string): Promise<{ supported: boolean }>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
@@ -1324,7 +1329,7 @@ export function createWorkspaceEngineCapture(
       initialUpdate,
       contentKind,
       path: sessionPath,
-      applyLocalUpdate(update) {
+      applyLocalUpdate(update, onArmed) {
         void append(async () => {
           if (canonicalDoc === null || closed) throw closedError();
           const doc = canonicalDoc;
@@ -1336,11 +1341,20 @@ export function createWorkspaceEngineCapture(
           if (current === null) {
             Y.applyUpdate(doc, update);
             await reviveDeadSession(doc);
+            // The revive replayed the canonical doc — this update included —
+            // into the new generation, so it is journaled now.
+            onArmed?.();
             return;
           }
           const generation = current;
           try {
-            await generation.applyLocalUpdate(update);
+            // The provider journals and arms its settle SYNCHRONOUSLY inside
+            // this call, so the update is covered from here. Announce it before
+            // awaiting the journal round trip: the settle it just armed may
+            // start before that round trip returns.
+            const journaled = generation.applyLocalUpdate(update);
+            onArmed?.();
+            await journaled;
             Y.applyUpdate(doc, update);
           } catch (error) {
             // A live refusal still owns its lease and must close first; a
@@ -2659,9 +2673,17 @@ export function createWorkspaceEngineCapture(
           initialUpdate: session.initialUpdate,
           contentKind: session.contentKind,
           path: session.path,
-          applyLocalUpdate: (update) => {
+          // TWO counters ride this call, and they are not the same count.
+          // `noteUpdate` is the CLOSE counter (#496): it asks whether every
+          // update is covered by a settle, counts here at hand-over, and
+          // over-counts on purpose — over-counting only costs loudness.
+          // `onArmed` is the SAVE counter (#514): it asks which edits a
+          // settle may vouch for, so it must fire at the moment a settle
+          // carrying this update is ARMED, deeper in and later. Merging them
+          // would break one or the other.
+          applyLocalUpdate: (update, onArmed) => {
             noteUpdate();
-            return session.applyLocalUpdate(update);
+            return session.applyLocalUpdate(update, onArmed);
           },
           settleNow: (opts) => session.settleNow(opts),
           applyExternalMarkdownEdit: (markdown) => {

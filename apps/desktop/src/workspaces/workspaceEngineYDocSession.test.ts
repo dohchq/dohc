@@ -1,18 +1,26 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
+  YDOC_METHOD,
   YdocLoopbackEngine,
+  openEngineYdocProviderSession,
   type EngineTransport,
   type Event,
   type JsonValue,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import {
+  createEngineYDocSaveSeqState,
+  noteLocalEdit,
+  noteSettleOutcome,
+  noteSettleStart,
+} from "./engineYDocSaveSeq";
 import {
   EngineWorkspaceSessions,
   type EngineDaemonClient,
@@ -25,6 +33,10 @@ const PATH = "notes/solo.md";
 const INITIAL_MARKDOWN = "# Solo\n\nStart here.\n";
 
 let root = "";
+// Milliseconds the loopback daemon takes to answer ONE journal RPC. A busy
+// machine is what makes the session's update queue back up behind the settle
+// debounce (#514); this is that machine, made deterministic.
+let recordUpdateDelayMs = 0;
 let requests: Request[] = [];
 // Armed by a test to make the next ydoc.settle requests refuse. The loopback
 // engine cannot refuse a settle, and it should not learn to: this is what the
@@ -83,6 +95,14 @@ function daemonSessions(): EngineWorkspaceSessions {
         throw closeRefusal;
       }
       if (request.method.startsWith("ydoc.")) {
+        if (
+          recordUpdateDelayMs > 0 &&
+          request.method === YDOC_METHOD.recordUpdate
+        ) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, recordUpdateDelayMs),
+          );
+        }
         return await ydoc.sendRequest(request);
       }
       return await versioned.sendRequest(request);
@@ -149,6 +169,7 @@ beforeEach(async () => {
   settleRefusal = null;
   closeRefusal = null;
   captureErrors = [];
+  recordUpdateDelayMs = 0;
   versioned = new VersionedLoopbackEngine();
   versioned.seedTextFile({
     workspace: WORKSPACE_ID,
@@ -472,4 +493,82 @@ it("keeps a stale-target close loud when the release fails too", async () => {
   capture.captureBatch([{ path: PATH, operation: "update" }]);
   await capture.flush();
   expect(methodCount(VERSIONED_METHOD.textWrite)).toBe(writesBeforeWatcher);
+});
+
+// AUDIT-SILENTSAVE, #514. The save indicator's whole job is to not lie, and
+// the seq is how it keeps that promise: a settle may only vouch for edits it
+// actually carried. This drives the SAME wiring main.ts's IPC handlers use —
+// noteLocalEdit on the way in, noteSettleStart/noteSettleOutcome on the way
+// out — against a daemon slow enough for the update queue to back up behind
+// the settle debounce, which is what a loaded machine produces.
+//
+// Before the fix, main counted an edit when the IPC arrived rather than when
+// the session handed it to the settle, so a settle carrying 3 of 12 edits
+// reported all 12 and the editor read "Saved" over a third of the document.
+it("never reports a save seq the settled file does not back", async () => {
+  // Short enough that the queue cannot drain between settles; the delay below
+  // makes every journal RPC outlast it.
+  const settleDebounceMs = 5;
+  recordUpdateDelayMs = 25;
+  const honest = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) =>
+      await openEngineYdocProviderSession({ ...options, settleDebounceMs }),
+  });
+  const saveSeq = createEngineYDocSaveSeqState();
+  const vouched: Array<{ seq: number; markdown: string }> = [];
+  const session = await honest.openYDocSession({
+    path: PATH,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state, token) => {
+      if (state === "settling") {
+        noteSettleStart(saveSeq, token);
+        return;
+      }
+      const seq = noteSettleOutcome(saveSeq, token);
+      if (state === "saved") {
+        vouched.push({ seq, markdown: readFileSync(join(root, PATH), "utf8") });
+      }
+    },
+  });
+
+  // One edit per seq, each carrying its own marker, exactly as the renderer
+  // ships them: a local Y.Doc update per transaction, counted on the way out.
+  const editor = new Y.Doc();
+  const remoteOrigin = Symbol("renderer-remote");
+  Y.applyUpdate(editor, session.initialUpdate, remoteOrigin);
+  let seq = 0;
+  editor.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin === remoteOrigin) return;
+    seq += 1;
+    const edited = seq;
+    session.applyLocalUpdate(update, () => noteLocalEdit(saveSeq, edited));
+  });
+  const EDITS = 12;
+  for (let at = 1; at <= EDITS; at += 1) typeIntoBody(editor, `EDIT-${at}.`);
+  expect(seq).toBe(EDITS);
+
+  await session.close();
+  expect(vouched.length).toBeGreaterThan(1);
+
+  // THE INVARIANT: whatever seq a save vouched for, the file it left behind
+  // holds every edit up to that seq.
+  for (const claim of vouched) {
+    for (let at = 1; at <= claim.seq; at += 1) {
+      expect(
+        claim.markdown,
+        `a save vouching for seq ${claim.seq} left a file without EDIT-${at}`,
+      ).toContain(`EDIT-${at}.`);
+    }
+  }
+  // And the last one covers the whole document — the indicator does reach
+  // "Saved" rather than staying honest by never clearing.
+  expect(vouched.at(-1)?.seq).toBe(EDITS);
+  expect(await readFile(join(root, PATH), "utf8")).toContain(
+    `EDIT-${EDITS}.`,
+  );
+  await honest.stop().catch(() => undefined);
 });
