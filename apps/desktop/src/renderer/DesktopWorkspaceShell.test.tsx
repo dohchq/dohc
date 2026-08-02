@@ -1532,6 +1532,77 @@ describe("content search", () => {
       expect(screen.queryByTestId("activity-search-count")).toBeNull();
     });
   });
+
+  // #476: the results outlive the panel, so the criteria that produced them
+  // must too. A reopened empty input above surviving results named a query
+  // the user never sees.
+  it("reopens the panel showing the criteria its results belong to", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-search"));
+    await user.type(await screen.findByTestId("search-input"), "apples");
+    await user.click(screen.getByTestId("search-toggle-case"));
+    await waitFor(() => expect(bridge.searchWorkspace).toHaveBeenCalled());
+
+    const searchPayload = bridge.searchWorkspace.mock.calls.at(-1)![0];
+    expect(searchPayload.caseSensitive).toBe(true);
+    act(() => {
+      bridge.emitSearchResults({
+        searchId: searchPayload.searchId,
+        entries: [
+          {
+            path: "a.md",
+            line: 1,
+            column: 9,
+            preview: "I ate 10 apples",
+            matchStart: 9,
+            matchEnd: 15,
+          },
+        ],
+        done: true,
+        limitHit: false,
+      });
+    });
+    await screen.findByTestId("search-result-row");
+
+    // Clicking the active rail item collapses the panel: SearchView unmounts.
+    await user.click(screen.getByTestId("activity-search"));
+    expect(screen.queryByTestId("search-input")).toBeNull();
+    await user.click(screen.getByTestId("activity-search"));
+
+    const reopened = await screen.findByTestId("search-input");
+    expect((reopened as HTMLInputElement).value).toBe("apples");
+    expect(screen.getByTestId("search-toggle-case").getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    expect(screen.getAllByTestId("search-result-row")).toHaveLength(1);
+  });
+
+  // The filter boxes are collapsed by default, so a surviving glob would
+  // narrow the visible results from behind a closed disclosure.
+  it("reopens the filter boxes when the surviving criteria carry a glob", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-search"));
+    await user.type(await screen.findByTestId("search-input"), "apples");
+    await user.click(screen.getByTestId("search-filter-toggle"));
+    await user.type(await screen.findByTestId("search-include"), "*.md");
+    await waitFor(() =>
+      expect(bridge.searchWorkspace.mock.calls.at(-1)![0].includeGlob).toBe("*.md"),
+    );
+
+    await user.click(screen.getByTestId("activity-search"));
+    expect(screen.queryByTestId("search-input")).toBeNull();
+    await user.click(screen.getByTestId("activity-search"));
+
+    const reopenedInclude = await screen.findByTestId("search-include");
+    expect((reopenedInclude as HTMLInputElement).value).toBe("*.md");
+    expect(screen.getByTestId("search-exclude")).toBeTruthy();
+  });
 });
 
 describe("file tree drag preview", () => {
