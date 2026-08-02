@@ -63,29 +63,78 @@
 export const CONFLICT_PREVIEW_MAX_CHARS = 200_000;
 export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 
-/// The largest combined copy this surface will edit and post, in UTF-8 bytes.
+/// The largest combined copy this surface will EDIT, in UTF-8 bytes.
 ///
-/// TODAY this is the engine's own limit: the `apply-merged` arm in
-/// `crates/dohc-workspace-engine/src/lib.rs` refuses a merged text over
-/// `MAX_DESKTOP_CAPTURE_TEXT_BYTES`, and a surface must not offer an editing
-/// affordance whose apply the engine will refuse. The number is copied rather
-/// than imported because the engine's TypeScript twin lives in
-/// `versionedLoopbackEngine.ts`, whose first line is `import { createHash }
-/// from "node:crypto"` — importing it from the renderer would pull a Node
-/// builtin into the browser bundle, which neither the typecheck nor the test
-/// suite would notice. `engineTextLimits.test.ts` is what holds the copy
-/// honest; it reads the arm and fails when the two drift.
+/// This is a renderer bound, not the engine's. #569 replaced the old
+/// merged-text cap with a frame budget: `conflicts.resolve` succeeds when the
+/// whole JSON-ENCODED request fits `RESOLVE_REQUEST_FRAME_BYTES` (8 MiB), so
+/// what a body may weigh is whatever the rest of its request leaves.
 ///
-/// THIS NUMBER IS ABOUT TO STOP BEING THE ENGINE'S (#528 / PR #569). That PR
-/// raises the merged-resolution cap to 8,323,072 bytes — the conflict
-/// listing's own frame budget — so every side the surface can display becomes
-/// a side the engine would accept back. When it lands, this constant stops
-/// mirroring the engine and becomes what it always also was: the largest body
-/// this surface will hold in a CONTROLLED textarea that re-renders per
-/// keystroke. At that point it needs its own measured bound, set above the
-/// largest healthy document (469,068 characters — see the corpus above), not
-/// this number. See #566 and the note in engineTextLimits.test.ts.
-export const CONFLICT_COMBINED_MAX_BYTES = 128 * 1024;
+/// WHAT BINDS IT is that frame, not responsiveness. JSON escaping costs at
+/// most six bytes per raw byte — a body of control characters is the worst
+/// case — so a body must stay under about (8 MiB minus the envelope) / 6.
+/// `engineTextLimits.test.ts` proves this value clears that with the imported
+/// contract rather than a restated number: at this bound the worst case is
+/// 6 MiB encoded, leaving about 2 MiB of the frame spare.
+///
+/// RESPONSIVENESS TURNED OUT NOT TO BIND, and the first version of this
+/// constant was wrong about that. Its benchmark assigned `textarea.value`
+/// directly and reported 26-36 ms per keystroke here, which set the bound at
+/// half this. That measured a write the shipping path does not make: on an
+/// ordinary keystroke the browser applies the edit itself, and React's
+/// controlled input skips the value write because the DOM already holds what
+/// it wanted. Driving the REAL path — native input event, `onChange`,
+/// `applyCombinedChange`, commit — costs about 1 ms per MiB:
+///
+///     495,878 characters   0.6 ms
+///   1,048,576 characters   1.1 ms
+///   8,388,608 characters   9.0 ms
+///
+/// The one expensive keystroke is the REFUSED one, about 28 ms at half a
+/// megabyte and rising with the draft: a refusal leaves React holding a value
+/// the DOM disagrees with, so it writes the whole string back. That lands once
+/// when the user reaches the bound, which is the price of not letting the
+/// draft grow without limit.
+///
+/// Re-measure with conflictPane.measure.test.ts, which drives the shipping
+/// component in the Chromium this app ships:
+///
+///   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
+///
+/// WHY THIS VALUE. It is the largest round value that provably fits the frame
+/// in the worst case, and it clears `CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES` by
+/// more than double — which matters, because that corpus figure grew by 6%
+/// during the writing of this change alone. UTF-8 never spends less than one
+/// byte per UTF-16 code unit, so a bound in BYTES caps the code units that
+/// drive the cost above for every script.
+///
+/// WHAT IT HOLDS, per script, because bytes are not characters. About
+/// 1,048,576 characters of ASCII; about 524,288 of Latin-1 accented text or
+/// Greek or Cyrillic at two bytes; about 349,525 of CJK or most other
+/// three-byte text; about 262,144 emoji. The corpus behind the healthy figure
+/// is ASCII-dominated source and Markdown, so it says nothing about how large
+/// a healthy CJK document is — that is the open question in this number, and
+/// it is why the guard pins the CJK case explicitly rather than trusting a
+/// character count to stand in for a byte one.
+///
+/// Above the bound the surface degrades rather than refuses: keep a side, then
+/// edit the file in the editor, which is incremental and pays none of this.
+export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 1024 * 1024;
+
+/// The largest document in the measured corpus, in UTF-8 BYTES — the healthy
+/// maximum the bound above has to clear (AGENTS.md: set a limit that rejects
+/// work beyond the measured healthy range).
+///
+/// BYTES, because that is the unit the bound is enforced in. Recording it in
+/// characters compared two different things and proved nothing for any
+/// multi-byte script: a 400,000-character CJK document is comfortably under
+/// the character maximum and about 1.2 MiB of UTF-8, which this surface
+/// refuses. `engineTextLimits.test.ts` now pins that case directly.
+///
+/// A SNAPSHOT, re-read by conflictPane.measure.test.ts, which prints the
+/// current corpus every run. It drifts as the repository grows; when it passes
+/// the bound, re-measure both rather than nudging this number.
+export const CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES = 496_029;
 
 export type ConflictPreview = {
   /// The text the pane paints.
@@ -194,4 +243,24 @@ export function exceedsUtf8Bytes(text: string, limitBytes: number): boolean {
 /// walk is paid on a body the user cannot apply anyway.
 export function utf8ByteLength(text: string): number {
   return utf8Bytes(text, Number.POSITIVE_INFINITY);
+}
+
+/// What one change to the combined copy does: it is taken, or it is refused
+/// for being past the editing bound and the attempted size is reported.
+export type CombinedChange =
+  | { accepted: true; text: string }
+  | { accepted: false; refusedBytes: number };
+
+/// The decision behind every keystroke in the combine textarea.
+///
+/// Exported as a pure function so the thing that runs per keystroke is one
+/// piece of code with one set of tests — and so the browser benchmark in
+/// conflictPane.measure.test.ts can drive the SHIPPING decision rather than a
+/// copy of it that could quietly disagree.
+export function applyCombinedChange(next: string): CombinedChange {
+  if (exceedsUtf8Bytes(next, CONFLICT_COMBINED_EDIT_MAX_BYTES)) {
+    // One walk of the refused body, paid on a body that cannot be applied.
+    return { accepted: false, refusedBytes: utf8ByteLength(next) };
+  }
+  return { accepted: true, text: next };
 }

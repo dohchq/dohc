@@ -15,7 +15,8 @@ import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
 import {
-  CONFLICT_COMBINED_MAX_BYTES,
+  CONFLICT_COMBINED_EDIT_MAX_BYTES,
+  applyCombinedChange,
   conflictPreview,
   exceedsUtf8Bytes,
   utf8ByteLength,
@@ -1147,7 +1148,7 @@ function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
     (candidate): candidate is SeedCandidate & { text: string } => candidate.text !== null,
   );
   const fitting = present.find(
-    (candidate) => !exceedsUtf8Bytes(candidate.text, CONFLICT_COMBINED_MAX_BYTES),
+    (candidate) => !exceedsUtf8Bytes(candidate.text, CONFLICT_COMBINED_EDIT_MAX_BYTES),
   );
   if (fitting) {
     return { text: fitting.text, startedFrom: `Started from ${fitting.name}'s copy.` };
@@ -1162,8 +1163,8 @@ function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
     text: "",
     startedFrom:
       `Both copies are larger than ` +
-      `${CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes, so this ` +
-      `starts empty. That is the largest combined copy dohc can apply.`,
+      `${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")} bytes, so this ` +
+      `starts empty. That is the largest copy you can combine by hand.`,
   };
 }
 
@@ -1259,13 +1260,13 @@ function ConflictResolver(props: {
   }, []);
 
   const onCombinedChange = useCallback((next: string) => {
-    if (exceedsUtf8Bytes(next, CONFLICT_COMBINED_MAX_BYTES)) {
-      // One walk of the refused body, in the handler rather than the render.
-      setRefusedBytes(utf8ByteLength(next));
+    const change = applyCombinedChange(next);
+    if (!change.accepted) {
+      setRefusedBytes(change.refusedBytes);
       return;
     }
     setRefusedBytes(null);
-    setCombined(next);
+    setCombined(change.text);
   }, []);
 
   const resolve = useCallback(
@@ -1417,8 +1418,9 @@ function ConflictResolver(props: {
                   className="mb-0 text-[11px] leading-4 text-danger"
                 >
                   That change would make the combined copy{" "}
-                  {refusedBytes.toLocaleString("en-US")} bytes. dohc can apply up
-                  to {CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes.
+                  {refusedBytes.toLocaleString("en-US")} bytes. Combining by hand
+                  works up to{" "}
+                  {CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")} bytes.
                   Add less text.
                 </p>
               ) : null}

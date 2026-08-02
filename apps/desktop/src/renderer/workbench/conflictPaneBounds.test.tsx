@@ -33,7 +33,7 @@ function measurements(): number {
   return utf8ByteLengthSpy.mock.calls.length + exceedsUtf8BytesSpy.mock.calls.length;
 }
 
-const { CONFLICT_COMBINED_MAX_BYTES, CONFLICT_PREVIEW_MAX_CHARS } = await import(
+const { CONFLICT_COMBINED_EDIT_MAX_BYTES, CONFLICT_PREVIEW_MAX_CHARS } = await import(
   "./conflictPane"
 );
 const { ConflictReviewDialog, openConflictId } = await import("./WorkspaceVersions");
@@ -167,10 +167,10 @@ describe("combine by hand", () => {
     expect(
       screen.getByTestId("version-conflict-combined-source").textContent,
     ).toBe(
-      `Both copies are larger than ${CONFLICT_COMBINED_MAX_BYTES.toLocaleString(
+      `Both copies are larger than ${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString(
         "en-US",
-      )} bytes, so this starts empty. That is the largest combined copy dohc ` +
-        `can apply.`,
+      )} bytes, so this starts empty. That is the largest copy you can combine ` +
+        `by hand.`,
     );
     // And it can be applied: an empty combined copy is under every cap.
     expect(
@@ -231,13 +231,19 @@ describe("combine by hand", () => {
       "version-conflict-combined-input",
     ) as HTMLTextAreaElement;
     expect(box.value).toBe("my own draft\n");
-    expect(box.value.length).toBeLessThanOrEqual(CONFLICT_COMBINED_MAX_BYTES);
-    const alert = screen.getByTestId("version-conflict-combined-too-large");
-    expect(alert.textContent).toContain(paste.length.toLocaleString("en-US"));
-    expect(alert.textContent).toContain(
-      CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US"),
+    expect(box.value.length).toBeLessThanOrEqual(CONFLICT_COMBINED_EDIT_MAX_BYTES);
+    // The whole sentence, not just its numbers. The REASON is the part #566
+    // changed — the limit is what this box will edit, not what the engine
+    // will apply — and a `toContain` on the digits cannot tell the two apart.
+    expect(
+      screen.getByTestId("version-conflict-combined-too-large").textContent,
+    ).toBe(
+      `That change would make the combined copy ${paste.length.toLocaleString(
+        "en-US",
+      )} bytes. Combining by hand works up to ` +
+        `${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")} bytes. ` +
+        `Add less text.`,
     );
-    expect(alert.textContent).toContain("Add less text.");
 
     // The next change that fits is accepted, and the refusal goes away.
     fireEvent.change(box, { target: { value: "combined\n" } });
@@ -254,7 +260,7 @@ describe("combine by hand", () => {
     await openReview([conflict()]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     fireEvent.change(screen.getByTestId("version-conflict-combined-input"), {
-      target: { value: "x".repeat(CONFLICT_COMBINED_MAX_BYTES + 1) },
+      target: { value: "x".repeat(CONFLICT_COMBINED_EDIT_MAX_BYTES + 1) },
     });
     expect(screen.getByTestId("version-conflict-combined-too-large")).not.toBeNull();
 
@@ -272,20 +278,20 @@ describe("combine by hand", () => {
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     const input = screen.getByTestId("version-conflict-combined-input");
 
-    const atCap = "x".repeat(CONFLICT_COMBINED_MAX_BYTES);
+    const atCap = "x".repeat(CONFLICT_COMBINED_EDIT_MAX_BYTES);
     fireEvent.change(input, { target: { value: atCap } });
     expect((input as HTMLTextAreaElement).value).toHaveLength(
-      CONFLICT_COMBINED_MAX_BYTES,
+      CONFLICT_COMBINED_EDIT_MAX_BYTES,
     );
     expect(screen.queryByTestId("version-conflict-combined-too-large")).toBeNull();
 
     fireEvent.change(input, { target: { value: `${atCap}x` } });
     expect((input as HTMLTextAreaElement).value).toHaveLength(
-      CONFLICT_COMBINED_MAX_BYTES,
+      CONFLICT_COMBINED_EDIT_MAX_BYTES,
     );
     expect(
       screen.getByTestId("version-conflict-combined-too-large").textContent,
-    ).toContain((CONFLICT_COMBINED_MAX_BYTES + 1).toLocaleString("en-US"));
+    ).toContain((CONFLICT_COMBINED_EDIT_MAX_BYTES + 1).toLocaleString("en-US"));
   });
 
   it("starts empty when one side has no file and the other is over the cap", async () => {
