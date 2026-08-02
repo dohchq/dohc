@@ -12,6 +12,7 @@ import {
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createWorkspaceActivity } from "./workspaceActivity";
+import { YdocReleasedWithSettleFailureError } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { nativeTmpdir } from "./testTemp";
 
@@ -644,7 +645,19 @@ it.skipIf(engine.missing)(
       states.length = 0;
       errors.length = 0;
 
-      await expect(session.close()).rejects.toThrow();
+      const closeError = await session.close().then(
+        () => null,
+        (error: unknown) => error,
+      );
+      // The sharpest statement of the fix. The error the release throws here
+      // CARRIES the stale-target message — the escalated settling release
+      // refuses the same way the settle did — while NOT being the
+      // released-with-settle-failure signal, because nothing was released.
+      // A downgrade keyed on the refusal's message would fire on exactly
+      // this; keyed on the type, it cannot.
+      expect(closeError).not.toBeNull();
+      expect(closeError).not.toBeInstanceOf(YdocReleasedWithSettleFailureError);
+      expect(String(closeError)).toContain("conflict-stale-target");
       expect(states.at(-1)).toBe("error");
       expect(states).not.toContain("changed-on-disk");
       expect(errors).toContain("ydoc settle of note.md");
