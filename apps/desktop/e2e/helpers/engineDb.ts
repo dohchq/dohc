@@ -31,30 +31,65 @@ export interface EngineMoment {
   text: string;
 }
 
-// The engine.db may not exist yet while the app is still opening, and right
-// after creation its schema materializes through a migration chain a readonly
-// poll can observe mid-flight (moments existed before payload_after_* landed —
-// a real race caught on Windows). Both are "not ready, poll again" cases.
-// The cost: a genuinely typo'd column/table now times the poll out instead of
-// failing fast — every other error still rethrows with its real message.
-function isDbNotReady(error: unknown): boolean {
+// Only a database that cannot be OPENED reads as "not ready, poll again", and
+// only by error CODE — never by matching message text, which is the rule the
+// relay helper already follows.
+function isDbNotOpenable(error: unknown, dbOpened: boolean): boolean {
+  if (dbOpened) return false;
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  if (code === "ENOENT" || code === "SQLITE_CANTOPEN") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /unable to open database|cannot open|no such file|no such table|no such column/i.test(
-    message,
-  );
+  return code === "ENOENT" || code === "SQLITE_CANTOPEN";
+}
+
+// Every (table, column) this file reads. The engine applies its schema through
+// an ordered migration chain, and a later migration adds `payload_after_*` to a
+// baseline `moments`, so a read-only poll can observe the chain mid-flight (a
+// real race caught on Windows). This list is the readiness gate for that race:
+// a half-applied chain reads as "poll again" BEFORE any query runs, so after
+// the gate every query error throws.
+//
+// That split is the point. A swallowed query error becomes an EMPTY result, and
+// an empty result silently satisfies `toEqual([])`, `toBe(0)` and `toBe(false)`
+// at the call sites below. A name that is NOT on this list — a typo, a renamed
+// column, a wrong join column — reaches the query and fails loud.
+const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
+  [
+    "moments",
+    [
+      "path",
+      "operation",
+      "moment_order",
+      "payload_after_blob_sha256",
+      "payload_after_content_kind",
+    ],
+  ],
+  ["blobs", ["sha256", "text"]],
+  ["snapshots", ["path"]],
+  ["ydoc_updates", []],
+  ["replication_log", ["op_kind", "payload_json"]],
+];
+
+function schemaMaterialized(db: EngineDb): boolean {
+  for (const [table, columns] of SCHEMA_READ_HERE) {
+    const present = new Set(
+      db
+        .prepare("SELECT name FROM pragma_table_info(?)")
+        .all(table)
+        .map((row) => String(row.name)),
+    );
+    if (present.size === 0) return false;
+    for (const column of columns) if (!present.has(column)) return false;
+  }
+  return true;
 }
 
 export function withEngineDb<T>(rootPath: string, fn: (db: EngineDb) => T): T | null {
   let db: EngineDb | null = null;
   try {
     db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), { readOnly: true });
+    if (!schemaMaterialized(db)) return null;
     return fn(db);
   } catch (error) {
-    // "Not present yet" and "schema still materializing" both poll again —
-    // the latter throws from the query itself, so the db handle may be open.
-    if (isDbNotReady(error)) return null;
+    if (isDbNotOpenable(error, db !== null)) return null;
     throw error;
   } finally {
     db?.close();
@@ -72,19 +107,42 @@ export function ydocUpdateCount(rootPath: string): number {
   );
 }
 
-// Every projected moment carrying its blob text, ordered by moment_order.
+// Every text-carrying moment with its blob text, ordered by moment_order.
+//
+// A moment's `payload_after_blob_sha256` holds a `blobs` digest for text and a
+// `binary_blobs` digest for binary, so binary moments have no `blobs` row.
+// Filter them out BY KIND rather than letting an inner join drop them: a text
+// moment whose blob is missing is then an impossible state — a wrong join or a
+// corrupt store — and it throws. Returning a shorter list instead would quietly
+// satisfy the "exactly one settle moment" double-journal check in
+// workspace-engine-editor.spec, the assertion this join feeds.
+function readMoments(db: EngineDb, path?: string): EngineMoment[] {
+  const rows = db
+    .prepare(
+      `SELECT m.path AS path, m.operation AS operation,
+              m.payload_after_blob_sha256 AS sha, b.text AS text
+       FROM moments m
+       LEFT JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
+       WHERE m.payload_after_blob_sha256 IS NOT NULL
+         AND m.payload_after_content_kind IS NOT 'binary'
+         ${path === undefined ? "" : "AND m.path = ?"}
+       ORDER BY m.moment_order`,
+    )
+    .all(...(path === undefined ? [] : [path]));
+  return rows.map((row) => {
+    if (typeof row.text !== "string") {
+      throw new Error(
+        `engine moment ${String(row.path)} carries text payload ${String(row.sha)}, ` +
+          "but blobs holds no row for that digest: the moments->blobs join is " +
+          "wrong or the store is corrupt.",
+      );
+    }
+    return { path: String(row.path), operation: String(row.operation), text: row.text };
+  });
+}
+
 export function engineMomentsOrEmpty(rootPath: string): EngineMoment[] {
-  return (
-    withEngineDb(rootPath, (db) =>
-      db
-        .prepare(
-          `SELECT m.path AS path, m.operation AS operation, b.text AS text
-           FROM moments m JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
-           ORDER BY m.moment_order`,
-        )
-        .all() as unknown as EngineMoment[],
-    ) ?? []
-  );
+  return withEngineDb(rootPath, (db) => readMoments(db)) ?? [];
 }
 
 // The projected settle-moment texts for one path (settle points ARE engine
@@ -92,17 +150,7 @@ export function engineMomentsOrEmpty(rootPath: string): EngineMoment[] {
 // join is how the content is read.
 export function momentTextsForPath(rootPath: string, path: string): string[] {
   return (
-    withEngineDb(rootPath, (db) =>
-      (
-        db
-          .prepare(
-            `SELECT b.text AS text
-             FROM moments m JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
-             WHERE m.path = ? ORDER BY m.moment_order`,
-          )
-          .all(path) as Array<{ text: string }>
-      ).map((row) => row.text),
-    ) ?? []
+    withEngineDb(rootPath, (db) => readMoments(db, path).map((moment) => moment.text)) ?? []
   );
 }
 
