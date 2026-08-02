@@ -11496,6 +11496,137 @@ fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
     );
 }
 
+fn share_view_write_op(seq: i64, path: &str, sha256: &str) -> ShareReplicationEnvelope {
+    ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: seq,
+        op_kind: "moment.append".to_owned(),
+        payload: json!({
+            "operation": "write",
+            "path": path,
+            "payloadAfterPath": path,
+            "payloadAfterBlobSha256": sha256,
+            "payloadAfterContentKind": "text"
+        }),
+        recorded_at_ms: 10 + seq,
+    }
+}
+
+/// The secret-path refusal itself is proven at the enforcement function by
+/// `share_view_and_shared_channel_fail_closed_outside_boundary`. What this
+/// proves is the WIRING: `pull_share_view` turns that refusal into a skip
+/// BEFORE replay, so a misbehaving relay never gets the blob requested and no
+/// secret plaintext lands.
+#[test]
+fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let tracked = b"tracked body".to_vec();
+    let secret = b"AWS_SECRET_ACCESS_KEY=hunter2".to_vec();
+    let tracked_sha = dohc_engine_storage::hex_sha256(&tracked);
+    let secret_sha = dohc_engine_storage::hex_sha256(&secret);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_write_op(0, "docs/a.md", &tracked_sha),
+                        share_view_write_op(1, "app/.env", &secret_sha),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(tracked_sha.clone(), tracked), (secret_sha, secret)]),
+    );
+
+    let result = client.pull_share_view(&mut engine, "ws", "share", &NoFaults);
+
+    // Asserted before the outcome: replay downloads the blob BEFORE the write
+    // floor refuses the path, so a swallowed refusal discloses the secret bytes
+    // to the client even though nothing lands.
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [tracked_sha],
+        "MUTATION: continuing into replay after the boundary refusal downloads the secret blob"
+    );
+    let outcome = result.expect("a secret op is skipped, not fatal");
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (2, 1, 1),
+        "the tracked op applies and the secret one is counted as skipped"
+    );
+    assert_eq!(
+        outcome
+            .changed_paths
+            .iter()
+            .map(|changed| changed.path.as_str())
+            .collect::<Vec<_>>(),
+        ["docs/a.md"]
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "app/.env")
+            .expect("secret path read is answerable"),
+        None,
+        "MUTATION: continuing into replay lands secret plaintext on the read surface"
+    );
+}
+
+/// A share-view DELETE has no second floor. `replay_share_delete` reaches
+/// `validate_addressable_plaintext_path`, which deliberately admits secret
+/// paths so an absence check answers honestly, so `share.rs`'s boundary is the
+/// only gate — a relay-sent delete for a secret path must leave the file.
+#[test]
+fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let plaintext = "AWS_SECRET_ACCESS_KEY=hunter2";
+    seed_text_head(&mut engine, "secret-object", "app/.env", plaintext);
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                ops: vec![ShareReplicationEnvelope {
+                    origin_id: "peer".to_owned(),
+                    origin_seq: 0,
+                    op_kind: "moment.append".to_owned(),
+                    payload: json!({"operation": "delete", "path": "app/.env"}),
+                    recorded_at_ms: 10,
+                }],
+                next_cursor: 1,
+                has_more: false,
+            },
+        )],
+    ));
+
+    let outcome = client
+        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .expect("a secret delete is skipped, not fatal");
+
+    assert_eq!((outcome.applied, outcome.skipped), (0, 1));
+    assert!(
+        outcome.changed_paths.is_empty(),
+        "MUTATION: continuing into replay reports the secret path as changed"
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "app/.env")
+            .expect("secret path read is answerable")
+            .map(|snapshot| snapshot.text),
+        Some(plaintext.to_owned()),
+        "MUTATION: continuing into replay lets a relay delete a secret-shadowed file"
+    );
+}
+
 #[test]
 fn workspace_push_excludes_origins_imported_from_share_views() {
     let (_scratch, _path, mut engine) = store();
