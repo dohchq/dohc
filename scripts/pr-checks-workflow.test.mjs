@@ -131,6 +131,53 @@ test("an extra ` | ` is rejected, because the verdict is read by position", () =
   );
 });
 
+test("a status ends at the row's end, not at a word boundary", () => {
+  // A word boundary sits before `-` and `[` too, so both of these read as a
+  // PASS while carrying something else.
+  for (const forgery of ["native target=PASS-ignored", "native target=PASS[x]"]) {
+    assert.throws(
+      () =>
+        requireCiPassVerdict(
+          passVerdict.replace("native target=PASS", forgery),
+        ),
+      /native target/,
+      forgery,
+    );
+  }
+});
+
+test("a row's reason is part of that row, not more rows", () => {
+  // The last required row is gone and its name written inside another row's
+  // reason. An optional step may report SKIP beside an overall PASS, so this
+  // line reads as a run whose advisory scan passed while the summary never
+  // reported it.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict.replace(
+          "cargo-audit=PASS",
+          "other=SKIP[x=cargo-audit=PASS]",
+        ),
+      ),
+    /0 rows for required CI gate step `cargo-audit`/,
+  );
+});
+
+test("the gate name is required in its own field, not anywhere in the line", () => {
+  // The line is found by its gate name. Put that name where the platform goes
+  // and the line passes the search, holds five fields, and reports PASS in the
+  // verdict field with every required row present.
+  const impostor =
+    "- 2026-07-27T00:00:00.000Z | not-the-gate | run-rust-checks | PASS | " +
+    "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
+    "build --workspace=PASS test --workspace=PASS test collab crash tier=PASS " +
+    "cargo-deny=PASS cargo-audit=PASS";
+  assert.throws(
+    () => requireCiPassVerdict(impostor),
+    /step field reads `not-the-gate`/,
+  );
+});
+
 test("the verdict line a real gate run printed passes as written", () => {
   // Verbatim from C:/w/iss-nativeev-gate3.log, 2026-08-02 — a passing local
   // run of tools/rust-engine-program/run-rust-checks.mjs. The parser has to

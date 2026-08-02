@@ -26,22 +26,63 @@ const requiredSteps = [
   "cargo-audit",
 ];
 
-// One step row of the evidence line: `name=STATUS`, plus `[reason]` when the
-// status is not PASS. A name holds spaces and hyphens (`clippy -D warnings`)
-// but never an `=`, so a row's name is the text between its own `=` and the
-// nearest `=` or row end before it. The trailing `\b` keeps the status whole:
-// without it `native target=PASSED` reads as a PASS. Reading this line by
-// substring instead let a row named `not-native target=PASS` answer for
-// `native target`.
-const STEP_ROW = /(?<name>[^=\s](?:[^=]*[^=\s])?)=(?<status>PASS|FAIL|SKIP)\b/g;
+// The summary field is a list of rows joined by one space and nothing else. A
+// row is `name=STATUS`, and a FAIL or SKIP row may carry `[reason]` — the
+// free-form text the gate writes for a human. A name holds spaces and hyphens
+// (`clippy -D warnings`) but never an `=`.
+//
+// The list is read in order, from its first character, and every character
+// must belong to a row. Scanning the field for anything shaped like a row is
+// what let text that is not a row answer for a required step: `not-native
+// target=PASS` for `native target`, `native target=PASS-ignored` for a whole
+// status, and a `cargo-audit=PASS` written inside another row's reason for a
+// step that never ran.
+const ROW_HEAD = /(?<name>[^=]+)=(?<status>PASS|FAIL|SKIP)/y;
+const REASON_END = /\](?= |$)/g;
 
-/** `name -> [status, ...]`, one entry per row the summary field carries. */
+/** `name -> [status, ...]`, one entry per row, or a throw if this is no list. */
 function parseStepRows(summary) {
   const rows = new Map();
-  for (const { groups } of summary.matchAll(STEP_ROW)) {
-    const statuses = rows.get(groups.name) ?? [];
-    statuses.push(groups.status);
-    rows.set(groups.name, statuses);
+  const from = (at) => `\`${summary.slice(at, at + 40)}\``;
+  let at = 0;
+
+  while (at < summary.length) {
+    ROW_HEAD.lastIndex = at;
+    const head = ROW_HEAD.exec(summary);
+    if (!head) {
+      throw new Error(
+        `step summary is not a list of \`name=STATUS\` rows: nothing at offset ${at} starts one, ${from(at)}`,
+      );
+    }
+    const { name, status } = head.groups;
+    at = ROW_HEAD.lastIndex;
+
+    // A reason belongs to the row that opened it, so its text is never read as
+    // more rows. It can hold `]` itself (`[build].target`), so it ends at the
+    // first `]` a row separator follows. Only a FAIL or SKIP row has one.
+    if (status !== "PASS" && summary[at] === "[") {
+      REASON_END.lastIndex = at;
+      const closed = REASON_END.exec(summary);
+      if (!closed) {
+        throw new Error(
+          `step row \`${name}=${status}\` opens a \`[reason]\` that no \`]\` closes before a row separator`,
+        );
+      }
+      at = closed.index + 1;
+    }
+
+    // The row ends here or it is not that row: `native target=PASS-ignored`
+    // and `native target=PASS[reason]` are not `native target=PASS`.
+    if (at < summary.length && summary[at] !== " ") {
+      throw new Error(
+        `step row \`${name}=${status}\` must end at a space or the end of the summary, found ${from(at)}`,
+      );
+    }
+    at += 1;
+
+    const statuses = rows.get(name) ?? [];
+    statuses.push(status);
+    rows.set(name, statuses);
   }
   return rows;
 }
@@ -65,6 +106,14 @@ export function requireCiPassVerdict(log) {
   if (fields.length !== 5) {
     throw new Error(
       `verdict line has ${fields.length} " | "-separated fields, expected exactly 5 (stamp, step, platform, verdict, summary)`,
+    );
+  }
+  // The line was found by its gate name, which must be that name's own field:
+  // `- stamp | not-the-gate | run-rust-checks | PASS | ...` carries the name
+  // where the platform goes and answers every check that follows.
+  if (fields[1] !== "run-rust-checks") {
+    throw new Error(
+      `verdict line's step field reads \`${fields[1]}\`, expected \`run-rust-checks\``,
     );
   }
   // The verdict is that field, not text found anywhere in the line: a reason
