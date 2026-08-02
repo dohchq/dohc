@@ -139,7 +139,7 @@ describe("executeCli", () => {
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         transport,
         // `transport` is mocked, so no socket is opened; state the platform the
-        // test exercises rather than inheriting the host's win32 refusal.
+        // test exercises rather than inheriting the host's endpoint layout.
         platform: "linux",
       },
     });

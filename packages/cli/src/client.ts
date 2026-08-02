@@ -18,6 +18,16 @@ import {
 
 const TOKEN_FILE = "dohc-cli-token";
 const SOCKET_FILE = "dohc-cli.sock";
+const ENDPOINT_FILE = "dohc-cli-endpoint";
+// The app randomizes the Windows pipe name each boot, so the client cannot
+// derive it from the state dir; it reads the name back from the endpoint
+// descriptor. That name is not a secret. Any local process can enumerate
+// `\\.\pipe\` and can create a name that matches this pattern. The
+// authentication gate is the 256-bit token in the token file, which only the
+// ACL of the state directory protects. This pattern exists to refuse remote
+// endpoints of the `\\host\pipe\...` form, so a rewritten descriptor cannot
+// send the token off the machine over SMB.
+const PIPE_NAME_RE = /^\\\\\.\\pipe\\dohc-cli-[a-f0-9]{32,}$/u;
 const tokenSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const responseVersionEnvelopeSchema = z
   .object({ protocolVersion: z.number().int().nonnegative() })
@@ -59,7 +69,15 @@ function stateDirCandidates(input: {
   }
   if (input.platform === "win32") {
     const appData = input.env.APPDATA;
-    return appData ? [join(appData, "dohc")] : [];
+    // Packaged: userData is %APPDATA%\<productName>. Unpackaged: Electron uses
+    // the package name, which is where a developer's app writes its endpoint.
+    return appData
+      ? [
+          join(appData, "dohc"),
+          join(appData, "@dohc", "desktop"),
+          join(appData, "Electron"),
+        ]
+      : [];
   }
   const configHome = input.env.XDG_CONFIG_HOME ?? join(input.homeDir, ".config");
   return [
@@ -69,22 +87,41 @@ function stateDirCandidates(input: {
   ];
 }
 
-function endpointForStateDir(stateDir: string): CliEndpoint {
+// What discovery waits for in a state dir: the unix socket itself, or the
+// descriptor naming the Windows pipe.
+interface EndpointCandidate {
+  stateDir: string;
+  descriptorPath: string;
+  tokenPath: string;
+}
+
+function candidateForStateDir(
+  stateDir: string,
+  platform: NodeJS.Platform,
+): EndpointCandidate {
   return {
     stateDir,
-    socketPath: join(stateDir, SOCKET_FILE),
+    descriptorPath: join(
+      stateDir,
+      platform === "win32" ? ENDPOINT_FILE : SOCKET_FILE,
+    ),
     tokenPath: join(stateDir, TOKEN_FILE),
   };
 }
 
-function endpointCandidates(options: CliClientOptions): CliEndpoint[] {
-  if (options.stateDir) return [endpointForStateDir(resolve(options.stateDir))];
+function endpointCandidates(
+  options: CliClientOptions,
+  platform: NodeJS.Platform,
+): EndpointCandidate[] {
+  if (options.stateDir) {
+    return [candidateForStateDir(resolve(options.stateDir), platform)];
+  }
   const env = options.env ?? process.env;
   return stateDirCandidates({
     env,
-    platform: options.platform ?? process.platform,
+    platform,
     homeDir: options.homeDir ?? homedir(),
-  }).map(endpointForStateDir);
+  }).map((stateDir) => candidateForStateDir(stateDir, platform));
 }
 
 async function canRead(path: string): Promise<boolean> {
@@ -96,20 +133,46 @@ async function canRead(path: string): Promise<boolean> {
   }
 }
 
+async function resolveEndpoint(
+  candidate: EndpointCandidate,
+  platform: NodeJS.Platform,
+): Promise<CliEndpoint | null> {
+  if (!(await canRead(candidate.tokenPath))) return null;
+  const { stateDir, tokenPath } = candidate;
+  if (platform !== "win32") {
+    if (!(await canRead(candidate.descriptorPath))) return null;
+    return { stateDir, socketPath: candidate.descriptorPath, tokenPath };
+  }
+  let described: string;
+  try {
+    described = (await readFile(candidate.descriptorPath, "utf8")).trim();
+  } catch {
+    return null;
+  }
+  if (!PIPE_NAME_RE.test(described)) return null;
+  return { stateDir, socketPath: described, tokenPath };
+}
+
 export async function locateCliEndpoint(options: CliClientOptions = {}): Promise<CliEndpoint> {
   const platform = options.platform ?? process.platform;
-  if (platform === "win32") {
-    throw new DohcCliError("CLI is not yet supported on this platform");
+  const candidates = endpointCandidates(options, platform);
+  for (const candidate of candidates) {
+    const endpoint = await resolveEndpoint(candidate, platform);
+    if (endpoint) return endpoint;
   }
-  const candidates = endpointCandidates(options);
-  for (const endpoint of candidates) {
-    if (await canRead(endpoint.tokenPath) && await canRead(endpoint.socketPath)) {
-      return endpoint;
-    }
-  }
-  return candidates[0] ?? endpointForStateDir(
-    join(options.homeDir ?? homedir(), ".config", "dohc"),
-  );
+  // No live endpoint. A unix path is still nameable, so hand back the preferred
+  // one and let the connection report the failure. A pipe name is not.
+  if (platform === "win32") throw new DohcCliError("desktop app not running");
+  const fallback = candidates[0] ??
+    candidateForStateDir(
+      join(options.homeDir ?? homedir(), ".config", "dohc"),
+      platform,
+    );
+  return {
+    stateDir: fallback.stateDir,
+    socketPath: fallback.descriptorPath,
+    tokenPath: fallback.tokenPath,
+  };
 }
 
 async function readToken(path: string): Promise<string> {
@@ -178,23 +241,17 @@ export async function sendCliRequest<Verb extends CliVerb>(
   options: CliClientOptions = {},
 ): Promise<CliResultByVerb[Verb]> {
   const platform = options.platform ?? process.platform;
-  if (platform === "win32") {
-    throw new DohcCliError("CLI is not yet supported on this platform");
-  }
   const automaticDiscovery = options.stateDir === undefined;
-  const discovered = automaticDiscovery
-    ? await Promise.all(
-        endpointCandidates(options).map(async (endpoint) => ({
-          endpoint,
-          available: await canRead(endpoint.tokenPath) && await canRead(endpoint.socketPath),
-        })),
-      )
-    : [{ endpoint: await locateCliEndpoint(options), available: true }];
-  const endpoints = discovered.filter((candidate) => candidate.available);
+  const endpoints = automaticDiscovery
+    ? (await Promise.all(
+        endpointCandidates(options, platform).map((candidate) =>
+          resolveEndpoint(candidate, platform)),
+      )).filter((endpoint): endpoint is CliEndpoint => endpoint !== null)
+    : [await locateCliEndpoint(options)];
   if (endpoints.length === 0) throw new DohcCliError("desktop app not running");
 
   for (let index = 0; index < endpoints.length; index += 1) {
-    const endpoint = endpoints[index]!.endpoint;
+    const endpoint = endpoints[index]!;
     try {
       const token = await readToken(endpoint.tokenPath);
       const request: CliRequest = cliRequestSchema.parse({ ...requestWithoutToken, token });

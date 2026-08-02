@@ -17,7 +17,11 @@ import {
 
 const repoRoot = resolve(desktopRoot, "../..");
 const cliBin = join(repoRoot, "packages/cli/bin/dohc.js");
-const cliSocketFile = "dohc-cli.sock";
+// Unix serves the CLI over a socket file. Windows serves the same protocol
+// over a named pipe whose per-boot name lives in the endpoint descriptor.
+const cliEndpointFile = process.platform === "win32"
+  ? "dohc-cli-endpoint"
+  : "dohc-cli.sock";
 const cliTokenFile = "dohc-cli-token";
 
 function runDohcCli(
@@ -63,7 +67,7 @@ function runDohcCli(
 }
 
 async function waitForCliEndpoint(homeDir: string): Promise<void> {
-  const socketPath = join(homeDir, cliSocketFile);
+  const socketPath = join(homeDir, cliEndpointFile);
   const tokenPath = join(homeDir, cliTokenFile);
   await expect
     .poll(
@@ -80,14 +84,21 @@ async function waitForCliEndpoint(homeDir: string): Promise<void> {
     .toBe(true);
 }
 
-function postCard(page: Page, title: string): Locator {
-  return page.getByTestId("chats-post-card").filter({
-    has: page.getByTestId("chats-post-title").filter({ hasText: title }),
+// The Chats panel mirrors the editor tab's conversation, so an unscoped
+// conversation locator matches both surfaces. Everything about the OPEN
+// conversation is read from the editor area; the panel stays the navigator.
+function editorArea(page: Page): Locator {
+  return page.locator("main");
+}
+
+function postCard(root: Locator, title: string): Locator {
+  return root.getByTestId("chats-post-card").filter({
+    has: root.page().getByTestId("chats-post-title").filter({ hasText: title }),
   });
 }
 
-function commentWithBody(page: Page, body: string): Locator {
-  return page
+function commentWithBody(root: Locator, body: string): Locator {
+  return root
     .locator(
       'li[data-testid="chats-message"] > [data-testid="chats-comment-bubble"] > [data-testid="chats-message-body"]',
     )
@@ -96,10 +107,24 @@ function commentWithBody(page: Page, body: string): Locator {
     .locator("..");
 }
 
+// A comment's replies nest INSIDE its own list item, so an unscoped lookup
+// matches the reply's controls as well. A message's own action row is a direct
+// child element; its replies sit in a sibling list.
+function ownActions(message: Locator): Locator {
+  return message.locator("> div");
+}
+
+// Same reason: a message's own bubble is its direct child, and every author,
+// badge, and decision control lives inside that bubble.
+function ownBubble(message: Locator): Locator {
+  return message.locator('> [data-testid="chats-comment-bubble"]');
+}
+
 async function addReaction(message: Locator, emoji: string): Promise<void> {
   await message.hover();
-  await message.getByTestId("chats-add-reaction").click();
-  await message
+  const actions = ownActions(message);
+  await actions.getByTestId("chats-add-reaction").click();
+  await actions
     .locator(
       `[data-testid="chats-reaction-choice"][data-emoji=${JSON.stringify(emoji)}]`,
     )
@@ -107,14 +132,12 @@ async function addReaction(message: Locator, emoji: string): Promise<void> {
 }
 
 function reactionPill(message: Locator, emoji: string): Locator {
-  return message.locator(
+  return ownActions(message).locator(
     `[data-testid="chats-reaction-pill"][data-emoji=${JSON.stringify(emoji)}]`,
   );
 }
 
 test("feed comments, reactions, and CLI decisions persist across relaunch", async () => {
-  test.skip(process.platform === "win32", "The authenticated dohc CLI socket is Unix-only.");
-
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "chats-feed-e2e";
@@ -136,9 +159,10 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
+    let view = editorArea(page);
 
     await page.getByTestId("titlebar-chats-sidebar").click();
-    await expect(page.getByTestId("chats-view")).toBeVisible();
+    await expect(page.getByTestId("chats-panel")).toBeVisible();
 
     // Channels remain a human/UI action. Creating one opens its feed
     // immediately, where the post composer accepts a multiline body and the
@@ -146,17 +170,26 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill(channelName);
     await page.getByTestId("chats-new-channel-name").press("Enter");
-    await expect(page.getByTestId("chats-channel-view")).toBeVisible();
     await expect(page.getByTestId("chats-channel-title")).toHaveText(channelName);
 
-    await page.getByTestId("chats-new-thread-composer").fill(postBody);
-    await page.getByTestId("chats-new-thread-composer").press("Enter");
-    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
-    await expect(page.getByTestId("chats-thread-post-title")).toHaveText(postTitle);
-    await expect(page.getByTestId("chats-message-body").first()).toHaveText(postBody);
+    // Creating a channel opens it inside the panel. Hand the conversation to
+    // the editor and collapse the navigator, so this spec asserts on ONE
+    // surface — panel/editor duplication is workspace-chats.spec.ts's subject.
+    await page.getByTestId("chats-channel-back").click();
+    await page.getByTestId("chats-channel").filter({ hasText: channelName }).click();
+    await expect(view.getByTestId("chats-channel-view")).toBeVisible();
+    await page.getByTestId("chats-panel-collapse").click();
+    await expect(page.getByTestId("chats-panel")).toHaveCount(0);
+    await expect(view.getByTestId("chats-channel-title")).toHaveText(channelName);
 
-    await page.getByTestId("chats-thread-back").click();
-    const card = postCard(page, postTitle);
+    await view.getByTestId("chats-new-thread-composer").fill(postBody);
+    await view.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(view.getByTestId("chats-thread-view")).toBeVisible();
+    await expect(view.getByTestId("chats-thread-post-title")).toHaveText(postTitle);
+    await expect(view.getByTestId("chats-message-body").first()).toHaveText(postBody);
+
+    await view.getByTestId("chats-thread-back").click();
+    const card = postCard(view, postTitle);
     await expect(card).toBeVisible();
     await expect(card.getByTestId("chats-post-title")).toHaveText(postTitle);
     await expect(card.getByTestId("chats-post-title")).toHaveClass(/font-serif/);
@@ -166,15 +199,15 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     if (!threadId) throw new Error("created post did not expose its thread id");
 
     await card.click();
-    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+    await expect(view.getByTestId("chats-thread-view")).toBeVisible();
 
     // Put an unrelated comment between the parent and its nested reply. The
     // flat v1 renderer then exposes the true parent with its reply-context
     // tag rather than relying on adjacency.
-    const composer = page.getByTestId("chats-composer");
+    const composer = view.getByTestId("chats-composer");
     await composer.fill(firstCommentBody);
     await composer.press("Enter");
-    const firstComment = commentWithBody(page, firstCommentBody);
+    const firstComment = commentWithBody(view, firstCommentBody);
     await expect(firstComment).toBeVisible();
     const firstCommentId = await firstComment.getAttribute("data-message-id");
     expect(firstCommentId).toBeTruthy();
@@ -182,15 +215,15 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
 
     await composer.fill(interveningCommentBody);
     await composer.press("Enter");
-    await expect(commentWithBody(page, interveningCommentBody)).toBeVisible();
+    await expect(commentWithBody(view, interveningCommentBody)).toBeVisible();
 
-    await firstComment.getByTestId("chats-comment-reply").click();
-    await expect(page.getByTestId("chats-replying-mode")).toContainText(
+    await ownActions(firstComment).getByTestId("chats-comment-reply").click();
+    await expect(view.getByTestId("chats-replying-mode")).toContainText(
       "Replying to You",
     );
     await composer.fill(nestedCommentBody);
     await composer.press("Enter");
-    const nestedComment = commentWithBody(page, nestedCommentBody);
+    const nestedComment = commentWithBody(view, nestedCommentBody);
     await expect(nestedComment).toBeVisible();
     await expect(nestedComment).toHaveAttribute("data-thread-depth", "1");
     await expect(nestedComment).toHaveAttribute(
@@ -203,7 +236,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
 
     // A post reaction is a reaction on the opening message. The same quiet
     // pills work on comments.
-    const openingMessage = page.locator('article[data-testid="chats-message"]');
+    const openingMessage = view.locator('article[data-testid="chats-message"]');
     await addReaction(openingMessage, "👍");
     await expect(reactionPill(openingMessage, "👍")).toHaveAttribute(
       "data-mine",
@@ -231,47 +264,49 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     ]);
     expect(reply.stderr).toBe("");
     expect(reply.stdout).toContain("replied");
-    const cliMessageId = reply.stdout.match(/\bmsg_[^\s·]+/u)?.[0];
+    // `replied <threadId> <messageId>`. Read the rendered field rather than a
+    // prefix: the daemon's message ids carry no `message_`/`msg_` prefix.
+    const cliMessageId = reply.stdout.match(/^replied\s+\S+\s+(\S+)/mu)?.[1];
     expect(cliMessageId).toBeTruthy();
     if (!cliMessageId) throw new Error("CLI reply did not return a message id");
 
     // The running thread consumes main's activity invalidation, so the CLI
     // report and typed decision appear without a navigation or polling wait.
-    const agentComment = commentWithBody(page, decisionBody);
+    const agentComment = commentWithBody(view, decisionBody);
     await expect(agentComment).toHaveAttribute("data-author-kind", "agent");
-    await expect(agentComment.getByTestId("chats-message-author")).toHaveText(
+    await expect(ownBubble(agentComment).getByTestId("chats-message-author")).toHaveText(
       "You's agent",
     );
-    await expect(agentComment.getByTestId("chats-comment-agent-badge")).toHaveText(
+    await expect(ownBubble(agentComment).getByTestId("chats-comment-agent-badge")).toHaveText(
       "agent",
     );
-    const agentBubble = agentComment.getByTestId("chats-comment-bubble");
+    const agentBubble = ownBubble(agentComment);
     await expect(agentBubble).toHaveClass(/border-l-2/);
     await expect(agentBubble).toHaveAttribute("style", /--dohc-agent/);
-    await expect(agentComment.getByTestId("chats-comment-decision-open")).toHaveText(
+    await expect(ownBubble(agentComment).getByTestId("chats-comment-decision-open")).toHaveText(
       "needs decision",
     );
 
     // The feed summary reflects the same open decision, and reopening keeps
     // the full agent treatment and resolve gesture intact.
-    await page.getByTestId("chats-thread-back").click();
-    const decisionCard = postCard(page, postTitle);
+    await view.getByTestId("chats-thread-back").click();
+    const decisionCard = postCard(view, postTitle);
     await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveText(
       "needs decision",
     );
     await decisionCard.click();
     await expect(agentComment).toBeVisible();
 
-    await agentComment.getByTestId("chats-comment-decision-resolve").click();
-    await expect(page.getByTestId("chats-resolving-mode")).toContainText(
+    await ownBubble(agentComment).getByTestId("chats-comment-decision-resolve").click();
+    await expect(view.getByTestId("chats-resolving-mode")).toContainText(
       "Resolving decision — your reply records it",
     );
     await composer.fill(resolutionBody);
     await composer.press("Enter");
     await expect(
-      agentComment.getByTestId("chats-comment-decision-resolved"),
+      ownBubble(agentComment).getByTestId("chats-comment-decision-resolved"),
     ).toHaveText("resolved");
-    await expect(commentWithBody(page, resolutionBody)).toBeVisible();
+    await expect(commentWithBody(view, resolutionBody)).toBeVisible();
 
     const show = await runDohcCli(temp, ["chat", "show", threadId, "--peek"]);
     expect(show.stderr).toBe("");
@@ -295,6 +330,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     page = desktop.page;
+    view = editorArea(page);
     if (!(await page.getByTestId("chats-view").isVisible())) {
       await page.getByTestId("titlebar-chats-sidebar").click();
     }
@@ -305,7 +341,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(persistedChannel).toBeVisible();
     await persistedChannel.click();
 
-    const persistedCard = postCard(page, postTitle);
+    const persistedCard = postCard(view, postTitle);
     await expect(persistedCard).toBeVisible();
     await expect(persistedCard.getByTestId("chats-post-title")).toHaveText(postTitle);
     await expect(persistedCard.getByTestId("chats-post-title")).toHaveClass(/font-serif/);
@@ -321,32 +357,109 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(persistedCard.getByTestId("chats-post-decision-open")).toHaveCount(0);
 
     await persistedCard.click();
-    await expect(page.getByTestId("chats-thread-post-title")).toHaveText(postTitle);
-    await expect(page.getByTestId("chats-message-body")).toHaveCount(6);
-    await expect(commentWithBody(page, nestedCommentBody).getByTestId("chats-reply-context"))
+    await expect(view.getByTestId("chats-thread-post-title")).toHaveText(postTitle);
+    await expect(view.getByTestId("chats-message-body")).toHaveCount(6);
+    await expect(commentWithBody(view, nestedCommentBody).getByTestId("chats-reply-context"))
       .toHaveText("↳ replying to You");
 
-    const persistedOpening = page.locator('article[data-testid="chats-message"]');
+    const persistedOpening = view.locator('article[data-testid="chats-message"]');
     await expect(reactionPill(persistedOpening, "👍")).toHaveAttribute(
       "data-mine",
       "true",
     );
-    const persistedFirstComment = commentWithBody(page, firstCommentBody);
+    const persistedFirstComment = commentWithBody(view, firstCommentBody);
     await expect(reactionPill(persistedFirstComment, "🎉")).toHaveAttribute(
       "data-mine",
       "true",
     );
 
-    const persistedAgentComment = commentWithBody(page, decisionBody);
-    await expect(persistedAgentComment.getByTestId("chats-comment-agent-badge"))
+    const persistedAgentComment = commentWithBody(view, decisionBody);
+    await expect(ownBubble(persistedAgentComment).getByTestId("chats-comment-agent-badge"))
       .toHaveText("agent");
-    await expect(persistedAgentComment.getByTestId("chats-comment-bubble"))
+    await expect(ownBubble(persistedAgentComment))
       .toHaveClass(/border-l-2/);
     await expect(
-      persistedAgentComment.getByTestId("chats-comment-decision-resolved"),
+      ownBubble(persistedAgentComment).getByTestId("chats-comment-decision-resolved"),
     ).toHaveText("resolved");
-    await expect(page.getByTestId("chats-comment-decision-open")).toHaveCount(0);
-    await expect(commentWithBody(page, resolutionBody)).toBeVisible();
+    await expect(view.getByTestId("chats-comment-decision-open")).toHaveCount(0);
+    await expect(commentWithBody(view, resolutionBody)).toBeVisible();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// #333: the live external-write invariant. A separate OS process writes an
+// agent chat into the RUNNING app's daemon over the authenticated CLI
+// endpoint, and the unread badge appears with NO relaunch and NO navigation.
+// This is the only cross-process write path after the daemon cutover — a
+// second daemon cannot attach to the app's store — so it is what proves the
+// app invalidates its chat state on an outside write.
+//
+// The open channel view consumes main's activity invalidation. The channel
+// LIST does not — it reloads on navigation — so the roll-up badge stays where
+// workspace-chats.spec.ts already reads it, after a relaunch.
+test("an agent chat written by the CLI while the app runs arrives unread live", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "chats-live-unread-e2e";
+  const agentBody = "The zeppelin-cadence report is ready.";
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+
+    // Open #general in the editor and stay there. The panel stays a navigator,
+    // so both surfaces render chats markup from here on; scope every locator
+    // to the one being asserted.
+    const panel = page.getByTestId("chats-panel");
+    const channelView = page.locator(
+      '[data-testid="chats-channel-view"][data-variant="page"]',
+    );
+    const threadView = page.locator(
+      '[data-testid="chats-thread-view"][data-variant="page"]',
+    );
+    await page.getByTestId("titlebar-chats-sidebar").click();
+    await expect(panel).toBeVisible();
+    await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
+    await panel.getByTestId("chats-channel").click();
+    await expect(channelView).toBeVisible();
+    await expect(channelView.getByTestId("chats-thread")).toHaveCount(0);
+
+    await waitForCliEndpoint(temp.homeDir);
+    const post = await runDohcCli(temp, [
+      "chat",
+      "post",
+      "general",
+      "--as-agent",
+      agentBody,
+    ]);
+    expect(post.stderr).toBe("");
+    expect(post.stdout).toContain("in #general");
+
+    // Live: no relaunch, no click, no navigation. The open channel repaints
+    // from main's invalidation, and the agent thread arrives UNREAD.
+    const agentThreadRow = channelView
+      .getByTestId("chats-thread")
+      .filter({ hasText: "zeppelin-cadence" });
+    await expect(agentThreadRow).toBeVisible();
+    await expect(agentThreadRow.getByTestId("chats-thread-unread")).toHaveText("1");
+
+    // Reading it clears the badge, so it tracked read state rather than
+    // merely rendering an arrival.
+    await agentThreadRow.click();
+    await expect(threadView.getByTestId("chats-message-author")).toHaveText(
+      "You's agent",
+    );
+    await expect(threadView.getByTestId("chats-message-body")).toContainText(
+      agentBody,
+    );
+    await threadView.getByTestId("chats-thread-back").click();
+    await expect(channelView.getByTestId("chats-thread-unread")).toHaveCount(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

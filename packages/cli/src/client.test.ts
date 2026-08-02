@@ -20,6 +20,12 @@ async function tempStateDir(withToken = true): Promise<string> {
   return dir;
 }
 
+const PIPE = `\\\\.\\pipe\\dohc-cli-${"9f".repeat(16)}`;
+
+async function describeEndpoint(stateDir: string, pipeName: string): Promise<void> {
+  await writeFile(join(stateDir, "dohc-cli-endpoint"), `${pipeName}\n`);
+}
+
 describe("sendCliRequest", () => {
   it("reads the boot token and validates a concrete success response", async () => {
     const stateDir = await tempStateDir();
@@ -173,5 +179,96 @@ describe("sendCliRequest", () => {
       join(stale, "dohc-cli.sock"),
       join(active, "dohc-cli.sock"),
     ]);
+  });
+
+  it("dials the Windows pipe named by the endpoint descriptor", async () => {
+    const stateDir = await tempStateDir();
+    await describeEndpoint(stateDir, PIPE);
+    const transport = vi.fn(async () => ({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      ok: true,
+      result: { channels: [] },
+    }));
+    const result = await sendCliRequest(
+      {
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "channels",
+        args: { cwd: "C:\\workspace", actor: "human" },
+      },
+      { stateDir, transport, platform: "win32" },
+    );
+    expect(result).toEqual({ channels: [] });
+    // The app randomizes the pipe name each boot, so it must come from the
+    // descriptor rather than from the state dir path.
+    expect(transport).toHaveBeenCalledWith(PIPE, expect.any(String), undefined);
+  });
+
+  it("never sends the boot token to a descriptor that does not name a dohc pipe", async () => {
+    const transport = vi.fn(async () => ({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      ok: true,
+      result: { channels: [] },
+    }));
+    for (
+      const described of [
+        "\\\\.\\pipe\\attacker-listener",
+        "\\\\evil-host\\pipe\\dohc-cli-00112233445566778899aabbccddeeff",
+        "C:\\Users\\someone\\dohc-cli.sock",
+        "",
+      ]
+    ) {
+      const stateDir = await tempStateDir();
+      await describeEndpoint(stateDir, described);
+      await expect(
+        sendCliRequest(
+          {
+            protocolVersion: CLI_PROTOCOL_VERSION,
+            verb: "channels",
+            args: { cwd: "C:\\workspace", actor: "human" },
+          },
+          { stateDir, transport, platform: "win32" },
+        ),
+      ).rejects.toThrow("desktop app not running");
+    }
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it("skips a Windows state dir with no endpoint descriptor", async () => {
+    const home = await mkdtemp(join(tmpdir(), "dohc-cli-home-"));
+    cleanupDirs.push(home);
+    const appData = join(home, "AppData", "Roaming");
+    const stale = join(appData, "dohc");
+    const active = join(appData, "@dohc", "desktop");
+    await Promise.all([
+      mkdir(stale, { recursive: true }),
+      mkdir(active, { recursive: true }),
+    ]);
+    for (const dir of [stale, active]) {
+      await writeFile(join(dir, "dohc-cli-token"), `${TOKEN}\n`);
+    }
+    await describeEndpoint(active, PIPE);
+    const attempted: string[] = [];
+    const result = await sendCliRequest(
+      {
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "channels",
+        args: { cwd: "C:\\workspace", actor: "human" },
+      },
+      {
+        env: { APPDATA: appData },
+        homeDir: home,
+        platform: "win32",
+        transport: async (socketPath) => {
+          attempted.push(socketPath);
+          return {
+            protocolVersion: CLI_PROTOCOL_VERSION,
+            ok: true,
+            result: { channels: [] },
+          };
+        },
+      },
+    );
+    expect(result).toEqual({ channels: [] });
+    expect(attempted).toEqual([PIPE]);
   });
 });

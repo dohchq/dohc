@@ -13,6 +13,13 @@ import {
   type TempWorkspace,
 } from "./helpers/workspace";
 
+// The CLI reaches a running app on Windows now (#333), so the socket is no
+// longer why these skip. The dispatch path itself is: with the runner exiting
+// 3, no failure note reaches the thread within 30s on Windows, and the report
+// case never posts either. Both are about the runner, not the transport.
+const WINDOWS_DISPATCH_SKIP =
+  "My agent's runner dispatch does not complete on Windows.";
+
 const REPORT = "done: checked the exports";
 const fakeRunner = resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs");
 
@@ -73,7 +80,7 @@ async function openMyAgent(page: Page): Promise<void> {
 }
 
 test("My agent dispatches a fresh successful run for each human message", async () => {
-  test.skip(process.platform === "win32", "The authenticated dohc CLI socket is Unix-only.");
+  test.skip(process.platform === "win32", WINDOWS_DISPATCH_SKIP);
 
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -128,7 +135,7 @@ test("My agent dispatches a fresh successful run for each human message", async 
 });
 
 test("My agent posts a durable failure note when the runner exits silently", async () => {
-  test.skip(process.platform === "win32", "The authenticated dohc CLI socket is Unix-only.");
+  test.skip(process.platform === "win32", WINDOWS_DISPATCH_SKIP);
 
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
