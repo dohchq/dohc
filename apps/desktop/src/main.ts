@@ -7819,13 +7819,14 @@ if (!app.requestSingleInstanceLock()) {
     refreshNativeWorkspaceSurfaces();
 
     const { createMainWindow } = await import("./window/createMainWindow");
-    const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
     // A path the handlers queued during the bootstrap is a later intent than the
-    // launch arguments, so it wins. Drain before the listener registers: the
-    // renderer only subscribes once it loads, so a send now would be dropped and
-    // the launch workspace would then override the path the user opened.
+    // launch arguments, so it wins. Drain before the window exists: creating it
+    // starts the load, so a listener registered after any further await can miss
+    // did-finish-load and never send at all.
     const drainedWorkspace = await flushPendingOpenPaths();
     const activatedWorkspace = drainedWorkspace ?? initialActivatedWorkspace;
+    const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
+    // Same tick as the window, so the load cannot finish before this listener.
     window.webContents.once("did-finish-load", () => {
       if (activatedWorkspace) sendWorkspaceActivated(window, activatedWorkspace);
       // A path that arrived while the drain above was awaiting is queued behind

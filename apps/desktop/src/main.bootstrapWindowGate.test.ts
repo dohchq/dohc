@@ -108,16 +108,15 @@ describe("bootstrap window gate", () => {
   });
 
   it("drains queued paths before the window's activation listener", () => {
-    const createWindowAt = mainSource.indexOf("createMainWindow({");
     const drainAt = mainSource.indexOf(
       "const drainedWorkspace = await flushPendingOpenPaths();",
-      createWindowAt,
     );
     const mergeAt = mainSource.indexOf(
       "drainedWorkspace ?? initialActivatedWorkspace",
       drainAt,
     );
-    const listenerAt = mainSource.indexOf('once("did-finish-load"', mergeAt);
+    const createWindowAt = mainSource.indexOf("createMainWindow({", mergeAt);
+    const listenerAt = mainSource.indexOf('once("did-finish-load"', createWindowAt);
     const sendAt = mainSource.indexOf(
       "sendWorkspaceActivated(window, activatedWorkspace)",
       listenerAt,
@@ -131,9 +130,13 @@ describe("bootstrap window gate", () => {
     // The renderer subscribes when it loads, so the drained path has to reach
     // the did-finish-load listener. Sending it earlier drops it, and the launch
     // argument then overrides the path the user actually opened.
-    expect(drainAt).toBeGreaterThan(createWindowAt);
+    expect(drainAt).toBeGreaterThanOrEqual(0);
     expect(mergeAt).toBeGreaterThan(drainAt);
-    expect(listenerAt).toBeGreaterThan(mergeAt);
+    expect(createWindowAt).toBeGreaterThan(mergeAt);
+    expect(listenerAt).toBeGreaterThan(createWindowAt);
+    // Creating the window starts the load. An await between the window and its
+    // listener lets did-finish-load fire first, and `once` then never runs.
+    expect(mainSource.slice(createWindowAt, listenerAt)).not.toContain("await");
     expect(sendAt).toBeGreaterThan(listenerAt);
     // A path can arrive while the drain above awaits: it is queued behind an
     // open gate, so the listener has to flush the remainder or it sits there.
