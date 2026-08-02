@@ -572,3 +572,47 @@ describe("blockControls drag payload", () => {
     expect(dragged?.eq(editor.state.doc.child(1))).toBe(true);
   });
 });
+
+describe("blockControls drag ghost", () => {
+  // jsdom has no DataTransfer. The dragstart handler only writes to it, so a
+  // recording stub is enough to reach the ghost.
+  function dragStart(handle: HTMLElement): void {
+    const event = new Event("dragstart", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: {
+        clearData: () => {},
+        setData: () => {},
+        setDragImage: () => {},
+        effectAllowed: "none",
+      },
+    });
+    handle.dispatchEvent(event);
+  }
+
+  it("hides the parked clone and takes it down with the editor", () => {
+    const editor = makeEditorWithControls({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: "Readable block text" }],
+        },
+      ],
+    });
+    const handle = editor.view.dom.querySelector<HTMLElement>(".dohc-block-handle");
+    if (!handle) throw new Error("block handle missing");
+
+    dragStart(handle);
+
+    const ghost = document.body.querySelector<HTMLElement>(".dohc-block-drag-ghost");
+    expect(ghost?.textContent).toContain("Readable block text");
+    expect(ghost?.getAttribute("aria-hidden")).toBe("true");
+
+    // A workspace switch destroys the editor mid-drag, so `dragend` never
+    // fires. The clone carries document text into the next workspace's
+    // accessibility tree unless the plugin removes it itself.
+    editor.destroy();
+
+    expect(document.body.querySelector(".dohc-block-drag-ghost")).toBeNull();
+  });
+});

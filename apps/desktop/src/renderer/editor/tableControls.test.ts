@@ -226,6 +226,21 @@ describe("table controls grips", () => {
     editor = undefined;
   });
 
+  it("takes its drag live region down with the editor", () => {
+    editor = createLabeledTableEditor();
+    const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
+    drag(rowGrips[0] as HTMLElement, rowGrips[2] as HTMLElement);
+    const status = document.body.querySelector("[data-dohc-table-drag-status]");
+    expect(status?.getAttribute("role")).toBe("status");
+
+    editor.destroy();
+    editor = undefined;
+
+    // A live region left on `document.body` outlives its editor: every
+    // workspace switch would add one more for a screen reader to enumerate.
+    expect(document.body.querySelector("[data-dohc-table-drag-status]")).toBeNull();
+  });
+
   it("renders column grips, row grips, row resize handles, and one table menu button", () => {
     editor = createTableEditor(2, 3);
     const dom = editor.view.dom;
