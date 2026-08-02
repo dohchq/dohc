@@ -23,6 +23,7 @@ configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
 import type {
   ChatChannelRecord,
+  DmRecord,
   FileChatThreadRecord,
   RefreshSharedViewResult,
   ShowExplorerMenuResult,
@@ -96,6 +97,33 @@ const STORED_STATE: WorkspaceUiState = {
   activeTab: "b.md",
   chatsVisible: true,
   chatsWidth: 360,
+};
+
+// One canonical DM, as the graph node a click starts a navigation from and as
+// the record syncDms answers with.
+const DM_GRAPH_NODE = {
+  path: "chat-thread:dm-thread",
+  kind: "chat-thread" as const,
+  threadId: "dm-thread",
+  channelId: "dm-local",
+  channelWireId: "dm-wire",
+  channelName: "alice@example.com",
+  channelKind: "dm" as const,
+  title: "Direct message",
+  incoming: 1,
+  outgoing: 0,
+};
+
+const CANONICAL_DM: DmRecord = {
+  channelId: "dm-local",
+  channelWireId: "dm-wire",
+  name: "alice@example.com",
+  peerLabel: "Alice",
+  role: "owner",
+  shareId: null,
+  threadId: "dm-thread",
+  unreadCount: 1,
+  connected: true,
 };
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -1191,23 +1219,11 @@ describe("ui-state merge-on-load", () => {
   // since the navigation holds that very object, its isCurrent() compared the
   // object against itself and the cancellation did nothing.
   it("discards an in-flight DM navigation when the user opens a file", async () => {
-    const dmNode = {
-      path: "chat-thread:dm-thread",
-      kind: "chat-thread" as const,
-      threadId: "dm-thread",
-      channelId: "dm-local",
-      channelWireId: "dm-wire",
-      channelName: "alice@example.com",
-      channelKind: "dm" as const,
-      title: "Direct message",
-      incoming: 1,
-      outgoing: 0,
-    };
-    const sync = deferred<{ available: boolean; dms: never[] }>();
+    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
-      nodes: [dmNode, { path: "a.md", title: "A", incoming: 0, outgoing: 0 }],
+      nodes: [DM_GRAPH_NODE, { path: "a.md", title: "A", incoming: 0, outgoing: 0 }],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
@@ -1221,7 +1237,7 @@ describe("ui-state merge-on-load", () => {
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
     const rows = await screen.findAllByTestId("graph-file-row");
-    await user.click(rows.find((row) => row.dataset.path === dmNode.path)!);
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
     // The user goes somewhere else: opening a file is a plain mutateWb
@@ -1230,14 +1246,95 @@ describe("ui-state merge-on-load", () => {
     await user.click(afterNav.find((row) => row.dataset.path === "a.md")!);
     expect((await screen.findByTestId("tab-a.md")).dataset.active).toBe("true");
 
-    // The navigation answers late. It is stale, so it must not open Chats
-    // over the file the user just opened.
+    // The navigation answers late, with the DM it would have opened. It is
+    // stale, so it must not open Chats over the file the user just opened.
     await act(async () => {
-      sync.resolve({ available: true, dms: [] });
+      sync.resolve({ available: true, dms: [CANONICAL_DM] });
       await sync.promise;
     });
     expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+  }, 20_000);
+
+  // The positive direction, and the reason it is not optional: every
+  // cancellation test above also passes when NOTHING ever lands, so a fix that
+  // cancelled the navigation the moment it started would read as green.
+  it("lands a DM navigation that nothing interrupts", async () => {
+    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [DM_GRAPH_NODE],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    await act(async () => {
+      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      await sync.promise;
+    });
+
+    expect(await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
+  }, 20_000);
+
+  // Cancelling on EVERY workbench write would make this seam hostile: a width
+  // drag streams one mutation per pointermove, so a user who clicks a DM and
+  // then adjusts the sidebar loses the click — and the syncDms failure branch
+  // is isCurrent-gated too, so nothing would surface. Only a destination
+  // change cancels.
+  it("keeps an in-flight DM navigation through a sidebar width drag", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [DM_GRAPH_NODE],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    // Drag the sidebar edge: a workbench write per pointermove, and not one
+    // that moves the active tab.
+    const panel = screen.getByTestId("side-panel");
+    expect(panel.style.width).toBe("240px");
+    const handle = screen.getByTestId("sidebar-resize");
+    fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 300 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 420 });
+    fireEvent.pointerUp(handle, { button: 0, pointerId: 1 });
+    await waitFor(() => expect(panel.style.width).toBe("420px"));
+
+    await act(async () => {
+      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      await sync.promise;
+    });
+
+    expect(await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
   }, 20_000);
 
   // A request that is merely in flight has not answered anything, and a

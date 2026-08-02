@@ -1313,7 +1313,18 @@ export function DesktopWorkspaceShell(props: {
   // the update. Loading stored state is the only setWb that bypasses this.
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
-      invalidateDmNavigation(dmNavigationRequest);
+      // A pending canonical DM navigation loses to a DESTINATION change, not
+      // to every workbench write. Most writes here are not one: a width drag
+      // streams a mutation per pointermove, and the share-mount poll reaches
+      // this seam with no user involved at all — cancelling on those would
+      // silently discard a DM the user had just clicked. The transition is
+      // computed from wbRef outside the functional updater, the idiom openFile
+      // and closeFileTab already use for their marks (updaters are
+      // side-effect-free by contract, so probing one is safe).
+      const current = wbRef.current;
+      if (updater(current).activeTab !== current.activeTab) {
+        invalidateDmNavigation(dmNavigationRequest);
+      }
       userTouchedWb.current = true;
       setWb(updater);
     },
@@ -1780,7 +1791,12 @@ export function DesktopWorkspaceShell(props: {
     setChatsReadRevision((current) => current + 1);
   }, []);
   const onChatsNav = useCallback((nav: ChatsNav) => {
-    invalidateDmNavigation(dmNavigationRequest);
+    // The panel reports its nav on every change, including ones that stay on
+    // the same conversation. Only a different destination cancels a pending
+    // DM navigation — the same predicate openChatsNavInTab already computes.
+    if (chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav)) {
+      invalidateDmNavigation(dmNavigationRequest);
+    }
     chatsNav.current = nav;
     setSelectedChatsNav(nav);
   }, []);
