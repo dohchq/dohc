@@ -31,14 +31,12 @@ describe("conflictPreview", () => {
     expect(preview.hiddenChars).toBeGreaterThan(0);
   });
 
-  it("cuts a character-heavy side at the character window, on a line boundary", () => {
+  it("fills the character window when the next whole line will not fit", () => {
     // 100 lines of 10,000 characters: far under the LINE window, far over the
     // character one. Only the character bound sees this shape.
     const text = lines(100, 10_000);
     const preview = conflictPreview(text, 1);
-    expect(preview.text.length).toBeLessThanOrEqual(CONFLICT_PREVIEW_MAX_CHARS);
-    expect(preview.text.split("\n").length - 1).toBeLessThan(100);
-    expect(preview.text.endsWith("\n")).toBe(true);
+    expect(preview.text).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS);
     expect(preview.text.length + preview.hiddenChars).toBe(text.length);
   });
 
@@ -49,6 +47,36 @@ describe("conflictPreview", () => {
     expect(preview.hiddenChars).toBe(CONFLICT_PREVIEW_MAX_CHARS * 3);
   });
 
+  it("stops on the line boundary the LINE window makes", () => {
+    // The line window bounds line boxes, so filling past it would paint the
+    // very thing it exists to bound. It is the one cut that stays on a
+    // boundary — progress is guaranteed there by the next window's lines.
+    const text = lines(CONFLICT_PREVIEW_MAX_LINES * 3, 10);
+    const preview = conflictPreview(text, 1);
+    expect(preview.text.split("\n").length - 1).toBe(CONFLICT_PREVIEW_MAX_LINES);
+    expect(preview.text.endsWith("\n")).toBe(true);
+    expect(preview.text.length).toBeLessThan(CONFLICT_PREVIEW_MAX_CHARS);
+  });
+
+  it("never ends the preview on half a surrogate pair", () => {
+    // A cut between the two halves of an astral character leaves a lone high
+    // surrogate, which renders as one replacement glyph. One line, so the
+    // window has no boundary to fall back to and must cut inside it.
+    //
+    // The leading "x" pushes every pair onto an odd index, so the window
+    // lands INSIDE one. Without the guard the preview would end on the
+    // leading half.
+    const body = `x${"🌱".repeat(CONFLICT_PREVIEW_MAX_CHARS)}`;
+    const preview = conflictPreview(body, 1);
+    const lastUnit = preview.text.charCodeAt(preview.text.length - 1);
+    expect(lastUnit >= 0xd800 && lastUnit < 0xdc00).toBe(false);
+    expect(preview.text).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS - 1);
+    expect(preview.text.length + preview.hiddenChars).toBe(body.length);
+    // The whole preview still decodes: no replacement character anywhere.
+    expect(preview.text).not.toContain("�");
+    expect([...preview.text]).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS / 2);
+  });
+
   it("bounds a 10 MiB side to one window", () => {
     const text = lines(250_000, 41);
     expect(text.length).toBeGreaterThan(10 * 1024 * 1024);
@@ -57,14 +85,39 @@ describe("conflictPreview", () => {
     expect(preview.hiddenChars).toBe(text.length - preview.text.length);
   });
 
-  it("each window shows more and holds back less", () => {
+  // Every shape, including the one that used to stall: a short complete line
+  // followed by a line far wider than the window. Requiring a line boundary
+  // kept the cut on that first newline, so 58 of the first 59 presses of
+  // "Show more" changed nothing.
+  const shapes: [string, string][] = [
+    ["many short lines", lines(CONFLICT_PREVIEW_MAX_LINES * 5, 10)],
+    ["one 1 MiB line", "y".repeat(1024 * 1024)],
+    ["a header then a 1 MiB line", `# header\n${"y".repeat(1024 * 1024)}`],
+    ["long lines", lines(60, 20_000)],
+    ["10 MiB, newline-heavy", lines(250_000, 41)],
+  ];
+
+  it.each(shapes)("every press of Show more reveals more of %s", (_label, text) => {
+    let previous = conflictPreview(text, 1);
+    expect(previous.hiddenChars).toBeGreaterThan(0);
+    for (let windows = 2; windows <= 60; windows += 1) {
+      const next = conflictPreview(text, windows);
+      expect(next.text.startsWith(previous.text)).toBe(true);
+      expect(next.text.length + next.hiddenChars).toBe(text.length);
+      if (previous.hiddenChars === 0) {
+        expect(next.hiddenChars).toBe(0);
+        continue;
+      }
+      // The press must pay for itself: strictly more painted, strictly less
+      // held back, every time, until the side is fully shown.
+      expect(next.text.length).toBeGreaterThan(previous.text.length);
+      expect(next.hiddenChars).toBeLessThan(previous.hiddenChars);
+      previous = next;
+    }
+  });
+
+  it("enough windows always reach the end of the side", () => {
     const text = lines(CONFLICT_PREVIEW_MAX_LINES * 5, 10);
-    const first = conflictPreview(text, 1);
-    const second = conflictPreview(text, 2);
-    expect(second.text.startsWith(first.text)).toBe(true);
-    expect(second.text.length).toBeGreaterThan(first.text.length);
-    expect(second.hiddenChars).toBeLessThan(first.hiddenChars);
-    // Enough windows always reach the end of the side.
     expect(conflictPreview(text, 5)).toEqual({ text, hiddenChars: 0 });
   });
 });

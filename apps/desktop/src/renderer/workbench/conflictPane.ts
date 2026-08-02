@@ -19,17 +19,21 @@
 /// not — 200,000 newlines is 200,000 line boxes and 200,000 characters.
 ///
 /// MEASURED by conflictPane.measure.test.ts against this repository's tracked
-/// text (`.md`, `.ts`, `.tsx`, `.rs`; 914 files), the stand-in for the
+/// text (`.md`, `.ts`, `.tsx`, `.rs`; 919 files), the stand-in for the
 /// documents a workspace holds — dohc has no user corpus yet:
 ///
 ///   lines: p50 191, p90 1,063, p99 4,414, max 13,404
-///   chars: p50 7,026, p90 39,271, p99 174,756, max 469,068
+///   chars: p50 7,022, p90 39,271, p99 174,756, max 469,068
+///   longest line: p50 99, p99 552, max 19,184
 ///
 /// Both windows sit above the 99th-percentile document, so 0.9% of them reach
 /// the character window and 0.8% the line window. A body past either shows its
 /// first window and a count of what is held back, and `Show more` reaches the
 /// rest. That is a weaker cut than the compare surface makes today — it stops
 /// at 800 diff lines and offers no way to see the rest at all.
+///
+/// The corpus holds NO line wider than the character window, so it says
+/// nothing about the mid-line cut below. The unit tests carry that shape.
 export const CONFLICT_PREVIEW_MAX_CHARS = 200_000;
 export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 
@@ -44,17 +48,34 @@ export const CONFLICT_COMBINED_MAX_BYTES = 128 * 1024;
 export type ConflictPreview = {
   /// The text the pane paints.
   text: string;
-  /// Characters the window held back. Zero means the pane shows the whole
-  /// side. Characters, not lines, because counting the lines of what we are
-  /// NOT painting would walk the whole body — the cost this bound removes.
+  /// How much the window held back, in UTF-16 code units. Zero means the pane
+  /// shows the whole side.
+  ///
+  /// Code units, not lines and not characters, and both of those are
+  /// deliberate. Counting the LINES of what we are not painting would walk the
+  /// whole body, which is the cost this bound exists to remove. Counting
+  /// CHARACTERS would too: `.length` counts code units, so a body of astral
+  /// characters — emoji, rare CJK, the mathematical alphabets — reports twice
+  /// the count a reader would count, because each of those spends two units.
+  /// The label the pane shows says "characters" because that is the reader's
+  /// word for it, and every BMP body (all ASCII, all ordinary CJK) reports it
+  /// exactly. An emoji-heavy side overstates, and the trade is deliberate: the
+  /// exact count costs a full-body walk to improve a number that sits beside a
+  /// "Show more" control.
   hiddenChars: number;
 };
 
 /// The first `windows` preview windows of one conflict side.
 ///
-/// The cut lands on a line boundary. The one exception is a single line longer
-/// than the character window, which is cut mid-line — there is no boundary to
-/// land on.
+/// The cut PREFERS a line boundary but never requires one: a window that could
+/// not fit the next whole line fills to the character bound instead, inside
+/// that line. Requiring the boundary made `Show more` stop making progress —
+/// a six-character line followed by a 1 MiB line revealed nothing for the
+/// first five presses, because the window kept landing on the same newline.
+///
+/// The one cut that stays on a boundary is the one the LINE window makes.
+/// Filling past it would paint the line boxes that window exists to bound, and
+/// progress is already guaranteed there: the next window admits more lines.
 export function conflictPreview(text: string, windows: number): ConflictPreview {
   const maxChars = CONFLICT_PREVIEW_MAX_CHARS * windows;
   const maxLines = CONFLICT_PREVIEW_MAX_LINES * windows;
@@ -69,10 +90,19 @@ export function conflictPreview(text: string, windows: number): ConflictPreview 
     lines += 1;
   }
 
-  // One line wider than the whole window: cut inside it rather than paint it.
-  if (cut === 0) cut = Math.min(text.length, maxChars);
+  if (lines < maxLines && cut < text.length && cut < maxChars) {
+    cut = Math.min(text.length, maxChars);
+    // Never split a surrogate pair: the leading half alone renders as one
+    // replacement glyph, so back up onto the character boundary.
+    if (cut < text.length && isHighSurrogate(text.charCodeAt(cut - 1))) cut -= 1;
+  }
+
   if (cut >= text.length) return { text, hiddenChars: 0 };
   return { text: text.slice(0, cut), hiddenChars: text.length - cut };
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code < 0xdc00;
 }
 
 // One walk of the UTF-8 encoding, stopping as soon as the count passes
@@ -87,7 +117,7 @@ function utf8Bytes(text: string, stopAbove: number): number {
       bytes += 1;
     } else if (code < 0x800) {
       bytes += 2;
-    } else if (code >= 0xd800 && code < 0xdc00) {
+    } else if (isHighSurrogate(code)) {
       const next = index + 1 < text.length ? text.charCodeAt(index + 1) : 0;
       if (next >= 0xdc00 && next < 0xe000) {
         bytes += 4;

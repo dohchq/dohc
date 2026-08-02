@@ -66,6 +66,12 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
     const longestLine: number[] = [];
     let overCharWindow = 0;
     let overLineWindow = 0;
+    // Files holding one line wider than the whole character window. This
+    // corpus has none — its longest line is about 19,000 characters — so the
+    // mid-line cut, and the "Show more" stall that lived in it (#536 review),
+    // were structurally invisible here. The unit tests carry that shape
+    // instead; a corpus of hand-written source cannot.
+    let overLongestLine = 0;
 
     for (const path of trackedTextFiles()) {
       let text: string;
@@ -78,7 +84,9 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
       const fileLines = text.split("\n");
       lines.push(fileLines.length);
       chars.push(text.length);
-      longestLine.push(fileLines.reduce((widest, line) => Math.max(widest, line.length), 0));
+      const widestLine = fileLines.reduce((widest, line) => Math.max(widest, line.length), 0);
+      longestLine.push(widestLine);
+      if (widestLine > CONFLICT_PREVIEW_MAX_CHARS) overLongestLine += 1;
       if (text.length > CONFLICT_PREVIEW_MAX_CHARS) overCharWindow += 1;
       if (fileLines.length > CONFLICT_PREVIEW_MAX_LINES) overLineWindow += 1;
     }
@@ -93,7 +101,8 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
         `over the character window: ${overCharWindow} ` +
         `(${((overCharWindow / lines.length) * 100).toFixed(1)}%)\n` +
         `over the line window:      ${overLineWindow} ` +
-        `(${((overLineWindow / lines.length) * 100).toFixed(1)}%)\n`,
+        `(${((overLineWindow / lines.length) * 100).toFixed(1)}%)\n` +
+        `holding a line wider than the character window: ${overLongestLine}\n`,
     );
   }, 600_000);
 

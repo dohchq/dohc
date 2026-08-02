@@ -6,11 +6,22 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
-import {
-  CONFLICT_COMBINED_MAX_BYTES,
-  CONFLICT_PREVIEW_MAX_CHARS,
-} from "./conflictPane";
-import { ConflictReviewDialog } from "./WorkspaceVersions";
+
+// The exact UTF-8 byte count is the one expensive thing this surface does to a
+// whole side. Spy on it, so a test can see it being spent on cards the user
+// cannot see — a render-count assertion cannot, and every bound test here
+// passed while twenty collapsed 10 MiB cards cost 750 ms on mount.
+const utf8ByteLengthSpy = vi.hoisted(() => vi.fn());
+vi.mock("./conflictPane", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./conflictPane")>();
+  utf8ByteLengthSpy.mockImplementation(actual.utf8ByteLength);
+  return { ...actual, utf8ByteLength: utf8ByteLengthSpy };
+});
+
+const { CONFLICT_COMBINED_MAX_BYTES, CONFLICT_PREVIEW_MAX_CHARS } = await import(
+  "./conflictPane"
+);
+const { ConflictReviewDialog, openConflictId } = await import("./WorkspaceVersions");
 
 // 250,000 lines of 41 characters: over 10 MiB, the band #524 opened up.
 function hugeBody(marker: string): string {
@@ -44,6 +55,7 @@ const bridgeMock = {
 };
 
 beforeEach(() => {
+  utf8ByteLengthSpy.mockClear();
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
   bridgeMock.listWorkspaceVersions.mockResolvedValue({
     versions: [
@@ -115,8 +127,10 @@ describe("a conflict side pane", () => {
 });
 
 describe("combine by hand", () => {
-  it("is not offered for a side the engine could not apply, and names the limit", async () => {
-    await openReview([conflict({ incomingText: hugeBody("b") })]);
+  it("is not offered when NEITHER side fits, and names the limit", async () => {
+    await openReview([
+      conflict({ currentText: hugeBody("a"), incomingText: hugeBody("b") }),
+    ]);
     expect(screen.queryByTestId("version-conflict-combine")).toBeNull();
     const note = screen.getByTestId("version-conflict-combine-unavailable");
     expect(note.textContent).toContain(
@@ -133,7 +147,33 @@ describe("combine by hand", () => {
       "version-conflict-combined-input",
     ) as HTMLTextAreaElement;
     expect(input.value).toBe("feature side\n");
+    expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
+      "Started from Feature's copy.",
+    );
     expect(screen.queryByTestId("version-conflict-combine-unavailable")).toBeNull();
+  });
+
+  it("falls back to the OTHER side when the preferred one is over the cap", async () => {
+    // A 10 MiB incoming copy beside a small copy on Main is still a conflict
+    // the user can combine by hand. Preferring the oversized side and then
+    // declaring the affordance unavailable refuses work the engine accepts.
+    await openReview([
+      conflict({ currentText: "main side\n", incomingText: hugeBody("b") }),
+    ]);
+    expect(screen.queryByTestId("version-conflict-combine-unavailable")).toBeNull();
+    fireEvent.click(screen.getByTestId("version-conflict-combine"));
+    expect(
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
+        .value,
+    ).toBe("main side\n");
+    // The user has to know which copy they are editing.
+    expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
+      "Started from Main's copy.",
+    );
+    expect(
+      (screen.getByTestId("version-conflict-apply-combined") as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
   });
 
   it("refuses to apply a combined copy typed past the cap, and names the limit", async () => {
@@ -178,6 +218,51 @@ describe("a list of open conflicts", () => {
     // Before the fix this was 80 panes, each holding a whole side.
     expect(screen.getAllByTestId("version-conflict-side-text")).toHaveLength(2);
     expect(screen.getAllByTestId("version-conflict-keep-current")).toHaveLength(1);
+  });
+
+  it("never measures a side it is not painting", async () => {
+    // Every one of these seeds is over the apply cap, so every card WOULD
+    // count its bytes exactly if the count were not deferred to expansion.
+    // Twenty 10 MiB sides cost 750 ms on mount that way, against 79 ms here —
+    // and every other test in this file passed through that regression.
+    const heavy = Array.from({ length: 20 }, (_, index) =>
+      conflict({
+        conflictId: `h-${index}`,
+        path: `heavy-${index}.md`,
+        currentText: hugeBody("a"),
+        incomingText: hugeBody("b"),
+      }),
+    );
+    await openReview(heavy);
+    // The open card measures its two over-cap sides. The nineteen collapsed
+    // ones measure nothing.
+    expect(utf8ByteLengthSpy).toHaveBeenCalledTimes(2);
+
+    utf8ByteLengthSpy.mockClear();
+    const cards = screen.getAllByTestId("version-conflict");
+    fireEvent.click(within(cards[7]).getByTestId("version-conflict-toggle"));
+    expect(utf8ByteLengthSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets the open conflict be collapsed, and leaves the others closed", async () => {
+    await openReview(many);
+    const cards = screen.getAllByTestId("version-conflict");
+
+    // Closing the card that is open must close it, not hand the turn back to
+    // the first card.
+    fireEvent.click(within(cards[0]).getByTestId("version-conflict-toggle"));
+    expect(screen.queryAllByTestId("version-conflict-side-text")).toHaveLength(0);
+    expect(
+      within(cards[0]).getByTestId("version-conflict-toggle").getAttribute(
+        "aria-expanded",
+      ),
+    ).toBe("false");
+
+    // And collapsing a LATER card must not reopen the first one.
+    fireEvent.click(within(cards[5]).getByTestId("version-conflict-toggle"));
+    expect(within(cards[5]).queryAllByTestId("version-conflict-side-text")).toHaveLength(2);
+    fireEvent.click(within(cards[5]).getByTestId("version-conflict-toggle"));
+    expect(screen.queryAllByTestId("version-conflict-side-text")).toHaveLength(0);
   });
 
   it("opens the first conflict, and expanding another closes it", async () => {
@@ -239,5 +324,30 @@ describe("a list of open conflicts", () => {
         .getAttribute("aria-expanded"),
     ).toBe("true");
     expect(screen.getAllByTestId("version-conflict-side-text")).toHaveLength(2);
+  });
+});
+
+describe("openConflictId", () => {
+  const list = [conflict({ conflictId: "a" }), conflict({ conflictId: "b" })];
+
+  it("opens the first conflict before the user has chosen", () => {
+    expect(openConflictId(list, undefined)).toBe("a");
+  });
+
+  it("keeps every card closed once the user has closed the open one", () => {
+    expect(openConflictId(list, null)).toBe(null);
+  });
+
+  it("opens the card the user chose", () => {
+    expect(openConflictId(list, "b")).toBe("b");
+  });
+
+  it("hands the turn to the next file when the chosen one is resolved", () => {
+    expect(openConflictId(list, "gone")).toBe("a");
+  });
+
+  it("opens nothing when there is nothing to open", () => {
+    expect(openConflictId([], undefined)).toBe(null);
+    expect(openConflictId([], "a")).toBe(null);
   });
 });

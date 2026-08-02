@@ -55,4 +55,30 @@ describe("the in-band text cap the combine affordance is gated on", () => {
       "text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES",
     );
   });
+
+  it("is still the only route a combined resolution can take", () => {
+    // The two assertions above catch the number MOVING. They cannot catch it
+    // ceasing to APPLY, which is exactly what #528 will do: it adds a blob
+    // route for an over-cap combined resolution, and on that day the daemon
+    // accepts a copy this surface still refuses — with both drift assertions
+    // green.
+    //
+    // The obvious fix is not a bigger constant here. It is for the conflict
+    // listing to REPORT the limit that applies to a combined resolution, the
+    // way `versionedText.read` already reports `inbandLimitBytes` beside an
+    // over-cap body (`lib.rs:3324`), and for this surface to gate on the
+    // reported number. Then #528 lifts the UI with no renderer change. That is
+    // a daemon wire change in the handler #528's lane is rewriting, so it is
+    // filed as #566 rather than taken here.
+    //
+    // Until then this tripwire fails the moment a second route appears, so
+    // #528 cannot land while this surface still refuses what the engine takes.
+    const rust = readRepoFile("crates/dohc-workspace-engine/src/lib.rs");
+    const resolveDto = rust.slice(
+      rust.indexOf("struct LocalResolveDto {"),
+      rust.indexOf("struct SearchParams {"),
+    );
+    expect(resolveDto).toContain("merged_text: Option<String>");
+    expect(resolveDto.toLowerCase()).not.toContain("blob");
+  });
 });

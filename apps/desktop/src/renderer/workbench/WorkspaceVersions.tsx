@@ -1038,6 +1038,11 @@ function conflictSideLabels(
 ): {
   currentHeading: string;
   incomingHeading: string;
+  /// Each side's owner, as a possessive subject: "Keep Main's copy",
+  /// "Started from this machine's copy". One name per side, so the two
+  /// sentences can never call the same side different things.
+  currentName: string;
+  incomingName: string;
   keepCurrent: string;
   keepIncoming: string;
   currentMissing: string;
@@ -1047,8 +1052,10 @@ function conflictSideLabels(
     return {
       currentHeading: "On this machine",
       incomingHeading: "On your other machine",
+      currentName: "this machine",
+      incomingName: "your other machine",
       keepCurrent: "Keep this machine's copy",
-      keepIncoming: "Keep the other machine's copy",
+      keepIncoming: "Keep your other machine's copy",
       currentMissing: "This machine doesn't have this file.",
       incomingMissing: "Your other machine removed this file.",
     };
@@ -1056,10 +1063,44 @@ function conflictSideLabels(
   return {
     currentHeading: "On Main",
     incomingHeading: `In ${sourceName}`,
+    currentName: "Main",
+    incomingName: sourceName,
     keepCurrent: "Keep Main's copy",
     keepIncoming: `Keep ${sourceName}'s copy`,
     currentMissing: "Main doesn't have this file.",
     incomingMissing: `${sourceName} removed this file.`,
+  };
+}
+
+type CombineSeed =
+  /// The copy the textarea starts from, and whose copy it is. `name` is null
+  /// only when neither side holds text, which seeds an empty combined copy.
+  | { available: true; text: string; name: string | null }
+  /// Neither side is small enough for the engine to apply. `smallestBytes` is
+  /// the closest any of them came.
+  | { available: false; smallestBytes: number };
+
+/// Pick the side "Combine by hand" starts from: the first one in preference
+/// order that the engine could actually apply.
+///
+/// A side over the in-band cap is not a usable seed, but its SIBLING may be —
+/// a 5 MiB incoming copy beside a 3 KB copy on Main is a conflict a user can
+/// still combine by hand. Preferring the oversized side and then declaring the
+/// whole affordance unavailable would refuse work the engine accepts.
+function chooseCombineSeed(
+  candidates: { text: string | null; name: string }[],
+): CombineSeed {
+  const present = candidates.filter(
+    (candidate): candidate is { text: string; name: string } => candidate.text !== null,
+  );
+  if (present.length === 0) return { available: true, text: "", name: null };
+  const fitting = present.find(
+    (candidate) => !exceedsUtf8Bytes(candidate.text, CONFLICT_COMBINED_MAX_BYTES),
+  );
+  if (fitting) return { available: true, text: fitting.text, name: fitting.name };
+  return {
+    available: false,
+    smallestBytes: Math.min(...present.map((candidate) => utf8ByteLength(candidate.text))),
   };
 }
 
@@ -1081,18 +1122,26 @@ function ConflictResolver(props: {
   const [combined, setCombined] = useState<string | null>(null);
   const isBinary = conflict.contentKind === "binary";
   const labels = conflictSideLabels(conflict, sourceName);
-  // "Combine by hand" seeds the textarea with a whole side and posts it back
-  // as a combined resolution, which the engine refuses above its in-band text
-  // cap. Offering an edit whose apply is already known to fail would waste the
-  // user's work, so the affordance follows what apply accepts.
-  const seed = conflict.incomingText ?? conflict.currentText ?? "";
-  // Zero when the body fits. The exact byte count is only spent on a body the
-  // user cannot apply anyway — and never on every render, which for a 10 MiB
-  // side would be the cost this whole change removes.
-  const seedOverCapBytes = useMemo(
+  // What "Combine by hand" would start from, and whether the engine could
+  // apply it. The seed prefers the incoming side, as it always has, but a side
+  // the engine would refuse is not a usable seed — so a side that FITS wins
+  // over the preference, and the affordance only disappears when neither side
+  // fits.
+  //
+  // Gated on `expanded` because it is only read there, and because it is not
+  // free: an over-cap side needs an exact byte count for its message, and a
+  // dialog can hold hundreds of collapsed cards. Counting all of them on mount
+  // was 750 ms for twenty 10 MiB sides against 79 ms for this — the cost this
+  // whole change exists to remove, reintroduced one layer up.
+  const combineSeed = useMemo<CombineSeed | null>(
     () =>
-      exceedsUtf8Bytes(seed, CONFLICT_COMBINED_MAX_BYTES) ? utf8ByteLength(seed) : 0,
-    [seed],
+      expanded && !isBinary
+        ? chooseCombineSeed([
+            { text: conflict.incomingText, name: labels.incomingName },
+            { text: conflict.currentText, name: labels.currentName },
+          ])
+        : null,
+    [conflict.currentText, conflict.incomingText, expanded, isBinary, labels],
   );
   const combinedOverCapBytes = useMemo(
     () =>
@@ -1216,22 +1265,23 @@ function ConflictResolver(props: {
               </button>
             </div>
           </div>
-          {!isBinary && combined === null && seedOverCapBytes > 0 ? (
+          {combined === null && combineSeed?.available === false ? (
             <p
               data-testid="version-conflict-combine-unavailable"
               className="mb-0 mt-2 text-[11px] leading-4 text-subtle"
             >
-              This copy is {seedOverCapBytes.toLocaleString("en-US")} bytes. dohc
-              can apply a combined copy up to{" "}
+              The smallest copy here is{" "}
+              {combineSeed.smallestBytes.toLocaleString("en-US")} bytes. dohc can
+              apply a combined copy up to{" "}
               {CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes. Keep one
               copy, then edit the file.
             </p>
-          ) : !isBinary && combined === null ? (
+          ) : combined === null && combineSeed?.available === true ? (
             <button
               type="button"
               data-testid="version-conflict-combine"
               disabled={busy}
-              onClick={() => setCombined(seed)}
+              onClick={() => setCombined(combineSeed.text)}
               className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >
               Combine by hand instead…
@@ -1244,6 +1294,14 @@ function ConflictResolver(props: {
               >
                 Combined copy for Main
               </label>
+              {combineSeed?.available === true && combineSeed.name !== null ? (
+                <p
+                  data-testid="version-conflict-combined-source"
+                  className="m-0 text-[11px] leading-4 text-subtle"
+                >
+                  Started from {combineSeed.name}'s copy.
+                </p>
+              ) : null}
               <textarea
                 id={`combined-${conflict.conflictId}`}
                 data-testid="version-conflict-combined-input"
@@ -1314,14 +1372,11 @@ function ConflictList(props: {
   sourceNameFor: (conflict: WorkspaceVersionConflict) => string;
   onResolved: (remaining: WorkspaceVersionConflict[]) => void;
 }) {
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  // A resolved conflict leaves the list, so an id that is no longer in it
-  // falls back to the first — the next file to decide opens by itself.
-  const openId = props.conflicts.some(
-    (conflict) => conflict.conflictId === expandedId,
-  )
-    ? expandedId
-    : (props.conflicts[0]?.conflictId ?? null);
+  // `undefined` means the user has not chosen yet. `null` means the user
+  // collapsed the open card, which is a state they are allowed to be in — the
+  // two must not be the same value, or closing a card reopens the first one.
+  const [chosenId, setChosenId] = useState<string | null | undefined>(undefined);
+  const openId = openConflictId(props.conflicts, chosenId);
 
   return (
     <div className="flex flex-col gap-3">
@@ -1333,15 +1388,31 @@ function ConflictList(props: {
           sourceName={props.sourceNameFor(conflict)}
           expanded={conflict.conflictId === openId}
           onToggle={() =>
-            setExpandedId(
-              conflict.conflictId === openId ? null : conflict.conflictId,
-            )
+            setChosenId(conflict.conflictId === openId ? null : conflict.conflictId)
           }
           onResolved={props.onResolved}
         />
       ))}
     </div>
   );
+}
+
+/// Which conflict is expanded. Exported for its own tests: the three states it
+/// distinguishes are not obvious from either call site.
+export function openConflictId(
+  conflicts: WorkspaceVersionConflict[],
+  chosenId: string | null | undefined,
+): string | null {
+  const firstId = conflicts[0]?.conflictId ?? null;
+  // Untouched: the first file to decide opens by itself.
+  if (chosenId === undefined) return firstId;
+  // Collapsed on purpose: leave every card closed.
+  if (chosenId === null) return null;
+  // A resolved conflict leaves the list, so a chosen id that is no longer in
+  // it hands the turn to the next file to decide.
+  return conflicts.some((conflict) => conflict.conflictId === chosenId)
+    ? chosenId
+    : firstId;
 }
 
 function changeStatusLabel(status: WorkspaceVersionFileChange["status"]): string {
