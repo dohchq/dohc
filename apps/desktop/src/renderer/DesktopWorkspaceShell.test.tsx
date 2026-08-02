@@ -24,7 +24,9 @@ vi.setConfig({ testTimeout: 15_000 });
 import type {
   ChatChannelRecord,
   DmRecord,
+  EngineMomentRecord,
   FileChatThreadRecord,
+  ListEngineMomentsResult,
   RefreshSharedViewResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
@@ -354,11 +356,16 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     source: "stored" as const,
   }));
   return Object.assign(bridge, {
-    listEngineMoments: vi.fn(async () => ({
-      moments: [],
-      nextBeforeMomentOrder: null,
-      latestMomentOrder: 0,
-    })),
+    // Typed to the contract, not to this empty default: a test that drives
+    // real pages must be able to swap the implementation.
+    listEngineMoments: vi.fn(
+      async (): Promise<ListEngineMomentsResult> => ({
+        moments: [],
+        nextBeforeMomentOrder: null,
+        latestMomentOrder: 0,
+        activeVersionId: "main",
+      }),
+    ),
     getTryInVersionState: vi.fn(async () => ({ state: null })),
     listWorkspaceVersions: vi.fn(async () => ({
       versions: [
@@ -2165,6 +2172,202 @@ describe("history page", () => {
     expect(
       within(page).getByTestId("history-off-placeholder").textContent,
     ).toContain("History is off for this workspace");
+  });
+
+  function historyMoment(id: string, summary: string): EngineMomentRecord {
+    return {
+      id,
+      versionId: "main",
+      path: "notes/plan.md",
+      recordedAtMs: 100,
+      operation: "write",
+      origin: "local-file",
+      momentOrder: 1,
+      summary,
+    };
+  }
+
+  function historyPage(moments: EngineMomentRecord[]): ListEngineMomentsResult {
+    return {
+      moments,
+      nextBeforeMomentOrder: null,
+      latestMomentOrder: 1,
+      activeVersionId: "main",
+    };
+  }
+
+  // The listing loaders' rule, on the timeline: a request that is merely in
+  // flight has answered nothing, and one that FAILS never will. Superseding on
+  // ISSUE threw away the only answer there was, and the panel stayed empty
+  // until some later event refreshed it.
+  it("commits an older history page when the newer refresh failed", async () => {
+    const older = deferred<ListEngineMomentsResult>();
+    let failNewer!: (error: Error) => void;
+    const newer = new Promise<never>((_resolve, reject) => {
+      failNewer = reject;
+    });
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => (++issued === 1 ? older.promise : newer));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+
+    // The newer request fails. Nothing has been displayed yet.
+    await act(async () => {
+      failNewer(new Error("history failed"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("Reordered the plan")).toBeNull();
+
+    // The older answer arrives — and it is the only answer there is.
+    await act(async () => {
+      older.resolve(historyPage([historyMoment("m-older", "Reordered the plan")]));
+      await older.promise;
+    });
+
+    expect(await screen.findByText("Reordered the plan")).toBeTruthy();
+  });
+
+  // The other half of the same rule: an answer OLDER than what is already
+  // displayed is still dropped, so a slow response cannot move the timeline
+  // backward.
+  it("ignores a history page that resolves after a newer one committed", async () => {
+    const older = deferred<ListEngineMomentsResult>();
+    const newer = deferred<ListEngineMomentsResult>();
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() =>
+      ++issued === 1 ? older.promise : newer.promise,
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      newer.resolve(historyPage([historyMoment("m-newer", "Added the launch checklist")]));
+      await newer.promise;
+    });
+    expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+
+    await act(async () => {
+      older.resolve(historyPage([historyMoment("m-older", "Reordered the plan")]));
+      await older.promise;
+    });
+
+    expect(screen.queryByText("Reordered the plan")).toBeNull();
+    expect(screen.getByText("Added the launch checklist")).toBeTruthy();
+  });
+
+  // The pagination's cursor points into the DISPLAYED timeline, so an older
+  // refresh must not reset the timeline under it — the append would land
+  // against a cursor that no longer describes what is on screen. The refresh
+  // is issued first here, which is the ordinary ordering, not a rare race.
+  it("keeps an older refresh from resetting the timeline under a pagination in flight", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const refreshed = deferred<ListEngineMomentsResult>();
+    const earlier = deferred<ListEngineMomentsResult>();
+    const pages = [first, refreshed, earlier];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => pages[issued++]!.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve({
+        ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
+        nextBeforeMomentOrder: 1,
+      });
+      await first.promise;
+    });
+    expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+
+    // A refresh goes out, and the user asks for earlier changes while it is
+    // still in flight.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("engine-history-load-more"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+
+    // The refresh answers first, because it was issued first.
+    await act(async () => {
+      refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
+      await refreshed.promise;
+    });
+    // Then the page the user actually asked for.
+    await act(async () => {
+      earlier.resolve(historyPage([historyMoment("m-earlier", "Started the plan")]));
+      await earlier.promise;
+    });
+
+    expect(await screen.findByText("Started the plan")).toBeTruthy();
+    expect(screen.getByText("Added the launch checklist")).toBeTruthy();
+    expect(screen.queryByText("Rewrote the plan")).toBeNull();
+  });
+
+  // The same pair, answering the other way round: once the page the user asked
+  // for is on screen, an older refresh landing after it is an older answer and
+  // is dropped like any other.
+  it("drops an older refresh that answers after the pagination it raced", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const refreshed = deferred<ListEngineMomentsResult>();
+    const earlier = deferred<ListEngineMomentsResult>();
+    const pages = [first, refreshed, earlier];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => pages[issued++]!.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve({
+        ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
+        nextBeforeMomentOrder: 1,
+      });
+      await first.promise;
+    });
+    expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("engine-history-load-more"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+
+    await act(async () => {
+      earlier.resolve(historyPage([historyMoment("m-earlier", "Started the plan")]));
+      await earlier.promise;
+    });
+    expect(await screen.findByText("Started the plan")).toBeTruthy();
+
+    await act(async () => {
+      refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
+      await refreshed.promise;
+    });
+
+    expect(screen.getByText("Started the plan")).toBeTruthy();
+    expect(screen.getByText("Added the launch checklist")).toBeTruthy();
+    expect(screen.queryByText("Rewrote the plan")).toBeNull();
   });
 });
 

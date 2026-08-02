@@ -1587,9 +1587,26 @@ export function DesktopWorkspaceShell(props: {
   // Liveness token for the engine history loads (bumped on unmount): a slow
   // response for one workspace must never repaint another.
   const engineHistoryToken = useRef(0);
+  // The newest request whose answer is DISPLAYED — the same commit-time
+  // watermark the file listing above uses, for the same reason. A request that
+  // is merely in flight has answered nothing, and one that FAILS never will,
+  // so superseding on ISSUE threw away the only answer there was and left the
+  // timeline stale until some later event refreshed it. Only an answer older
+  // than what is already displayed is dropped.
+  const committedEngineHistoryToken = useRef(0);
+  // A pagination in flight, or 0. Its page is fetched from a cursor into the
+  // DISPLAYED timeline, so an older refresh must not reset the timeline under
+  // it — the append would land against a cursor that no longer describes what
+  // is on screen. Cleared when the pagination settles, so a FAILED one stops
+  // holding anything back.
+  const pendingEngineHistoryPage = useRef(0);
   useEffect(
     () => () => {
+      // Unmount invalidates every load in flight. Raising the watermark is
+      // what does that now: advancing the issue counter alone no longer stops
+      // a response from committing.
       engineHistoryToken.current += 1;
+      committedEngineHistoryToken.current = engineHistoryToken.current;
     },
     [],
   );
@@ -1607,8 +1624,9 @@ export function DesktopWorkspaceShell(props: {
 
   const refreshHistory = useCallback(async () => {
     if (engineEnabled) {
-      // Latest-wins: each request ADVANCES the token, so an older slower
-      // response can never overwrite newer moments or move
+      // Latest-COMMITTED-wins: each request advances the token, and an answer
+      // displays only if it is newer than the answer already displayed, so an
+      // older response can never overwrite newer moments or move
       // latestMomentOrder backward (shared with loadMoreEngineHistory).
       const token = ++engineHistoryToken.current;
       const [page, status, agent, trySession] = await Promise.all([
@@ -1617,7 +1635,9 @@ export function DesktopWorkspaceShell(props: {
         bridge().getAgentRunStatus({ workspaceId }),
         bridge().getTryInVersionState({ workspaceId }),
       ]);
-      if (token !== engineHistoryToken.current) return;
+      if (token <= committedEngineHistoryToken.current) return;
+      if (token < pendingEngineHistoryPage.current) return;
+      committedEngineHistoryToken.current = token;
       // A refresh returns to the newest page; older pages reload on demand.
       // It also supersedes any in-flight load-more, whose finally can no
       // longer clear the flag (its token is stale now).
@@ -1649,6 +1669,7 @@ export function DesktopWorkspaceShell(props: {
     // started after this pagination supersedes it (and vice versa), so
     // overlapping responses can never interleave into a mixed timeline.
     const token = ++engineHistoryToken.current;
+    pendingEngineHistoryPage.current = token;
     setEngineHistoryLoadingMore(true);
     try {
       const page = await bridge().listEngineMoments({
@@ -1657,6 +1678,9 @@ export function DesktopWorkspaceShell(props: {
         beforeMomentOrder: cursor,
       });
       if (token !== engineHistoryToken.current) return;
+      // This page is what the timeline now shows, so an older refresh must not
+      // replace it with the newest page and drop it.
+      committedEngineHistoryToken.current = token;
       setEngineHistory((current) =>
         current
           ? {
@@ -1673,6 +1697,7 @@ export function DesktopWorkspaceShell(props: {
       if (token !== engineHistoryToken.current) return;
       reportShellError("Could not load earlier history.", error);
     } finally {
+      if (pendingEngineHistoryPage.current === token) pendingEngineHistoryPage.current = 0;
       if (token === engineHistoryToken.current) setEngineHistoryLoadingMore(false);
     }
   }, [engineHistory, engineHistoryLoadingMore, reportShellError, workspaceId]);
