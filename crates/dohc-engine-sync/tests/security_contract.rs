@@ -60,8 +60,18 @@ fn generated_ts_write_floor_matches_the_rust_write_floor() {
 /// The share boundary is the single gate every op kind passes before replay,
 /// and `replay_share_delete` carries no floor of its own. So a relay-sent
 /// delete is refused only while `classify_share_path` calls secret everything
-/// the files policy calls secret. The two encode the same three `.env` rules
-/// today by coincidence: neither reads the other, and no test drove both.
+/// the files policy calls secret.
+///
+/// `classify_share_path` reads that verdict from
+/// `dohc_engine_files::policy::normalized_path_is_secret`, so the two sets are
+/// equal by construction and a new secret class reaches both callers at once.
+/// A vector list cannot claim that — it proves only the shapes it names.
+///
+/// This test guards the one thing construction cannot: a future edit that
+/// restates the rules at the boundary instead of calling the shared one, which
+/// is the #484 shape returning. A widened pre-check is deliberately not
+/// guarded — the grammar and ignored-segment checks run first, so widening one
+/// turns a secret verdict into `Unsafe` or `Ignored`, which is still refused.
 ///
 /// Both directions are asserted, because either side gaining a class alone is
 /// drift. `Ignored` and `Unsafe` count as agreement: both gates admit only

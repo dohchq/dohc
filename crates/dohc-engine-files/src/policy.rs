@@ -232,17 +232,30 @@ fn has_ignored_segment(path: &str) -> bool {
     })
 }
 
-fn classify_normalized_secret(path: &str) -> PathClassification {
+/// THE secret-path rule. `path` must already be normalized: relative,
+/// slash-separated, with `.`, `..`, and percent-encoding resolved.
+///
+/// Exported so the share boundary reuses this rule instead of restating it.
+/// `dohc_engine_sync::classify_share_path` decides which relayed ops may
+/// replay, and `replay_share_delete` carries no floor of its own, so a delete
+/// of secret material is refused only while the boundary and this floor name
+/// the same secrets. They did, in two copies, by coincidence — a class added
+/// here alone made deletes of it replayable (#484). One rule, one place, so a
+/// new class reaches both callers at once.
+pub fn normalized_path_is_secret(path: &str) -> bool {
     let segments: Vec<String> = path
         .split('/')
         .map(strip_windows_alias_suffix)
         .map(str::to_lowercase)
         .collect();
     let basename = segments.last().map(String::as_str).unwrap_or_default();
-    if segments.iter().any(|segment| segment == ".env")
+    segments.iter().any(|segment| segment == ".env")
         || basename.ends_with(".env")
         || basename.starts_with(".env.")
-    {
+}
+
+fn classify_normalized_secret(path: &str) -> PathClassification {
+    if normalized_path_is_secret(path) {
         PathClassification::Secret
     } else {
         PathClassification::Tracked
