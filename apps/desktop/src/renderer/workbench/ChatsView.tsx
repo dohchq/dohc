@@ -1107,10 +1107,11 @@ export function ChatsView(props: {
   // refreshOverview in three ways, and each one is a thing this refresh has no
   // authority to do:
   //
-  //  - It reads the channel listing ALONE. The share listing is relay-backed
-  //    and answers "none" when the relay is unreachable, so re-reading it here
-  //    would let an unrelated workspace write erase a pending invitation or a
-  //    member row that is still true.
+  //  - It reads the channel listing, and the share lookup only to correct the
+  //    JOINED rows the listing's sync may have just changed. Joined rows are
+  //    local registry state, so that lookup answers them offline; the granted
+  //    and received rows need the relay, which answers "none" when it is
+  //    unreachable, and those stay cached here.
   //  - It never touches overviewRequest, so it cannot discard the response of
   //    a refresh the user DID ask for (a join, a leave, a retry). It captures
   //    liveToken and commits only over a resolved overview, so a workspace
@@ -1120,39 +1121,68 @@ export function ChatsView(props: {
   //    over the relay before it reads, and a persistent navigator plus an
   //    expanded page mount two of these surfaces. Activity arriving mid-read
   //    is not dropped: it runs exactly one more pass when the read settles.
-  const badgeReadInFlight = useRef(false);
-  const badgeReadPending = useRef(false);
+  //
+  // The drain is bound to ONE workspace by identity, not by a shared flag.
+  // Activity in the workspace the user switched TO must never queue another
+  // pass onto a read still in flight for the workspace they LEFT: that pass
+  // would carry the old workspace's id and the new workspace's liveToken, and
+  // repaint one workspace's channels over the other's.
+  const badgeRead = useRef<{ workspaceId: string; pending: boolean } | null>(null);
+  const latestChannelShares = useRef(channelShares);
+  latestChannelShares.current = channelShares;
   const refreshChannelBadges = useCallback(async (): Promise<void> => {
-    if (badgeReadInFlight.current) {
-      badgeReadPending.current = true;
+    const active = badgeRead.current;
+    if (active?.workspaceId === workspaceId) {
+      active.pending = true;
       return;
     }
-    badgeReadInFlight.current = true;
+    // Any leftover drain belongs to a workspace the user left. Taking the slot
+    // stops it: its own commits and its next pass both check this identity.
+    const mine = { workspaceId, pending: false };
+    badgeRead.current = mine;
     try {
-      let again = true;
-      while (again) {
-        badgeReadPending.current = false;
+      do {
+        mine.pending = false;
         const token = liveToken.current;
+        const isCurrent = () =>
+          token === liveToken.current && badgeRead.current === mine;
         try {
           const result = await bridge().listChatChannels({ workspaceId });
-          if (token === liveToken.current) {
-            setOverview((current) =>
-              current.status === "ready"
-                ? {
-                    status: "ready",
-                    channels: result.channels,
-                    fileThreads: result.fileThreads,
-                  }
-                : current,
+          if (!isCurrent()) return;
+          setOverview((current) =>
+            current.status === "ready"
+              ? {
+                  status: "ready",
+                  channels: result.channels,
+                  fileThreads: result.fileThreads,
+                }
+              : current,
+          );
+          // The listing above syncs joined shared channels before it reads, and
+          // that sync records a revoked or downgraded grant in the registry.
+          // Without the correction here the composer stays enabled on a channel
+          // the user can no longer post to. Ask only when this workspace has
+          // joined rows: nothing else in this refresh needs share metadata, and
+          // a joined row only ever arrives through an explicit refresh.
+          const cachedShares = latestChannelShares.current;
+          if (cachedShares && cachedShares.joined.length > 0) {
+            const sharesId = ++sharesRequest.current;
+            const refreshed = await bridge().listChatChannelShares({ workspaceId });
+            if (!isCurrent() || sharesId <= committedSharesRequest.current) return;
+            committedSharesRequest.current = sharesId;
+            // ONLY the joined rows. The relay-backed rows keep their cached
+            // values, because "the relay did not answer" reaches this renderer
+            // as an empty listing, which is not an answer.
+            setChannelShares((current) =>
+              current ? { ...current, joined: refreshed.joined } : current,
             );
           }
         } catch {
           // Nobody asked for this refresh: a stale badge beats an error card.
         }
-        again = badgeReadPending.current;
-      }
+      } while (mine.pending && badgeRead.current === mine);
     } finally {
-      badgeReadInFlight.current = false;
+      if (badgeRead.current === mine) badgeRead.current = null;
     }
   }, [workspaceId]);
 
@@ -1220,9 +1250,9 @@ export function ChatsView(props: {
     liveToken.current += 1;
     dmRefreshSeq.current += 1;
     feedRefreshSeq.current += 1;
-    // A badge read queued for the workspace the user just left has nothing to
+    // A badge pass queued for the workspace the user just left has nothing to
     // report here, and the listing it would run reaches the relay.
-    badgeReadPending.current = false;
+    if (badgeRead.current) badgeRead.current.pending = false;
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
     bookmarkMutationGeneration.current += 1;

@@ -1654,10 +1654,78 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
   });
 
-  // The share listing is relay-backed and answers "none" when the relay is
-  // unreachable — the main handler catches the failure and returns empty rows.
-  // A badge refresh that re-read it would let an unrelated file save erase a
-  // pending invitation that is still true.
+  // The switch happens while a badge read for the old workspace is still in
+  // flight. Activity in the NEW workspace must not queue a pass onto it: that
+  // pass carries the old workspace's id and the new workspace's liveToken, and
+  // the guard would pass while the wrong workspace's channels repaint.
+  it("never repaints one workspace's list with the one the user left", async () => {
+    type ChannelListPage = {
+      channels: ChatChannelRecord[];
+      fileThreads: FileChatThreadRecord[];
+    };
+    let resolveLeftBehind!: (value: ChannelListPage) => void;
+    const leftBehindRead = new Promise<ChannelListPage>((resolve) => {
+      resolveLeftBehind = resolve;
+    });
+    let oldWorkspaceReads = 0;
+    bridgeMock.listChatChannels.mockImplementation(
+      ({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId !== "workspace-old") {
+          return Promise.resolve({
+            channels: [channel({ id: "channel-new", name: "planning", slug: "planning" })],
+            fileThreads: [],
+          });
+        }
+        oldWorkspaceReads += 1;
+        if (oldWorkspaceReads === 1) {
+          return Promise.resolve({ channels: [channel()], fileThreads: [] });
+        }
+        if (oldWorkspaceReads === 2) return leftBehindRead;
+        // Any later read for the workspace the user left is the drain this
+        // test exists to prevent; make what it would paint unmistakable.
+        return Promise.resolve({
+          channels: [
+            channel({ id: "channel-left", name: "left-behind", slug: "left-behind" }),
+          ],
+          fileThreads: [],
+        });
+      },
+    );
+    const view = render(
+      <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-name").textContent).toBe("general"),
+    );
+    // A badge read for the old workspace is now in flight.
+    act(() => emitWorkspaceActivity());
+    expect(oldWorkspaceReads).toBe(2);
+
+    view.rerender(
+      <ChatsView workspaceId="workspace-new" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-name").textContent).toBe("planning"),
+    );
+    // A write lands in the workspace the user switched TO.
+    act(() => emitWorkspaceActivity());
+
+    await act(async () => {
+      resolveLeftBehind({ channels: [channel()], fileThreads: [] });
+      await leftBehindRead;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-name").textContent).toBe("planning"),
+    );
+    expect(screen.queryByText("left-behind")).toBeNull();
+    expect(oldWorkspaceReads).toBe(2);
+  });
+
+  // The share listing is relay-backed for the granted and received rows, and
+  // answers "none" when the relay is unreachable — the main handler catches the
+  // failure and returns empty rows. A badge refresh that replaced them would
+  // let an unrelated file save erase a pending invitation that is still true.
   it("leaves the relay-backed share listing alone while it updates a badge", async () => {
     let unreadCount = 0;
     bridgeMock.listChatChannels.mockImplementation(() =>
@@ -1690,7 +1758,63 @@ describe("ChatsView live activity refresh", () => {
 
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("3");
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+    // Nothing is joined here, so there is no grant to correct and no reason to
+    // ask the relay-backed lookup anything.
     expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1);
+  });
+
+  // The channel listing syncs joined shared channels BEFORE it reads, and that
+  // sync records a revoked or downgraded grant. Those joined rows are local, so
+  // they are answered even while the relay is down — and until they land, the
+  // composer stays enabled on a channel main will refuse to accept posts for.
+  it("corrects a joined grant the listing's sync revoked, and keeps the cached invitation", async () => {
+    const joinedRow = {
+      shareId: "share-joined",
+      channelWireId: "wire-joined",
+      granterEmail: "owner@example.com",
+      access: "read-write" as const,
+      ended: false,
+    };
+    const invitation = {
+      shareId: "share-invite",
+      channelWireId: "wire-invite",
+      granterEmail: "owner@example.com",
+      access: "read-write" as const,
+      ended: false,
+    };
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-joined" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [invitation],
+      joined: [joinedRow],
+    });
+    renderView();
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+    expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
+      "Shared by owner@example.com",
+    );
+    expect(screen.getByTestId("chats-channel-shared").textContent).not.toContain(
+      "no longer shared",
+    );
+
+    // The sync finds the grant revoked. The relay is unreachable in the same
+    // pass, so the invitation comes back empty — which is not an answer.
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [{ ...joinedRow, ended: true }],
+    });
+    act(() => emitWorkspaceActivity());
+
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
+        "no longer shared",
+      ),
+    );
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
 
   // Activity fires for every settled file batch and run update, and the
