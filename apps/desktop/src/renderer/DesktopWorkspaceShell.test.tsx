@@ -1553,6 +1553,78 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
   }, 20_000);
 
+  // The residual window the destination KEY cannot see: opening the chat
+  // destination that is already open. Nothing about the key changed, the tab
+  // does not move, and the panel reports nothing — yet the user issued an open
+  // command, and a repeated backlink is the sharper form of it
+  // (chatsNavigationRequiresRemount remounts the page for the message you
+  // already focused, precisely so a second click scrolls back to it). The late
+  // DM would replace that page. An explicit open therefore always cancels.
+  it("discards an in-flight DM navigation when the open chat destination is commanded again", async () => {
+    const channel = {
+      path: "chat-thread:thread-planning",
+      kind: "chat-thread" as const,
+      threadId: "thread-planning",
+      channelId: "channel-planning",
+      channelName: "planning",
+      channelSlug: "planning",
+      channelKind: "channel" as const,
+      title: "Planning discussion",
+      incoming: 1,
+      outgoing: 0,
+    };
+    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [DM_GRAPH_NODE, channel],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    // Open the channel conversation in the Chats TAB, with the graph still in
+    // the sidebar.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === channel.path)!);
+    expect((await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).dataset.active).toBe("true");
+
+    // Start a canonical DM navigation and leave it in flight.
+    await user.click(
+      (await screen.findAllByTestId("graph-file-row")).find(
+        (row) => row.dataset.path === DM_GRAPH_NODE.path,
+      )!,
+    );
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    // Command the SAME conversation again. Every check the seam has says
+    // nothing moved: same destination key, same active tab, same sidebar view.
+    await user.click(
+      (await screen.findAllByTestId("graph-file-row")).find(
+        (row) => row.dataset.path === channel.path,
+      )!,
+    );
+    expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe("true");
+
+    // Collapse the sidebar so the graph's own row labels stop matching and
+    // only the Chats surface answers the query below.
+    await user.click(screen.getByTestId("activity-graph"));
+    expect(await screen.findByText("Planning discussion")).toBeTruthy();
+
+    await act(async () => {
+      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      await sync.promise;
+    });
+    expect(screen.getByText("Planning discussion")).toBeTruthy();
+    expect(screen.queryByText(CANONICAL_DM.name)).toBeNull();
+  }, 20_000);
+
   // A request that is merely in flight has not answered anything, and a
   // request that fails never will. Superseding on ISSUE would drop the only
   // answer there is and leave the explorer empty with nothing to retry it.

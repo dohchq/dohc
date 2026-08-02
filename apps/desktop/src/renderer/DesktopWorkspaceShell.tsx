@@ -1833,7 +1833,7 @@ export function DesktopWorkspaceShell(props: {
   // is why the invalidation kept being missed one caller at a time — a chat
   // destination can only change here, so this is where the rule belongs.
   // Reports that stay on the same conversation change nothing and cancel
-  // nothing. Returns whether the destination actually moved.
+  // nothing.
   const setChatsDestination = useCallback((nav: ChatsNav) => {
     if (chatsNavigationChangesDestination(chatsNav.current, nav)) {
       invalidateDmNavigation(dmNavigationRequest);
@@ -1863,6 +1863,14 @@ export function DesktopWorkspaceShell(props: {
       // panel is leaving.
       const shouldRemount = chatsNavigationRequiresRemount(chatsNav.current, nav);
       const leftConversation = chatsNavigationLeavesConversation(chatsNav.current, nav);
+      // An explicit open is the user going somewhere, so it always cancels a
+      // pending DM — even when the destination key is unchanged. Repeating a
+      // backlink to the message you already focused is the case that proves
+      // it: chatsNavigationRequiresRemount deliberately treats it as a new
+      // jump, and the page it remounts must not be replaced by a DM answering
+      // late. Only the panel's passive onChatsNav reports stay conditional;
+      // they say where the view already is, and nobody commanded them.
+      invalidateDmNavigation(dmNavigationRequest);
       setChatsDestination(nav);
       if (leftConversation) {
         // Drafts are scoped to the conversation they were typed in. Until the
