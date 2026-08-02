@@ -832,6 +832,44 @@ describe("YdocLiveAdapter", () => {
     expect(engine.activeSessionIds()).toHaveLength(0);
   });
 
+  // #534, codex P1. The escalation above is right for an ordinary teardown and
+  // WRONG for a caller releasing a session it is about to declare absent: the
+  // daemon refuses that release precisely BECAUSE content arrived, so settling
+  // it writes the file the caller is about to say does not exist. That caller
+  // says `settleOnRefusal: false`, and the refusal comes back instead.
+  it("never escalates to a settling close when the caller forbids it", async () => {
+    const engine = seedPlaintextEngine();
+    const unsettledClose = new Error("injected unsettled close");
+    const closes: Array<boolean | undefined> = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.close) {
+          const settle = (request.params as { settle?: boolean }).settle;
+          closes.push(settle);
+          if (settle === false) throw unsettledClose;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+
+    await expect(
+      provider.close({ settle: false, settleOnRefusal: false }),
+    ).rejects.toBe(unsettledClose);
+    // ONE close attempt, and it did not settle. The settling retry is what
+    // would have materialized the path.
+    expect(closes).toEqual([false]);
+  });
+
   it("marks a close whose settle failed but whose release succeeded as RELEASED", async () => {
     const engine = seedPlaintextEngine("settled base");
     const settleFailure = new Error("injected settle refusal");

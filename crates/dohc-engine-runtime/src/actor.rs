@@ -8790,6 +8790,14 @@ fn ydoc_open_state_on_store(
     let object_id = match head.as_ref() {
         Some(snapshot) => snapshot.object_id.clone(),
         None => {
+            // NO HEAD: the entered version does not contain this path. The
+            // daemon still binds an empty doc, because that is how a file the
+            // user just created (written to disk, not yet captured) becomes
+            // editable. The open reports `head: "absent"` and the CONSUMER
+            // decides whether that is a creation or a path the version does
+            // not have — the contract it applies is stated on
+            // `WorkspaceEngineCapture.openYDocSession`
+            // (apps/desktop/src/workspaces/workspaceEngineCapture.ts).
             let derived = derive_capture_object_id(workspace_id, version_id, &canonical_path);
             // A derived id still LIVE at another alias means this path's
             // former file was renamed away: capture's locked resolution mints

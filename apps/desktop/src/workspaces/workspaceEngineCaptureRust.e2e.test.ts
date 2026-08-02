@@ -10,7 +10,11 @@ import {
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import {
+  createWorkspaceEngineCapture,
+  isYDocPathNotInVersionError,
+  YDocUncapturedArtifactError,
+} from "./workspaceEngineCapture";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import { YdocReleasedWithSettleFailureError } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -669,6 +673,83 @@ it.skipIf(engine.missing)(
       await capture.stop().catch(() => undefined);
       await sessions.closeAll().catch(() => undefined);
       await lifecycle.stop().catch(() => undefined);
+    }
+  },
+  60_000,
+);
+
+// #534 against the REAL daemon, which is the only place `head` actually
+// crosses the wire. The loopback tests state what the daemon does; this proves
+// the daemon does it — that an absent head really comes back absent, and that
+// the three outcomes the contract distinguishes are the three that happen.
+it.skipIf(engine.missing)(
+  "refuses a live session for a path the version does not have, and still opens a new file",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-absent-"));
+    roots.push(root);
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-absent-head",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+    });
+    try {
+      // Nothing in the version, nothing on disk: the path is not here.
+      const refusal = await capture
+        .openYDocSession({ path: "gone.md", onRemoteUpdate: () => undefined })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(isYDocPathNotInVersionError(refusal)).toBe(true);
+      // The refusal wrote nothing. This is the phantom, at the real boundary.
+      await expect(readFile(join(root, "gone.md"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      // On disk with content but not captured yet: refused, but NOT as missing.
+      await writeFile(join(root, "uncaptured.md"), "real bytes", "utf8");
+      const uncaptured = await capture
+        .openYDocSession({
+          path: "uncaptured.md",
+          onRemoteUpdate: () => undefined,
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(uncaptured).toBeInstanceOf(YDocUncapturedArtifactError);
+      expect(await readFile(join(root, "uncaptured.md"), "utf8")).toBe(
+        "real bytes",
+      );
+
+      // Creation, the case the daemon's absent-head bind exists for: an EMPTY
+      // artifact on disk, exactly what workspaceFiles.createFile leaves. The
+      // open must be ADMITTED — the guard above refused two paths in a row, and
+      // a guard that refused this one too would look just as green.
+      //
+      // Deliberately stops at the open. Whether the daemon's own capture reaches
+      // the new file before or after this runs is a race, and settling across it
+      // is a separate, pre-existing conflict (the settle expects the head the
+      // open saw). What is race-free, and what this proves, is that a
+      // freshly-created empty artifact still opens against the real daemon.
+      await writeFile(join(root, "created.md"), "", "utf8");
+      const session = await capture.openYDocSession({
+        path: "created.md",
+        onRemoteUpdate: () => undefined,
+      });
+      expect(session.path).toBe("created.md");
+      await session.close({ settle: false });
+    } finally {
+      await capture.stop();
+      await sessions.closeAll();
+      await lifecycle.stop();
     }
   },
   60_000,

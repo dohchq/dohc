@@ -7055,6 +7055,11 @@ impl EngineService {
             } else {
                 "absent"
             },
+            head: if state.head_blob_sha256.is_some() {
+                "present"
+            } else {
+                "absent"
+            },
             seed_markdown: {
                 // A seed past the in-band cap cannot cross the wire as one
                 // string, and a client that can't seed can't edit: refuse the
@@ -8793,6 +8798,13 @@ struct YdocOpenResult {
     content_kind: &'static str,
     initial_update_base64: String,
     lineage: &'static str,
+    /// Whether the ENTERED VERSION has a committed snapshot for this path.
+    /// "absent" means the daemon bound an empty doc over a path the version
+    /// does not contain — legitimate only while the caller is creating the
+    /// file. The consumer owns that decision; the contract it applies is
+    /// stated on `WorkspaceEngineCapture.openYDocSession`
+    /// (apps/desktop/src/workspaces/workspaceEngineCapture.ts).
+    head: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed_markdown: Option<String>,
 }

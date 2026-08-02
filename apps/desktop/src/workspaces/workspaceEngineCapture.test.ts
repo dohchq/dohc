@@ -21,6 +21,9 @@ import {
   assertGeneratedMarkdownPath,
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
+  isYDocPathNotInVersionError,
+  YDocOpenRacedError,
+  YDocUncapturedArtifactError,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import {
@@ -508,7 +511,8 @@ describe("workspaceEngineCapture batch capture", () => {
           initialUpdate: staleInitialUpdate,
           contentKind: "plaintext",
           path: "note.md",
-          lineage: "present" as const,
+          head: "present" as const,
+          lineage: "existing" as const,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), markdown: "" }) as never,
@@ -550,7 +554,11 @@ describe("workspaceEngineCapture batch capture", () => {
         initialUpdate: Y.encodeStateAsUpdate(doc),
         contentKind: "plaintext",
         path: settled.path ?? "note.md",
-        lineage: "present" as const,
+        // Stated by hand: `as never` below stops tsc checking this literal, and
+        // an absent `head` would silently disable the absent-head refusal for
+        // every drift case here.
+        head: "present" as const,
+        lineage: "existing" as const,
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
           await options.onSettled?.({ ...settled, materialized: true } as never, 1);
@@ -2750,7 +2758,8 @@ describe("Rust engine session selection", () => {
           initialUpdate: Y.encodeStateAsUpdate(doc),
           contentKind: "plaintext",
           path: "note.md",
-          lineage: "present" as const,
+          head: "present" as const,
+          lineage: "existing" as const,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "b".repeat(64), markdown: "daemon" }) as never,
@@ -2811,7 +2820,11 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
         initialUpdate: Y.encodeStateAsUpdate(doc),
         contentKind: "plaintext",
         path: options.path,
-        lineage: "present" as const,
+        // `as never` below stops tsc checking this literal, so these two are
+        // stated by hand. Without them `head` was undefined here and the
+        // absent-head refusal never ran in this test at all.
+        head: "present" as const,
+        lineage: "existing" as const,
         applyLocalUpdate: async () => undefined,
         settleNow: async () =>
           ({ sha256: "c".repeat(64), markdown: "" }) as never,
@@ -2996,6 +3009,278 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
 
     expect(openedVersionIds).toEqual(["main", created.activeVersionId]);
     await second.close({ settle: false });
+    await engine.stop();
+  });
+});
+
+// #534, codex P1. The absent-head refusal reads the DISK, and that read is
+// awaited. On a shared workspace a replicated `onRemoteUpdate` can land inside
+// that await: a peer is writing this very path. Two things then stop being
+// true at once — the version DOES have the document, so "not in this version"
+// is false; and the lineage is dirty, so the refusal's `close({settle:false})`
+// is answered with UnsettledClose and the provider escalates it to a SETTLING
+// close, materializing the path the refusal was about to call missing. The
+// refusal would create the phantom it exists to prevent.
+describe("workspaceEngineCapture absent-head refusal against replication", () => {
+  it("binds instead of refusing when a replicated update reached the session", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    const remoteDoc = new Y.Doc();
+    remoteDoc.getText("content").insert(0, "written by a peer");
+    const peerUpdate = Y.encodeStateAsUpdate(remoteDoc);
+    const settles: string[] = [];
+    let closedWithSettle: boolean | undefined;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        // AFTER the open resolves, INSIDE the awaited disk check. A timer beats
+        // an lstat round trip, so the update lands where the race puts it —
+        // which is what makes the recheck's POSITION testable, not just its
+        // existence.
+        // Delivered DURING the open, which the generation buffers and replays
+        // the moment it installs — after the daemon has answered
+        // head/lineage absent, before the guard runs. That is deterministic.
+        // The window codex named (arrival inside the awaited disk check) is the
+        // same defect one tick later, and the guard reads the count ONCE after
+        // that await, so both arrivals take the identical path. Racing an lstat
+        // with a timer is not stageable, so this stages the half that is.
+        options.onRemoteUpdate(peerUpdate);
+        return {
+          doc: remoteDoc,
+          initialUpdate: Y.encodeStateAsUpdate(remoteDoc),
+          contentKind: "plaintext",
+          path: options.path,
+          // The daemon's answer at open time: nothing committed, nothing
+          // durable. The peer's update is still in flight behind it.
+          head: "absent" as const,
+          lineage: "absent" as const,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            settles.push("settle");
+            return { sha256: "d".repeat(64), markdown: "written by a peer" } as never;
+          },
+          close: async (closeOptions?: { settle?: boolean }) => {
+            closedWithSettle = closeOptions?.settle;
+          },
+        } as never;
+      },
+    });
+
+    // The path is in NEITHER the version nor on disk — every input the refusal
+    // keys on says "missing". Only the peer's update says otherwise.
+    const session = await engine.openYDocSession({
+      path: "peer-created.md",
+      onRemoteUpdate: () => undefined,
+    });
+
+    expect(session.path).toBe("peer-created.md");
+    // Nothing was settled or materialized by a refusal that never happened.
+    expect(settles).toEqual([]);
+    expect(closedWithSettle).toBeUndefined();
+    await expect(readFile(join(root, "peer-created.md"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("refuses without settling, and without calling it missing, when an update wins the release gap", async () => {
+    // The narrower seam: the count is read, THEN the release is queued through
+    // the operation chain, so an update can still arrive before the close
+    // reaches the daemon. The daemon answers UnsettledClose — "content arrived
+    // after all". The session cannot be handed back (its provider already
+    // closed itself and dropped every subscription) and cannot be reopened (a
+    // refused close reinserts the daemon entry with its lease held), so the
+    // only safe answer is a refusal that does NOT claim the path is missing.
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "arrived from a peer");
+    const peerUpdate = Y.encodeStateAsUpdate(doc);
+    const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> = [];
+    const settles: string[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        let deliver: (() => void) | null = () => options.onRemoteUpdate(peerUpdate);
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext",
+          path: options.path,
+          head: "absent" as const,
+          lineage: "absent" as const,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            settles.push("settle");
+            return { sha256: "e".repeat(64), markdown: "arrived from a peer" } as never;
+          },
+          close: async (closeOptions?: {
+            settle?: boolean;
+            settleOnRefusal?: boolean;
+          }) => {
+            closeCalls.push({ ...closeOptions });
+            // The update lands in the gap the release was queued across, and
+            // the daemon refuses because the lineage is now dirty.
+            if (deliver) {
+              deliver();
+              deliver = null;
+              throw new Error("unsettled-close");
+            }
+          },
+        } as never;
+      },
+    });
+
+    const refusal = await engine
+      .openYDocSession({ path: "peer-created.md", onRemoteUpdate: () => undefined })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
+    // It must NOT claim the version does not have a path something is writing.
+    expect(isYDocPathNotInVersionError(refusal)).toBe(false);
+    // And the release never escalated, so nothing was materialized.
+    expect(closeCalls).toEqual([{ settle: false, settleOnRefusal: false }]);
+    expect(settles).toEqual([]);
+    await expect(readFile(join(root, "peer-created.md"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await engine.stop();
+  });
+
+  it("does not claim the version is missing a file an agent created during the release", async () => {
+    // The disk read is one syscall and the release that follows awaits a daemon
+    // round trip. This chain serializes ENGINE work, not the filesystem, so an
+    // agent or an external editor can create the path inside that window — and
+    // the queued watcher then captures a file the user was just told does not
+    // exist. Staged on the close, which is the window.
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    const doc = new Y.Doc();
+    const settles: string[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => ({
+        doc,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        contentKind: "plaintext",
+        path: options.path,
+        head: "absent" as const,
+        lineage: "absent" as const,
+        applyLocalUpdate: async () => undefined,
+        settleNow: async () => {
+          settles.push("settle");
+          return { sha256: "a".repeat(64), markdown: "" } as never;
+        },
+        close: async () => {
+          // The agent's write lands while the release is in flight.
+          await writeFile(join(root, "agent-made.md"), "written by an agent", "utf8");
+        },
+      }) as never,
+    });
+
+    const refusal = await engine
+      .openYDocSession({ path: "agent-made.md", onRemoteUpdate: () => undefined })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    // The file is there now, so "this version doesn't have this file" would be
+    // a false statement to the user.
+    expect(isYDocPathNotInVersionError(refusal)).toBe(false);
+    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
+    // And the agent's bytes were never touched.
+    expect(await readFile(join(root, "agent-made.md"), "utf8")).toBe(
+      "written by an agent",
+    );
+    expect(settles).toEqual([]);
+    await engine.stop();
+  });
+
+  it("keeps refusing an uncaptured artifact even when a replicated update arrived", async () => {
+    // Replication-as-existence is safe for a path with NOTHING on disk. It is
+    // NOT safe when the file is there with bytes capture has not ingested: this
+    // bind carries no seed, so its doc holds only the replicated update, and
+    // settling it would write that OVER the user's file — while this same
+    // capture chain is what keeps the watcher from ingesting those bytes.
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    await writeFile(join(root, "uncaptured.md"), "bytes the watcher has not seen", "utf8");
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "arrived from a peer");
+    const peerUpdate = Y.encodeStateAsUpdate(doc);
+    const settles: string[] = [];
+    const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        // Delivered during the open, so the count is already non-zero when the
+        // rules run — the exact input that used to bypass this refusal.
+        options.onRemoteUpdate(peerUpdate);
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext",
+          path: options.path,
+          head: "absent" as const,
+          lineage: "absent" as const,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            settles.push("settle");
+            return { sha256: "f".repeat(64), markdown: "arrived from a peer" } as never;
+          },
+          close: async (closeOptions?: {
+            settle?: boolean;
+            settleOnRefusal?: boolean;
+          }) => {
+            closeCalls.push({ ...closeOptions });
+          },
+        } as never;
+      },
+    });
+
+    const refusal = await engine
+      .openYDocSession({ path: "uncaptured.md", onRemoteUpdate: () => undefined })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(refusal).toBeInstanceOf(YDocUncapturedArtifactError);
+    expect(settles).toEqual([]);
+    expect(closeCalls).toEqual([{ settle: false, settleOnRefusal: false }]);
+    // The bytes the empty bind would have erased are untouched.
+    expect(await readFile(join(root, "uncaptured.md"), "utf8")).toBe(
+      "bytes the watcher has not seen",
+    );
     await engine.stop();
   });
 });

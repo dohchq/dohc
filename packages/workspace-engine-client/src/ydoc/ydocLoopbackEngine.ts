@@ -16,6 +16,13 @@ interface LoopbackFile {
   objectId: string;
   contentKind: YdocContentKind;
   markdown: string;
+  // The daemon reports these INDEPENDENTLY (actor.rs ydoc_open_state_on_store),
+  // so the loopback must too. head-absent + lineage-existing is the
+  // crash-orphaned draft the daemon resurrects: no snapshot in the version,
+  // but durable CRDT rows that hold the only copy of the user's edits. A
+  // loopback that coupled them could not stage that case at all.
+  head: "present" | "absent";
+  lineage: "existing" | "absent";
 }
 
 interface LoopbackSession {
@@ -42,6 +49,10 @@ export interface SeedLoopbackFileInput {
   markdown: string;
   contentKind?: YdocContentKind;
   objectId?: string;
+  // Defaults model an ordinary captured file: the version has the snapshot,
+  // no CRDT lineage has been built yet.
+  head?: "present" | "absent";
+  lineage?: "existing" | "absent";
 }
 
 function fileKey(workspace: string, versionId: string, path: string): string {
@@ -156,6 +167,8 @@ export class YdocLoopbackEngine implements EngineTransport {
       objectId: input.objectId ?? `object-${this.files.size + 1}`,
       contentKind: input.contentKind ?? "richdoc",
       markdown: input.markdown,
+      head: input.head ?? "present",
+      lineage: input.lineage ?? "existing",
     });
   }
 
@@ -253,16 +266,22 @@ export class YdocLoopbackEngine implements EngineTransport {
     ) {
       throw new Error("ydoc.open params.contentKind is invalid.");
     }
-    const file = this.files.get(fileKey(request.workspace, versionId, path));
-    if (!file) throw new Error("Loopback file not found.");
-    const contentKind = requestedKind ?? file.contentKind;
+    const key = fileKey(request.workspace, versionId, path);
+    const file = this.files.get(key);
+    // NO HEAD in this version. The daemon does NOT refuse here — it derives an
+    // object id and binds an EMPTY doc, which is how a just-created file
+    // becomes editable before capture ingests it (actor.rs
+    // ydoc_open_state_on_store, head == None). A loopback that threw instead
+    // modelled less than the daemon and hid every consumer bug on that branch.
+    const contentKind = requestedKind ?? file?.contentKind ?? "richdoc";
     const sessionId = `session-${this.nextSessionId++}`;
-    const doc = createSeededDoc(file.markdown, contentKind);
+    const doc = file ? createSeededDoc(file.markdown, contentKind) : new Y.Doc();
+    const objectId = file?.objectId ?? `object-derived-${key}`;
     this.sessions.set(sessionId, {
       sessionId,
       workspace: request.workspace,
       versionId,
-      objectId: file.objectId,
+      objectId,
       path,
       contentKind,
       doc,
@@ -271,10 +290,12 @@ export class YdocLoopbackEngine implements EngineTransport {
     });
     return {
       sessionId,
-      objectId: file.objectId,
+      objectId,
       path,
       contentKind,
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(doc)),
+      lineage: file ? file.lineage : "absent",
+      head: file ? file.head : "absent",
     };
   }
 

@@ -1012,6 +1012,287 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(screen.queryByTestId("markdown-source-view")).toBeNull());
     expect(screen.getByTestId("view-markdown").hidden).toBe(false);
   });
+
+  // #534. The user clicked a file that exists only in the version they are
+  // LEAVING. The content read wins the race and returns the file; the engine
+  // open loses it, running after the switch removed the path. Every other
+  // available:false downgrades the document to the writable plain editor —
+  // whose autosave would write that file straight back into the version the
+  // user just entered, as a phantom. notInVersion must not downgrade: the
+  // document is replaced by a state that says what happened.
+  it("replaces the document with the honest state when the path is not in this version", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      openEngineYDocSession: vi.fn(async () => ({
+        available: false,
+        notInVersion: true,
+      })),
+    });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId(
+      "file-not-in-version",
+      {},
+      { timeout: 5_000 },
+    );
+    expect(notice.textContent).toContain("This version doesn't have this file.");
+    // The Next names a control the shell actually has (the version menu).
+    expect(notice.textContent).toContain("Switch to the version that has it.");
+    // No edit was pending, so the surface must not claim one was thrown away.
+    expect(screen.queryByTestId("file-not-in-version-discarded")).toBeNull();
+    // The editor is gone, not merely read-only.
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  // THE P1 the review reproduced. Typing during the open wait arms an 800ms
+  // autosave AND leaves a pending draft. When the refusal arrived, `readOnly`
+  // flipped false->true; `readOnly` was a dependency of the unmount-flush
+  // effect, so React ran that effect's PREVIOUS cleanup — closure captured
+  // `readOnly === false` — which walked past its own guard and wrote the
+  // phantom. Turning the document read-only was itself the write.
+  //
+  // The refusal must therefore DISCARD the draft, and the flush must stop
+  // re-running on the transition. Both routes are covered here: the write that
+  // fired on the transition, and the 800ms timer that was already scheduled.
+  it("writes nothing when a document the user typed into turns read-only while it stays mounted", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        openEngineYDocSession: vi.fn(async () => ({ available: false })),
+      });
+
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+      await user.click(screen.getByTestId("markdown-edit-toggle"));
+      await user.type(
+        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+        "typed",
+      );
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+      // The shell turns the path read-only (a share mount lands on it). The
+      // document STAYS MOUNTED, so no unmount clears the armed autosave.
+      view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly />);
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // THE P1 the review reproduced, restaged for #565. Typing DURING the open
+  // wait is no longer reachable — that surface is read-only now — so the
+  // pending draft is armed the only way that remains: legitimately, on a
+  // document the engine already answered "not engine-backed" for, and then a
+  // version switch reopens it and the reopen refuses.
+  //
+  // When the refusal arrived, `readOnly` flipped false->true, and both write
+  // guards held a STALE `readOnly`: the unmount flush had it in its deps, so
+  // React ran that effect's PREVIOUS cleanup with `readOnly === false`
+  // captured, walked past its own guard, and wrote the phantom. Turning the
+  // document read-only was itself the write. The armed 800ms autosave carried
+  // the same stale value in the closure that armed it.
+  //
+  // Timers are advanced only AFTER the refusal lands. A timer that fires
+  // BEFORE it is #567's window, which this change does not close and does not
+  // claim to.
+  // The refusal's DELIVERY must survive the reread that races it (codex P2).
+  // A version switch bumps refreshKey and engineVersionKey together, so the
+  // same-path reread can ENOENT before the queued Y.Doc open answers. The
+  // parent then takes its loading/error branch, and if the engine open lives
+  // in the child that branch unmounts, the refusal lands on nobody: the user
+  // is told "Couldn't read this file", which is true of the read and says
+  // nothing about the version.
+  it("shows the version-specific notice when the reread fails before the open refuses", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    let reads = 0;
+    bridgeMock.readWorkspaceText = vi.fn(async () => {
+      reads += 1;
+      if (reads === 1) return { text: DOC_MARKDOWN, truncated: false };
+      // The version switch removed it. The reread answers FIRST.
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+    let refuse!: () => void;
+    let opens = 0;
+    const refused = new Promise<{ available: boolean; notInVersion?: boolean }>(
+      (resolve) => {
+        refuse = () => resolve({ available: false, notInVersion: true });
+      },
+    );
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      openEngineYDocSession: vi.fn(() => {
+        opens += 1;
+        return opens === 1 ? Promise.resolve({ available: false }) : refused;
+      }),
+    });
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={0}
+        engineVersionKey={0}
+      />,
+    );
+    await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+
+    // The switch: both tokens move together, exactly as the shell bumps them.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+      />,
+    );
+    // The reread loses the file first.
+    await screen.findByText("Couldn't read this file.", {}, { timeout: 5_000 });
+    expect(reads).toBeGreaterThan(1);
+
+    // ...and only THEN does the open answer. The notice must still arrive.
+    await act(async () => {
+      refuse();
+      await refused;
+    });
+    const notice = await screen.findByTestId(
+      "file-not-in-version",
+      {},
+      { timeout: 5_000 },
+    );
+    expect(notice.textContent).toContain("This version doesn't have this file.");
+    expect(screen.queryByText("Couldn't read this file.")).toBeNull();
+  });
+
+
+  // codex P1, the half this change can honestly close. `writesBlocked()` stops
+  // the write — correct, a read-only view must not be written — but the armed
+  // 800ms timer had already fired, so the indicator sat on "Saving…" over an
+  // edit that would never land. That is the same lie as a doc reading "Saved"
+  // over a zero-byte file. The edit is still lost when the view is torn down
+  // in this state: #567 owns that, because preserving the TEXT needs eager
+  // serialization (a rearm re-serializes, and the read-only window has already
+  // unmounted the editor, so it writes the PRE-EDIT body).
+  it("stops claiming a save is in flight when the view turns read-only", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        openEngineYDocSession: vi.fn(async () => ({ available: false })),
+      });
+      const states: string[] = [];
+
+      const view = render(
+        <FileInspector
+          workspaceId="ws-1"
+          path="a.md"
+          onSaveStateChange={(state) => states.push(state)}
+        />,
+      );
+      await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+      await user.click(screen.getByTestId("markdown-edit-toggle"));
+      await user.type(
+        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+        "held",
+      );
+      expect(states.at(-1)).toBe("saving");
+
+      // The share mount lands inside the autosave window.
+      view.rerender(
+        <FileInspector
+          workspaceId="ws-1"
+          path="a.md"
+          readOnly
+          onSaveStateChange={(state) => states.push(state)}
+        />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+      // The document must not still claim the edit is on its way.
+      expect(states.at(-1)).not.toBe("saving");
+      expect(states).toContain("error");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("writes nothing when a pending draft meets a not-in-version refusal on reopen", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      let opens = 0;
+      let refuse!: () => void;
+      const refused = new Promise<{
+        available: boolean;
+        notInVersion?: boolean;
+      }>((resolve) => {
+        refuse = () => resolve({ available: false, notInVersion: true });
+      });
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        openEngineYDocSession: vi.fn(() => {
+          opens += 1;
+          // First open: not engine-backed, so the plain editor is legitimately
+          // writable. The second (the version switch) is the refusal.
+          return opens === 1 ? Promise.resolve({ available: false }) : refused;
+        }),
+      });
+
+      const view = render(
+        <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={0} />,
+      );
+      await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+      await user.click(screen.getByTestId("markdown-edit-toggle"));
+      await user.type(
+        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+        "phantom",
+      );
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+      // The version switch. Same mount, same pending draft, same armed timer.
+      view.rerender(
+        <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
+      );
+      await act(async () => {
+        refuse();
+        await refused;
+      });
+      const notice = await screen.findByTestId(
+        "file-not-in-version",
+        {},
+        { timeout: 5_000 },
+      );
+
+      // Route 1: the read-only transition must not have written.
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+      // Route 2: the armed autosave must not write either, now that the
+      // document is read-only. Past 800ms it would have, on a stale closure.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+      // The user is TOLD the edit went nowhere. Losing it silently would be
+      // the same defect wearing the other face.
+      expect(notice.textContent).toContain("dohc discarded your unsaved edit.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // #533. The engine open runs ON the capture chain, so a document clicked while

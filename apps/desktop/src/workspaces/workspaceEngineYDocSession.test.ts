@@ -25,7 +25,12 @@ import {
   EngineWorkspaceSessions,
   type EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
-import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import {
+  createWorkspaceEngineCapture,
+  isYDocPathNotInVersionError,
+  YDocPathNotInVersionError,
+  YDocUncapturedArtifactError,
+} from "./workspaceEngineCapture";
 import { nativeTmpdir } from "./testTemp";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
@@ -572,3 +577,126 @@ it("never reports a save seq the settled file does not back", async () => {
   );
   await honest.stop().catch(() => undefined);
 });
+// #534 — the absent-head contract stated on WorkspaceEngineCapture.openYDocSession.
+//
+// The daemon does NOT refuse an open for a path the entered version has no
+// snapshot for: it derives an object id and binds an EMPTY doc, which is the
+// only reason a just-created file is editable before capture ingests it. Both
+// halves of the contract are pinned here, because the guard is only correct if
+// it separates them: refusing everything would break creation, and refusing
+// nothing is the phantom file.
+it("refuses a live session for a path the entered version does not have", async () => {
+  // The #534 interleaving, at the point it actually decides: the user clicked
+  // draftOnly.md while switchVersion("main") was on the capture chain, so the
+  // open runs AFTER the switch — against a version with no snapshot for the
+  // path, over a folder the switch already removed it from.
+  const DRAFT_ONLY = "notes/draftOnly.md";
+
+  const refusal = await capture
+    .openYDocSession({
+      path: DRAFT_ONLY,
+      contentKind: "richdoc",
+      onRemoteUpdate: () => undefined,
+    })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+  expect(refusal).toBeInstanceOf(YDocPathNotInVersionError);
+  expect(isYDocPathNotInVersionError(refusal)).toBe(true);
+  expect((refusal as YDocPathNotInVersionError).code).toBe("path-not-in-version");
+  // The refusal names the file and the version it is not in.
+  expect((refusal as Error).message).toContain(DRAFT_ONLY);
+  // The daemon session the probe opened is released, not leaked: a retained
+  // lease would refuse every later open of the same object as already-live.
+  expect(methodCount("ydoc.close")).toBe(methodCount("ydoc.open"));
+  // The whole point: nothing materialized. No phantom file in this version.
+  await expect(readFile(join(root, DRAFT_ONLY), "utf8")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+});
+
+it("still opens a file the user just created that capture has not ingested", async () => {
+  // Creation, verbatim: workspaceFiles.createFile writes the artifact to disk
+  // with `wx` as an EMPTY file and the editor opens it immediately. The version
+  // has no snapshot yet (capture is asynchronous), so this open takes the SAME
+  // absent-head branch the test above refuses. Only the artifact on disk
+  // separates them.
+  const CREATED = "notes/created.md";
+  await writeFile(join(root, CREATED), "", "utf8");
+
+  const session = await capture.openYDocSession({
+    path: CREATED,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "First words in a brand new file.");
+  await session.settleNow();
+
+  expect(await readFile(join(root, CREATED), "utf8")).toContain(
+    "First words in a brand new file.",
+  );
+  await session.close({ settle: false });
+});
+
+it("refuses an uncaptured artifact that HAS content, without calling it missing", async () => {
+  // Head absent but the file is really on disk with bytes in it. The daemon
+  // seeds an absent-head bind from the HEAD, so the doc comes up empty and the
+  // first settle would erase the file. Refuse the session — but this is an
+  // ordinary refusal: the file exists, so the caller keeps the plain editor and
+  // must NOT tell the user the version does not have it.
+  const UNCAPTURED = "notes/uncaptured.md";
+  await writeFile(join(root, UNCAPTURED), "# Real content", "utf8");
+
+  const refusal = await capture
+    .openYDocSession({
+      path: UNCAPTURED,
+      contentKind: "richdoc",
+      onRemoteUpdate: () => undefined,
+    })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+  expect(refusal).toBeInstanceOf(YDocUncapturedArtifactError);
+  // The claim the user would see must not be made for a file that is right there.
+  expect(isYDocPathNotInVersionError(refusal)).toBe(false);
+  // The file the empty bind would have erased is untouched.
+  expect(await readFile(join(root, UNCAPTURED), "utf8")).toBe("# Real content");
+  expect(methodCount("ydoc.close")).toBe(methodCount("ydoc.open"));
+});
+
+it("opens a crash-orphaned draft the daemon resurrects, head absent and all", async () => {
+  // actor.rs keeps a never-settled local lineage alive: its CRDT rows are the
+  // ONLY copy of what the user typed before the crash, and the version has no
+  // snapshot for the path. Refusing on `head` alone would strand those edits —
+  // and the settle:false close of a dirty lineage is itself refused, wedging
+  // the lease so the path could never be opened again.
+  const ORPHANED = "notes/orphanedDraft.md";
+  ydoc.seedFile({
+    workspace: WORKSPACE_ID,
+    versionId: "main",
+    path: ORPHANED,
+    markdown: "Typed before the crash.",
+    contentKind: "richdoc",
+    head: "absent",
+    lineage: "existing",
+  });
+
+  const session = await capture.openYDocSession({
+    path: ORPHANED,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+  });
+
+  const recovered = new Y.Doc();
+  Y.applyUpdate(recovered, session.initialUpdate);
+  expect(recovered.getXmlFragment("body").toString()).toContain(
+    "Typed before the crash.",
+  );
+  await session.close({ settle: false });
+});
+

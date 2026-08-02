@@ -30,6 +30,16 @@ export type YdocOpenResult = JsonObject & {
   path: string;
   contentKind: YdocContentKind;
   initialUpdateBase64: string;
+  // Whether the ENTERED VERSION has a committed snapshot for this path.
+  // "absent" means the version does not contain the path. See
+  // EngineYdocProviderSession.head.
+  head: "present" | "absent";
+  // Whether the daemon resumed durable CRDT state for this object. These two
+  // are INDEPENDENT and both are read: an ordinary first open of a captured
+  // file is lineage-absent and head-present, and a crash-orphaned draft the
+  // daemon resurrects is lineage-existing and head-absent. Only both absent
+  // means the session is bound to an EMPTY doc over nothing.
+  lineage: "existing" | "absent";
 };
 
 export type YdocRecordUpdateParams = JsonObject & {
@@ -174,7 +184,40 @@ export function decodeYdocOpenResult(value: JsonValue): YdocOpenResult {
       "initialUpdateBase64",
       "ydoc.open result",
     ),
+    head: headValue(object, "head", "ydoc.open result"),
+    lineage: lineageValue(object, "lineage", "ydoc.open result"),
   };
+}
+
+// Both fields gate a REFUSAL, so neither may be inferred. A decoder that
+// defaulted a missing or garbled value to the permissive side would silently
+// turn the refusal off — the same hole the field exists to close.
+function headValue(
+  object: JsonObject,
+  key: string,
+  label: string,
+): "present" | "absent" {
+  const value = object[key];
+  if (value !== "present" && value !== "absent") {
+    throw new YdocProtocolShapeError(
+      `${label}.${key} must be present or absent.`,
+    );
+  }
+  return value;
+}
+
+function lineageValue(
+  object: JsonObject,
+  key: string,
+  label: string,
+): "existing" | "absent" {
+  const value = object[key];
+  if (value !== "existing" && value !== "absent") {
+    throw new YdocProtocolShapeError(
+      `${label}.${key} must be existing or absent.`,
+    );
+  }
+  return value;
 }
 
 export function decodeYdocRecordUpdateResult(

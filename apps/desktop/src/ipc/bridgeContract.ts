@@ -2913,6 +2913,12 @@ export type OpenEngineYDocSessionPayload = z.infer<typeof OpenEngineYDocSessionP
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
+  // The path is not in the version the workspace is on — a version switch
+  // removed it while this open was queued behind that switch (#534). Every
+  // other available:false reason downgrades the document to the writable plain
+  // editor; this one must not, because that editor would autosave the path back
+  // into the version as a phantom file.
+  notInVersion: z.boolean().optional(),
 });
 export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionResult>;
 

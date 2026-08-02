@@ -10,6 +10,7 @@ import {
 import {
   Suspense,
   lazy,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -23,7 +24,7 @@ import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { bridge } from "./bridge";
-import { useEngineDoc } from "./collab/useEngineDoc";
+import { useEngineDoc, type UseEngineDoc } from "./collab/useEngineDoc";
 import {
   applyFrontmatter,
   orderFrontmatter,
@@ -270,6 +271,10 @@ const TEXT_EXT = new Set([
   "h",
   "hpp",
 ]);
+// The markdown autosave debounce. Named because the rearm on unblock has to
+// use the SAME window the keystroke armed — two literals would drift.
+const AUTOSAVE_DEBOUNCE_MS = 800;
+
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
 const RAW_FRONTMATTER_RE =
   /^(---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?)([\s\S]*)$/;
@@ -665,6 +670,28 @@ function MarkdownView(props: {
   // docs toggle the read-only source projection; the legacy autosave editor
   // switches its existing (editable) source mode.
   registerSourceToggle?: (toggle: (() => void) | null) => void;
+  // The engine refused the open because the path is not in this workspace's
+  // version (#534). `discardedEdit` is true when the user had typed and that
+  // draft was thrown away rather than written — the inspector owes them that
+  // fact, because nothing else will tell them.
+  // Whether an unsaved draft is pending, reported on every render. The
+  // inspector needs this AT REFUSAL TIME, and by then this component is gone:
+  // the commit that learns of the refusal is the one that replaces it, so a
+  // callback fired from here at that moment would never run. Reporting
+  // continuously means the inspector already holds the answer. The setter bails
+  // out when the value is unchanged, so this costs a comparison per render.
+  onPendingDraftChange?: (pending: boolean) => void;
+  // The engine open, opened by the INSPECTOR and passed down. It deliberately
+  // does not live here: this component is unmounted by the inspector's own
+  // loading/error branch, and a version switch that removes the file makes the
+  // reread fail before the queued open answers — so an open owned here would be
+  // cancelled by the very race its refusal exists to name (#534, codex P2).
+  engine: UseEngineDoc;
+  // Set by the inspector the instant the engine refuses this path. Read by
+  // every write guard BESIDE `readOnlyRef`, because the refusal arrives in the
+  // same commit that unmounts this component — there is no render of it here to
+  // fold into `readOnly` (#534).
+  writesRefusedRef: { current: boolean };
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
@@ -676,18 +703,7 @@ function MarkdownView(props: {
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
 
-  // WS-G2-C-2: a rich (markdown) file on an engine-flagged workspace binds
-  // Tiptap to the engine-native Y.Doc (recordUpdate + debounced settle). Solo
-  // runs entirely on the engine with no relay, and a shared workspace co-edits
-  // through the same
-  // ydoc.update replication. available:false (unflagged workspace, secret path,
-  // missing file, already live) keeps the plain local autosave editor.
-  const engine = useEngineDoc({
-    workspaceId: props.workspaceId,
-    path: props.path,
-    enabled: !props.truncated && !props.forceReadOnly,
-    reopenKey: props.reopenKey,
-  });
+  const engine = props.engine;
   // #533. The engine open runs ON the capture chain, so a document opened
   // while that chain is busy (startup reconciliation of a 1,000-file
   // workspace, a version switch) waits before dohc knows whether it is
@@ -818,7 +834,45 @@ function MarkdownView(props: {
     ? () => props.onSharePath?.(props.path)
     : undefined;
 
-  const readOnly = !!props.forceReadOnly || (props.truncated && !engine.available);
+  // The engine refused because the path is not in the version this workspace is
+  // on (#534). The plain editor is writable too, so falling back to it would
+  // autosave the file the version switch removed back into the version as a
+  // phantom. Hand the refusal up; the caller replaces the document.
+  //
+  // A pending draft reached disk by two routes, and turning the document
+  // read-only closed NEITHER, because both held a stale `readOnly`: the armed
+  // 800ms autosave (see writeDraftNow) and the unmount flush below, which had
+  // `readOnly` in its deps and so ran its previous cleanup on the very
+  // false->true transition with `readOnly === false` captured. Making the
+  // document read-only was itself the write. Both now read `readOnlyRef`.
+  //
+  // NOTE for #567: this makes the `readOnly` guards read the CURRENT value.
+  // It does not add `opening` to them — whether an opening document may drop
+  // an armed keystroke is that issue's product decision, not this one's.
+  //
+  // The draft is reported, not written: the user typed into a file this
+  // version does not have, and nothing else would tell them it went nowhere.
+  const { onPendingDraftChange } = props;
+  useEffect(() => {
+    onPendingDraftChange?.(unsavedDraft.current);
+  });
+  const readOnly =
+    !!props.forceReadOnly ||
+    engine.notInVersion ||
+    (props.truncated && !engine.available);
+  // Every write guard reads THIS, never the captured `readOnly`. Assigned
+  // during render so a cleanup or an armed timer that runs after the flip sees
+  // the flip. See writeDraftNow and the unmount flush.
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  // The single question all three write paths ask. Both refs, because they
+  // close different gaps: `readOnlyRef` a flip this component rendered,
+  // `writesRefusedRef` a refusal it never got to render.
+  const { writesRefusedRef } = props;
+  const writesBlocked = useCallback(
+    () => readOnlyRef.current || writesRefusedRef.current,
+    [writesRefusedRef],
+  );
   const engineMode = engine.available && engine.doc !== null;
 
   // "View markdown as source" (engine mode): a READ-ONLY projection of the
@@ -1017,7 +1071,23 @@ function MarkdownView(props: {
   }, [props.body, editing]);
 
   async function writeDraftNow(options: { rejectOnError?: boolean } = {}): Promise<void> {
-    if (readOnly) return;
+    // The REF, not the captured value. The 800ms autosave timer holds the
+    // closure from the render that armed it, where readOnly was false — so a
+    // document that turned read-only after the keystroke still wrote (#534).
+    // Writes are blocked (a read-only view, or the version refusal). The edit
+    // does NOT reach disk — and the indicator must stop saying it is going to.
+    // Leaving it on "saving" is the same lie as a doc reading "Saved" over a
+    // zero-byte file: this reports the honest state, that the file on disk is
+    // behind the editor.
+    //
+    // The draft itself is still lost when the view is torn down in this state,
+    // and #567 owns that: preserving the TEXT needs eager serialization,
+    // because `serializeDraftRef` reads the live editor and a read-only window
+    // unmounts it — a naive rearm here writes the PRE-EDIT body.
+    if (writesBlocked()) {
+      setSaveState("error");
+      return;
+    }
     const text = serializeDraftRef.current();
     latestDraft.current = text;
     unsavedDraft.current = false;
@@ -1064,7 +1134,7 @@ function MarkdownView(props: {
     unsavedDraft.current = true;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => void saveNow(), 800);
+    saveTimer.current = setTimeout(() => void saveNow(), AUTOSAVE_DEBOUNCE_MS);
   }
 
   function switchMode(next: "read" | "wysiwyg" | "source") {
@@ -1132,11 +1202,16 @@ function MarkdownView(props: {
   // IPC as saveNow) still lands and the watcher records it like any save.
   // props are stable for a mount (keyed remount per path), so the captured
   // workspaceId/path always belong to the draft being flushed.
+  //
+  // `readOnly` is READ FROM A REF and is deliberately not a dependency. As a
+  // dependency it made every read-only transition run this cleanup with the
+  // PREVIOUS render's value captured, so turning the document read-only was
+  // itself a write (#534). The ref carries the current value to a real unmount.
   const { workspaceId, path } = props;
   useEffect(() => {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      if (!unsavedDraft.current || readOnly) return;
+      if (!unsavedDraft.current || writesBlocked()) return;
       unsavedDraft.current = false;
       const text = serializeDraftRef.current();
       void bridge()
@@ -1147,7 +1222,7 @@ function MarkdownView(props: {
         })
         .catch(() => undefined);
     };
-  }, [workspaceId, path, readOnly]);
+  }, [workspaceId, path]);
 
   // Imperative flush seam: the shell awaits this BEFORE an explorer op that
   // moves/deletes paths. A rename of the open file remounts the keyed
@@ -1158,7 +1233,9 @@ function MarkdownView(props: {
   useEffect(() => {
     if (!registerDraftFlush) return;
     registerDraftFlush(async () => {
-      if (!unsavedDraft.current || readOnly) return;
+      // The ref, not the captured value: the shell can call this seam between
+      // the refusal and the re-registration.
+      if (!unsavedDraft.current || writesBlocked()) return;
       if (saveTimer.current) clearTimeout(saveTimer.current);
       await writeDraftNow({ rejectOnError: true });
     });
@@ -1166,7 +1243,7 @@ function MarkdownView(props: {
     // writeDraftNow reads refs (latestDraft) + per-mount-stable props only, so the
     // first render's closure stays correct for the whole mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [registerDraftFlush, readOnly]);
+  }, [registerDraftFlush]);
 
   // Linked mentions live at the BOTTOM of the document, inside the reading
   // measure, in every markdown branch (engine / wysiwyg / read). Hidden when a
@@ -2174,12 +2251,51 @@ export function FileInspector(props: {
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
+  // Whether an unsaved draft is pending. Only MarkdownView knows (it owns the
+  // draft), so it reports every render and this holds the answer BEFORE the
+  // refusal arrives — which is the only way to have it, since the refusal
+  // unmounts the reporter.
+  const [pendingDraft, setPendingDraft] = useState(false);
   const { text, loadedPath, truncated, error } = useTextContent(
     props.workspaceId,
     props.path,
     isText,
     props.refreshKey ?? 0,
   );
+  // THE ENGINE OPEN LIVES HERE, above every branch that swaps the body out.
+  // It used to live in MarkdownView, which the loading/error branch below
+  // unmounts — and a version switch that removes the file bumps refreshKey and
+  // engineVersionKey together, so the reread ENOENTs before the queued open
+  // answers. The child went with the branch, the refusal landed on nobody, and
+  // the user was told "Couldn't read this file": true of the read, silent about
+  // the version (#534, codex P2).
+  //
+  // `enabled` waits for the read to ANSWER, so this opens no earlier than it
+  // used to (and never for a truncated file). It deliberately does NOT go false
+  // when that answer is a failure: a failed reread is exactly when the refusal
+  // is on its way, and dropping `enabled` would cancel the open that carries it.
+  const readAnswered = text !== null || error;
+  const engine = useEngineDoc({
+    workspaceId: props.workspaceId,
+    path: props.path,
+    enabled:
+      kind === "markdown" && readAnswered && !truncated && !props.readOnly,
+    reopenKey: props.engineVersionKey,
+  });
+  // DERIVED, never stored. #565 keys the hook's outcome to the request that
+  // asked for it, so a refusal for the version the user just LEFT cannot repaint
+  // the one they just entered — which is what a sticky flag here used to risk.
+  // DISCLOSED: a file that reappears in the SAME version (an agent recreates it)
+  // leaves this notice up until the request changes. Reopening a daemon session
+  // on every activity tick would churn the capture chain for no gain.
+  const notInVersion = engine.notInVersion;
+  // The child never gets a render carrying this refusal: the branch below
+  // replaces it in the same commit that learns of it, so its own `readOnlyRef`
+  // still holds the pre-refusal value when its unmount flush runs. A REF the
+  // PARENT assigns during render is what crosses that gap — the object identity
+  // is stable, so even the child's first-render closures read the live value.
+  const writesRefusedRef = useRef(false);
+  writesRefusedRef.current = notInVersion;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
@@ -2207,6 +2323,31 @@ export function FileInspector(props: {
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
     : undefined;
+
+  if (notInVersion) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+        <ViewHeader
+          icon={<FileText size={13} aria-hidden />}
+          path={props.path}
+          label="file"
+          onShare={onShareCurrentPath}
+        />
+        <div
+          data-testid="file-not-in-version"
+          className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-subtle"
+        >
+          <span>This version doesn&apos;t have this file.</span>
+          {pendingDraft ? (
+            <span data-testid="file-not-in-version-discarded">
+              dohc discarded your unsaved edit.
+            </span>
+          ) : null}
+          <span>Switch to the version that has it.</span>
+        </div>
+      </div>
+    );
+  }
 
   if (isText && (text === null || loadedPath !== props.path)) {
     // Keep the inspector frame mounted while loading/erroring so the surface
@@ -2250,6 +2391,9 @@ export function FileInspector(props: {
             reopenKey={props.engineVersionKey}
             refreshKey={props.refreshKey}
             registerSourceToggle={props.registerSourceToggle}
+            onPendingDraftChange={setPendingDraft}
+            engine={engine}
+            writesRefusedRef={writesRefusedRef}
           />
         </div>
       );

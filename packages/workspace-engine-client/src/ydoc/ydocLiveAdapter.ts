@@ -440,9 +440,16 @@ export class YdocAdapterSession {
   readonly contentKind: YdocContentKind;
   readonly workspace: WorkspaceHandle;
   readonly sessionId: string;
-  // Whether the daemon resumed a durable CRDT lineage for this object, or
-  // found none. Set by openSession.
-  lineage: "present" | "absent" = "present";
+  // Whether the ENTERED VERSION has a committed snapshot for this path.
+  // Set by openSession; read by the open consumer, which owns the
+  // create-or-refuse decision.
+  head: "present" | "absent" = "present";
+  // Whether the daemon resumed durable CRDT state for this object. Read WITH
+  // `head`, never instead of it: a crash-orphaned draft the daemon resurrects
+  // is lineage-existing and head-absent, and its CRDT rows are the only copy
+  // of those edits — refusing it would strand them and wedge the lease on an
+  // unsettled close.
+  lineage: "existing" | "absent" = "existing";
 
   private readonly adapter: YdocLiveAdapter;
   private closed = false;
@@ -949,12 +956,12 @@ export class YdocLiveAdapter {
       initialUpdate: base64ToBytes(result.initialUpdateBase64),
     });
     this.sessions.set(result.sessionId, session);
-    const lineageAbsent =
-      rawResult !== null &&
-      !Array.isArray(rawResult) &&
-      typeof rawResult === "object" &&
-      rawResult.lineage === "absent";
-    session.lineage = lineageAbsent ? "absent" : "present";
+    session.head = result.head;
+    session.lineage = result.lineage;
+    // `lineage` (durable CRDT state) is NOT `head` (a snapshot in this
+    // version). An ordinary first open of a captured file is lineage-absent
+    // AND head-present, and that is exactly the seed case below.
+    const lineageAbsent = result.lineage === "absent";
     if (
       lineageAbsent &&
       input.seedAbsentLineage !== false &&
