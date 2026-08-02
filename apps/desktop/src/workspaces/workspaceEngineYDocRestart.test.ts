@@ -23,6 +23,12 @@ import {
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { nativeTmpdir } from "./testTemp";
+import {
+  createEngineYDocSaveSeqState,
+  noteLocalEdit,
+  noteSettleOutcome,
+  noteSettleStart,
+} from "./engineYDocSaveSeq";
 
 const roots: string[] = [];
 
@@ -1950,6 +1956,152 @@ it("an explicit settle against a down daemon fails fast instead of blocking", as
   backoff.delays.length = 0;
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   expect(backoff.delays).toEqual(BOUNDED_CLOSE_BACKOFF_MS);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+// #514, codex P2. The revive path's ordering. An edit typed after the daemon
+// died is replayed into the replacement generation, and that replay ARMS a
+// settle before its journal RPC returns. The settle can therefore start while
+// the RPC is still in flight — and it snapshots the edit count at that moment.
+//
+// So the count has to be raised when the replay is armed. Raised after the
+// journal completes, it misses the settle that the replay itself armed: that
+// settle succeeds, carrying the edit, while reporting a seq below it. The
+// renderer only clears on seq >= its own, and with the user done typing
+// nothing arms another settle — the document reads "Saving…" forever over a
+// file that already holds it.
+//
+// The wiring below is main.ts's: noteLocalEdit through the hand-over callback,
+// noteSettleStart/noteSettleOutcome on the save-state channel.
+it("counts a revived edit against the settle its own replay armed", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-revive-seq-",
+    "ydoc-revive-seq",
+  );
+  // The replacement's journal RPC, held open so the settle its replay arms
+  // starts while it is still in flight — a slow daemon under load.
+  let releaseReplayJournal: (() => void) | null = null;
+  const replayJournalHeld = new Promise<void>((resolve) => {
+    releaseReplayJournal = resolve;
+  });
+  // Held on an object: a `let` assigned only inside a callback narrows to
+  // `null` for the reader below, and the non-null dance that hides costs more
+  // than it explains.
+  const armed: { settle: ((markdown: string) => Promise<void>) | null } = {
+    settle: null,
+  };
+  let replayArrived: (() => void) | null = null;
+  const replayReached = new Promise<void>((resolve) => {
+    replayArrived = resolve;
+  });
+
+  const gatedOpenProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const inner = await openProvider(options);
+    // Generation 1 behaves normally; the REPLACEMENT is the one under test.
+    if (state.generation < 2) return inner;
+    let token = 0;
+    return {
+      ...inner,
+      async applyLocalUpdate(update) {
+        // A real provider journals and arms its settle synchronously here,
+        // then awaits the RPC. Everything below the await is the RPC.
+        token += 1;
+        const settleToken = token;
+        armed.settle = async (markdown: string): Promise<void> => {
+          // The debounce fires: this settle announces itself, and only then
+          // does the journal complete and the settle land.
+          options.onSettleStart?.(settleToken);
+          releaseReplayJournal?.();
+          await replayJournalHeld;
+          await writeFile(join(rootPath, options.path), markdown, "utf8");
+          await options.onSettled?.(
+            {
+              momentId: `moment-revive-${settleToken}`,
+              path: options.path,
+              markdown,
+              sha256: createHash("sha256").update(markdown).digest("hex"),
+              materialized: true,
+              projection: {
+                contentKind: "plaintext",
+                sourceStateVectorSha256: "b".repeat(64),
+                destructive: false,
+              },
+            },
+            settleToken,
+          );
+        };
+        replayArrived?.();
+        await replayJournalHeld;
+        await inner.applyLocalUpdate(update);
+      },
+    };
+  };
+
+  const saveSeq = createEngineYDocSaveSeqState();
+  const reported: Array<{ state: string; seq: number }> = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-revive-seq",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: gatedOpenProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onSaveState: (saveState, token) => {
+      const seq =
+        saveState === "settling"
+          ? noteSettleStart(saveSeq, token)
+          : noteSettleOutcome(saveSeq, token);
+      reported.push({ state: saveState, seq });
+    },
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  // The renderer's own counter, exactly as useEngineDoc keeps it.
+  let rendererSeq = 0;
+  const type = (text: string): void => {
+    const before = Y.encodeStateVector(rendererDoc);
+    const body = rendererDoc.getText("plainText");
+    body.insert(body.length, text);
+    rendererSeq += 1;
+    const edited = rendererSeq;
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before), () =>
+      noteLocalEdit(saveSeq, edited),
+    );
+  };
+
+  type("alive ");
+  await session.settleNow();
+
+  // The daemon dies. The next edit finds no generation and must revive one.
+  state.daemonAlive = false;
+  await expect(session.settleNow()).rejects.toThrow(/closed|not available/i);
+  state.daemonAlive = true;
+
+  type("TYPED_AFTER_DEATH");
+  await replayReached;
+
+  // THE INTERLEAVING: the settle the replay armed starts now, while that
+  // replay's journal RPC has not returned.
+  expect(armed.settle, "the replay never reached the replacement").not.toBeNull();
+  await armed.settle?.("alive TYPED_AFTER_DEATH");
+
+  // The save that carried the edit must vouch for it. A lower seq leaves the
+  // renderer on "Saving…" with nothing left to arm another settle.
+  const saved = reported.filter((entry) => entry.state === "saved").at(-1);
+  expect(saved, "the revived settle never reported a save").toBeDefined();
+  expect(
+    saved?.seq,
+    `the save that carried the revived edit vouched for seq ${saved?.seq}, ` +
+      `below the renderer's ${rendererSeq} — the document sticks on "Saving…"`,
+  ).toBeGreaterThanOrEqual(rendererSeq);
 
   await session.close({ settle: false }).catch(() => undefined);
   await capture.stop();

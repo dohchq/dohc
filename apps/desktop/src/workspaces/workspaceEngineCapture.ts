@@ -1171,6 +1171,14 @@ export function createWorkspaceEngineCapture(
     const adoptGeneration = async (
       doc: Y.Doc,
       replacement: EngineYdocProviderSession,
+      // Announced when the REPLAY is armed on the replacement — the moment the
+      // settle that will carry it exists. Anything later is too late: that
+      // settle can start while the replay's journal RPC is still in flight, and
+      // an edit counted after the RPC returns is missing from the seq that
+      // settle reports. The settle then succeeds carrying the edit while
+      // vouching for a seq below it, and with nothing left to arm another
+      // settle the document sits on "Saving…" for good (#514, codex P2).
+      onReplayArmed?: () => void,
     ): Promise<void> => {
       try {
         const opening = openingRemoteUpdates.get(replacement);
@@ -1189,7 +1197,13 @@ export function createWorkspaceEngineCapture(
           Y.encodeStateVector(replacement.doc),
         );
         if (replay.byteLength > 2) {
-          await replacement.applyLocalUpdate(replay);
+          const journaled = replacement.applyLocalUpdate(replay);
+          onReplayArmed?.();
+          await journaled;
+        } else {
+          // Nothing to replay: the replacement already holds this text, so
+          // every settle it runs carries it.
+          onReplayArmed?.();
         }
         current = replacement;
         if (opening) {
@@ -1262,11 +1276,15 @@ export function createWorkspaceEngineCapture(
     // died with its daemon took its lease with it, and one that died still
     // holding a LIVE lease refuses the open and stays dead for close() to
     // converge — the retained release obligation remains teardown's job.
-    const reviveDeadSession = async (doc: Y.Doc): Promise<void> => {
+    const reviveDeadSession = async (
+      doc: Y.Doc,
+      onReplayArmed?: () => void,
+    ): Promise<void> => {
       if (closed || current !== null) return;
       await adoptGeneration(
         doc,
         await openGeneration(false, { retryTransportErrors: false }),
+        onReplayArmed,
       );
     };
 
@@ -1340,10 +1358,10 @@ export function createWorkspaceEngineCapture(
           // once a generation died.
           if (current === null) {
             Y.applyUpdate(doc, update);
-            await reviveDeadSession(doc);
-            // The revive replayed the canonical doc — this update included —
-            // into the new generation, so it is journaled now.
-            onArmed?.();
+            // The revive replays the canonical doc — this update included —
+            // into the new generation. It announces the update when that
+            // replay is ARMED, not when its journal RPC returns.
+            await reviveDeadSession(doc, onArmed);
             return;
           }
           const generation = current;
