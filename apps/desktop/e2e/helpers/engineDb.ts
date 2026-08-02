@@ -160,14 +160,19 @@ export function withEngineDb<T>(rootPath: string, fn: (db: EngineDb) => T): T | 
   let db: EngineDb | null = null;
   try {
     db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), { readOnly: true });
+    if (missingSchemaNames(db).length === 0) return fn(db);
+    if (!schemaSettled(db)) return null;
+    // Every read above is its own snapshot, so the daemon can commit the rest
+    // of the chain between them and leave "name absent" and "ledger finished"
+    // describing two different instants. Settling is final, so re-reading the
+    // names AFTER the ledger is the whole guard: still absent now means never.
     const missing = missingSchemaNames(db);
     if (missing.length === 0) return fn(db);
-    // Absent AND settled is a defect, and it says which name and where the
+    // Absent after settling is a defect, and it says which name and where the
     // ledger stopped. Returning "not ready" instead would leave the gate shut
     // forever, every helper would answer 0/[]/false, and the `toBe(0)` and
     // `toEqual([])` call sites would pass on nothing — the shape this file
     // exists to remove.
-    if (!schemaSettled(db)) return null;
     throw new Error(
       `engine.db has no ${missing.join(", ")}, and its migration ledger has settled at ` +
         `ordinal ${terminalMigrationOrdinal()}: these e2e readers query a schema the ` +
