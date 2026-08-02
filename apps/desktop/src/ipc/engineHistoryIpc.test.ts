@@ -4,7 +4,11 @@ import {
   versionConflictForIpc,
   type EngineMomentAuthorNamer,
 } from "./engineHistoryIpc";
-import { EngineMomentDetailRecord, WorkspaceVersionConflict } from "./bridgeContract";
+import {
+  EngineMomentDetailRecord,
+  MOMENT_TEXT_MAX_CHARS,
+  WorkspaceVersionConflict,
+} from "./bridgeContract";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
 
@@ -122,6 +126,54 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     expect(record.afterBinary).toEqual({ byteLength: 4, sha256: BINARY_SHA });
     expect(record.contentKind).toBe("binary");
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+  });
+});
+
+// The bridge schema is the LAST gate a hydrated body passes: main runs
+// `ReadEngineMomentResult.parse` on exactly what `engineMomentDetailForIpc`
+// produced (main.ts readEngineMoment handler), so these two calls are the
+// real pairing, not a stand-in.
+describe("moment bodies the engine accepted cross the bridge", () => {
+  it("carries a body larger than the old 2 MB bound", () => {
+    // One character past the retired 2,000,000 bound, and well inside the
+    // engine's 10 MiB text contract: this body is ordinary stored content.
+    const body = "x".repeat(2_000_001);
+    const record = engineMomentDetailForIpc(
+      detailWith({ before: textSide("v1\n"), after: textSide(body) }),
+      namer,
+    );
+    expect(EngineMomentDetailRecord.parse(record).afterText).toBe(body);
+  });
+
+  it("carries a body at the engine's own text contract", () => {
+    // Stated absolutely, not as MOMENT_TEXT_MAX_CHARS: the bound the bridge
+    // owes is the engine's MAX_TEXT_BYTES
+    // (`crates/dohc-engine-domain/src/store.rs`), so lowering the bridge
+    // constant must fail this, never move it.
+    const engineMaxTextBytes = 10 * 1024 * 1024;
+    expect(MOMENT_TEXT_MAX_CHARS).toBe(engineMaxTextBytes);
+    const body = "x".repeat(engineMaxTextBytes);
+    const record = engineMomentDetailForIpc(
+      detailWith({ before: null, after: textSide(body) }),
+      namer,
+    );
+    expect(EngineMomentDetailRecord.parse(record).afterText).toBe(body);
+  });
+
+  it("names the constraint, limit, unit, and observed size when a body is over", () => {
+    // Over the engine's own contract, so no stored body reaches here — but a
+    // reader who hits it gets the limit, not a bare Zod string complaint.
+    const record = engineMomentDetailForIpc(
+      detailWith({ before: null, after: textSide("x".repeat(MOMENT_TEXT_MAX_CHARS + 1)) }),
+      namer,
+    );
+    const parsed = EngineMomentDetailRecord.safeParse(record);
+    expect(parsed.success).toBe(false);
+    const message = parsed.success ? "" : parsed.error.issues[0]!.message;
+    expect(message).toContain(String(MOMENT_TEXT_MAX_CHARS + 1));
+    expect(message).toContain(String(MOMENT_TEXT_MAX_CHARS));
+    expect(message).toContain("characters");
+    expect(message).toContain("moment body");
   });
 });
 
