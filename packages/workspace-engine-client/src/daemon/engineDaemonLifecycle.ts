@@ -68,7 +68,11 @@ const DEFAULT_MAX_PING_EXPIRIES = 3;
 // is about 7.5 minutes of a workspace that has answered nothing.
 //
 // Any answered probe clears the streak, so a daemon that wedges once and then
-// recovers is restarted, not condemned.
+// recovers is restarted, not condemned. The cap therefore bounds only an
+// unbroken wedge streak: a daemon that wedges intermittently is restarted
+// every time, by design. This file ends a daemon that stopped answering for
+// good, not one that answers unreliably. A crash between two wedges does not
+// clear the streak either — a process that exits answered nothing.
 const DEFAULT_MAX_CONSECUTIVE_WEDGES = 2;
 
 export interface EngineDaemonClient {
@@ -831,7 +835,7 @@ export class EngineDaemonLifecycle {
     if (this.consecutiveWedges >= maxWedges) {
       this.reportFailure(
         new EngineDaemonUnavailableError(
-          `The Rust engine stopped answering engine.ping on ${this.consecutiveWedges} launches in a row, with no reply in between: ${silence}. The limit is ${maxWedges} wedged launches. dohc stopped restarting it.`,
+          `The Rust engine stopped answering engine.ping on ${this.consecutiveWedges} launches: ${silence}. The limit is ${maxWedges} wedges with no reply in between. dohc stopped restarting it.`,
         ),
         true,
       );

@@ -703,9 +703,10 @@ describe("Rust engine daemon lifecycle", () => {
       }
 
       expect(terminalFailures.map((error) => error.message)).toEqual([
-        "The Rust engine stopped answering engine.ping on 2 launches in a row, " +
-          "with no reply in between: 3 probes in a row got no reply within " +
-          "45000ms each. The limit is 2 wedged launches. dohc stopped restarting it.",
+        "The Rust engine stopped answering engine.ping on 2 launches: " +
+          "3 probes in a row got no reply within 45000ms each. " +
+          "The limit is 2 wedges with no reply in between. " +
+          "dohc stopped restarting it.",
       ]);
       // Two generations, both wedged, both killed. A third would mean the
       // terminal verdict failed to stop the restart it ordered.
