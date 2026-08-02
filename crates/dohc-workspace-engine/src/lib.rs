@@ -2194,7 +2194,7 @@ impl EngineService {
                 RelayOperation::PullShareView {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
-                    granted_paths: params.granted_paths,
+                    granted: params.granted_selector.map(Into::into),
                 },
                 "share.view.pull",
             )
@@ -8309,11 +8309,29 @@ struct SharedChannelParams {
 struct ShareViewParams {
     workspace_id: String,
     share_id: String,
-    /// The path scope the caller recorded when it accepted this share.
-    /// Absent means the scope is unknown and this pull enforces no
-    /// containment; an empty list is a whole-workspace grant.
+    /// The selector the caller recorded when it accepted this share. ABSENT
+    /// declares no scope, and that pull enforces no containment. Present with
+    /// empty `paths` is a whole-workspace grant; present with a `versionId`
+    /// is a version share. The three states are deliberately distinct.
     #[serde(default)]
-    granted_paths: Option<Vec<String>>,
+    granted_selector: Option<GrantedSelectorParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GrantedSelectorParams {
+    paths: Vec<String>,
+    #[serde(default)]
+    version_id: Option<String>,
+}
+
+impl From<GrantedSelectorParams> for dohc_engine_sync::ShareGrant {
+    fn from(params: GrantedSelectorParams) -> Self {
+        Self {
+            paths: params.paths,
+            version_id: params.version_id,
+        }
+    }
 }
 
 #[derive(Deserialize)]

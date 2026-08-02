@@ -22,6 +22,80 @@ export interface RefreshSharedViewOutcome {
   changedPaths: number;
 }
 
+/** The selector a share granted, as the relay expressed it at accept time. */
+export interface AcceptedShareSelector {
+  paths: string[];
+  versionId: string | null;
+}
+
+/**
+ * Raised when a refresh cannot establish the scope the user accepted, so it
+ * did NOT pull. An unscoped pull enforces no containment, which would hand a
+ * relay able to INDUCE this failure the one pull it is not checked on.
+ */
+export class ShareScopeUnavailableError extends Error {
+  constructor(readonly shareId: string) {
+    super(`The scope of share ${shareId} could not be read from the relay.`);
+    this.name = "ShareScopeUnavailableError";
+  }
+}
+
+/** How one refresh learns the selector the user accepted. */
+export interface ShareScopeSource {
+  /** What the local record holds. Anything malformed reads as absent. */
+  recorded: unknown;
+  /** Asked ONCE, and only when the record holds no usable selector. */
+  fetch: () => Promise<AcceptedShareSelector>;
+  /** Persist a fetched selector so no later refresh has to ask again. */
+  record: (selector: AcceptedShareSelector) => void;
+}
+
+/**
+ * A registry record is data, not a contract: read the selector back
+ * defensively. Anything malformed reads as absent, which is repaired by the
+ * fetch below rather than passed to the engine.
+ */
+export function recordedShareSelector(
+  value: unknown,
+): AcceptedShareSelector | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const candidate = value as { paths?: unknown; versionId?: unknown };
+  if (!Array.isArray(candidate.paths)) return null;
+  if (!candidate.paths.every((path) => typeof path === "string")) return null;
+  if (candidate.versionId !== null && typeof candidate.versionId !== "string") {
+    return null;
+  }
+  return {
+    paths: [...(candidate.paths as string[])],
+    versionId: candidate.versionId,
+  };
+}
+
+/**
+ * Fetch-then-persist BEFORE the pull, never after: a record with no selector
+ * gets one now, or this refresh does not pull at all.
+ */
+async function acceptedShareSelector(
+  scope: ShareScopeSource,
+  shareId: string,
+): Promise<AcceptedShareSelector> {
+  const recorded = recordedShareSelector(scope.recorded);
+  if (recorded !== null) return recorded;
+  let fetched: AcceptedShareSelector;
+  try {
+    fetched = await scope.fetch();
+  } catch (error) {
+    // A revoked share answers 404 here exactly as the pull would, and means
+    // the same thing. Every other failure leaves the scope unknown.
+    if (error instanceof ShareUnavailableError) throw error;
+    throw new ShareScopeUnavailableError(shareId);
+  }
+  scope.record(fetched);
+  return fetched;
+}
+
 // Containment before any disk write: the engine already restricts paths to
 // validated workspace-relative ones, but a defense layer this close to
 // fs writes is cheap and permanent.
@@ -216,11 +290,24 @@ export async function refreshSharedViewOnce(input: {
     workspaceId: string;
     relay: SyncRelayConnection;
     shareId: string;
+    grantedSelector: AcceptedShareSelector;
   }) => Promise<PullShareViewResult>;
   // Required at the factory boundary for the same reason: every rooted caller
   // must explicitly select its store implementation.
   store: CaptureVersionedTextStore;
+  // The scope this refresh enforces. Resolved BEFORE the pull, so no pull
+  // ever runs unscoped.
+  scope: ShareScopeSource;
 }): Promise<RefreshSharedViewOutcome> {
+  let grantedSelector: AcceptedShareSelector;
+  try {
+    grantedSelector = await acceptedShareSelector(input.scope, input.shareId);
+  } catch (error) {
+    if (error instanceof ShareUnavailableError) {
+      return { status: "ended", changedPaths: 0 };
+    }
+    throw error;
+  }
   let pull;
   try {
     pull = await input.pull({
@@ -228,6 +315,7 @@ export async function refreshSharedViewOnce(input: {
       workspaceId: input.workspaceId,
       relay: input.relay,
       shareId: input.shareId,
+      grantedSelector,
     });
   } catch (error) {
     if (error instanceof ShareUnavailableError) {

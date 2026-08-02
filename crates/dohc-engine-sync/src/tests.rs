@@ -4864,7 +4864,10 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
-        granted_paths: Some(vec!["shared/docs".to_owned()]),
+        granted: Some(ShareGrant {
+            paths: vec!["shared/docs".to_owned()],
+            version_id: None,
+        }),
     };
     let secret = envelope(
         "peer",
@@ -4880,7 +4883,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         share_id: "share-channel".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-allowed".to_owned()),
-        granted_paths: None,
+        granted: None,
     };
     let private = envelope(
         "peer",
@@ -4901,7 +4904,7 @@ fn shared_channel_channel_create_without_wire_id_is_rejected() {
         share_id: "share-channel".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-allowed".to_owned()),
-        granted_paths: None,
+        granted: None,
     };
     let op = envelope(
         "missing-wire",
@@ -4928,7 +4931,7 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
         share_id: "share-other".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-other".to_owned()),
-        granted_paths: None,
+        granted: None,
     };
     let channel = envelope(
         "cross-channel",
@@ -4967,7 +4970,7 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
         share_id: "share-allowed".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-allowed".to_owned()),
-        granted_paths: None,
+        granted: None,
     };
     let foreign_thread = envelope(
         "cross-channel",
@@ -5010,7 +5013,7 @@ fn shared_channel_correctly_scoped_ops_apply() {
         share_id: "share-allowed".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-allowed".to_owned()),
-        granted_paths: None,
+        granted: None,
     };
     let channel = envelope(
         "allowed-channel",
@@ -5091,7 +5094,10 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
-        granted_paths: Some(vec!["shared/docs".to_owned()]),
+        granted: Some(ShareGrant {
+            paths: vec!["shared/docs".to_owned()],
+            version_id: None,
+        }),
     };
     let crossing = envelope(
         "view-paths",
@@ -11486,7 +11492,7 @@ fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
             },
         )],
     ));
-    let granted = ["docs".to_owned(), "projects".to_owned()];
+    let granted = tracked_grant(["docs", "projects"]);
     let outcome = client
         .pull_share_view(&mut engine, "ws", "share", Some(&granted), &NoFaults)
         .expect("pull multi-path share");
@@ -11632,6 +11638,15 @@ fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop
     );
 }
 
+/// A path grant that follows the workspace's main version — what a recipient
+/// records for every share except a version share.
+fn tracked_grant<'a>(paths: impl IntoIterator<Item = &'a str>) -> ShareGrant {
+    ShareGrant {
+        paths: paths.into_iter().map(str::to_owned).collect(),
+        version_id: None,
+    }
+}
+
 fn share_view_pull_changed(outcome: &ShareViewPullOutcome) -> Vec<&str> {
     outcome
         .changed_paths
@@ -11680,7 +11695,7 @@ fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_reques
         ]),
     );
 
-    let granted = ["docs".to_owned()];
+    let granted = tracked_grant(["docs"]);
     let result = client.pull_share_view(&mut engine, "ws", "share", Some(&granted), &NoFaults);
 
     // The disclosure comes FIRST in the causal chain: replay downloads the
@@ -11751,7 +11766,13 @@ fn share_view_pull_applies_every_tracked_path_under_a_whole_workspace_grant() {
     );
 
     let outcome = client
-        .pull_share_view(&mut engine, "ws", "share", Some(&[]), &NoFaults)
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            Some(&tracked_grant([])),
+            &NoFaults,
+        )
         .expect("a whole-workspace grant pulls");
 
     assert_eq!(
@@ -11835,7 +11856,7 @@ fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
         ),
     );
 
-    let granted = ["docs".to_owned(), "projects".to_owned()];
+    let granted = tracked_grant(["docs", "projects"]);
     let outcome = client
         .pull_share_view(&mut engine, "ws", "share", Some(&granted), &NoFaults)
         .expect("a multi-path grant pulls");
@@ -11854,6 +11875,133 @@ fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
             .expect("share blob calls"),
         shas[..2],
         "MUTATION: the ungranted path's blob is downloaded before the scope is checked"
+    );
+}
+
+fn share_view_version_create_op(
+    seq: i64,
+    version_id: &str,
+    path: &str,
+    sha: &str,
+) -> ShareReplicationEnvelope {
+    ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: seq,
+        op_kind: "version.create".to_owned(),
+        payload: json!({
+            "versionId": version_id,
+            "forkSnapshots": [{ "path": path, "blobSha256": sha, "contentKind": "text" }]
+        }),
+        recorded_at_ms: 10 + seq,
+    }
+}
+
+/// A version share grants ONE version. `version.create` is the only inbound op
+/// that still carries a version identity — the relay minimizes a served
+/// `moment.append` down to paths, blob and operation — so it is the only one
+/// the recipient can check, and it must name the granted version.
+#[test]
+fn share_view_pull_skips_a_version_create_from_a_version_the_share_did_not_grant() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let granted_body = b"the granted version".to_vec();
+    let other_body = b"a version nobody shared".to_vec();
+    let granted_sha = dohc_engine_storage::hex_sha256(&granted_body);
+    let other_sha = dohc_engine_storage::hex_sha256(&other_body);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_version_create_op(0, "v1", "docs/a.md", &granted_sha),
+                        share_view_version_create_op(1, "v2", "docs/b.md", &other_sha),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(granted_sha.clone(), granted_body), (other_sha, other_body)]),
+    );
+
+    // A whole-workspace path scope: the version is the ONLY thing separating
+    // these two ops, so nothing else can be what refuses the second.
+    let granted = ShareGrant {
+        paths: Vec::new(),
+        version_id: Some("v1".to_owned()),
+    };
+    let outcome = client
+        .pull_share_view(&mut engine, "ws", "share", Some(&granted), &NoFaults)
+        .expect("an ungranted version is skipped, not fatal");
+
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [granted_sha],
+        "MUTATION: dropping the version check downloads a blob from a version the share never granted"
+    );
+    assert_eq!(
+        share_view_pull_changed(&outcome),
+        ["docs/a.md"],
+        "the granted version applies and the other one lands nothing"
+    );
+    assert_eq!((outcome.applied, outcome.skipped), (1, 1));
+}
+
+/// A path share follows main and is never entitled to a `version.create` —
+/// the relay refuses to serve one (`shareFilter.ts`: `selector.versionId ===
+/// null` is `allowed: false`), so a recipient that replays one is trusting a
+/// relay that just broke its own rule. The snapshot path here is INSIDE the
+/// granted paths, so only the version rule can refuse it.
+#[test]
+fn share_view_pull_refuses_a_version_create_to_a_share_that_granted_only_paths() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"forked into a path share".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![share_view_version_create_op(0, "v1", "docs/a.md", &sha)],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            Some(&tracked_grant(["docs"])),
+            &NoFaults,
+        )
+        .expect("an unentitled version.create is skipped, not fatal");
+
+    assert_eq!(
+        (outcome.applied, outcome.skipped),
+        (0, 1),
+        "MUTATION: an unconstrained version reading as 'any version' replays a fork the share never granted"
+    );
+    assert!(
+        client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls")
+            .is_empty(),
+        "MUTATION: the fork's blob is downloaded before the version is checked"
     );
 }
 

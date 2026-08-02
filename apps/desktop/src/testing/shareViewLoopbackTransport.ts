@@ -539,7 +539,10 @@ export interface ShareViewDaemonHarness {
     workspaceId: string;
     rootPath: string;
     shareMount?: true;
-  }): (input: { shareId: string }) => Promise<PullShareViewResult>;
+  }): (input: {
+    shareId: string;
+    grantedSelector: { paths: string[]; versionId: string | null };
+  }) => Promise<PullShareViewResult>;
   closeAll(): Promise<void>;
 }
 
@@ -589,7 +592,8 @@ export function createShareViewDaemonHarness(
     },
     pullFor(target) {
       const client = live.bind({ ...target, relay: bound });
-      return async ({ shareId }) => await client.pullShareView({ shareId });
+      return async ({ shareId, grantedSelector }) =>
+        await client.pullShareView({ shareId, grantedSelector });
     },
     async closeAll() {
       await sessions.closeAll();

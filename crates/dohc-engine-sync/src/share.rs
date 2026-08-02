@@ -20,14 +20,26 @@ pub struct ShareBoundary {
     pub share_id: String,
     pub surface: ShareSurface,
     pub channel_wire_id: Option<String>,
-    /// The path scope the recipient recorded when it accepted the share.
+    /// The selector the recipient recorded when it accepted the share.
     ///
-    /// `None` means the scope is unknown — a share accepted before the
-    /// recipient kept it — and no containment is enforced. `Some(vec![])` is a
-    /// whole-workspace grant, which also admits every tracked path. Otherwise
-    /// a referenced path must equal a granted path or sit beneath it. The two
-    /// permissive states stay distinct because only `None` needs a backfill.
-    pub granted_paths: Option<Vec<String>>,
+    /// `None` declares no scope and enforces no containment. The desktop
+    /// never pulls that way: it records the selector when the user accepts
+    /// the share, and a refresh that cannot resolve one skips its pull.
+    pub granted: Option<ShareGrant>,
+}
+
+/// A received share's accepted selector, mirroring the relay's own
+/// `ShareSelector` (`services/sync-relay/src/shareFilter.ts`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShareGrant {
+    /// Granted paths. Each selects itself and everything beneath it. EMPTY is
+    /// a whole-workspace grant, which admits every tracked path — distinct
+    /// from an absent `ShareGrant`, which declares no scope at all.
+    pub paths: Vec<String>,
+    /// The granted version. `None` is a live-follow share of the workspace's
+    /// main version, which is never entitled to a `version.create`; `Some(id)`
+    /// is a version share, entitled to exactly that version's create.
+    pub version_id: Option<String>,
 }
 
 /// Apply an inbound shared op only if its channel/path selector remains inside
@@ -205,9 +217,23 @@ fn enforce_share_view_boundary(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    let granted = boundary.granted_paths.as_deref();
+    let granted = boundary.granted.as_ref();
     if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
         return Err(SyncError::ShareBoundaryViolation);
+    }
+    // The version dimension, mirroring the relay: only a VERSION share is
+    // entitled to a `version.create`, and only to the version it was granted.
+    // This is the ONLY op the recipient can check that way — the relay
+    // minimizes a served `moment.append` down to paths, blob and operation,
+    // so an inbound moment carries no version identity at all.
+    if op.op_kind == "version.create" {
+        if let Some(grant) = granted {
+            let claimed = op.payload.get("versionId").and_then(Value::as_str);
+            match (grant.version_id.as_deref(), claimed) {
+                (Some(entitled), Some(claimed)) if entitled == claimed => {}
+                _ => return Err(SyncError::ShareBoundaryViolation),
+            }
+        }
     }
     let mut paths = Vec::new();
     for field in [
@@ -240,7 +266,7 @@ fn enforce_share_view_boundary(
     }
     for path in paths {
         if classify_share_path(path) != PathClass::Tracked
-            || granted.is_some_and(|granted| !path_within_grant(path, granted))
+            || granted.is_some_and(|grant| !path_within_grant(path, &grant.paths))
         {
             return Err(SyncError::ShareBoundaryViolation);
         }

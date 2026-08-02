@@ -33,7 +33,21 @@ import {
   relayTargetForShareMount,
 } from "./shareMounts";
 import { syncJoinedSharedChannels } from "./sharedChannels";
-import { refreshSharedViewOnce } from "./sharedView";
+import {
+  refreshSharedViewOnce,
+  type ShareScopeSource,
+} from "./sharedView";
+
+// Every test in this file pulls with a selector already recorded; the
+// fetch-first path has its own tests in sharedView.test.ts. A throwing
+// `fetch` is the assertion that a recorded selector never re-asks the relay.
+const RECORDED_SCOPE: ShareScopeSource = {
+  recorded: { paths: [], versionId: null },
+  fetch: () => {
+    throw new Error("a recorded selector must not be re-fetched");
+  },
+  record: () => undefined,
+};
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
 class MockDaemon implements EngineDaemonClient {
@@ -407,8 +421,12 @@ describe("EngineRelayClient", () => {
       relay,
       shareId: "share-view",
       store,
+      scope: RECORDED_SCOPE,
       pull: async (input) =>
-        await client.pullShareView({ shareId: input.shareId }),
+        await client.pullShareView({
+          shareId: input.shareId,
+          grantedSelector: input.grantedSelector,
+        }),
     });
 
     expect(outcome).toEqual({ status: "unchanged", changedPaths: 0 });
@@ -432,15 +450,15 @@ describe("EngineRelayClient", () => {
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
+      grantedSelector: { paths: [], versionId: null },
     });
     await sessions.closeAll();
   });
 
-  // Absent and empty are different grants: absent means the scope is unknown
-  // and the pull enforces nothing, empty means the whole workspace was
-  // granted. Sending one for the other either strands a share or records
-  // "everything" as the scope the user accepted.
-  it("sends a whole-workspace grant as an empty list, never as an absent one", async () => {
+  // Both dimensions of the accepted selector reach the engine intact. Dropping
+  // either one widens the grant: no paths reads as "the whole workspace", and
+  // no version reads as "any version's fork".
+  it("sends the accepted selector's paths AND version to the engine", async () => {
     const { rootPath, daemon, sessions, client, relay } = await harness();
     const store = createCaptureLiveStores(
       { workspaceId: "workspace-a", rootPath },
@@ -452,10 +470,17 @@ describe("EngineRelayClient", () => {
       relay,
       shareId: "share-view",
       store,
+      scope: {
+        recorded: { paths: ["docs"], versionId: "v1" },
+        fetch: () => {
+          throw new Error("a recorded selector must not be re-fetched");
+        },
+        record: () => undefined,
+      },
       pull: async (input) =>
         await client.pullShareView({
           shareId: input.shareId,
-          grantedPaths: [],
+          grantedSelector: input.grantedSelector,
         }),
     });
 
@@ -463,11 +488,11 @@ describe("EngineRelayClient", () => {
       daemon.requests.find(
         (request) => request.method === "share.view.pull",
       )?.params,
-      "MUTATION: omitting an empty grant tells the engine the scope is unknown",
+      "MUTATION: dropping either dimension on the wire widens the accepted grant",
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
-      grantedPaths: [],
+      grantedSelector: { paths: ["docs"], versionId: "v1" },
     });
     await sessions.closeAll();
   });
@@ -530,8 +555,12 @@ describe("EngineRelayClient", () => {
         relay,
         shareId: "share-view",
         store,
+        scope: RECORDED_SCOPE,
         pull: async (input) =>
-          await client.pullShareView({ shareId: input.shareId }),
+          await client.pullShareView({
+            shareId: input.shareId,
+            grantedSelector: input.grantedSelector,
+          }),
       }),
     ).resolves.toEqual({ status: "updated", changedPaths: 1 });
 
@@ -557,8 +586,12 @@ describe("EngineRelayClient", () => {
         relay,
         openStore: (workspace) =>
           createCaptureLiveStores(workspace, sessions).store,
+        scope: RECORDED_SCOPE,
         pull: async (input) =>
-          await mountRelay.pullShareView({ shareId: input.shareId }),
+          await mountRelay.pullShareView({
+            shareId: input.shareId,
+            grantedSelector: input.grantedSelector,
+          }),
       }),
     ).resolves.toEqual({ status: "unchanged", changedPaths: 0 });
 
@@ -623,8 +656,12 @@ describe("EngineRelayClient", () => {
         relay,
         shareId: "share-revoked",
         store,
+        scope: RECORDED_SCOPE,
         pull: async (input) =>
-          await client.pullShareView({ shareId: input.shareId }),
+          await client.pullShareView({
+            shareId: input.shareId,
+            grantedSelector: input.grantedSelector,
+          }),
       }),
     ).resolves.toEqual({ status: "ended", changedPaths: 0 });
     await expect(

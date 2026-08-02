@@ -55,6 +55,13 @@ describe("share mounts real daemon", () => {
               baseUrl: "http://unused.invalid",
               token: "unused",
             },
+            scope: {
+              recorded: { paths: [], versionId: null },
+              fetch: () => {
+                throw new Error("a recorded selector must not be re-fetched");
+              },
+              record: () => undefined,
+            },
             pull: async () => ({
               fetched: 0,
               applied: 0,

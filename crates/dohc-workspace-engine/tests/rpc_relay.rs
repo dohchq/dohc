@@ -673,7 +673,7 @@ async fn every_relay_rpc_round_trips_through_dispatch_against_fake_transport() {
         json!({
             "workspaceId": workspace_id,
             "shareId": "roundtrip-view",
-            "grantedPaths": ["notes"],
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
         }),
     )
     .await;
@@ -1417,7 +1417,7 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
         ),
         (
             "share.view.pull",
-            json!({ "workspaceId": "other", "shareId": "share", "grantedPaths": ["notes"] }),
+            json!({ "workspaceId": "other", "shareId": "share", "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" } }),
         ),
     ];
     for (index, (method, params)) in methods.into_iter().enumerate() {
@@ -1656,6 +1656,7 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
                 5,
                 "version.create",
                 json!({
+                    "versionId": "shared-version",
                     "forkSnapshots": [{
                         "path": "notes/view.md",
                         "blobSha256": sha,
@@ -1773,6 +1774,7 @@ async fn share_view_pull_skips_a_malformed_entry_and_reports_the_skip() {
                 0,
                 "version.create",
                 json!({
+                    "versionId": "shared-version",
                     "forkSnapshots": [{
                         "path": "notes/after-malformed.md",
                         "blobSha256": sha,
@@ -1798,7 +1800,7 @@ async fn share_view_pull_skips_a_malformed_entry_and_reports_the_skip() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "grantedPaths": ["notes"],
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
         }),
     )
     .await;
@@ -1827,6 +1829,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
             0,
             "version.create",
             json!({
+                "versionId": "shared-version",
                 "forkSnapshots": [{
                     "path": "notes/old.md",
                     "blobSha256": old_sha,
@@ -1857,7 +1860,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "grantedPaths": ["notes"],
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
         }),
     )
     .await;
@@ -1904,7 +1907,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
                 json!({
                     "workspaceId": workspace_id,
                     "shareId": share_id,
-                    "grantedPaths": ["notes"],
+                    "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
                 }),
             ),
         )
@@ -1940,7 +1943,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "grantedPaths": ["notes"],
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
         }),
     )
     .await;

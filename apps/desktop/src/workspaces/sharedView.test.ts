@@ -8,9 +8,22 @@ import {
   type ShareViewDaemonHarness,
 } from "../testing/shareViewLoopbackTransport";
 import {
+  ShareScopeUnavailableError,
   materializeSharedViewPaths,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
+  type ShareScopeSource,
 } from "./sharedView";
+
+// These tests drive the pull with a selector already recorded; the
+// fetch-first path has its own tests. A throwing `fetch` asserts that a
+// recorded selector never goes back to the relay.
+const RECORDED_SCOPE: ShareScopeSource = {
+  recorded: { paths: [], versionId: null },
+  fetch: () => {
+    throw new Error("a recorded selector must not be re-fetched");
+  },
+  record: () => undefined,
+};
 
 const WORKSPACE = "shared-view-ws";
 const SHARE_ID = "share-1";
@@ -70,7 +83,12 @@ function daemonHarness(relay: FakeShareRelay): ShareViewDaemonHarness {
 // "unchanged" assertions below.
 async function refreshSharedViewOnce(
   harness: ShareViewDaemonHarness,
-  input: { rootDir: string; workspaceId: string; shareId: string },
+  input: {
+    rootDir: string;
+    workspaceId: string;
+    shareId: string;
+    scope?: ShareScopeSource;
+  },
 ) {
   const target = { workspaceId: input.workspaceId, rootPath: input.rootDir };
   const pull = harness.pullFor(target);
@@ -82,6 +100,7 @@ async function refreshSharedViewOnce(
       relay: harness.relay,
       shareId: input.shareId,
       pull,
+      scope: input.scope ?? RECORDED_SCOPE,
       store,
     });
   } finally {
@@ -246,6 +265,102 @@ describe("shared view refresh", () => {
     expect(
       harness.transport.requests.map((request) => request.method),
     ).toContain("share.view.pull");
+  });
+
+  // The scope is resolved BEFORE the pull, and a pull only ever runs with one.
+  // A relay that cannot answer the metadata request is exactly the relay this
+  // enforcement exists for, so a failure there must not buy it an unchecked
+  // pull — it must buy it nothing.
+  it("does not pull at all when the accepted selector cannot be resolved", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("docs/a.md", "body the relay must not get to send");
+    let pulls = 0;
+
+    await expect(
+      refreshSharedViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store: harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir }),
+        scope: {
+          recorded: undefined,
+          fetch: async () => {
+            throw new Error("relay metadata is unavailable");
+          },
+          record: () => undefined,
+        },
+        pull: async (input) => {
+          pulls += 1;
+          return await harness.pullFor({
+            workspaceId: WORKSPACE,
+            rootPath: rootDir,
+          })(input);
+        },
+      }),
+    ).rejects.toBeInstanceOf(ShareScopeUnavailableError);
+
+    expect(
+      pulls,
+      "MUTATION: falling back to an unscoped pull serves the relay that induced the failure",
+    ).toBe(0);
+    await expect(stat(join(rootDir, "docs/a.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await harness.closeAll();
+  });
+
+  // …and the next refresh, once the relay answers, records the selector and
+  // pulls with it. The transitional window is zero unscoped pulls, not one.
+  it("records the fetched selector and pulls with it on the next refresh", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("docs/a.md", "first body");
+    const recorded: Array<{ paths: string[]; versionId: string | null }> = [];
+    let fetches = 0;
+
+    const first = await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+      scope: {
+        recorded: undefined,
+        fetch: async () => {
+          fetches += 1;
+          return { paths: ["docs"], versionId: null };
+        },
+        record: (selector) => recorded.push(selector),
+      },
+    });
+
+    expect(first).toEqual({ status: "updated", changedPaths: 1 });
+    expect(recorded).toEqual([{ paths: ["docs"], versionId: null }]);
+    expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("first body");
+
+    // The recorded selector is now the scope, and it is NOT fetched again.
+    relay.addWrite("docs/b.md", "second body");
+    const second = await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+      scope: {
+        recorded: recorded[0],
+        fetch: async () => {
+          fetches += 1;
+          return { paths: [], versionId: null };
+        },
+        record: (selector) => recorded.push(selector),
+      },
+    });
+
+    expect(second).toEqual({ status: "updated", changedPaths: 1 });
+    expect(
+      fetches,
+      "MUTATION: re-fetching a recorded selector lets the relay restate the grant on every pull",
+    ).toBe(1);
   });
 
   // A read that fails must not cost the user the file they already had.

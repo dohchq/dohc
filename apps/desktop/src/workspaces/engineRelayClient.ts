@@ -477,9 +477,10 @@ export interface EngineRelayWorkspaceClient {
   }): Promise<PushSharedChannelResult>;
   pullShareView(input: {
     shareId: string;
-    // The scope this share granted when the user accepted it. Omitted when
-    // the local record predates the scope — that pull enforces nothing.
-    grantedPaths?: readonly string[];
+    // The selector this share granted when the user accepted it. Omitting it
+    // declares no scope, and that pull enforces no containment — the desktop
+    // refresh paths resolve a selector first and skip the pull otherwise.
+    grantedSelector?: { paths: readonly string[]; versionId: string | null };
   }): Promise<PullShareViewResult>;
 }
 
@@ -826,7 +827,7 @@ export class EngineRelayClient {
           pushed: numberField(result, "pushed", "share.channel.push"),
         };
       },
-      pullShareView: async ({ shareId, grantedPaths }) => {
+      pullShareView: async ({ shareId, grantedSelector }) => {
         let fetched = 0;
         let applied = 0;
         let nextCursor = 0;
@@ -846,11 +847,16 @@ export class EngineRelayClient {
               workspaceId: workspace.workspaceId,
               shareId,
               // Absent and empty mean different things to the engine: absent
-              // is "scope unknown, enforce nothing", empty is "the whole
-              // workspace was granted". Never collapse one into the other.
-              ...(grantedPaths === undefined
+              // declares no scope and enforces nothing, empty `paths` is a
+              // whole-workspace grant. Never collapse one into the other.
+              ...(grantedSelector === undefined
                 ? {}
-                : { grantedPaths: [...grantedPaths] }),
+                : {
+                    grantedSelector: {
+                      paths: [...grantedSelector.paths],
+                      versionId: grantedSelector.versionId,
+                    },
+                  }),
             }),
             "share.view.pull",
           );

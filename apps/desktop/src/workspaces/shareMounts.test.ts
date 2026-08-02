@@ -19,7 +19,19 @@ import {
   removeMountFolder,
   validMountLabel,
 } from "./shareMounts";
+import type { ShareScopeSource } from "./sharedView";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
+
+// These tests drive the pull with a selector already recorded; the
+// fetch-first path has its own tests. A throwing `fetch` asserts that a
+// recorded selector never goes back to the relay.
+const RECORDED_SCOPE: ShareScopeSource = {
+  recorded: { paths: [], versionId: null },
+  fetch: () => {
+    throw new Error("a recorded selector must not be re-fetched");
+  },
+  record: () => undefined,
+};
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 
 const SHARE_ID = "share-1";
@@ -70,6 +82,7 @@ async function refreshShareMountOnce(
   input: {
     hostRoot: string;
     mount: { shareId: string; label: string };
+    scope?: ShareScopeSource;
     openStore?: (workspace: {
       workspaceId: string;
       rootPath: string;
@@ -89,6 +102,7 @@ async function refreshShareMountOnce(
     mount: input.mount,
     relay: harness.relay,
     pull,
+    scope: input.scope ?? RECORDED_SCOPE,
     openStore: input.openStore ?? harness.openStore,
   });
 }
