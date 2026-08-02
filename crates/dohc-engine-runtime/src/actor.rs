@@ -322,6 +322,9 @@ pub enum RelayOperation {
     PullShareView {
         workspace_id: String,
         share_id: String,
+        /// The scope the recipient recorded when it accepted the share.
+        /// `None` is an unknown scope and enforces nothing.
+        granted_paths: Option<Vec<String>>,
     },
     CommitShareViewCursor {
         workspace_id: String,
@@ -6473,8 +6476,15 @@ fn execute_relay_operation(
         RelayOperation::PullShareView {
             workspace_id,
             share_id,
+            granted_paths,
         } => client
-            .pull_share_view(store, &workspace_id, &share_id, &NoFaults)
+            .pull_share_view(
+                store,
+                &workspace_id,
+                &share_id,
+                granted_paths.as_deref(),
+                &NoFaults,
+            )
             .map(RelayOperationOutcome::ShareViewPulled)
             .map_err(RuntimeError::from),
         RelayOperation::CommitShareViewCursor {

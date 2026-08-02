@@ -20,7 +20,14 @@ pub struct ShareBoundary {
     pub share_id: String,
     pub surface: ShareSurface,
     pub channel_wire_id: Option<String>,
-    pub path_prefix: Option<String>,
+    /// The path scope the recipient recorded when it accepted the share.
+    ///
+    /// `None` means the scope is unknown — a share accepted before the
+    /// recipient kept it — and no containment is enforced. `Some(vec![])` is a
+    /// whole-workspace grant, which also admits every tracked path. Otherwise
+    /// a referenced path must equal a granted path or sit beneath it. The two
+    /// permissive states stay distinct because only `None` needs a backfill.
+    pub granted_paths: Option<Vec<String>>,
 }
 
 /// Apply an inbound shared op only if its channel/path selector remains inside
@@ -190,15 +197,15 @@ fn thread_bound_to_wire(
 
 /// Fail-closed ShareView scoping. EVERY referenced path (`path`,
 /// `payloadBeforePath`, `payloadAfterPath`, `beforePath`) must classify
-/// `Tracked` and sit within the grant prefix, and at least one must be present
-/// — mirroring `services/sync-relay/src/shareFilter.ts` moment.append
+/// `Tracked` and sit within the recorded grant, and at least one must be
+/// present — mirroring `services/sync-relay/src/shareFilter.ts` moment.append
 /// all-paths visibility so a rename crossing the boundary cannot leak the
 /// outside path.
 fn enforce_share_view_boundary(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    let prefix = boundary.path_prefix.as_deref();
+    let granted = boundary.granted_paths.as_deref();
     if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
         return Err(SyncError::ShareBoundaryViolation);
     }
@@ -233,7 +240,7 @@ fn enforce_share_view_boundary(
     }
     for path in paths {
         if classify_share_path(path) != PathClass::Tracked
-            || prefix.is_some_and(|prefix| !path_within_prefix(path, prefix))
+            || granted.is_some_and(|granted| !path_within_grant(path, granted))
         {
             return Err(SyncError::ShareBoundaryViolation);
         }
@@ -241,21 +248,36 @@ fn enforce_share_view_boundary(
     Ok(())
 }
 
-fn path_within_prefix(path: &str, prefix: &str) -> bool {
-    prefix.is_empty()
-        || path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|tail| tail.starts_with('/'))
+/// The relay's own selection rule (`shareFilter.ts` `pathVisibleThroughShare`),
+/// re-run against the scope the recipient recorded: a granted path selects
+/// itself and everything beneath it, and an empty grant is the whole tracked
+/// workspace.
+fn path_within_grant(path: &str, granted: &[String]) -> bool {
+    granted.is_empty()
+        || granted.iter().any(|selected| {
+            path == selected
+                || path
+                    .strip_prefix(selected.as_str())
+                    .is_some_and(|tail| tail.starts_with('/'))
+        })
 }
 
 #[cfg(test)]
-mod path_prefix_tests {
-    use super::path_within_prefix;
+mod granted_path_tests {
+    use super::path_within_grant;
 
     #[test]
-    fn empty_prefix_is_the_tracked_workspace_root() {
-        assert!(path_within_prefix("notes/plan.md", ""));
-        assert!(path_within_prefix("plan.md", ""));
+    fn an_empty_grant_is_the_whole_tracked_workspace() {
+        assert!(path_within_grant("notes/plan.md", &[]));
+        assert!(path_within_grant("plan.md", &[]));
+    }
+
+    #[test]
+    fn a_granted_path_selects_itself_and_its_children_only() {
+        let granted = ["notes".to_owned()];
+        assert!(path_within_grant("notes", &granted));
+        assert!(path_within_grant("notes/plan.md", &granted));
+        assert!(!path_within_grant("notes-private/plan.md", &granted));
+        assert!(!path_within_grant("other/plan.md", &granted));
     }
 }

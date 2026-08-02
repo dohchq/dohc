@@ -4864,7 +4864,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
-        path_prefix: Some("shared/docs".to_owned()),
+        granted_paths: Some(vec!["shared/docs".to_owned()]),
     };
     let secret = envelope(
         "peer",
@@ -4880,7 +4880,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         share_id: "share-channel".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-allowed".to_owned()),
-        path_prefix: None,
+        granted_paths: None,
     };
     let private = envelope(
         "peer",
@@ -4901,7 +4901,7 @@ fn shared_channel_channel_create_without_wire_id_is_rejected() {
         share_id: "share-channel".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-allowed".to_owned()),
-        path_prefix: None,
+        granted_paths: None,
     };
     let op = envelope(
         "missing-wire",
@@ -4928,7 +4928,7 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
         share_id: "share-other".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-other".to_owned()),
-        path_prefix: None,
+        granted_paths: None,
     };
     let channel = envelope(
         "cross-channel",
@@ -4967,7 +4967,7 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
         share_id: "share-allowed".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-allowed".to_owned()),
-        path_prefix: None,
+        granted_paths: None,
     };
     let foreign_thread = envelope(
         "cross-channel",
@@ -5010,7 +5010,7 @@ fn shared_channel_correctly_scoped_ops_apply() {
         share_id: "share-allowed".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("wire-allowed".to_owned()),
-        path_prefix: None,
+        granted_paths: None,
     };
     let channel = envelope(
         "allowed-channel",
@@ -5091,7 +5091,7 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
-        path_prefix: Some("shared/docs".to_owned()),
+        granted_paths: Some(vec!["shared/docs".to_owned()]),
     };
     let crossing = envelope(
         "view-paths",
@@ -11430,7 +11430,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
     ));
 
     let first = client
-        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .pull_share_view(&mut engine, "ws", "share", None, &NoFaults)
         .expect("bounded share-view page");
     assert_eq!((first.fetched, first.pending_cursor.cursor), (0, 1));
     assert!(
@@ -11455,7 +11455,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
         .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
         .expect("commit first view page");
     let second = client
-        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .pull_share_view(&mut engine, "ws", "share", None, &NoFaults)
         .expect("resume view page");
     assert_eq!(second.pending_cursor.cursor, 2);
     assert!(!second.has_more);
@@ -11486,13 +11486,14 @@ fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
             },
         )],
     ));
+    let granted = ["docs".to_owned(), "projects".to_owned()];
     let outcome = client
-        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .pull_share_view(&mut engine, "ws", "share", Some(&granted), &NoFaults)
         .expect("pull multi-path share");
     assert_eq!(
         (outcome.fetched, outcome.skipped),
         (2, 0),
-        "MUTATION: restoring a single prefix permanently drops the other selected path"
+        "MUTATION: matching only the first granted path permanently drops the other selected path"
     );
 }
 
@@ -11543,7 +11544,7 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
         .with_view_blobs([(tracked_sha.clone(), tracked), (secret_sha, secret)]),
     );
 
-    let result = client.pull_share_view(&mut engine, "ws", "share", &NoFaults);
+    let result = client.pull_share_view(&mut engine, "ws", "share", None, &NoFaults);
 
     // Nothing landed. Two independent floors say so — the boundary refusal
     // here, and `write_text`'s storable-path floor in `store.rs` — so this
@@ -11613,7 +11614,7 @@ fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop
     ));
 
     let outcome = client
-        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .pull_share_view(&mut engine, "ws", "share", None, &NoFaults)
         .expect("a secret delete is skipped, not fatal");
 
     assert_eq!((outcome.applied, outcome.skipped), (0, 1));
@@ -11628,6 +11629,231 @@ fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop
             .map(|snapshot| snapshot.text),
         Some(plaintext.to_owned()),
         "MUTATION: continuing into replay lets a relay delete a secret-shadowed file"
+    );
+}
+
+fn share_view_pull_changed(outcome: &ShareViewPullOutcome) -> Vec<&str> {
+    outcome
+        .changed_paths
+        .iter()
+        .map(|changed| changed.path.as_str())
+        .collect()
+}
+
+/// The relay picks the page; the recipient decides what it accepted. A
+/// compromised or buggy relay can address an ORDINARY tracked path outside
+/// the granted share — no secret floor and no storable floor stops that one,
+/// so the scope recorded at accept time is the only gate. It must skip the op
+/// before replay, so the ungranted blob is never even requested.
+#[test]
+fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_requesting_its_blob() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let granted_body = b"the granted doc".to_vec();
+    let ungranted_body = b"salary review: everyone".to_vec();
+    let sibling_body = b"a sibling of the granted folder".to_vec();
+    let granted_sha = dohc_engine_storage::hex_sha256(&granted_body);
+    let ungranted_sha = dohc_engine_storage::hex_sha256(&ungranted_body);
+    let sibling_sha = dohc_engine_storage::hex_sha256(&sibling_body);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_write_op(0, "docs/a.md", &granted_sha),
+                        share_view_write_op(1, "private/hr.md", &ungranted_sha),
+                        // "docs-private" only SHARES a prefix with "docs" —
+                        // it is not beneath it.
+                        share_view_write_op(2, "docs-private/leak.md", &sibling_sha),
+                    ],
+                    next_cursor: 3,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([
+            (granted_sha.clone(), granted_body),
+            (ungranted_sha, ungranted_body),
+            (sibling_sha, sibling_body),
+        ]),
+    );
+
+    let granted = ["docs".to_owned()];
+    let result = client.pull_share_view(&mut engine, "ws", "share", Some(&granted), &NoFaults);
+
+    // The disclosure comes FIRST in the causal chain: replay downloads the
+    // blob before anything downstream looks at the path, so an inert scope
+    // check hands the recipient bytes the granter never shared with them —
+    // whether or not the write then lands.
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [granted_sha],
+        "MUTATION: passing None (or dropping the containment) downloads blobs the share never granted"
+    );
+    let text = VersionedTextStore::new(&mut engine);
+    assert_eq!(
+        text.read_text("ws", "main", "private/hr.md")
+            .expect("an ungranted tracked path read is answerable"),
+        None,
+        "MUTATION: an ungranted ORDINARY path has no second floor — it lands"
+    );
+    assert_eq!(
+        text.read_text("ws", "main", "docs-private/leak.md")
+            .expect("a sibling-prefix read is answerable"),
+        None,
+        "MUTATION: matching the grant by bare string prefix admits a sibling folder"
+    );
+    let outcome = result.expect("an out-of-scope op is skipped, not fatal");
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (3, 1, 2),
+        "the in-scope op applies and both out-of-scope ops are counted as skipped"
+    );
+    assert_eq!(
+        share_view_pull_changed(&outcome),
+        ["docs/a.md"],
+        "MUTATION: equality-only matching drops a file BENEATH the granted path"
+    );
+}
+
+/// A version share grants the whole tracked workspace, which the recipient
+/// records as an EMPTY grant. Empty means everything, never nothing.
+#[test]
+fn share_view_pull_applies_every_tracked_path_under_a_whole_workspace_grant() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let first = b"first body".to_vec();
+    let second = b"second body".to_vec();
+    let first_sha = dohc_engine_storage::hex_sha256(&first);
+    let second_sha = dohc_engine_storage::hex_sha256(&second);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_write_op(0, "docs/a.md", &first_sha),
+                        share_view_write_op(1, "projects/b.md", &second_sha),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(first_sha, first), (second_sha, second)]),
+    );
+
+    let outcome = client
+        .pull_share_view(&mut engine, "ws", "share", Some(&[]), &NoFaults)
+        .expect("a whole-workspace grant pulls");
+
+    assert_eq!(
+        (outcome.applied, outcome.skipped),
+        (2, 0),
+        "MUTATION: reading an empty grant as 'nothing granted' refuses a whole-workspace share"
+    );
+    assert_eq!(
+        share_view_pull_changed(&outcome),
+        ["docs/a.md", "projects/b.md"]
+    );
+}
+
+/// A share accepted before dohc recorded the scope has an UNKNOWN one. That
+/// pull enforces no containment — the desktop records the scope on the next
+/// open or mount refresh, and the pull after that enforces it. Failing closed
+/// here would strand every share accepted before this field existed.
+#[test]
+fn share_view_pull_with_an_unknown_grant_enforces_no_containment() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"pulled under an unknown scope".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![share_view_write_op(0, "docs/a.md", &sha)],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+
+    let outcome = client
+        .pull_share_view(&mut engine, "ws", "share", None, &NoFaults)
+        .expect("an unknown scope pulls");
+
+    assert_eq!(
+        (outcome.applied, outcome.skipped),
+        (1, 0),
+        "MUTATION: reading an unknown scope as 'nothing granted' strands every share accepted before the scope was recorded"
+    );
+}
+
+/// A grant is a SET of paths (the relay allows up to 100), and each one
+/// selects itself and its children independently.
+#[test]
+fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let bodies = ["docs body", "projects body", "private body"];
+    let shas = bodies
+        .iter()
+        .map(|body| dohc_engine_storage::hex_sha256(body.as_bytes()))
+        .collect::<Vec<_>>();
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_write_op(0, "docs/a.md", &shas[0]),
+                        share_view_write_op(1, "projects/b.md", &shas[1]),
+                        share_view_write_op(2, "private/c.md", &shas[2]),
+                    ],
+                    next_cursor: 3,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs(
+            shas.iter()
+                .zip(bodies)
+                .map(|(sha, body)| (sha.clone(), body.as_bytes().to_vec())),
+        ),
+    );
+
+    let granted = ["docs".to_owned(), "projects".to_owned()];
+    let outcome = client
+        .pull_share_view(&mut engine, "ws", "share", Some(&granted), &NoFaults)
+        .expect("a multi-path grant pulls");
+
+    assert_eq!(
+        share_view_pull_changed(&outcome),
+        ["docs/a.md", "projects/b.md"],
+        "MUTATION: matching only the first granted path drops the second"
+    );
+    assert_eq!((outcome.applied, outcome.skipped), (2, 1));
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        shas[..2],
+        "MUTATION: the ungranted path's blob is downloaded before the scope is checked"
     );
 }
 
@@ -11700,10 +11926,10 @@ fn share_view_actor_replay_does_not_redownload_completed_blob_prefixes() {
     let client = RelaySyncClient::new(relay);
 
     client
-        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .pull_share_view(&mut engine, "ws", "share", None, &NoFaults)
         .expect("initial multi-blob pull");
     client
-        .pull_share_view(&mut engine, "ws", "share", &NoFaults)
+        .pull_share_view(&mut engine, "ws", "share", None, &NoFaults)
         .expect("actor-style replay without cursor commit");
     assert_eq!(
         client

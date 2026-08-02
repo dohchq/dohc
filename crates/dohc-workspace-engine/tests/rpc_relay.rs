@@ -673,7 +673,7 @@ async fn every_relay_rpc_round_trips_through_dispatch_against_fake_transport() {
         json!({
             "workspaceId": workspace_id,
             "shareId": "roundtrip-view",
-            "pathPrefix": "notes",
+            "grantedPaths": ["notes"],
         }),
     )
     .await;
@@ -1417,7 +1417,7 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
         ),
         (
             "share.view.pull",
-            json!({ "workspaceId": "other", "shareId": "share", "pathPrefix": "notes" }),
+            json!({ "workspaceId": "other", "shareId": "share", "grantedPaths": ["notes"] }),
         ),
     ];
     for (index, (method, params)) in methods.into_iter().enumerate() {
@@ -1798,7 +1798,7 @@ async fn share_view_pull_skips_a_malformed_entry_and_reports_the_skip() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "pathPrefix": "notes",
+            "grantedPaths": ["notes"],
         }),
     )
     .await;
@@ -1857,7 +1857,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "pathPrefix": "notes",
+            "grantedPaths": ["notes"],
         }),
     )
     .await;
@@ -1904,7 +1904,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
                 json!({
                     "workspaceId": workspace_id,
                     "shareId": share_id,
-                    "pathPrefix": "notes",
+                    "grantedPaths": ["notes"],
                 }),
             ),
         )
@@ -1940,7 +1940,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "pathPrefix": "notes",
+            "grantedPaths": ["notes"],
         }),
     )
     .await;

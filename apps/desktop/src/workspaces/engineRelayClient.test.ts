@@ -432,7 +432,42 @@ describe("EngineRelayClient", () => {
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
-      pathPrefix: "",
+    });
+    await sessions.closeAll();
+  });
+
+  // Absent and empty are different grants: absent means the scope is unknown
+  // and the pull enforces nothing, empty means the whole workspace was
+  // granted. Sending one for the other either strands a share or records
+  // "everything" as the scope the user accepted.
+  it("sends a whole-workspace grant as an empty list, never as an absent one", async () => {
+    const { rootPath, daemon, sessions, client, relay } = await harness();
+    const store = createCaptureLiveStores(
+      { workspaceId: "workspace-a", rootPath },
+      sessions,
+    ).store;
+    await refreshSharedViewOnce({
+      rootDir: rootPath,
+      workspaceId: "workspace-a",
+      relay,
+      shareId: "share-view",
+      store,
+      pull: async (input) =>
+        await client.pullShareView({
+          shareId: input.shareId,
+          grantedPaths: [],
+        }),
+    });
+
+    expect(
+      daemon.requests.find(
+        (request) => request.method === "share.view.pull",
+      )?.params,
+      "MUTATION: omitting an empty grant tells the engine the scope is unknown",
+    ).toEqual({
+      workspaceId: "workspace-a",
+      shareId: "share-view",
+      grantedPaths: [],
     });
     await sessions.closeAll();
   });

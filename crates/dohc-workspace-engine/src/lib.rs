@@ -2194,6 +2194,7 @@ impl EngineService {
                 RelayOperation::PullShareView {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
+                    granted_paths: params.granted_paths,
                 },
                 "share.view.pull",
             )
@@ -8308,8 +8309,11 @@ struct SharedChannelParams {
 struct ShareViewParams {
     workspace_id: String,
     share_id: String,
-    #[serde(default, rename = "pathPrefix")]
-    _legacy_path_prefix: Option<String>,
+    /// The path scope the caller recorded when it accepted this share.
+    /// Absent means the scope is unknown and this pull enforces no
+    /// containment; an empty list is a whole-workspace grant.
+    #[serde(default)]
+    granted_paths: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

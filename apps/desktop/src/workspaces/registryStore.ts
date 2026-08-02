@@ -18,6 +18,12 @@ export interface RemoteIdentity {
 export interface ShareViewIdentity {
   shareId: string;
   granterEmail: string | null;
+  // The path scope the share granted when the user accepted it, recorded so
+  // every later pull can enforce it locally instead of trusting the relay to
+  // send only what it granted. `[]` is a whole-workspace (version) share.
+  // ABSENT means a view accepted before dohc kept the scope: that pull
+  // enforces nothing and the refresh records the scope for the next one.
+  grantedPaths?: string[];
   ended?: boolean;
   // The relay this share was opened from. A refresh only ever runs against
   // this origin relay; signed into a different relay, the refresh is skipped
@@ -61,6 +67,9 @@ export interface ShareMountRecord {
   // account, a refresh must SKIP (not flip the mount to ended). Null on
   // records from before this field existed — those refresh as before.
   recipientEmail?: string | null;
+  // Same recorded grant as ShareViewIdentity.grantedPaths, for the same
+  // reason: the mount's pulls enforce it against the relay's selection.
+  grantedPaths?: string[];
   ended?: boolean;
 }
 

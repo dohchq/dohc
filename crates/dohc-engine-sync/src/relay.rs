@@ -908,7 +908,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             share_id: share_id.to_owned(),
             surface: crate::ShareSurface::SharedChannel,
             channel_wire_id: Some(channel_wire_id.to_owned()),
-            path_prefix: None,
+            granted_paths: None,
         };
         let mut applied = 0_usize;
         let mut refused = 0_usize;
@@ -1111,11 +1111,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(SharedChannelPushOutcome { pushed })
     }
 
+    /// Pull one page of a received share.
+    ///
+    /// `granted_paths` is the scope the recipient recorded when it accepted
+    /// the share, and it is enforced against every inbound op. The relay
+    /// selects the page, but the relay is not trusted to select it honestly:
+    /// an op addressing a path outside the recorded scope is skipped before
+    /// replay, so its blob is never requested. `None` (an unknown scope)
+    /// enforces nothing — see `ShareBoundary::granted_paths`.
     pub fn pull_share_view(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         share_id: &str,
+        granted_paths: Option<&[String]>,
         faults: &dyn FaultInjector,
     ) -> Result<ShareViewPullOutcome, RelayError> {
         let mut cursor =
@@ -1134,7 +1143,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             share_id: share_id.to_owned(),
             surface: crate::ShareSurface::ShareView,
             channel_wire_id: None,
-            path_prefix: None,
+            granted_paths: granted_paths.map(<[String]>::to_vec),
         };
         let mut applied = 0_usize;
         let mut skipped = 0_usize;

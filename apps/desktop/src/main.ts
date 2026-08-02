@@ -4319,6 +4319,37 @@ function registerIpcHandlers(
     return undefined;
   });
 
+  // The path scope a received share granted, as recorded when the user
+  // accepted it. Every pull enforces it locally, so a relay that later
+  // selects an op outside the share it granted is refused by the recipient
+  // rather than trusted.
+  //
+  // A record made before dohc kept the scope (or one a hand edit left
+  // malformed) has none. Fetch it once here and record it: that pull enforces
+  // nothing, and every pull after it does. A relay that cannot answer leaves
+  // the scope unknown and changes nothing else: a revoked share still reports
+  // "ended" through the pull itself, exactly as before.
+  async function grantedPathsForPull(input: {
+    relay: SyncRelayConnection;
+    shareId: string;
+    recorded: unknown;
+    record: (grantedPaths: string[]) => void;
+  }): Promise<readonly string[] | undefined> {
+    if (
+      Array.isArray(input.recorded) &&
+      input.recorded.every((path) => typeof path === "string")
+    ) {
+      return input.recorded as string[];
+    }
+    const info = await fetchShareViewInfo({
+      relay: input.relay,
+      shareId: input.shareId,
+    }).catch(() => null);
+    if (!info) return undefined;
+    input.record(info.selector.paths);
+    return info.selector.paths;
+  }
+
   // Receive side: open a pasted share code as a READ-ONLY shared view.
   // Mirrors the join flow's ordering guarantees: everything is validated
   // BEFORE local state exists, the token only ever goes to the signed-in
@@ -4378,6 +4409,9 @@ function registerIpcHandlers(
     setWorkspaceShareView(created.workspaceId, {
       shareId: parsed.shareId,
       granterEmail: info.granterEmail,
+      // Record the scope the user is accepting, so later pulls enforce it
+      // instead of trusting the relay's selection.
+      grantedPaths: info.selector.paths,
       // Persist the origin relay so a later refresh signed into a DIFFERENT
       // relay is skipped instead of misreading a 404 as "share ended".
       relayUrl: credentials.relayUrl,
@@ -4398,6 +4432,7 @@ function registerIpcHandlers(
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
+            grantedPaths: info.selector.paths,
           }),
       });
       if (outcome.status === "ended") {
@@ -4457,6 +4492,18 @@ function registerIpcHandlers(
       rootPath: workspace.rootPath,
       relay,
     });
+    // Tracks the record as written, so the "ended" write below cannot erase a
+    // scope this refresh just recorded.
+    let current = shareView;
+    const grantedPaths = await grantedPathsForPull({
+      relay,
+      shareId: shareView.shareId,
+      recorded: shareView.grantedPaths,
+      record: (recorded) => {
+        current = { ...shareView, grantedPaths: recorded };
+        setWorkspaceShareView(workspace.workspaceId, current);
+      },
+    });
     const outcome = await refreshSharedViewOnce({
       rootDir: workspace.rootPath,
       workspaceId: workspace.workspaceId,
@@ -4466,12 +4513,13 @@ function registerIpcHandlers(
       pull: async (input) =>
         await daemonRelay.pullShareView({
           shareId: input.shareId,
+          grantedPaths,
         }),
     });
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
       // refreshing; the notice survives restarts.
-      setWorkspaceShareView(workspace.workspaceId, { ...shareView, ended: true });
+      setWorkspaceShareView(workspace.workspaceId, { ...current, ended: true });
       refreshNativeWorkspaceSurfaces();
     }
     notifyRenderer();
@@ -4565,6 +4613,8 @@ function registerIpcHandlers(
       granterEmail: info.granterEmail,
       relayUrl: credentials.relayUrl,
       recipientEmail: credentials.email ?? null,
+      // Record the scope the user is accepting (same reason as a shared view).
+      grantedPaths: info.selector.paths,
     };
     await createMountDirectory(workspace.rootPath, mount.label);
     const mountRelayTarget = relayTargetForShareMount(
@@ -4594,6 +4644,7 @@ function registerIpcHandlers(
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
+            grantedPaths: info.selector.paths,
           }),
       });
       if (outcome.status === "ended") throw new ShareUnavailableError();
@@ -4689,6 +4740,20 @@ function registerIpcHandlers(
           ...mountRelayTarget,
           relay,
         });
+        const grantedPaths = await grantedPathsForPull({
+          relay,
+          shareId: mount.shareId,
+          recorded: mount.grantedPaths,
+          record: (recorded) => {
+            const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+            setWorkspaceShareMounts(
+              workspace.workspaceId,
+              current.map((m) =>
+                m.shareId === mount.shareId ? { ...m, grantedPaths: recorded } : m,
+              ),
+            );
+          },
+        });
         const outcome = await refreshShareMountOnce({
           hostWorkspaceId: workspace.workspaceId,
           hostRoot: workspace.rootPath,
@@ -4698,6 +4763,7 @@ function registerIpcHandlers(
           pull: async (input) =>
             await daemonRelay.pullShareView({
               shareId: input.shareId,
+              grantedPaths,
             }),
         });
         if (outcome.status === "ended") {
