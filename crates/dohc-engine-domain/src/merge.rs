@@ -2,16 +2,17 @@
 
 use crate::conflicts::{
     ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, TextConflict,
-    enqueue_delete, enqueue_write, insert_text_conflict_if_absent, load_text_conflict_in_tx,
+    WriteBinaryFile, enqueue_delete, enqueue_write, insert_text_conflict_if_absent,
+    load_text_conflict_in_tx, write_binary_file_in_tx,
 };
 use crate::error::DomainError;
 use crate::records::{
-    DeleteResult, DeleteTextFile, SnapshotContent, TextSnapshot, VersionKind, WriteResult,
-    WriteText,
+    DeleteResult, DeleteTextFile, FileObjectRecord, MomentOp, MomentRecord, SnapshotContent,
+    TextSnapshot, VersionKind, WriteResult, WriteText,
 };
 use crate::store::{
-    VersionedTextStore, delete_result_from_moment, delete_text_in_tx, get_moment, hash_fields,
-    lookup_request, record_merge_request, validate_delete_input, validate_path,
+    VersionedTextStore, delete_result_from_moment, delete_text_in_tx, get_file_object, get_moment,
+    hash_fields, lookup_request, record_merge_request, validate_delete_input, validate_path,
     validate_write_input, write_result_from_moment, write_text_in_tx,
 };
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
@@ -95,6 +96,19 @@ pub enum MergeUnchangedReason {
     SourceUnchanged,
 }
 
+/// The binary head a WS-G1 fast-forward left in the target version.
+///
+/// `head` keeps the store's text-view convention, exactly as a comparison side
+/// does: empty text, with `blob_sha256` holding the BINARY content address and
+/// the byte length beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryMergeWrite {
+    pub object: FileObjectRecord,
+    pub head: ComparisonSide,
+    pub moment: MomentRecord,
+    pub deduped: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeTextFileResult {
     Unchanged {
@@ -105,6 +119,10 @@ pub enum MergeTextFileResult {
     Write {
         comparison: VersionedTextComparison,
         write: WriteResult,
+    },
+    BinaryWrite {
+        comparison: VersionedTextComparison,
+        write: BinaryMergeWrite,
     },
     Delete {
         comparison: VersionedTextComparison,
@@ -129,6 +147,7 @@ struct MergeLedgerRecord {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum MergeLedgerOutcome {
     Write { moment_id: String },
+    BinaryWrite { moment_id: String },
     Delete { moment_id: String },
     Conflict { conflict_id: String },
     Unchanged { reason: MergeLedgerUnchangedReason },
@@ -387,6 +406,53 @@ impl VersionedTextStore<'_> {
                 let delete = delete_text_in_tx(tx, &delete_input)?;
                 enqueue_delete(tx, &delete, "merge")?;
                 let result = MergeTextFileResult::Delete { comparison, delete };
+                return finish_merge(tx, input, &payload_hash, result, &after);
+            }
+
+            // The same fast-forward for BYTES, through the binary write seam.
+            // `comparison_sides_equal` proves current and base equal by CONTENT
+            // ADDRESS, and a side that holds bytes never compares equal to one
+            // that holds text — so an emptied text current over a binary base
+            // stays a conflict here, as it must.
+            //
+            // A REMOVED binary asset keeps its conflict: that seam is the text
+            // delete, whose merged record reports its preimage as text.
+            if let Some(incoming) = &comparison.incoming
+                && incoming.binary
+                && comparison_sides_equal(&comparison.current, &comparison.base)
+            {
+                let preimage = comparison
+                    .current
+                    .as_ref()
+                    .map_or(Preimage::Absent, |side| {
+                        Preimage::Present(side.snapshot.blob_sha256.clone())
+                    });
+                write_binary_file_in_tx(
+                    tx,
+                    &WriteBinaryFile {
+                        workspace_id: input.workspace_id.clone(),
+                        version_id: input.target_version_id.clone(),
+                        // A path the target already holds keeps its object
+                        // identity; this id binds only a NEW target path.
+                        object_id: input.object_id.clone(),
+                        path: input.path.clone(),
+                        binary_sha256: incoming.snapshot.blob_sha256.clone(),
+                        moment_id: input.moment_id.clone(),
+                        metadata_origin: input.metadata_origin.clone(),
+                        metadata_summary: input.metadata_summary.clone(),
+                        metadata_correlation_id: input.metadata_correlation_id.clone(),
+                        author_json: input.author_json.clone(),
+                        materialize: Some(preimage),
+                        now_ms: input.now_ms,
+                    },
+                )?;
+                let moment = get_moment(tx, &input.workspace_id, &input.moment_id)?.ok_or(
+                    DomainError::StateCorrupt {
+                        reason: "binary merge moment vanished within its transaction",
+                    },
+                )?;
+                let write = binary_merge_write_from_moment(tx, &input.workspace_id, moment, false)?;
+                let result = MergeTextFileResult::BinaryWrite { comparison, write };
                 return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
@@ -653,11 +719,13 @@ where
     after(tx, &result)?;
     let result_seq = match &result {
         MergeTextFileResult::Write { write, .. } => write.moment.moment_order,
+        MergeTextFileResult::BinaryWrite { write, .. } => write.moment.moment_order,
         MergeTextFileResult::Delete { delete, .. } => delete.moment.moment_order,
         MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => 0,
     };
     let comparison = match &result {
         MergeTextFileResult::Write { comparison, .. }
+        | MergeTextFileResult::BinaryWrite { comparison, .. }
         | MergeTextFileResult::Delete { comparison, .. }
         | MergeTextFileResult::Unchanged { comparison, .. }
         | MergeTextFileResult::Conflict { comparison, .. } => comparison.clone(),
@@ -701,8 +769,9 @@ fn reconstruct_merge(
             },
         )?,
     };
-    if let MergeLedgerOutcome::Write { moment_id } | MergeLedgerOutcome::Delete { moment_id } =
-        &recorded.outcome
+    if let MergeLedgerOutcome::Write { moment_id }
+    | MergeLedgerOutcome::BinaryWrite { moment_id }
+    | MergeLedgerOutcome::Delete { moment_id } = &recorded.outcome
     {
         let moment =
             get_moment(conn, &input.workspace_id, moment_id)?.ok_or(DomainError::StateCorrupt {
@@ -718,6 +787,12 @@ fn reconstruct_merge(
                 Ok(MergeTextFileResult::Write {
                     comparison,
                     write: write_result_from_moment(conn, &input.workspace_id, moment, true)?,
+                })
+            }
+            (MergeLedgerOutcome::BinaryWrite { .. }, crate::records::MomentOp::Write) => {
+                Ok(MergeTextFileResult::BinaryWrite {
+                    comparison,
+                    write: binary_merge_write_from_moment(conn, &input.workspace_id, moment, true)?,
                 })
             }
             (MergeLedgerOutcome::Delete { .. }, crate::records::MomentOp::Delete) => {
@@ -753,13 +828,70 @@ fn reconstruct_merge(
                 deduped: true,
             })
         }
-        MergeLedgerOutcome::Write { .. } | MergeLedgerOutcome::Delete { .. } => unreachable!(),
+        MergeLedgerOutcome::Write { .. }
+        | MergeLedgerOutcome::BinaryWrite { .. }
+        | MergeLedgerOutcome::Delete { .. } => unreachable!(),
     }
+}
+
+/// The binary head a merge left, read back from its own moment. Both the fresh
+/// fast-forward and its ledger replay build the result here, so a replay can
+/// never describe a head the merge did not write.
+fn binary_merge_write_from_moment(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: MomentRecord,
+    deduped: bool,
+) -> Result<BinaryMergeWrite, DomainError> {
+    if moment.operation != MomentOp::Write || moment.after_content_kind != "binary" {
+        return Err(DomainError::StateCorrupt {
+            reason: "binary merge moment does not describe a binary write",
+        });
+    }
+    let blob_sha256 = moment
+        .after_binary_sha256
+        .clone()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "binary merge moment has no binary blob",
+        })?;
+    let byte_length = moment.after_byte_length.ok_or(DomainError::StateCorrupt {
+        reason: "binary merge moment has no byte length",
+    })?;
+    let object = get_file_object(conn, workspace_id, &moment.object_id)?.ok_or(
+        DomainError::StateCorrupt {
+            reason: "binary merge moment object missing",
+        },
+    )?;
+    Ok(BinaryMergeWrite {
+        object,
+        head: ComparisonSide {
+            snapshot: TextSnapshot {
+                workspace_id: workspace_id.to_owned(),
+                version_id: moment.version_id.clone(),
+                object_id: moment.object_id.clone(),
+                path: moment.path.clone(),
+                text: String::new(),
+                blob_sha256,
+                updated_at_ms: moment.recorded_at_ms,
+                latest_moment_id: moment.moment_id.clone(),
+                metadata_origin: moment.metadata_origin.clone(),
+                metadata_summary: moment.metadata_summary.clone(),
+                metadata_correlation_id: moment.metadata_correlation_id.clone(),
+            },
+            binary: true,
+            byte_length,
+        },
+        moment,
+        deduped,
+    })
 }
 
 fn merge_ledger_outcome(result: &MergeTextFileResult) -> MergeLedgerOutcome {
     match result {
         MergeTextFileResult::Write { write, .. } => MergeLedgerOutcome::Write {
+            moment_id: write.moment.moment_id.clone(),
+        },
+        MergeTextFileResult::BinaryWrite { write, .. } => MergeLedgerOutcome::BinaryWrite {
             moment_id: write.moment.moment_id.clone(),
         },
         MergeTextFileResult::Delete { delete, .. } => MergeLedgerOutcome::Delete {

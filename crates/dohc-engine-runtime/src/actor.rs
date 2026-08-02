@@ -10191,13 +10191,22 @@ fn versioned_text_merge_on_store(
                     &delete.object.object_id,
                 )
                 .map_err(search_domain)?,
-                MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {}
+                // A fast-forwarded BINARY head needs no index work: the file
+                // search reader drops any candidate whose live head is binary
+                // (`search::query::live_head_is_binary`), so the text this path
+                // used to hold is already unreachable.
+                MergeTextFileResult::BinaryWrite { .. }
+                | MergeTextFileResult::Unchanged { .. }
+                | MergeTextFileResult::Conflict { .. } => {}
             }
             Ok(())
         })
         .map_err(RuntimeError::from)?;
     let (moment_id, deduped) = match &result {
         MergeTextFileResult::Write { write, .. } => {
+            (write.moment.moment_id.as_str(), write.deduped)
+        }
+        MergeTextFileResult::BinaryWrite { write, .. } => {
             (write.moment.moment_id.as_str(), write.deduped)
         }
         MergeTextFileResult::Delete { delete, .. } => {
@@ -10221,7 +10230,12 @@ fn versioned_text_merge_on_store(
         });
     }
 
-    let job_id = format!("merge-mat_{moment_id}");
+    // A binary write's job id IS its moment id (the moment/job generation-
+    // sharing contract in `write_binary_file_in_tx`); the text seams prefix it.
+    let job_id = match &result {
+        MergeTextFileResult::BinaryWrite { .. } => moment_id.to_owned(),
+        _ => format!("merge-mat_{moment_id}"),
+    };
     let job = match store.load_materialization_job(&job_id) {
         Ok(Some(job)) => job,
         Ok(None) if deduped => {

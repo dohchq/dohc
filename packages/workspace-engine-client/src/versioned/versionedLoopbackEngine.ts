@@ -2071,7 +2071,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       return result;
     }
     let textToWrite = incoming?.text;
-    if (liveSidesBinary || !this.filesEqual(current, base)) {
+    // A source-only BINARY change fast-forwards through the binary seam:
+    // current equals base by content ADDRESS (a binary side never compares
+    // equal to a text one), so only the source moved. A removal keeps its
+    // conflict — that seam is the text delete.
+    const binaryFastForward =
+      incoming?.contentKind === "binary" && this.filesEqual(current, base);
+    if (!binaryFastForward && (liveSidesBinary || !this.filesEqual(current, base))) {
       const cleanMerge =
         base?.contentKind === "text" &&
         current?.contentKind === "text" &&
@@ -2166,7 +2172,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     state.moments.set(momentId, internal);
     const result: JsonObject = {
       status: "merged",
-      writeKind: "write",
+      writeKind: copied.contentKind === "binary" ? "binary-write" : "write",
       object: this.fileObject(workspace, copied.objectId, now),
       snapshot: this.snapshotMetadata(workspace, target.id, path, copied),
       moment: this.capMoment(moment),

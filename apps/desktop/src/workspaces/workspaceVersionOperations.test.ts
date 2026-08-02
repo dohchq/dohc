@@ -1036,6 +1036,34 @@ describe("mergeVersionIntoMain", () => {
     expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
   });
 
+  it("fast-forwards a source-only binary asset onto disk", async () => {
+    // Nothing on Main can be lost, so the user is asked nothing (#497).
+    //
+    // MUTATION: read the merged binary status as a delete -> the merge throws
+    // on the absent preimage instead of landing the asset.
+    const root = await tempRoot();
+    const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xbb, 0xbb]);
+    await write(root, "plan.md", "v1 text\n");
+    const loopback = new ConflictLoopbackEngine();
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    await writeBytes(root, "logo.png", draftBytes);
+    engine.captureBatch([{ path: "logo.png", operation: "create" }]);
+    await engine.flush();
+    await engine.switchVersion("main");
+    expect(existsSync(join(root, "logo.png"))).toBe(false);
+
+    const draftId = await versionIdByName(engine, "Draft");
+    const merge = await engine.mergeVersionIntoMain(draftId);
+    expect(merge.conflicts).toEqual([]);
+    expect(merge.mergedFileCount).toBe(1);
+    // Main is active, so the merged bytes reach the folder byte-exactly.
+    expect(await readBytes(root, "logo.png")).toEqual(draftBytes);
+    await engine.stop();
+  });
+
   it("mirrors a resolved binary side onto disk", async () => {
     const root = await tempRoot();
     const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa]);

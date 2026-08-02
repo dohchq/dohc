@@ -1,9 +1,10 @@
 //! WS-G1: what a version merge does with a path that holds BYTES.
 //!
-//! The contract: identical bytes on both sides are uncontested; differing
-//! bytes open a conflict the user resolves by side. Nothing in between — a
-//! binary head has no line merge and no text fast-forward seam, so the merge
-//! decision tree must never route one through either.
+//! The contract: identical bytes on both sides are uncontested; bytes only the
+//! SOURCE moved fast-forward through the binary write seam; differing bytes
+//! open a conflict the user resolves by side. A binary head has no line merge
+//! and no TEXT fast-forward seam, so the merge decision tree must never route
+//! one through either.
 
 use dohc_engine_domain::{
     CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind, ConflictStatus,
@@ -154,6 +155,19 @@ fn binary_head_sha(store: &EngineStore, version_id: &str, path: &str) -> String 
             )
         })
         .expect("binary head")
+}
+
+fn head_content_kind(store: &EngineStore, version_id: &str, path: &str) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COALESCE(content_kind, 'text') FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                rusqlite::params![WS, version_id, path],
+                |row| row.get(0),
+            )
+        })
+        .expect("head content kind")
 }
 
 /// Bytes that agree need no decision.
@@ -370,13 +384,206 @@ fn applying_a_binary_side_into_the_active_version_enqueues_its_materialization()
     assert_eq!(job.preimage, Preimage::Present(main_sha));
 }
 
-/// A path that gained bytes only in the SOURCE still opens a conflict rather
-/// than fast-forwarding. The text seam it would otherwise use cannot write
-/// bytes, and the deliberate cost is one decision the user could be spared.
+/// A NEW binary file, present only in the source: base and current are both
+/// absent, so nothing on the target can be lost and the merge fast-forwards
+/// instead of asking the user to adjudicate a disagreement that does not exist.
+///
+/// MUTATION: fire the fast-forward without checking that current equals base ->
+/// `differing_bytes_open_a_conflict_resolvable_by_side` FAILS.
 #[test]
-fn a_source_only_binary_change_opens_a_conflict() {
+fn a_new_source_only_binary_file_fast_forwards() {
     let (_scratch, mut store) = open();
     // Seed an unrelated file so the fork carries durable fork-base snapshots.
+    write_text(&mut store, "main", "seed.md", "seed", "seed-moment");
+    fork(&mut store);
+    let feat_bytes = b"\x89PNG\xbb";
+    let feat_sha = write_binary(&mut store, "feat", "logo.png", feat_bytes, "obj-f", "f-1");
+
+    let result = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(
+            &merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1"),
+            &NO_FAULTS,
+        )
+        .expect("source-only binary merge");
+    match result {
+        MergeTextFileResult::BinaryWrite { write, comparison } => {
+            assert_eq!(comparison.status, ComparisonStatus::IncomingChanged);
+            assert!(write.head.binary);
+            // The head reports its BINARY address and length, never the empty
+            // text view a binary snapshot reads as.
+            assert_eq!(write.head.snapshot.blob_sha256, feat_sha);
+            assert_eq!(write.head.byte_length, feat_bytes.len() as i64);
+            assert_eq!(write.head.snapshot.version_id, "main");
+            assert_eq!(write.head.snapshot.path, "logo.png");
+            assert_eq!(write.head.snapshot.text, "");
+            assert_eq!(write.moment.moment_id, "merge-1");
+            assert_eq!(write.object.object_id, "obj-merge-1");
+            assert!(!write.deduped);
+        }
+        other => panic!("expected a binary fast-forward, got {other:?}"),
+    }
+    assert_eq!(binary_head_sha(&store, "main", "logo.png"), feat_sha);
+
+    // The folder follows: main is active, and a binary write keys its job on
+    // the moment id it shares a generation with.
+    let job = store
+        .load_materialization_job("merge-1")
+        .expect("load the merge materialization job")
+        .expect("main is active, so the merged bytes must reach disk");
+    assert_eq!(job.content_sha256, feat_sha);
+    assert_eq!(job.target_path, "logo.png");
+    assert_eq!(job.operation, MaterializationOperation::Write);
+    assert_eq!(
+        job.preimage,
+        Preimage::Absent,
+        "the target held nothing at this path"
+    );
+}
+
+/// The same fast-forward over a head the target has NOT touched since the fork:
+/// current equals base by content ADDRESS, so only the source moved.
+#[test]
+fn a_source_only_binary_replacement_fast_forwards_over_the_unchanged_head() {
+    let (_scratch, mut store) = open();
+    let main_sha = write_binary(
+        &mut store,
+        "main",
+        "logo.png",
+        b"\x89PNG\x00\x01",
+        "obj-logo",
+        "m-1",
+    );
+    fork(&mut store);
+    let feat_sha = write_binary(
+        &mut store,
+        "feat",
+        "logo.png",
+        b"\x89PNG\xbb\xbb",
+        "obj-feat-f-1",
+        "f-1",
+    );
+
+    let result = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(
+            &merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1"),
+            &NO_FAULTS,
+        )
+        .expect("source-only binary replacement");
+    match result {
+        MergeTextFileResult::BinaryWrite { write, .. } => {
+            assert_eq!(write.head.snapshot.blob_sha256, feat_sha);
+            // The path keeps its object identity; the merge id binds only a
+            // NEW target path.
+            assert_eq!(write.object.object_id, "obj-logo");
+        }
+        other => panic!("expected a binary fast-forward, got {other:?}"),
+    }
+    assert_eq!(binary_head_sha(&store, "main", "logo.png"), feat_sha);
+    let job = store
+        .load_materialization_job("merge-1")
+        .expect("load the merge materialization job")
+        .expect("main is active, so the merged bytes must reach disk");
+    assert_eq!(
+        job.preimage,
+        Preimage::Present(main_sha),
+        "the disk write is guarded by the bytes it replaces"
+    );
+}
+
+/// Bytes replacing a TEXT head the target has not touched since the fork. The
+/// disk write is guarded by the text blob it overwrites.
+#[test]
+fn a_source_only_binary_change_fast_forwards_over_an_unchanged_text_head() {
+    let (_scratch, mut store) = open();
+    write_text(&mut store, "main", "notes.md", "shared\n", "m-1");
+    fork(&mut store);
+    let feat_sha = write_binary(
+        &mut store,
+        "feat",
+        "notes.md",
+        b"\x89PNG\x02",
+        "obj-feat-f-1",
+        "f-1",
+    );
+
+    let result = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(
+            &merge_input("notes.md", "merge-1", "conflict-1", "obj-merge-1"),
+            &NO_FAULTS,
+        )
+        .expect("bytes over an unchanged text head");
+    match result {
+        MergeTextFileResult::BinaryWrite { write, .. } => {
+            assert_eq!(write.head.snapshot.blob_sha256, feat_sha);
+        }
+        other => panic!("expected a binary fast-forward, got {other:?}"),
+    }
+    assert_eq!(head_content_kind(&store, "main", "notes.md"), "binary");
+    let job = store
+        .load_materialization_job("merge-1")
+        .expect("load the merge materialization job")
+        .expect("main is active, so the merged bytes must reach disk");
+    assert_eq!(
+        job.preimage,
+        Preimage::Present(hex_sha256(b"shared\n")),
+        "the disk write is guarded by the text it replaces"
+    );
+}
+
+/// An EMPTY text head over a binary base is not a binary fast-forward either. A
+/// binary side's text view is empty, so equality read from the text view would
+/// let the emptied head stand in for its binary ancestor and the incoming bytes
+/// would land on an edit that never shared an ancestor with them.
+///
+/// MUTATION: compare the fast-forward's sides by their text view instead of
+/// their content address -> this fast-forwards instead of conflicting.
+#[test]
+fn an_empty_text_head_over_a_binary_base_is_not_a_binary_fast_forward() {
+    let (_scratch, mut store) = open();
+    write_text(&mut store, "main", "seed.md", "seed", "seed-moment");
+    write_binary(
+        &mut store,
+        "main",
+        "notes.md",
+        b"\x89PNG\x01",
+        "obj-notes",
+        "m-1",
+    );
+    fork(&mut store);
+    // Main empties the file; the fork replaces the bytes with other bytes.
+    write_text(&mut store, "main", "notes.md", "", "m-2");
+    write_binary(
+        &mut store,
+        "feat",
+        "notes.md",
+        b"\x89PNG\x02\x02",
+        "obj-feat-f-1",
+        "f-1",
+    );
+
+    let result = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(
+            &merge_input("notes.md", "merge-1", "conflict-1", "obj-merge-1"),
+            &NO_FAULTS,
+        )
+        .expect("merge an emptied head whose base was binary");
+    assert!(
+        matches!(result, MergeTextFileResult::Conflict { .. }),
+        "an empty text view must never stand in for a binary ancestor, got {result:?}"
+    );
+    assert_eq!(
+        head_content_kind(&store, "main", "notes.md"),
+        "text",
+        "the emptied text head must survive the refused fast-forward"
+    );
+}
+
+/// The fast-forward's ledger record round-trips: an exact retry replays the
+/// binary write it committed rather than re-reading the live head or falling
+/// through to another branch.
+#[test]
+fn a_replayed_binary_fast_forward_reports_the_head_it_wrote() {
+    let (_scratch, mut store) = open();
     write_text(&mut store, "main", "seed.md", "seed", "seed-moment");
     fork(&mut store);
     let feat_sha = write_binary(
@@ -387,24 +594,36 @@ fn a_source_only_binary_change_opens_a_conflict() {
         "obj-f",
         "f-1",
     );
+    let mut input = merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1");
+    input.request_id = Some("merge-request-1".to_owned());
 
-    let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
-            &merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1"),
-            &NO_FAULTS,
-        )
+    let first = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(&input, &NO_FAULTS)
         .expect("source-only binary merge");
-    match result {
-        MergeTextFileResult::Conflict { conflict, .. } => {
-            assert_eq!(
-                conflict.incoming.binary_sha256.as_deref(),
-                Some(feat_sha.as_str())
-            );
-            assert_eq!(conflict.current.content_kind, ConflictContentKind::Text);
-            assert!(conflict.current.snapshot.is_none());
+    let after_first = moment_count(&store);
+    let replay = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(&input, &NO_FAULTS)
+        .expect("the same request replays");
+    match (first, replay) {
+        (
+            MergeTextFileResult::BinaryWrite { write: first, .. },
+            MergeTextFileResult::BinaryWrite {
+                write: replayed, ..
+            },
+        ) => {
+            assert!(!first.deduped && replayed.deduped);
+            assert_eq!(replayed.head, first.head);
+            assert_eq!(replayed.head.snapshot.blob_sha256, feat_sha);
+            assert_eq!(replayed.moment.moment_id, "merge-1");
+            assert_eq!(replayed.object, first.object);
         }
-        other => panic!("expected a binary conflict, got {other:?}"),
+        (first, replay) => panic!("expected two binary fast-forwards, got {first:?} / {replay:?}"),
     }
+    assert_eq!(
+        moment_count(&store),
+        after_first,
+        "a replay records no second moment"
+    );
 }
 
 /// The comparison RPC must report a binary head as PRESENT. Reading it through

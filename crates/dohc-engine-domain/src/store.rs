@@ -3927,7 +3927,7 @@ pub fn object_has_live_alias(
     Ok(found.is_some())
 }
 
-fn get_file_object(
+pub(crate) fn get_file_object(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,
