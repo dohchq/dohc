@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { dirname, resolve, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
 import {
+  RelayUnauthorizedError,
   ShareUnavailableError,
   type PullShareViewResult,
   type ShareViewChangedPath,
@@ -87,9 +88,17 @@ async function acceptedShareSelector(
   try {
     fetched = await scope.fetch();
   } catch (error) {
-    // A revoked share answers 404 here exactly as the pull would, and means
-    // the same thing. Every other failure leaves the scope unknown.
-    if (error instanceof ShareUnavailableError) throw error;
+    // A revoked share answers 404 here exactly as the pull would, and an
+    // expired session must reach the handler that tells the user to sign in —
+    // wrapping either one would report a share as quietly "unchanged" while
+    // it is actually gone or locked out. Only an ordinary metadata failure
+    // leaves the scope unknown.
+    if (
+      error instanceof ShareUnavailableError ||
+      error instanceof RelayUnauthorizedError
+    ) {
+      throw error;
+    }
     throw new ShareScopeUnavailableError(shareId);
   }
   scope.record(fetched);

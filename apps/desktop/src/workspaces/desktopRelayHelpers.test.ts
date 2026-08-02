@@ -6,7 +6,10 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 import { fetchSharedChannelInfo } from "./sharedChannelInfo";
-import { fetchShareViewInfo } from "./shareViewInfo";
+import {
+  ShareSelectorInvalidError,
+  fetchShareViewInfo,
+} from "./shareViewInfo";
 
 function relay(fetch: typeof globalThis.fetch) {
   return {
@@ -113,6 +116,63 @@ describe("desktop relay helpers", () => {
       selector: { paths: ["docs"], versionId: "version-a" },
       createdAtMs: 42,
     });
+  });
+
+  // The fetched selector BECOMES the grant every later pull is enforced
+  // against, so an unreadable one is refused instead of softened. Every
+  // permissive reading lands on the WIDEST grant — empty paths with no
+  // version is "the whole tracked workspace" to the engine — so a relay that
+  // merely omits or corrupts the field would disarm the containment.
+  it("refuses a share whose selector it cannot read, instead of widening the grant", async () => {
+    const unreadable = [
+      { shareId: "share-a" }, // selector missing entirely
+      { shareId: "share-a", selector: null },
+      { shareId: "share-a", selector: "docs" },
+      { shareId: "share-a", selector: { versionId: "v1" } }, // no paths array
+      { shareId: "share-a", selector: { paths: ["docs", 7], versionId: null } },
+      { shareId: "share-a", selector: { paths: [""], versionId: null } },
+      { shareId: "share-a", selector: { paths: ["docs"], versionId: "" } },
+      // Selects nothing at all: the relay refuses to CREATE this one, so a
+      // response carrying it is not a grant.
+      { shareId: "share-a", selector: { paths: [], versionId: null } },
+    ];
+    for (const body of unreadable) {
+      await expect(
+        fetchShareViewInfo({
+          relay: relay(
+            vi.fn<typeof globalThis.fetch>(async () => Response.json(body)),
+          ),
+          shareId: "share-a",
+        }),
+        `MUTATION: a permissive fallback records ${JSON.stringify(body.selector)} as a whole-workspace grant`,
+      ).rejects.toBeInstanceOf(ShareSelectorInvalidError);
+    }
+  });
+
+  // A chat-channel grant has no file selector at all. That is a KNOWN kind,
+  // not an unreadable response, so it resolves to null and the file surfaces
+  // refuse it with their own guidance.
+  it("reports a chat-channel grant as having no file selector", async () => {
+    await expect(
+      fetchShareViewInfo({
+        relay: relay(
+          vi.fn<typeof globalThis.fetch>(async () =>
+            Response.json({
+              shareId: "share-channel",
+              granterUserId: "user-a",
+              granterEmail: null,
+              selector: {
+                kind: "chat-channel",
+                channelWireId: "wire-a",
+                access: "read-only",
+              },
+              createdAtMs: 84,
+            }),
+          ),
+        ),
+        shareId: "share-channel",
+      }),
+    ).resolves.toMatchObject({ selector: null });
   });
 
   it("maps unavailable shares and rejects invalid shared-channel selectors", async () => {

@@ -391,7 +391,10 @@ import type {
   ChatThread,
   VersionedTextMomentSummary,
 } from "@dohc/workspace-contracts/engine";
-import { fetchShareViewInfo } from "./workspaces/shareViewInfo";
+import {
+  ShareSelectorInvalidError,
+  fetchShareViewInfo,
+} from "./workspaces/shareViewInfo";
 import { fetchSharedChannelInfo } from "./workspaces/sharedChannelInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
@@ -4339,9 +4342,19 @@ function registerIpcHandlers(
   }): ShareScopeSource {
     return {
       recorded: input.recorded,
-      fetch: async () =>
-        (await fetchShareViewInfo({ relay: input.relay, shareId: input.shareId }))
-          .selector,
+      fetch: async () => {
+        const info = await fetchShareViewInfo({
+          relay: input.relay,
+          shareId: input.shareId,
+        });
+        // A file share that now answers as a chat-channel grant is not a
+        // scope this pull can enforce, so it is refused like any other
+        // unreadable selector rather than read as "grants everything".
+        if (info.selector === null) {
+          throw new ShareSelectorInvalidError(input.shareId);
+        }
+        return info.selector;
+      },
       record: input.record,
     };
   }
@@ -4383,8 +4396,18 @@ function registerIpcHandlers(
       if (error instanceof RelayUnauthorizedError) {
         throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
       }
+      if (error instanceof ShareSelectorInvalidError) {
+        throw new Error(
+          "This share can't be opened: the server didn't say what it shares. Try again later.",
+        );
+      }
       throw error;
     }
+    // A chat-channel code has no file selector, so there is no scope to
+    // enforce and nothing to project. Refuse it here rather than record a
+    // grant of "everything" (the mount path says the same through
+    // assertMountableSelector).
+    assertMountableSelector(info.selector);
     const rootPath = usableRoot(input.rootPath);
     const existingEntries = await readdir(rootPath).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];

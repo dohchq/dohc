@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import {
   createShareViewDaemonHarness,
   type ShareViewDaemonHarness,
@@ -309,6 +310,43 @@ describe("shared view refresh", () => {
     await expect(stat(join(rootDir, "docs/a.md"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+    await harness.closeAll();
+  });
+
+  // An expired session must SURFACE. Wrapping it as "the scope is
+  // unavailable" would make both refresh handlers report the share as
+  // quietly unchanged — the same "refreshed, nothing new" lie a previous
+  // review already fixed for the pull itself — and the mount handler's
+  // sign-in guidance would become unreachable.
+  it("lets an expired session through the scope lookup instead of masking it", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    let pulls = 0;
+
+    await expect(
+      refreshSharedViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store: harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir }),
+        scope: {
+          recorded: undefined,
+          fetch: async () => {
+            throw new RelayUnauthorizedError();
+          },
+          record: () => undefined,
+        },
+        pull: async () => {
+          pulls += 1;
+          throw new Error("unreachable");
+        },
+      }),
+      "MUTATION: wrapping every failure hides an expired session behind 'unchanged'",
+    ).rejects.toBeInstanceOf(RelayUnauthorizedError);
+
+    expect(pulls).toBe(0);
     await harness.closeAll();
   });
 

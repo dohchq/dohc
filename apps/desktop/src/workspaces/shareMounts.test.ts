@@ -583,9 +583,7 @@ describe("refreshShareMountOnce", () => {
   });
 
   it("refuses to mount a selector with no file content (chat-channel codes)", () => {
-    expect(() => assertMountableSelector({ paths: [], versionId: null })).toThrow(
-      /shared chat channel/,
-    );
+    expect(() => assertMountableSelector(null)).toThrow(/shared chat channel/);
     expect(() =>
       assertMountableSelector({ paths: ["docs"], versionId: null }),
     ).not.toThrow();
