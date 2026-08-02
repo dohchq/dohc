@@ -24,6 +24,7 @@ vi.setConfig({ testTimeout: 15_000 });
 import type {
   ChatChannelRecord,
   FileChatThreadRecord,
+  RefreshSharedViewResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
@@ -49,6 +50,7 @@ import {
 } from "./DesktopWorkspaceShell";
 import type { ChatsNav } from "./workbench/ChatsView";
 import {
+  CHATS_TAB_PATH,
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
 } from "./workbench/workbenchState";
@@ -97,6 +99,36 @@ const STORED_STATE: WorkspaceUiState = {
 };
 
 Element.prototype.scrollIntoView = vi.fn();
+
+// The dirty-draft test types into the real markdown editor, which needs the
+// same two globals jsdom lacks that FileInspector.test.tsx stubs.
+vi.stubGlobal(
+  "ResizeObserver",
+  class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+);
+for (const method of ["getClientRects", "getBoundingClientRect"] as const) {
+  Object.defineProperty(Range.prototype, method, {
+    configurable: true,
+    value: () =>
+      method === "getClientRects"
+        ? []
+        : {
+            bottom: 0,
+            height: 0,
+            left: 0,
+            right: 0,
+            top: 0,
+            width: 0,
+            x: 0,
+            y: 0,
+            toJSON: () => {},
+          },
+  });
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -237,10 +269,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     openSharedView: vi.fn(async () => {
       throw new Error("not used in shell tests");
     }),
-    refreshSharedView: vi.fn(async () => ({
-      status: "unchanged" as const,
-      changedPaths: 0,
-    })),
+    // Typed to the contract, not to this one default: a test that drives a
+    // real pull ("updated") must be able to swap the implementation.
+    refreshSharedView: vi.fn(
+      async (): Promise<RefreshSharedViewResult> => ({
+        status: "unchanged",
+        changedPaths: 0,
+      }),
+    ),
     onWorkspaceActivity: vi.fn((callback: () => void) => {
       activityCallback = callback;
       return () => {
@@ -742,6 +778,583 @@ describe("ui-state merge-on-load", () => {
     );
   });
 
+  // Journey 2 (#337): rolling back a rename left `assets/alpha-renamed.png`
+  // in Open Editors for a path that no longer existed — through a restart,
+  // because nothing reconciled the restored tabs against the workspace.
+  it("restores only the tabs whose files still exist", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["assets/alpha-renamed.png", "b.md"],
+        activeTab: "b.md",
+      }),
+    );
+    renderShell(bridge);
+
+    // b.md is in the listing; the rolled-back path is not.
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-assets/alpha-renamed.png")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    // And the ghost does not come back on the next launch.
+    await waitFor(() => {
+      const states = bridge.setWorkspaceUiState.mock.calls.map(
+        ([payload]) => payload.state,
+      );
+      expect(states.some((state) => state.tabs.join() === "b.md")).toBe(true);
+    });
+  });
+
+  // A shared workspace lists its files TWICE on open: once at mount, once
+  // after refreshShareView pulls the changed paths. Reconciling against
+  // whichever landed first would either miss a remote delete or judge the
+  // restored tabs against a pre-pull snapshot.
+  it("prunes a restored tab on a listing that lands after the share pull", async () => {
+    const listing = (...paths: string[]) =>
+      vi.fn(async () => ({
+        files: paths.map((path) => ({ path, kind: "file" as const })),
+        folders: [] as string[],
+      }));
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "shared-gone.md"],
+        activeTab: "b.md",
+      }),
+    );
+    // The pre-pull listing still carries the file the granter deleted.
+    bridge.listWorkspaceFiles = listing("a.md", "b.md", "shared-gone.md");
+    const pull = deferred<RefreshSharedViewResult>();
+    bridge.refreshSharedView = vi.fn(() => pull.promise);
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+    });
+
+    // It survives that listing: nothing has said the file is gone yet.
+    expect(await screen.findByTestId("tab-shared-gone.md")).toBeTruthy();
+
+    // The pull lands, and the listing it triggers no longer has the file.
+    bridge.listWorkspaceFiles = listing("a.md", "b.md");
+    await act(async () => {
+      pull.resolve({ status: "updated", changedPaths: 1 });
+      await pull.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-shared-gone.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  // P1: closing a DIRTY tab unmounts the inspector mid-draft, and its cleanup
+  // flushes best-effort to a path that no longer exists. resolveWorkspaceFile
+  // requires the file, the write fails, the failure is swallowed — the draft
+  // would be gone with no error and no way back.
+  it("never closes a restored tab with an unsaved draft, and closes it once saved", async () => {
+    const listing = (...paths: string[]) => ({
+      files: paths.map((path) => ({ path, kind: "file" as const })),
+      folders: [] as string[],
+    });
+    const user = userEvent.setup();
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    renderShell(bridge);
+
+    // Type into the restored tab's document without letting it settle.
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await screen.findByTestId("tab-dirty");
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+
+    // The file disappears from the workspace while that draft is unsaved.
+    bridge.listWorkspaceFiles = vi.fn(async () => listing("b.md"));
+    await act(async () => {
+      bridge.emitWorkspaceActivity();
+      await Promise.resolve();
+    });
+
+    // The tab stays open, so the draft still has somewhere to live.
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-dirty")).toBeTruthy();
+
+    // Once the draft settles, the deferred close completes.
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-a.md")).toBeNull();
+    });
+  }, 20_000);
+
+  // A provisional display-fill must not drive a destructive close: the pull
+  // still in flight can carry back a file the older listing predates.
+  it("defers closing a tab while a newer listing is still pending", async () => {
+    const older = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    const newer = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let issued = 0;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "pulled.md"],
+        activeTab: "b.md",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(() =>
+      ++issued === 1 ? older.promise : newer.promise,
+    );
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The older listing lands first and does not know about pulled.md.
+    await act(async () => {
+      older.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await older.promise;
+    });
+    // It fills the display, but must not close anything: a newer answer is
+    // still coming.
+    expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+
+    // The newer one carries the file back.
+    await act(async () => {
+      newer.resolve({
+        files: [
+          { path: "b.md", kind: "file" },
+          { path: "pulled.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await newer.promise;
+    });
+    expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+    expect(screen.getAllByText("pulled.md").length).toBeGreaterThan(0);
+  });
+
+  // Closing the ACTIVE tab remounts the keyed inspector on its neighbour —
+  // an open. Without the mark, that mount measure brackets a stale mark.
+  it("marks file-open-start when closing the active tab hands over to a survivor", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "gone.md"],
+        activeTab: "gone.md",
+      }),
+    );
+    renderShell(bridge);
+
+    const openStartCalls = () =>
+      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+
+    // Wait for the RESTORE to land first, or the assertions below pass
+    // vacuously against the empty default state.
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+    });
+    expect(openStartCalls()).toBe(1);
+
+    mark.mockRestore();
+  });
+
+  // A failure is not an answer, so it cannot make an older snapshot
+  // authoritative for CLOSING: the listing that failed may have been the one
+  // that would have shown a file pulled back in. The close waits for a
+  // success issued after the failure. It is not blocked forever — the next
+  // successful listing re-enables it — and correctness beats eagerness for
+  // work that cannot be undone.
+  it("waits for a listing that succeeds after a failure before closing", async () => {
+    const older = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let failNewer!: (error: Error) => void;
+    const newer = new Promise<never>((_resolve, reject) => {
+      failNewer = reject;
+    });
+    const third = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let issued = 0;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "gone.md"],
+        activeTab: "b.md",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(() => {
+      issued += 1;
+      return issued === 1 ? older.promise : issued === 2 ? newer : third.promise;
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The older listing commits, but a newer request is still in flight.
+    await act(async () => {
+      older.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await older.promise;
+    });
+    expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
+
+    // The newer request fails. Everything has settled now, but that failure
+    // could have been the listing that would have shown the file pulled back
+    // in, so the older snapshot cannot authorise a close.
+    await act(async () => {
+      failNewer(new Error("listing failed"));
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("tab-gone.md")).toBeTruthy();
+
+    // A listing issued after the failure answers, and still does not have the
+    // file. Now the close is authorised.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      third.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await third.promise;
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  // Codex's scenario: the pull brings a file BACK, and the listing that would
+  // have shown it is the one that failed. Closing on the pre-pull snapshot
+  // would close a tab whose file exists.
+  it("does not close on a pre-pull snapshot when the post-pull listing failed", async () => {
+    const prePull = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let failPostPull!: (error: Error) => void;
+    const postPull = new Promise<never>((_resolve, reject) => {
+      failPostPull = reject;
+    });
+    const afterPull = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let issued = 0;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "pulled.md"],
+        activeTab: "b.md",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(() => {
+      issued += 1;
+      return issued === 1
+        ? prePull.promise
+        : issued === 2
+          ? postPull
+          : afterPull.promise;
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The pre-pull snapshot commits; it predates the file coming back.
+    await act(async () => {
+      prePull.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await prePull.promise;
+    });
+    // The listing that would have carried the pulled file fails.
+    await act(async () => {
+      failPostPull(new Error("listing failed"));
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+
+    // A later listing confirms the file is really there. Still no close.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      afterPull.resolve({
+        files: [
+          { path: "b.md", kind: "file" },
+          { path: "pulled.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await afterPull.promise;
+    });
+    expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+  });
+
+  // CodeRabbit: reconciling commits through the direct setter (it must not set
+  // the touched flag), which also skips mutateWb's DM-navigation invalidation.
+  // A DM navigation in flight would then still pass its isCurrent() check and
+  // land its destination on top of the tab the close just activated.
+  it("discards an in-flight DM navigation when closing a tab moves the active tab", async () => {
+    const dmNode = {
+      path: "chat-thread:dm-thread",
+      kind: "chat-thread" as const,
+      threadId: "dm-thread",
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      channelName: "alice@example.com",
+      channelKind: "dm" as const,
+      title: "Direct message",
+      incoming: 1,
+      outgoing: 0,
+    };
+    const listing = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    const sync = deferred<{ available: boolean; dms: never[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "gone.md"],
+        activeTab: "gone.md",
+      }),
+    );
+    // The listing is held so the close cannot happen before the navigation.
+    bridge.listWorkspaceFiles = vi.fn(() => listing.promise);
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [dmNode],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    // Start a canonical DM navigation and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === dmNode.path)!);
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    // Now the listing lands without the active tab's file, so the close runs
+    // and hands over to the survivor.
+    await act(async () => {
+      listing.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await listing.promise;
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    // The navigation answers late. It is stale, so it must not open Chats
+    // over the tab the close just activated.
+    await act(async () => {
+      sync.resolve({ available: true, dms: [] });
+      await sync.promise;
+    });
+    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+  }, 20_000);
+
+  // A request that is merely in flight has not answered anything, and a
+  // request that fails never will. Superseding on ISSUE would drop the only
+  // answer there is and leave the explorer empty with nothing to retry it.
+  it("commits an older listing when the newer request failed", async () => {
+    const older = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let failNewer!: (error: Error) => void;
+    const newer = new Promise<never>((_resolve, reject) => {
+      failNewer = reject;
+    });
+    let issued = 0;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(() => (++issued === 1 ? older.promise : newer));
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The newer request fails. Nothing has been displayed yet.
+    await act(async () => {
+      failNewer(new Error("listing failed"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("a.md")).toBeNull();
+
+    // The older answer arrives — and it is the only answer there is.
+    await act(async () => {
+      older.resolve({
+        files: [
+          { path: "a.md", kind: "file" },
+          { path: "b.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await older.promise;
+    });
+
+    expect(await screen.findByText("a.md")).toBeTruthy();
+    expect(screen.getByText("b.md")).toBeTruthy();
+  });
+
+  // Listings resolve out of order (the mount listing can overtake the one the
+  // share pull triggered). An older snapshot committing last would show a
+  // stale tree and, worse, make the reconciliation read a live file as
+  // deleted and close its tab.
+  it("ignores a listing that resolves after a newer one was issued", async () => {
+    type Listing = {
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    };
+    const older = deferred<Listing>();
+    const newer = deferred<Listing>();
+    let issued = 0;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "live.md"],
+        activeTab: "b.md",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(() =>
+      ++issued === 1 ? older.promise : newer.promise,
+    );
+    renderShell(bridge);
+
+    // A second listing is issued while the first is still in flight.
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The newer one lands first and knows about live.md.
+    await act(async () => {
+      newer.resolve({
+        files: [
+          { path: "a.md", kind: "file" },
+          { path: "b.md", kind: "file" },
+          { path: "live.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await newer.promise;
+    });
+    expect(await screen.findByTestId("tab-live.md")).toBeTruthy();
+
+    // Then the stale one, which predates live.md, arrives last.
+    await act(async () => {
+      older.resolve({
+        files: [
+          { path: "a.md", kind: "file" },
+          { path: "b.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await older.promise;
+    });
+
+    // It commits nothing: the tab is open and the tree still lists the file
+    // (its name renders in the explorer row, the open-editors row, and the
+    // tab — the stale snapshot would have removed all three).
+    expect(screen.getByTestId("tab-live.md")).toBeTruthy();
+    expect(screen.getAllByText("live.md").length).toBeGreaterThan(0);
+  });
+
+  // Either load can win. When the listing lands FIRST there is nothing
+  // restored to judge yet, so the restore itself has to re-run the check —
+  // otherwise the missing tab survives and gets written back out.
+  it("prunes a restored tab when the file listing arrives before the stored state", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+
+    // The listing lands first: a.md and b.md, no ghost.md.
+    await screen.findByText("a.md");
+
+    await act(async () => {
+      stored.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "ghost.md"],
+        activeTab: "b.md",
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-ghost.md")).toBeNull();
+    });
+    await waitFor(() => {
+      const states = bridge.setWorkspaceUiState.mock.calls.map(
+        ([payload]) => payload.state,
+      );
+      expect(states.some((state) => state.tabs.includes("ghost.md"))).toBe(false);
+      expect(states.some((state) => state.tabs.join() === "b.md")).toBe(true);
+    });
+  });
+
+  // The scoping earns its keep here: only stored tabs are eligible, so a
+  // listing that raced a create cannot close what the user just opened.
+  it("never prunes a tab opened this session, whatever a later listing says", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+
+    // b.md is restored; a.md is opened now.
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    fireEvent.click(await screen.findByText("a.md"));
+    expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
+
+    // A listing that knows about neither file arrives.
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: [] as Array<{ path: string; kind: "file" }>,
+      folders: [] as string[],
+    }));
+    await act(async () => {
+      bridge.emitWorkspaceActivity();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-b.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+  });
+
   it("stored state applies when the user touched nothing before the load", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
@@ -853,6 +1466,24 @@ describe("active file sharing", () => {
 });
 
 describe("content search", () => {
+  // Journey 1 (#337): queries arrived with their leading characters missing
+  // ("MBERDRAFT-8831" for "EMBERDRAFT-8831"). The panel opened, but the input
+  // only mounted when a lazy chunk resolved, so everything typed in that gap
+  // went to the activity-bar button the user had just clicked.
+  it("mounts the focused input in the same commit that opens the panel", () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    // No awaits: nothing can resolve a pending import between the click and
+    // the first keystroke, which is exactly the user's situation.
+    act(() => {
+      fireEvent.click(screen.getByTestId("activity-search"));
+    });
+
+    const input = screen.getByTestId("search-input");
+    expect(document.activeElement).toBe(input);
+  });
+
   it("clears the activity badge as soon as the query is cleared", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();

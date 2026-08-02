@@ -831,3 +831,71 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
     ).toBe(false);
   });
 });
+
+// Presence waits for the share scope to RESOLVE (sharesWorkspaceId), because a
+// joined channel's scope is derived from the share metadata. Preserving cached
+// metadata on a failed background refresh is right — but only when something
+// was cached. A background refresh supersedes an initial request still in
+// flight, so if it also declined to commit its own failed lookup, nothing
+// would ever resolve the scope and presence would stay dormant for good.
+describe("ChatsView presence when the first share lookup never answers", () => {
+  const ownedChannel: ChatChannelRecord = {
+    id: "channel-owned",
+    name: "owned",
+    slug: "owned",
+    kind: "channel",
+    createdAtMs: NOW,
+    updatedAtMs: NOW,
+    threadCount: 0,
+    unreadCount: 0,
+    wireId: "wire-owned",
+  };
+
+  it("resolves the scope from a failed background lookup rather than hanging", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [ownedChannel],
+      fileThreads: [],
+    });
+    // The initial lookup never answers; the background one fails.
+    let initial = true;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      if (initial) {
+        initial = false;
+        return new Promise(() => {});
+      }
+      return Promise.reject(new Error("signed out"));
+    });
+    const rec = recordingCollab();
+    const user = userEvent.setup();
+    const props = (readRevision: number) => ({
+      workspaceId: "workspace-a",
+      onOpenFileChat: vi.fn(),
+      onError: vi.fn(),
+      collaboration: rec.collaboration,
+      readRevision,
+    });
+    const view = render(<ChatsView {...props(0)} />);
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1),
+    );
+
+    // A read lands. Its background refresh supersedes the stalled initial one.
+    view.rerender(<ChatsView {...props(1)} />);
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2),
+    );
+
+    // Unknown share metadata fails closed, but the scope is RESOLVED, so
+    // presence runs instead of waiting on a request that will never answer.
+    const buttons = await screen.findAllByTestId("chats-channel");
+    await user.click(buttons[0]);
+    await screen.findByTestId("chats-channel-view");
+    await waitFor(() =>
+      expect(
+        rec.publishes.some(
+          (p) => p.topic === "wire-owned" && scopeKey(p.scope) === "ws:workspace-a",
+        ),
+      ).toBe(true),
+    );
+  });
+});

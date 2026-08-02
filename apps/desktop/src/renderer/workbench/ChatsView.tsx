@@ -872,8 +872,14 @@ export function ChatsView(props: {
   // Reports every draft edit (ref-cheap in the shell) so unsent input
   // survives the panel/tab handoff.
   onDraftsChange?: (drafts: ChatsDrafts) => void;
+  // Unread badges are the one state the two instances disagree about: the
+  // page performs every read, the panel navigator only projects counts it
+  // fetched at mount. The page reports each landed mark-read; the shell hands
+  // the panel a bumped revision so its badges catch up.
+  onThreadRead?: () => void;
+  readRevision?: number;
 }) {
-  const { workspaceId, onNavChange, onDraftsChange } = props;
+  const { workspaceId, onNavChange, onDraftsChange, onThreadRead } = props;
   const readOnly = props.readOnly === true;
   const collaboration = readOnly ? null : props.collaboration ?? null;
   const mentionCandidates = props.mentionCandidates ?? [];
@@ -1011,36 +1017,91 @@ export function ChatsView(props: {
     setSending(contextIsSending);
   }, [sendContextKey]);
 
-  const refreshOverview = useCallback(async () => {
-    const token = ++liveToken.current;
-    setOverview((current) =>
-      current.status === "ready" ? current : { status: "loading" },
-    );
-    try {
-      const [result, shares] = await Promise.all([
-        bridge().listChatChannels({ workspaceId }),
-        // Sharing is OPTIONAL: solo / signed-out workspaces simply render
-        // without the sharing affordances.
-        bridge()
-          .listChatChannelShares({ workspaceId })
-          .catch(() => null),
-      ]);
-      if (token !== liveToken.current) return;
-      setChannelShares(shares);
-      setSharesWorkspaceId(workspaceId);
-      setOverview({
-        status: "ready",
-        channels: result.channels,
-        fileThreads: result.fileThreads,
-      });
-    } catch (error) {
-      if (token !== liveToken.current) return;
-      setOverview({
-        status: "unavailable",
-        message: ipcErrorMessage(error, "Could not load Chats."),
-      });
-    }
-  }, [workspaceId]);
+  // `background` marks a refresh the user did not ask for (the navigator's
+  // badge catch-up). Two things follow, and both are about not stealing from
+  // whatever the user IS doing:
+  //
+  //  - It must not touch liveToken. That token means "everything in flight is
+  //    now stale", and createChannel, joinShared and shareChannel capture it
+  //    to decide whether their own completion still counts. Bumping it here
+  //    made a badge refresh landing mid-mutation throw away the mutation's
+  //    successful result, leaving the create form or the old invite on screen.
+  //    Latest-wins among overview refreshes uses its own sequence instead; the
+  //    captured token is still CHECKED, so a workspace switch or a user
+  //    navigation still discards this response.
+  //  - A transient failure must not replace a working navigator with an error
+  //    card (there is nothing to report to a user who asked for nothing).
+  const overviewRequest = useRef(0);
+  // ONE monotonic sequence over every channelShares commit, whichever loader
+  // produces it. refreshOverview and refreshShares both write this state, and
+  // without a shared order a share lookup issued first could resolve last and
+  // put a pre-mutation snapshot back on screen — the person you just invited
+  // vanishing, or the one you just removed reappearing. Same commit-time
+  // watermark as the workspace file listing: an id is taken at issue, and a
+  // response commits only if it is newer than what is already displayed.
+  const sharesRequest = useRef(0);
+  const committedSharesRequest = useRef(0);
+  const refreshOverview = useCallback(
+    async (options?: { background?: boolean }): Promise<void> => {
+      const token = options?.background ? liveToken.current : ++liveToken.current;
+      const request = ++overviewRequest.current;
+      const sharesId = ++sharesRequest.current;
+      const superseded = () =>
+        token !== liveToken.current || request !== overviewRequest.current;
+      setOverview((current) =>
+        current.status === "ready" ? current : { status: "loading" },
+      );
+      try {
+        const [result, shares] = await Promise.all([
+          bridge().listChatChannels({ workspaceId }),
+          // Sharing is OPTIONAL: solo / signed-out workspaces simply render
+          // without the sharing affordances. Whether the lookup FAILED is
+          // kept separate from what it returned — null is not an answer, it
+          // is the absence of one, and it fails closed in channelIsLocked.
+          bridge()
+            .listChatChannelShares({ workspaceId })
+            .then((value) => ({ answered: true, value }) as const)
+            .catch(() => ({ answered: false, value: null }) as const),
+        ]);
+        if (superseded()) return;
+        // A background refresh that could not reach the share metadata keeps
+        // what it already had: dropping to "unknown" would wipe the cached
+        // invitations and share controls, and lock every joined channel, for
+        // a refresh the user never asked for.
+        //
+        // Preservation only applies over state that IS resolved, which the
+        // watermark records (it only ever advances on a commit for the
+        // current workspace, and the workspace switch resets it). With
+        // nothing resolved there is nothing to keep, and this response may be
+        // the only one coming — a background refresh supersedes any initial
+        // request still in flight — so it must settle the state even with a
+        // failed lookup. That commits "unknown", which fails closed, instead
+        // of leaving presence and the share controls waiting forever.
+        const sharesResolvedForWorkspace = committedSharesRequest.current > 0;
+        const keepCached =
+          options?.background && !shares.answered && sharesResolvedForWorkspace;
+        if (!keepCached && sharesId > committedSharesRequest.current) {
+          committedSharesRequest.current = sharesId;
+          setChannelShares(shares.value);
+          setSharesWorkspaceId(workspaceId);
+        }
+        setOverview({
+          status: "ready",
+          channels: result.channels,
+          fileThreads: result.fileThreads,
+        });
+      } catch (error) {
+        if (superseded()) return;
+        const message = ipcErrorMessage(error, "Could not load Chats.");
+        setOverview((current) =>
+          options?.background && current.status === "ready"
+            ? current
+            : { status: "unavailable", message },
+        );
+      }
+    },
+    [workspaceId],
+  );
 
   const refreshBookmarks = useCallback(async () => {
     const workspaceGeneration = bookmarkWorkspaceGeneration.current;
@@ -1132,6 +1193,7 @@ export function ChatsView(props: {
     setCreatingChannel(null);
     setChannelShares(null);
     setSharesWorkspaceId(null);
+    committedSharesRequest.current = 0;
     setSharePanelOpen(false);
     setShareEmail("");
     setShareReadOnly(false);
@@ -1250,6 +1312,19 @@ export function ChatsView(props: {
     const interval = setInterval(() => void refreshDms(), 5_000);
     return () => clearInterval(interval);
   }, [refreshDms, nav.level]);
+
+  // The panel navigator hands every conversation to the page instance, so it
+  // never reaches the mark-read above and its channel and file-thread badges
+  // would keep the counts fetched at mount until it remounted. The shell bumps
+  // readRevision after each landed read; the mount value belongs to the load
+  // effect above, so only later ones refetch.
+  const seenReadRevision = useRef(props.readRevision);
+  useEffect(() => {
+    const revision = props.readRevision;
+    if (revision === seenReadRevision.current) return;
+    seenReadRevision.current = revision;
+    void refreshOverview({ background: true });
+  }, [props.readRevision, refreshOverview]);
 
   const loadChannelSnapshot = useCallback(
     async (channelId: string): Promise<ChannelSnapshot> => {
@@ -1470,13 +1545,18 @@ export function ChatsView(props: {
         );
         void bridge()
           .markChatThreadRead({ workspaceId, threadId, upToSequence })
-          .catch(() => {
-            // Mark-read is best-effort; the badge re-appears on next refresh if
-            // the cursor write did not land.
-          });
+          .then(
+            // Only once the cursor write LANDED: a panel refetch before that
+            // would read the same count back and look like nothing happened.
+            () => onThreadRead?.(),
+            () => {
+              // Mark-read is best-effort; the badge re-appears on next refresh
+              // if the cursor write did not land.
+            },
+          );
       }
     },
-    [workspaceId],
+    [onThreadRead, workspaceId],
   );
 
   const openThread = useCallback(
@@ -2422,10 +2502,13 @@ export function ChatsView(props: {
 
   const refreshShares = useCallback(async () => {
     const token = liveToken.current;
+    const sharesId = ++sharesRequest.current;
     const shares = await bridge()
       .listChatChannelShares({ workspaceId })
       .catch(() => null);
     if (token !== liveToken.current) return;
+    if (sharesId <= committedSharesRequest.current) return;
+    committedSharesRequest.current = sharesId;
     setChannelShares(shares);
     setSharesWorkspaceId(workspaceId);
   }, [workspaceId]);

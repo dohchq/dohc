@@ -72,6 +72,11 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
+// Eager on purpose. Behind lazy(), the search input did not exist until the
+// chunk resolved, and every character typed in that gap went to whatever the
+// user clicked to open the panel — queries arrived with their first letters
+// missing. The view carries no dependency the shell does not already load.
+import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
 import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
@@ -129,6 +134,7 @@ import {
   parseHistoryDiffTabPath,
   parseSiteTabPath,
   parseUiState,
+  pruneMissingRestoredTabs,
   recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
@@ -365,9 +371,6 @@ function scheduleMarkdownEditorPreload(): () => void {
     }
   };
 }
-const LazySearchView = lazy(() =>
-  import("./workbench/SearchView").then((mod) => ({ default: mod.SearchView })),
-);
 const LazyGraphView = lazy(() =>
   import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
 );
@@ -987,6 +990,10 @@ export function DesktopWorkspaceShell(props: {
   onSwitchWorkspace: (workspace: Workspace) => void;
 }) {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
+  // An empty workspace also lists zero files, so "loaded" needs its own flag —
+  // the restored-tab reconciliation below must never run against a listing
+  // that has not happened yet.
+  const [filesLoaded, setFilesLoaded] = useState(false);
   const [folders, setFolders] = useState<string[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
@@ -1260,6 +1267,14 @@ export function DesktopWorkspaceShell(props: {
   const uiStateLoaded = useRef(false);
   const userTouchedWb = useRef(false);
   const wbRef = useRef(wb);
+  // The tab paths the stored state restored — the only ones a file listing is
+  // allowed to close. Empty until the load applies, and empty forever when the
+  // user acted first and the stored tabs were discarded. STATE, not a ref: the
+  // reconciliation below reads it, and the listing can win the race against
+  // this load, so it has to re-run when the restore lands.
+  const [restoredTabPaths, setRestoredTabPaths] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  );
 
   // THE one mutation seam for workbench state: every user-driven transition
   // routes through here so the touched flag is set before React even queues
@@ -1286,6 +1301,7 @@ export function DesktopWorkspaceShell(props: {
           // must flush the restored state, never the stale default.
           wbRef.current = parsed;
           setWb(parsed);
+          setRestoredTabPaths(new Set(parsed.tabs.map((tab) => tab.path)));
         }
         uiStateLoaded.current = true;
         if (userTouchedWb.current) {
@@ -1333,11 +1349,129 @@ export function DesktopWorkspaceShell(props: {
     };
   }, [workspaceId]);
 
+  // Latest-wins: fourteen call sites issue listings — mount, the watcher,
+  // imports, restores, the share pull — and they can resolve out of order. An
+  // older snapshot committing last would show a stale tree AND make the
+  // reconciliation below read a live file as deleted.
+  //
+  // Supersession is decided when a response COMMITS, not when it is issued. A
+  // newer request that is merely in flight has not answered anything yet, and
+  // if it fails it never will: dropping this answer for it would leave the
+  // explorer empty after a failed refresh, with nothing to retry it. So an
+  // older answer fills an unanswered UI, and the newer one supersedes it when
+  // it lands. Only an answer OLDER than what is already displayed is dropped.
+  const filesRequest = useRef(0);
+  const committedFilesRequest = useRef(0);
+  // How many listings are still in flight, and a bump each time that reaches
+  // zero. The destructive close waits for quiet, not for a particular id: a
+  // request that FAILS never commits, so keying off "newest issued" would
+  // block the close for as long as the app ran.
+  const pendingFilesRequests = useRef(0);
+  // The newest request that FAILED. A failure is not an answer, so it cannot
+  // refute anything — but it does mean the tree may have moved in a way no
+  // surviving snapshot saw, which taints every older snapshot for the one
+  // purpose that cannot be undone. See the close below.
+  const failedFilesRequest = useRef(0);
+  const [listingsSettled, setListingsSettled] = useState(0);
   const refreshFiles = useCallback(async () => {
-    const result = await bridge().listWorkspaceFiles({ workspaceId });
-    setFiles(result.files);
-    setFolders(result.folders ?? []);
+    const request = ++filesRequest.current;
+    pendingFilesRequests.current += 1;
+    try {
+      const result = await bridge().listWorkspaceFiles({ workspaceId });
+      if (request <= committedFilesRequest.current) return;
+      committedFilesRequest.current = request;
+      setFiles(result.files);
+      setFolders(result.folders ?? []);
+      setFilesLoaded(true);
+    } catch (error) {
+      if (request > failedFilesRequest.current) failedFilesRequest.current = request;
+      throw error;
+    } finally {
+      pendingFilesRequests.current -= 1;
+      if (pendingFilesRequests.current === 0) {
+        setListingsSettled((settled) => settled + 1);
+      }
+    }
   }, [workspaceId]);
+
+  // Keep a restored tab only while the workspace still lists its file. A
+  // rollback, an external delete, or a share pull changes the tree without an
+  // explorer op, so nothing remaps the stored tabs and Open Editors keeps a
+  // dead path across restarts.
+  //
+  // Every listing is checked, not just the first. A shared workspace lists
+  // twice on open — once at mount, once after refreshShareView pulls the
+  // changed paths — and consuming whichever landed first would either miss a
+  // remote delete or judge the tabs against a pre-pull snapshot. Only the
+  // RESTORED paths are eligible (see pruneMissingRestoredTabs), so a listing
+  // that raced a create can never close a tab opened this session.
+  //
+  // Both inputs are dependencies because either can arrive first: a listing
+  // that beats the ui-state load finds nothing restored yet, and the restore
+  // is what has to re-run the check.
+  useEffect(() => {
+    if (!filesLoaded || restoredTabPaths.size === 0) return;
+    // Closing a tab is destructive, so it waits until no listing is in
+    // flight. The watermark above deliberately lets an older success fill the
+    // display — right for the explorer, wrong for closing tabs, because a
+    // pull still in flight can carry back a file this older listing predates.
+    // Once everything has settled, the committed response is the newest
+    // SUCCESS by construction (a response only commits if it is newer than
+    // what is displayed), so a failed newer request leaves the older listing
+    // authoritative instead of blocking the close for the rest of the session.
+    if (pendingFilesRequests.current > 0) return;
+    // A failure since the displayed listing was issued means the tree may
+    // have changed in a way this snapshot never saw — refreshShareView pulls
+    // a file back and the listing that would have shown it is the one that
+    // failed. Closing on the older snapshot would then close a tab whose file
+    // exists. Waiting costs a delay; closing costs the user their tab, so the
+    // close waits for a success issued AFTER the failure. Not a deadlock: the
+    // next successful listing re-enables it.
+    if (committedFilesRequest.current <= failedFilesRequest.current) return;
+    // A DIRTY tab is never closed. Closing it unmounts the keyed inspector
+    // mid-draft, whose cleanup flushes best-effort to a path that no longer
+    // exists; the write fails, the failure is swallowed, and the draft is
+    // gone with no error and no way back. Waiting costs nothing: this re-runs
+    // when the draft settles, and closes the tab then.
+    const dirtyPath = activeTabDirty ? wb.activeTab : null;
+    const closable =
+      dirtyPath !== null && restoredTabPaths.has(dirtyPath)
+        ? new Set([...restoredTabPaths].filter((path) => path !== dirtyPath))
+        : restoredTabPaths;
+    const present = new Set(files.map((file) => file.path));
+    const fileExists = (path: string) => present.has(path);
+    const current = wbRef.current;
+    const next = pruneMissingRestoredTabs(current, closable, fileExists);
+    if (next === current) return;
+    if (next.activeTab !== current.activeTab) {
+      // This commits through the direct setter, on purpose: reconciling is not
+      // a user action and must not set the touched flag. But it moves the
+      // active tab exactly as mutateWb does, so it owes the same invalidation
+      // — otherwise an in-flight DM navigation still passes its isCurrent()
+      // check and lands its destination on top of the tab we just activated.
+      // REPLACE the record, never increment it in place: openCanonicalDmInTab
+      // installs the very object it then compares against, so mutating it
+      // would move its captured sequence too and the check would still pass.
+      dmNavigationRequest.current = {
+        workspaceId: dmNavigationRequest.current.workspaceId,
+        sequence: dmNavigationRequest.current.sequence + 1,
+      };
+      // Activating a neighbour remounts the keyed inspector — that is an OPEN
+      // (closeFileTab idiom). Without the mark, the inspector's mount measure
+      // brackets whatever stale mark came before it.
+      if (next.activeTab !== null && !isVirtualTabPath(next.activeTab)) {
+        rendererMarks.mark("file-open-start");
+      }
+    }
+    setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
+  }, [
+    files,
+    filesLoaded,
+    listingsSettled,
+    restoredTabPaths,
+    activeTabDirty,
+    wb.activeTab,
+  ]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
     setShellError(error instanceof Error ? error.message : fallback);
@@ -1612,6 +1746,13 @@ export function DesktopWorkspaceShell(props: {
   const chatsNav = useRef<ChatsNav | null>(null);
   const [selectedChatsNav, setSelectedChatsNav] = useState<ChatsNav | null>(null);
   const [chatsPageRevision, setChatsPageRevision] = useState(0);
+  // The navigator's unread badges come from one fetch at its mount, and the
+  // editor is what performs the reads — without this the panel keeps showing
+  // counts the user already cleared until something remounts it.
+  const [chatsReadRevision, setChatsReadRevision] = useState(0);
+  const onChatsThreadRead = useCallback(() => {
+    setChatsReadRevision((current) => current + 1);
+  }, []);
   const onChatsNav = useCallback((nav: ChatsNav) => {
     dmNavigationRequest.current.sequence += 1;
     chatsNav.current = nav;
@@ -2535,6 +2676,7 @@ export function DesktopWorkspaceShell(props: {
     initialDrafts: chatsDrafts.current ?? undefined,
     onNavChange: onChatsNav,
     onDraftsChange: onChatsDrafts,
+    onThreadRead: onChatsThreadRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: setShellError,
@@ -2552,6 +2694,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
     readOnly: Boolean(shareView),
     selectedNav: selectedChatsNav ?? undefined,
+    readRevision: chatsReadRevision,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
@@ -2724,9 +2867,7 @@ export function DesktopWorkspaceShell(props: {
             {wb.activeView === "explorer" ? (
               explorerView
             ) : wb.activeView === "search" ? (
-              <Suspense fallback={<PanelLoading label="search" />}>
-                <LazySearchView search={search} onOpenResult={openSearchResult} />
-              </Suspense>
+              <SearchView search={search} onOpenResult={openSearchResult} />
             ) : wb.activeView === "graph" ? (
               <Suspense fallback={<PanelLoading label="graph" />}>
                 <LazyGraphView
@@ -3035,6 +3176,7 @@ export function DesktopWorkspaceShell(props: {
                     initialFocusMessageId={searchChatTarget?.focusMessageId}
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
+                    onThreadRead={onChatsThreadRead}
                     onError={(message) => setShellError(message)}
                   />
                 </Suspense>

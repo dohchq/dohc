@@ -363,6 +363,270 @@ describe("ChatsView channels", () => {
   });
 });
 
+// Journey 3 (#337): the navigator kept an unread badge more than 30s after
+// the thread was read. It hands every conversation to the editor, so it never
+// reaches its own mark-read and had no reason to refetch the counts it loaded
+// at mount. The shell reports each landed read through readRevision.
+describe("ChatsView panel navigator unread badges", () => {
+  function navigator(readRevision: number) {
+    return (
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        onOpenInTab={vi.fn()}
+        readRevision={readRevision}
+      />
+    );
+  }
+
+  it("refetches the counts once the shell reports a landed read", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    const view = render(navigator(0));
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+
+    // The editor read the thread: the durable count is zero now.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    view.rerender(navigator(1));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+  });
+
+  // Clearing a badge must never cost the user the navigator itself.
+  it("keeps a working navigator when the badge refresh fails, and retries on the next read", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    const view = render(navigator(0));
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+
+    // The refresh the read triggers fails.
+    bridgeMock.listChatChannels.mockRejectedValue(new Error("offline"));
+    view.rerender(navigator(1));
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
+
+    // The channel list is still there — a stale badge beats an error card.
+    expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
+    expect(screen.getByTestId("chats-channel-unread").textContent).toBe("2");
+
+    // The signal was not spent on that failure: the next read still refetches
+    // and the badge catches up.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    view.rerender(navigator(2));
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+    expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
+  });
+
+  // liveToken means "everything in flight is now stale", and the mutations
+  // capture it to decide whether their own completion still counts. A badge
+  // refresh is not that: it must not throw away a channel the user just made.
+  it("does not discard a channel creation that a badge refresh lands on top of", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    let finishCreate!: (result: { channel: ChatChannelRecord }) => void;
+    bridgeMock.createChatChannel.mockReturnValue(
+      new Promise((resolve) => {
+        finishCreate = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    const view = render(navigator(0));
+    await screen.findByTestId("chats-channel-unread");
+
+    // Start creating a channel and leave the IPC in flight.
+    await user.click(screen.getByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    await waitFor(() => expect(bridgeMock.createChatChannel).toHaveBeenCalled());
+
+    // A read lands, so the navigator refreshes its badges underneath.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    view.rerender(navigator(1));
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+
+    // The creation now answers. Its result must still count.
+    await act(async () => {
+      finishCreate({
+        channel: channel({ id: "channel-9", name: "launch", slug: "launch" }),
+      });
+      await Promise.resolve();
+    });
+    // Straight into the new channel, and the create form is gone — neither
+    // happens if the refresh invalidated the creation.
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
+      "launch",
+    );
+    expect(screen.queryByTestId("chats-new-channel-name")).toBeNull();
+  });
+
+  // The share lookup is optional, so a failure returns "unknown" — which is
+  // not the same as "there are none". A badge refresh must not spend a
+  // teammate's pending invitation on a transient signed-out blip.
+  it("keeps cached share metadata when the badge refresh cannot reach it", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [
+        {
+          shareId: "share-received",
+          channelWireId: "wire-received",
+          granterEmail: "owner@example.com",
+          access: "read-write",
+          ended: false,
+        },
+      ],
+      joined: [],
+    });
+    const view = render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+
+    // The read lands. Channels answer; the optional share lookup does not.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
+    view.rerender(navigator(1));
+
+    // The badge catches up, and the invitation is still on offer.
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+  });
+
+  // refreshOverview and refreshShares both write channelShares. Without one
+  // order over both, a share lookup issued FIRST can resolve LAST and put the
+  // pre-mutation snapshot back — the person you just invited disappearing.
+  it("does not let a slow background lookup undo a share the user just made", async () => {
+    const teamChannel = channel({
+      id: "channel-team",
+      name: "team",
+      slug: "team",
+      wireId: "wire-team",
+    });
+    const grant = (recipientEmail: string, shareId: string) => ({
+      shareId,
+      channelWireId: "wire-team",
+      access: "read-write" as const,
+      recipientEmail,
+      revokedAtMs: null,
+    });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel],
+      fileThreads: [],
+    });
+    bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
+    // Every share lookup is answered by hand, so the order is the test.
+    const answerShares: Array<(value: unknown) => void> = [];
+    bridgeMock.listChatChannelShares.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answerShares.push(resolve);
+        }),
+    );
+    const user = userEvent.setup();
+    const view = render(
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        readRevision={0}
+      />,
+    );
+
+    // Mount: one person has the channel.
+    await waitFor(() => expect(answerShares).toHaveLength(1));
+    await act(async () => {
+      answerShares[0]({ granted: [grant("ana@example.com", "share-1")], received: [], joined: [] });
+      await Promise.resolve();
+    });
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-share-channel"));
+    expect((await screen.findByTestId("chats-share-member")).textContent).toContain(
+      "ana@example.com",
+    );
+
+    // A read lands: the badge refresh issues its share lookup and stalls.
+    view.rerender(
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        readRevision={1}
+      />,
+    );
+    await waitFor(() => expect(answerShares).toHaveLength(2));
+
+    // Meanwhile the user shares the channel with someone else, and THAT
+    // lookup answers first.
+    await user.type(screen.getByTestId("chats-share-email"), "bo@example.com");
+    await user.click(screen.getByTestId("chats-share-submit"));
+    await waitFor(() => expect(answerShares).toHaveLength(3));
+    await act(async () => {
+      answerShares[2]({
+        granted: [grant("ana@example.com", "share-1"), grant("bo@example.com", "share-2")],
+        received: [],
+        joined: [],
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.getAllByTestId("chats-share-member")).toHaveLength(2),
+    );
+
+    // Now the stalled background lookup answers with its older snapshot.
+    await act(async () => {
+      answerShares[1]({ granted: [grant("ana@example.com", "share-1")], received: [], joined: [] });
+      await Promise.resolve();
+    });
+
+    // Bo is still there.
+    const members = screen.getAllByTestId("chats-share-member");
+    expect(members).toHaveLength(2);
+    expect(members.map((el) => el.textContent).join(" ")).toContain("bo@example.com");
+  });
+
+  it("does not refetch while the revision stands still", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    const view = render(navigator(0));
+    await screen.findByTestId("chats-channel-unread");
+    expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(1);
+
+    view.rerender(navigator(0));
+    await waitFor(() => {
+      expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
 describe("ChatsView shared-workspace read-only boundary", () => {
   it("keeps the panel navigator readable while removing every overview/channel mutation", async () => {
     const sharedChannel = channel({ wireId: "wire-1", threadCount: 1 });
