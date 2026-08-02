@@ -200,6 +200,9 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
   readonly cancelRequest?: EngineDaemonClient["cancelRequest"];
   readonly onBlob?: EngineDaemonClient["onBlob"];
   readonly onEvent?: EngineDaemonClient["onEvent"];
+  // Swallowing this one would make a wedge kill report a deliberate shutdown,
+  // and every retry-enabled caller would stay failed across the restart.
+  readonly closeUnresponsive?: EngineDaemonClient["closeUnresponsive"];
   readonly waitForExit?: EngineDaemonClient["waitForExit"];
 
   constructor(
@@ -209,6 +212,9 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     if (client.cancelRequest) this.cancelRequest = client.cancelRequest.bind(client);
     if (client.onBlob) this.onBlob = client.onBlob.bind(client);
     if (client.onEvent) this.onEvent = client.onEvent.bind(client);
+    if (client.closeUnresponsive) {
+      this.closeUnresponsive = client.closeUnresponsive.bind(client);
+    }
     if (client.waitForExit) this.waitForExit = client.waitForExit.bind(client);
   }
 

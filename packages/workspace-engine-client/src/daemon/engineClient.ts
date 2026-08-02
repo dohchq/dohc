@@ -722,6 +722,23 @@ export class EngineClient implements EngineTransport {
     this.fail(new EngineClientError("closed", "The engine client was closed."));
   }
 
+  // AUDIT-KILLREC again, for the supervisor's wedge kill. Killing a daemon that
+  // stopped answering is a REPLACEMENT, not a shutdown, and this cause is the
+  // only one its in-flight callers will ever see: `notifyProcessExit` returns
+  // early once the client is closed, so the process exit that follows cannot
+  // re-cause these rejections. Reporting a bare `closed` here told every
+  // retry-enabled caller the daemon went away on purpose, and they stayed
+  // failed across a restart that was already under way.
+  closeUnresponsive(): void {
+    if (this.closed) return;
+    this.fail(
+      new EngineClientError(
+        "transport-error",
+        "The engine stopped answering and was killed for replacement.",
+      ),
+    );
+  }
+
   dispose(): void {
     this.close();
   }

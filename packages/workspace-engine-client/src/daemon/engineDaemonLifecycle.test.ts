@@ -32,6 +32,11 @@ class FakeClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
   readonly cancelledRequestIds: number[] = [];
   closed = false;
+  // WHICH kill path ran. The real EngineClient rejects everything in flight
+  // with this code, and a caller that retries through a relaunch reads it to
+  // tell a replacement from a deliberate shutdown. A fake that only recorded
+  // `closed = true` could not tell the two apart at all.
+  closeCause: "closed" | "transport-error" | null = null;
   waitForExit?: () => Promise<void>;
 
   constructor(
@@ -53,7 +58,17 @@ class FakeClient implements EngineDaemonClient {
   }
 
   close(): void {
+    this.finishClose("closed");
+  }
+
+  closeUnresponsive(): void {
+    this.finishClose("transport-error");
+  }
+
+  protected finishClose(cause: "closed" | "transport-error"): void {
+    if (this.closed) return;
     this.closed = true;
+    this.closeCause = cause;
   }
 }
 
@@ -81,10 +96,17 @@ function silentPing(request: Request): Response | Promise<Response> {
 class SelfExitingClient extends FakeClient {
   exit: EngineClientSpawnOptions["onExit"];
 
-  close(): void {
+  protected override finishClose(
+    cause: "closed" | "transport-error",
+  ): void {
     if (this.closed) return;
-    super.close();
-    this.exit?.(null, "SIGTERM");
+    super.finishClose(cause);
+    // A REAL child's "exit" is an event-loop delivery: node cannot dispatch it
+    // inside the close() call that killed the process. Delivering it
+    // synchronously here would let a fake reorder failure reports in a way the
+    // real transport never can. A microtask keeps that ordering honest without
+    // depending on fake timers.
+    queueMicrotask(() => this.exit?.(null, "SIGTERM"));
   }
 }
 
@@ -766,6 +788,84 @@ describe("Rust engine daemon lifecycle", () => {
         timeout: 10_000,
       });
       expect(failures.filter(({ terminal }) => terminal)).toEqual([]);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("kills a wedged daemon as a transport failure, not a deliberate close", async () => {
+    // A wedge kill is a REPLACEMENT. EngineWorkspaceSessions retries only
+    // `transport-error`, so a plain close tells an editor session the daemon
+    // went away on purpose and it stays failed across the restart already
+    // under way — AUDIT-KILLREC, reached the second way.
+    // MUTATION: call client.close() in reportWedge instead and the recorded
+    // cause is "closed", which no retry path rebinds through.
+    const clients: SelfExitingClient[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      pingExpiryMs: 10,
+      maxPingExpiries: 1,
+      launch: async (options) => {
+        const client = new SelfExitingClient(silentPing);
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(clients.length).toBeGreaterThanOrEqual(2), {
+        timeout: 10_000,
+      });
+      expect(clients[0]?.closed).toBe(true);
+      expect(clients[0]?.closeCause).toBe("transport-error");
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("kills the wedged daemon before the terminal report can block", async () => {
+    // The desktop answers a terminal verdict with dialog.showErrorBox, which
+    // does not return until the user dismisses the modal. Reporting first
+    // would leave the wedged child alive behind that dialog for as long as it
+    // stands, while this lifecycle already called the engine gone.
+    // MUTATION: move the kill below reportFailure and the wedged client is
+    // still open when the consumer regains control -> [false].
+    const clients: SelfExitingClient[] = [];
+    const closedWhenReported: boolean[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      pingIntervalMs: 5,
+      pingExpiryMs: 10,
+      maxPingExpiries: 1,
+      maxConsecutiveWedges: 2,
+      launch: async (options) => {
+        const client = new SelfExitingClient(silentPing);
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (_error, terminal) => {
+        // Stands in for the modal: read the wedged client at the exact moment
+        // the consumer takes control, which is where a dialog would park.
+        if (terminal) closedWhenReported.push(clients.at(-1)?.closed ?? false);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(closedWhenReported).toHaveLength(1), {
+        timeout: 10_000,
+      });
+      expect(closedWhenReported).toEqual([true]);
     } finally {
       await lifecycle.stop();
     }

@@ -40,10 +40,20 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_PING_INTERVAL_MS = 30_000;
 // A probe carries NO wire deadline, so the supervisor gives it the daemon's own
 // `default_deadline` of 30s — the latest a live daemon can take to answer a
-// probe it never gets an execution slot for. 45s is that bound with half again
-// of headroom. The probe must not carry a deadline of its own: EngineClient
+// probe it never gets an execution slot for. 45s is that bound plus 15s of
+// egress headroom. The probe must not carry a deadline of its own: EngineClient
 // arms a client-side timer for any request that has one, and that timer turns
 // the very silence this looks for into a rejection, which reads as life.
+//
+// The 30s is not the whole wait. A reply — a pong or the DEADLINE_EXCEEDED
+// refusal that also proves life — is queued on the daemon's single output
+// channel, and `write_output` writes one whole blob egress (BlobStart, every
+// chunk, Response) before it reads the next item. So a reply can sit behind
+// blob bytes. What bounds that wait is the egress budget, not this constant:
+// `BLOB_EGRESS_BYTE_BUDGET` is a 64 MiB byte semaphore held until the bytes
+// reach stdout, so at most 64 MiB can ever be queued ahead of a reply. Burning
+// the remaining 15s would need stdout to drain slower than 4.3 MB/s, which is
+// a stalled reader — itself the wedge this detector exists to catch.
 const DEFAULT_PING_EXPIRY_MS = 45_000;
 // Three silent probes in a row. They are one interval apart and each waits out
 // its own expiry, so a wedge verdict needs at least 2 intervals + 3 expiries —
@@ -81,6 +91,11 @@ export interface EngineDaemonClient {
   onBlob?(handler: (blob: CompletedDaemonBlob) => void): () => void;
   onEvent?(handler: (event: Event) => void): () => void;
   close(): void;
+  // Kill a daemon that stopped answering. `close` reports a deliberate
+  // shutdown, which retry-enabled callers must NOT retry through; a wedge kill
+  // is a replacement, which they must. A client that cannot tell the two apart
+  // falls back to `close`.
+  closeUnresponsive?(): void;
   waitForExit?(): Promise<void>;
 }
 
@@ -832,25 +847,33 @@ export class EngineDaemonLifecycle {
     // The crash window cannot end a wedge loop: one wedge cycle is longer than
     // a tenth of that window, so its count is unreachable by construction. A
     // wedge streak carries its own budget.
-    if (this.consecutiveWedges >= maxWedges) {
-      this.reportFailure(
-        new EngineDaemonUnavailableError(
-          `The Rust engine stopped answering engine.ping on ${this.consecutiveWedges} launches: ${silence}. The limit is ${maxWedges} wedges with no reply in between. dohc stopped restarting it.`,
-        ),
-        true,
-      );
-    } else {
-      this.reportFailure(
-        new EngineDaemonUnavailableError(
-          `The Rust engine is running but stopped answering engine.ping: ${silence}. The limit is ${maxExpiries} silent probes. dohc is restarting it.`,
-        ),
-        false,
-      );
-    }
-    // Killing it is the point either way. Restarting starts at process exit, so
-    // the only way a wedge reaches the restart path is to become an exit — and
-    // a terminal wedge must still not leave a wedged sidecar running.
-    client.close();
+    const terminal = this.consecutiveWedges >= maxWedges;
+    // Condemn, then kill, then report. Each step depends on the one before it.
+    //
+    // Condemn first because the kill becomes a process exit, and
+    // `handleUnexpectedExit` reads `terminal` to decide whether to relaunch.
+    // Setting it here does not depend on when that exit is delivered.
+    if (terminal) this.terminal = true;
+    // Kill before reporting because `reportFailure` runs consumer code: on a
+    // terminal verdict the desktop app answers it with `dialog.showErrorBox`,
+    // a modal that does not return until the user dismisses it. Killing after
+    // that call would leave the wedged child alive for as long as the dialog
+    // stands, while this lifecycle already called the engine gone.
+    //
+    // `closeUnresponsive` rejects everything in flight as a transport failure.
+    // A plain `close` reports a deliberate shutdown, and retry-enabled callers
+    // do not retry through one — they would stay failed across the very
+    // restart this kill is starting.
+    if (client.closeUnresponsive) client.closeUnresponsive();
+    else client.close();
+    this.reportFailure(
+      new EngineDaemonUnavailableError(
+        terminal
+          ? `The Rust engine stopped answering engine.ping on ${this.consecutiveWedges} launches: ${silence}. The limit is ${maxWedges} wedges with no reply in between. dohc stopped restarting it.`
+          : `The Rust engine is running but stopped answering engine.ping: ${silence}. The limit is ${maxExpiries} silent probes. dohc is restarting it.`,
+      ),
+      terminal,
+    );
   }
 
   private reportFailure(error: Error, terminal: boolean): void {

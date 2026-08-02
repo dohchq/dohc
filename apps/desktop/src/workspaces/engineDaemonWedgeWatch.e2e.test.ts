@@ -56,6 +56,10 @@ describe("engine.ping against a real daemon", () => {
             onEvent: (handler) => client.onEvent(handler),
             onBlob: (handler) => client.onBlob(handler),
             close: () => client.close(),
+            // Forwarded so this e2e drives the REAL kill path. A wrapper that
+            // dropped it would send the supervisor down the close() fallback
+            // and prove nothing about what a wedge kill reports.
+            closeUnresponsive: () => client.closeUnresponsive(),
             waitForExit: async () => await client.waitForExit(),
           };
         },

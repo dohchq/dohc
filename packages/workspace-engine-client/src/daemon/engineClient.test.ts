@@ -1403,6 +1403,28 @@ describe("EngineClient", () => {
     ).rejects.toMatchObject({ code: "transport-error" });
   });
 
+  // The supervisor's wedge kill, on the REAL client. A wedged daemon never
+  // exits on its own, so the supervisor kills it — and once this client is
+  // closed, `notifyProcessExit` returns early, so the exit that follows can no
+  // longer re-cause these rejections. Whatever is recorded here is final.
+  it("reports a wedge kill as a transport failure so callers retry the replacement", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const inFlight = transport.sendRequest(request(300, "wedged.work"));
+
+    transport.closeUnresponsive();
+
+    await expect(inFlight).rejects.toMatchObject({ code: "transport-error" });
+    // And the later process exit cannot upgrade it, which is why the cause
+    // above has to be right the first time.
+    transport.notifyProcessExit(null, "SIGTERM");
+    await expect(
+      transport.sendRequest(request(301, "after.kill")),
+    ).rejects.toMatchObject({ code: "transport-error" });
+  });
+
   it("still reports a deliberate close as closed", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
