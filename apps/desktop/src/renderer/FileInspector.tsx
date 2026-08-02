@@ -964,10 +964,12 @@ function MarkdownView(props: {
       onSaveStateChange?.(saveState);
       return;
     }
-    // The shell's dot has three states; a read-only refusal is an unsaved
-    // document as far as the tab is concerned.
+    // The shell's dot has three states; a read-only or changed-on-disk refusal
+    // is an unsaved document as far as the tab is concerned.
     onSaveStateChange?.(
-      engine.saveState === "read-only" ? "error" : engine.saveState,
+      engine.saveState === "read-only" || engine.saveState === "changed-on-disk"
+        ? "error"
+        : engine.saveState,
     );
   }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
 
@@ -1187,13 +1189,17 @@ function MarkdownView(props: {
                 data-state={engine.saveState}
                 title={
                   engine.saveState === "error"
-                    ? "Your edits are still here, but the file on disk is behind them. Keep this document open and try another edit."
+                    ? "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit."
                     : engine.saveState === "read-only"
                       ? "This document is shared with you to read. Your changes stay on screen but are not saved."
-                      : undefined
+                      : engine.saveState === "changed-on-disk"
+                        ? "This file changed outside dohc while it was open. Open History to restore your text."
+                        : undefined
                 }
                 className={`font-mono text-[11px] ${
-                  engine.saveState === "error" || engine.saveState === "read-only"
+                  engine.saveState === "error" ||
+                  engine.saveState === "read-only" ||
+                  engine.saveState === "changed-on-disk"
                     ? "text-danger"
                     : "text-subtle"
                 }`}
@@ -1204,7 +1210,9 @@ function MarkdownView(props: {
                     ? "Saving…"
                     : engine.saveState === "read-only"
                       ? "Read-only"
-                      : "Couldn't save"}
+                      : engine.saveState === "changed-on-disk"
+                        ? "Changed on disk"
+                        : "Couldn't save"}
               </span>
               <button
                 type="button"

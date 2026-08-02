@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import * as Y from "yjs";
@@ -121,7 +122,14 @@ beforeEach(async () => {
     path: PATH,
     text: INITIAL_MARKDOWN,
   });
-  ydoc = new YdocLoopbackEngine();
+  // The daemon materializes a settle to the workspace file itself, and the
+  // desktop no longer mirrors settled bytes over a file that holds something
+  // else (#338). A loopback that reports `materialized: true` while writing
+  // nothing would leave every file below unchanged, so it materializes too.
+  ydoc = new YdocLoopbackEngine({
+    materialize: ({ path, markdown }) =>
+      writeFileSync(join(root, path), markdown, "utf8"),
+  });
   seedYdoc("main");
   sessions = daemonSessions();
   capture = createWorkspaceEngineCapture({

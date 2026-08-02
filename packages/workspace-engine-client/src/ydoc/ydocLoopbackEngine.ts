@@ -123,6 +123,20 @@ function project(session: LoopbackSession): string {
     .join("\n\n");
 }
 
+export interface YdocLoopbackEngineOptions {
+  // The daemon WRITES the projected markdown to the workspace file as part of
+  // settle, which is what its `materialized: true` reports. A loopback with no
+  // materializer reports that same flag while nothing reaches disk — a caller
+  // that reads the file back then sees content only because something else
+  // wrote it. Tests that read the file pass this in.
+  //
+  // It writes on EVERY settle, including the one the daemon answers from the
+  // lineage without touching a drifted file. That is more than the daemon
+  // does, so no test may use this hook to prove what happens to a file the
+  // daemon leaves alone — those cases belong to a real-daemon test.
+  materialize?: (input: { path: string; markdown: string }) => void;
+}
+
 export class YdocLoopbackEngine implements EngineTransport {
   readonly requests: Request[] = [];
   readonly responses: Response[] = [];
@@ -134,6 +148,8 @@ export class YdocLoopbackEngine implements EngineTransport {
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private nextSessionId = 1;
   private nextMomentId = 1;
+
+  constructor(private readonly options: YdocLoopbackEngineOptions = {}) {}
 
   seedFile(input: SeedLoopbackFileInput): void {
     this.files.set(fileKey(input.workspace, input.versionId, input.path), {
@@ -293,6 +309,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     );
     optionalString(params, "summary");
     const markdown = project(session);
+    this.options.materialize?.({ path: session.path, markdown });
     return {
       momentId: `moment-${this.nextMomentId++}`,
       path: session.path,

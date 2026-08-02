@@ -393,12 +393,15 @@ export function parseEngineYDocRemoteUpdateEvent(
 // "read-only" is a SEPARATE refusal from "error": the workspace became a
 // read-only shared view, so this edit and every edit after it is discarded.
 // Advice that suits a transient failure ("try another edit") is futile there,
-// so the two must not share a string.
+// so the two must not share a string. "changed-on-disk" is the same kind of
+// separate refusal: the file was edited outside dohc while the document was
+// open, dohc kept that edit, and the document's own text is in History.
 export const ENGINE_YDOC_SAVE_STATES = [
   "settling",
   "saved",
   "error",
   "read-only",
+  "changed-on-disk",
 ] as const;
 export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];
 

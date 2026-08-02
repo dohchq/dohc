@@ -16,6 +16,7 @@ import {
   DAEMON_CAPTURE_HEALTH_POLL_MS,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
+  MAX_SETTLED_FILE_BYTES,
   UnsupportedWorkspacePathError,
   assertGeneratedMarkdownPath,
   createDefaultDiskWriter,
@@ -72,6 +73,11 @@ function sha256Utf8(text: string): string {
 }
 
 const WORKSPACE_ID = "engine-capture-test";
+
+// chmod/ACL-based fixtures cannot make a path unreadable for root (root
+// ignores file modes), so every test that needs an unreadable path skips
+// under uid 0.
+const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 interface CaptureOptions {
   store?: CaptureVersionedTextStore;
@@ -522,6 +528,284 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(rendererDoc.getText("content").toString()).toBe("base+remote");
     expect(forwarded).toEqual([bufferedUpdate]);
     await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  // #338. The engine owns the .md: it materializes a changed projection and
+  // leaves a drifted file alone. The desktop mirrored the settled markdown
+  // over the file anyway, so an edit made outside dohc while the document was
+  // open vanished from disk. The desktop no longer writes here at all, and
+  // every case below drives the REAL onSettled against a REAL file; only the
+  // daemon session is a fake, and it calls onSettled exactly where
+  // ydocProviderSession's runSettle does.
+  function driftFixture(settled: {
+    sha256: string;
+    markdown: string | null;
+    path?: string;
+  }) {
+    return async (options: EngineYdocProviderSessionOptions) => {
+      const doc = new Y.Doc();
+      return {
+        doc,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        contentKind: "plaintext",
+        path: settled.path ?? "note.md",
+        lineage: "present" as const,
+        applyLocalUpdate: async () => undefined,
+        settleNow: async () => {
+          await options.onSettled?.({ ...settled, materialized: true } as never, 1);
+          return settled as never;
+        },
+        close: async (closeOptions?: { settle?: boolean }) => {
+          if (closeOptions?.settle === false) return;
+          await options.onSettled?.({ ...settled, materialized: true } as never, 2);
+        },
+      } as never;
+    };
+  }
+
+  // Open a session on note.md, let its close settle, and report the save
+  // states that settle produced.
+  async function settleOnClose(
+    root: string,
+    settled: { sha256: string; markdown: string | null },
+    onError?: (context: string, error: unknown) => void,
+  ): Promise<string[]> {
+    const states: string[] = [];
+    const engine = capture(root, {
+      ...(onError ? { onError } : {}),
+      openRustYDocProviderSession: driftFixture(settled),
+    });
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state),
+    });
+    await session.close();
+    await engine.stop();
+    return states;
+  }
+
+  const EDITOR_TEXT = "typed in dohc\n";
+
+  it("keeps an edit made outside dohc when the open document's session closes", async () => {
+    const root = await tempRoot();
+    const outside = "written outside dohc\n";
+    await write(root, "note.md", outside);
+
+    // MUTATION: restore the mirror write and the file reads "typed in dohc" —
+    // the outside edit is gone from disk.
+    const states = await settleOnClose(root, {
+      sha256: sha256Utf8(EDITOR_TEXT),
+      markdown: EDITOR_TEXT,
+    });
+
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+    expect(states).toEqual(["changed-on-disk"]);
+  });
+
+  // The size the old check gave up at: readDiskTextState returns
+  // untracked-content with NO sha past its 5 MiB cap, so a check that trusted
+  // it read "no proof of drift" and mirrored 14 bytes over the biggest file in
+  // the workspace — reporting "Saved".
+  it("keeps an outside edit larger than the capture size cap", async () => {
+    const root = await tempRoot();
+    const huge = `${"o".repeat(MAX_ENGINE_CAPTURE_BINARY_BYTES + 1)}\n`;
+    await write(root, "note.md", huge);
+
+    const states = await settleOnClose(root, {
+      sha256: sha256Utf8(EDITOR_TEXT),
+      markdown: EDITOR_TEXT,
+    });
+
+    expect((await readFile(join(root, "note.md"), "utf8")).length).toBe(
+      huge.length,
+    );
+    expect(states).toEqual(["changed-on-disk"]);
+  });
+
+  // An outside DELETE is an intent, not an accident. Writing the document back
+  // is the same overwrite in reverse.
+  it("does not recreate a file deleted outside dohc", async () => {
+    const root = await tempRoot();
+
+    const states = await settleOnClose(root, {
+      sha256: sha256Utf8(EDITOR_TEXT),
+      markdown: EDITOR_TEXT,
+    });
+
+    expect(existsSync(join(root, "note.md"))).toBe(false);
+    expect(states).toEqual(["changed-on-disk"]);
+  });
+
+  // markdown === null: the body is past the engine's in-band response cap, so
+  // it never rode back over the wire. The settle still reports its sha, so
+  // drift is just as answerable there — the old code returned "Saved" without
+  // looking.
+  it("reports the drift for an over-cap settle whose markdown never crossed the wire", async () => {
+    const root = await tempRoot();
+    const outside = "written outside dohc\n";
+    await write(root, "note.md", outside);
+
+    const states = await settleOnClose(root, {
+      sha256: sha256Utf8("a body far past the in-band cap"),
+      markdown: null,
+    });
+
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+    expect(states).toEqual(["changed-on-disk"]);
+  });
+
+  // A file bigger than the largest projection the engine can produce cannot BE
+  // the settled artifact, so its size answers the question and its bytes are
+  // never read — a close must not wait on an unbounded read. The deny-read ACE
+  // is the proof: reading would fail (EPERM), which would report "error"
+  // instead. MUTATION: drop the size check and this reports ["error"].
+  itNonRoot("answers an oversized file from its size, without reading it", async () => {
+    const root = await tempRoot();
+    const absolute = join(root, "note.md");
+    await write(root, "note.md", "b".repeat(MAX_SETTLED_FILE_BYTES + 1));
+    await denyRead(absolute, "file");
+
+    try {
+      const states = await settleOnClose(root, {
+        sha256: sha256Utf8(EDITOR_TEXT),
+        markdown: EDITOR_TEXT,
+      });
+
+      expect(states).toEqual(["changed-on-disk"]);
+    } finally {
+      await restoreRead(absolute, 0o644);
+    }
+  });
+
+  // A file dohc cannot read is not a file dohc knows changed. Sending the user
+  // to History over a scanner's transient lock would be a lie about a file
+  // that probably holds exactly this document; "error" is the retryable state,
+  // and the next settle checks again.
+  itNonRoot("reports the retryable error state when the file cannot be read", async () => {
+    const root = await tempRoot();
+    const absolute = join(root, "note.md");
+    await write(root, "note.md", EDITOR_TEXT);
+    await denyRead(absolute, "file");
+    const errors: Array<{ context: string; error: unknown }> = [];
+
+    try {
+      const states = await settleOnClose(
+        root,
+        { sha256: sha256Utf8(EDITOR_TEXT), markdown: EDITOR_TEXT },
+        (context, error) => errors.push({ context, error }),
+      );
+
+      expect(states).toEqual(["error"]);
+      expect(String(errors[0]?.error)).toContain("could not check the file");
+    } finally {
+      await restoreRead(absolute, 0o644);
+    }
+  });
+
+  // Containment, the same invariant the disk writer holds: a parent directory
+  // replaced by a link out of the workspace must not be read through. A file
+  // out there whose bytes matched would otherwise report a save — and arm a
+  // self-write suppression — for an artifact that is not in the workspace.
+  it("refuses to read the settled file through a folder that leaves the workspace", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await write(outside, "note.md", EDITOR_TEXT);
+    let linked = true;
+    try {
+      // A junction needs no privilege on Windows; symlink elsewhere.
+      await symlink(
+        join(outside),
+        join(root, "notes"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch {
+      linked = false;
+    }
+    if (!linked) return;
+
+    const states: string[] = [];
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const engine = capture(root, {
+      onError: (context, error) => errors.push({ context, error }),
+      openRustYDocProviderSession: driftFixture({
+        sha256: sha256Utf8(EDITOR_TEXT),
+        markdown: EDITOR_TEXT,
+        path: "notes/note.md",
+      }),
+    });
+    const session = await engine.openYDocSession({
+      path: "notes/note.md",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state),
+    });
+    await session.close();
+    await engine.stop();
+
+    // MUTATION: drop the containment check and the matching file OUTSIDE the
+    // workspace reports ["saved"].
+    expect(states).toEqual(["error"]);
+    expect(String(errors[0]?.error)).toContain("outside the workspace");
+  });
+
+  // The narrowness guard: the refusal above must fire ONLY on a drifted file.
+  it("still reports a plain saved settle when nothing changed the file", async () => {
+    const root = await tempRoot();
+    await write(root, "note.md", EDITOR_TEXT);
+
+    const states = await settleOnClose(root, {
+      sha256: sha256Utf8(EDITOR_TEXT),
+      markdown: EDITOR_TEXT,
+    });
+
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe(EDITOR_TEXT);
+    expect(states).toEqual(["saved"]);
+  });
+
+  // A settle that agrees with the file registers its sha, so the watcher event
+  // for the ENGINE's own write is recognized. A settle that does NOT agree
+  // must register nothing: those bytes are on no disk, and an armed
+  // suppression would swallow the next event that happens to carry that sha.
+  it("arms the self-write suppression only for a settle the file agrees with", async () => {
+    const root = await tempRoot();
+    const outside = "written outside dohc\n";
+    await write(root, "note.md", outside);
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "note.md",
+      text: outside,
+    });
+    const requests: Request[] = [];
+    const engine = liveCapture(root, loopback, {
+      requests,
+      openRustYDocProviderSession: driftFixture({
+        sha256: sha256Utf8(EDITOR_TEXT),
+        markdown: EDITOR_TEXT,
+      }),
+    });
+
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+    });
+    await session.close();
+    // Something else puts exactly those settled bytes on disk afterwards. It
+    // is a genuine change to the tracked file, and history must record it.
+    await write(root, "note.md", EDITOR_TEXT);
+    const writesBefore = requests.filter(
+      (request) => request.method === VERSIONED_METHOD.textWrite,
+    ).length;
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.flush();
+
+    expect(
+      requests.filter(
+        (request) => request.method === VERSIONED_METHOD.textWrite,
+      ).length,
+    ).toBeGreaterThan(writesBefore);
     await engine.stop();
   });
 
@@ -1583,10 +1867,6 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     ]);
     await liveStore.close();
   });
-
-  // chmod-based fixtures cannot make a path unreadable for root (root
-  // ignores file modes), so these degrade-tolerance tests skip under uid 0.
-  const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
   itNonRoot("cold adoption survives an unreadable subdirectory: the rest of the tree seeds and the pass reports degraded", async () => {
     const root = await tempRoot();

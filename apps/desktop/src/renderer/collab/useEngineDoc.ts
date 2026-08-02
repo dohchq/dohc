@@ -28,8 +28,15 @@ import {
 // "error" = a settle FAILED, so the file on disk is behind what the editor
 // shows. "read-only" = the workspace is a read-only shared view and the edit
 // was discarded outright; retrying cannot help, so it gets its own copy.
-// Neither is ever inferred — main pushes both from real outcomes.
-export type EngineDocSaveState = "saved" | "saving" | "error" | "read-only";
+// "changed-on-disk" = the file was edited outside dohc while this document was
+// open, and dohc kept that edit instead of overwriting it (#338).
+// None is ever inferred — main pushes all of them from real outcomes.
+export type EngineDocSaveState =
+  | "saved"
+  | "saving"
+  | "error"
+  | "read-only"
+  | "changed-on-disk";
 
 export type UseEngineDoc = {
   // True once the engine session is open and the mirror doc is bound. false =>
@@ -177,7 +184,11 @@ export function useEngineDoc(input: {
         unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
           if (cancelled || token !== openTokenRef.current) return;
           if (event.sessionId !== sessionId) return;
-          if (event.state === "error" || event.state === "read-only") {
+          if (
+            event.state === "error" ||
+            event.state === "read-only" ||
+            event.state === "changed-on-disk"
+          ) {
             setSaveState(event.state);
             return;
           }
