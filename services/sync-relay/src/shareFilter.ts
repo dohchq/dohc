@@ -226,7 +226,17 @@ export function validateShareSelector(input: {
       return {
         ok: false,
         code: RELAY_ERRORS.invalid_version.code,
-        message: `versionId must be a non-empty trimmed string of at most ${MAX_SHARE_VERSION_ID_CHARS} characters`,
+        // The unit is UTF-16 code units, because that is what the rule
+        // measures (`String.length`). Saying "characters" misreports an
+        // astral id by half, and the recipient's twin refusal
+        // (`crates/dohc-engine-sync/src/error.rs`,
+        // `SyncError::ShareVersionUnusable`) names the same unit — and the
+        // observed length with it, so 129 and 10,000 do not read alike.
+        message: `versionId must be a non-empty trimmed string of at most ${MAX_SHARE_VERSION_ID_CHARS} UTF-16 code units${
+          typeof input.versionId === "string"
+            ? `; this one is ${input.versionId.length}`
+            : ""
+        }`,
       };
     }
     versionId = input.versionId;
@@ -296,6 +306,12 @@ function pathVisibleThroughShare(selector: ShareSelector, path: string): boolean
   );
 }
 
+// The ONE version a path/version share exposes, and the rule both sides
+// state: a served op must name EXACTLY this version — the selector's
+// `versionId`, or `main` when the selector names none. A descendant, a fork,
+// or any other lineage is not admitted, on either side. The recipient runs the
+// same equality against the selector it recorded when it accepted the share
+// (`crates/dohc-engine-sync/src/share.rs`, `enforce_share_view_boundary`).
 function targetVersionId(selector: ShareSelector): string {
   return selector.versionId ?? MAIN_VERSION_ID;
 }
@@ -579,7 +595,8 @@ export function filterOpForShare(
   if (opKind === "moment.append") {
     const record = asRecord(payload);
     if (!record) return { allowed: false };
-    if (record.versionId !== targetVersionId(selector)) return { allowed: false };
+    const claimedVersionId = collectString(record.versionId);
+    if (claimedVersionId !== targetVersionId(selector)) return { allowed: false };
     const paths = [
       collectString(record.path),
       collectString(record.payloadBeforePath),
@@ -604,6 +621,15 @@ export function filterOpForShare(
     const afterSha = collectString(record.payloadAfterBlobSha256);
     const served: Record<string, unknown> = {
       operation: typeof record.operation === "string" ? record.operation : null,
+      // The MOMENT's own version, read from the stored op — deliberately not
+      // `targetVersionId(selector)`, which would restate the selector and
+      // stamp every served moment with the granted version whatever lineage it
+      // came from. The equality above proves the two are equal here, so the
+      // served value is the same in the honest case; carrying the moment's
+      // field is what leaves the recipient an independent check
+      // (`crates/dohc-engine-sync/src/share.rs`, `enforce_granted_version`)
+      // rather than a copy of this one.
+      versionId: claimedVersionId,
       metadata: { origin: "sync" },
     };
     const inPath = collectString(record.path);

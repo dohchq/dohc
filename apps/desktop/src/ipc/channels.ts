@@ -543,6 +543,7 @@ export const CHANNELS = {
   leaveSharedChannel: "desktop:leave-shared-channel",
   openSharedView: "desktop:open-shared-view",
   refreshSharedView: "desktop:refresh-shared-view",
+  dismissShareSkips: "desktop:dismiss-share-skips",
   mountShare: "desktop:mount-share",
   refreshShareMounts: "desktop:refresh-share-mounts",
   unmountShare: "desktop:unmount-share",

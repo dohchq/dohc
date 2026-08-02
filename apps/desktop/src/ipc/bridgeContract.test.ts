@@ -18,6 +18,7 @@ import {
   InvokeSiteSdkPayload,
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
+  WorkspaceSummary,
   ListFileChatsPayload,
   PRESENCE_STATE_MAX_BYTES,
   SITE_SDK_PARAMS_MAX_BYTES,
@@ -1337,6 +1338,58 @@ describe("engine Y.Doc update IPC contract", () => {
         update: new Uint8Array([1]),
         seq: -1,
       }),
+    ).toThrow();
+  });
+});
+
+// A refusal is data the engine PERSISTS into the registry and this schema
+// reads back. The relay picks the op kind, so the engine replaces an unusable
+// one with a bounded placeholder before recording it
+// (`crates/dohc-engine-sync/src/relay.rs`, `ShareViewRefusal::new`). These are
+// the two shapes that would otherwise arrive: the empty one throws in the
+// client's strict decode and wedges the pull, the oversized one lands on disk
+// and breaks the next workspace listing.
+describe("a persisted share refusal stays readable", () => {
+  const skipped = (opKind: string) => ({
+    ops: [
+      {
+        originId: "peer",
+        originSeq: 0,
+        opKind,
+        code: "invalid-input",
+        detail: "invalid replication input: op_kind must be non-empty and bounded",
+        atMs: 1000,
+      },
+    ],
+    more: 0,
+    generation: 1,
+  });
+  const summary = (opKind: string) => ({
+    workspaceId: "ws-1",
+    rootPath: "/home/ice/dohc/shared",
+    kind: "personal" as const,
+    mode: "local-first" as const,
+    shareView: {
+      shareId: "share-1",
+      granterEmail: "granter@dohc.test",
+      grantedSelector: { paths: ["docs"], versionId: null },
+      skippedOps: skipped(opKind),
+    },
+  });
+
+  it("accepts the placeholder the engine records", () => {
+    const parsed = WorkspaceSummary.parse(summary("invalid-op-kind"));
+    expect(parsed.shareView?.skippedOps?.ops[0]?.opKind).toBe("invalid-op-kind");
+  });
+
+  it("rejects the raw values the placeholder stands in for", () => {
+    expect(
+      () => WorkspaceSummary.parse(summary("")),
+      "MUTATION: an empty op kind reaches the registry and the listing that reads it back",
+    ).toThrow();
+    expect(
+      () => WorkspaceSummary.parse(summary("k".repeat(200))),
+      "MUTATION: an oversized op kind reaches the registry and breaks every later listing",
     ).toThrow();
   });
 });

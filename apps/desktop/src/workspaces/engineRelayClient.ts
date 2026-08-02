@@ -11,7 +11,9 @@ import {
   type RelayWorkspaceBootstrapResult,
   type RelayWorkspaceIdentity,
   type PullSharedChannelResult,
+  MAX_REPORTED_REFUSALS,
   type PullShareViewResult,
+  type ShareViewRefusal,
   type PullWorkspaceFromRelayResult,
   type PushSharedChannelResult,
   type PushWorkspaceToRelayResult,
@@ -397,6 +399,35 @@ function changedPaths(
   });
 }
 
+// The refusals a share-view page reports. Strict: a malformed entry throws
+// rather than being dropped, because a dropped refusal is the silent skip this
+// exists to end.
+function shareViewRefusals(
+  value: JsonValue | undefined,
+  label: string,
+): Array<{
+  originId: string;
+  originSeq: number;
+  opKind: string;
+  code: string;
+  detail: string;
+}> {
+  if (!Array.isArray(value)) {
+    throw new Error(`Rust engine ${label}.refusals must be an array.`);
+  }
+  return value.map((entry, index) => {
+    const at = `${label}.refusals[${index}]`;
+    const record = resultRecord(entry, at);
+    return {
+      originId: stringField(record, "originId", at),
+      originSeq: numberField(record, "originSeq", at),
+      opKind: stringField(record, "opKind", at),
+      code: stringField(record, "code", at),
+      detail: stringField(record, "detail", at),
+    };
+  });
+}
+
 function pendingResolves(
   value: JsonValue | undefined,
 ): PendingConflictResolve[] {
@@ -495,6 +526,12 @@ export interface EngineRelayWorkspaceClient {
     // Required, because the engine has no unscoped pull: a caller that cannot
     // resolve a selector must skip its refresh, not widen it.
     grantedSelector: { paths: readonly string[]; versionId: string | null };
+    // Called with each page's refusals BEFORE that page's cursor is
+    // committed. A refusal is a durable fact — the commit moves permanently
+    // past the op — so it has to be recorded first, or a later page that
+    // fails takes the earlier page's reasons with it while its cursor stays
+    // committed.
+    recordRefusals?: (refusals: ShareViewRefusal[]) => Promise<void>;
   }): Promise<PullShareViewResult>;
 }
 
@@ -841,9 +878,18 @@ export class EngineRelayClient {
           pushed: numberField(result, "pushed", "share.channel.push"),
         };
       },
-      pullShareView: async ({ shareId, grantedSelector }) => {
+      pullShareView: async ({ shareId, grantedSelector, recordRefusals }) => {
         let fetched = 0;
         let applied = 0;
+        let skipped = 0;
+        let refusalCount = 0;
+        const refusals: Array<{
+          originId: string;
+          originSeq: number;
+          opKind: string;
+          code: string;
+          detail: string;
+        }> = [];
         let nextCursor = 0;
         let previousCursor: number | null = null;
         let finalCursor: Record<string, JsonValue | undefined> | null = null;
@@ -894,6 +940,26 @@ export class EngineRelayClient {
           nextCursor = pageCursor;
           fetched += numberField(result, "fetched", "share.view.pull");
           applied += numberField(result, "applied", "share.view.pull");
+          skipped += numberField(result, "skipped", "share.view.pull");
+          // Every page's refusals, not just the last: a share can go stale on
+          // a page the caller never sees the end of.
+          const pageRefusals = shareViewRefusals(
+            result.refusals,
+            "share.view.pull",
+          );
+          refusalCount += pageRefusals.length;
+          // Bounded: the durable record holds every reason (it is written
+          // below, before this page's cursor commits), so this aggregate only
+          // has to carry enough to log and to show. Without the cap a relay
+          // that refuses on every page grows this array with its log.
+          for (const refusal of pageRefusals) {
+            if (refusals.length >= MAX_REPORTED_REFUSALS) break;
+            refusals.push(refusal);
+          }
+          // Record BEFORE the commit below. Once that cursor is committed the
+          // pull never offers these ops again, so a throw on a later page must
+          // not be able to take the reason with it.
+          if (pageRefusals.length > 0) await recordRefusals?.(pageRefusals);
           for (const path of changedPaths(
             result.changedPaths,
             "share.view.pull",
@@ -914,6 +980,9 @@ export class EngineRelayClient {
         return {
           fetched,
           applied,
+          skipped,
+          refusals,
+          refusalCount,
           changedPaths: [...changed.values()],
           nextCursor,
           commitCursor: async () => await commitCursor(finalCursor),

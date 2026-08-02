@@ -93,6 +93,16 @@ pub(crate) fn owned_op_kinds() -> impl Iterator<Item = &'static str> {
     OWNED_OP_ROUTES.iter().map(|(kind, _)| *kind)
 }
 
+/// Whether this engine knows the op kind at all.
+///
+/// The share boundary asks so it can tell two refusals apart: a KNOWN kind a
+/// share does not carry is a scope decision, and a kind this engine cannot
+/// interpret is not — no grant admits it, and only the sender can fix it.
+/// One list answers both, so a new op kind cannot drift into the wrong class.
+pub(crate) fn is_owned_op_kind(kind: &str) -> bool {
+    OWNED_OP_ROUTES.iter().any(|(owned, _)| *owned == kind)
+}
+
 pub fn apply_replication_envelope(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,

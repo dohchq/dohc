@@ -189,6 +189,11 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     emitWorkspaceActivity: () => activityCallback?.(),
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
+    // The shell re-reads the registry to pick up a share's durable skip
+    // record. Default: a workspace with nothing skipped.
+    getWorkspaceRegistry: vi.fn(
+      async (): Promise<{ workspaces: unknown[] }> => ({ workspaces: [] }),
+    ),
     setWorkspaceUiState: vi.fn(
       async (_payload: { workspaceId: string; state: WorkspaceUiState }) => undefined,
     ),
@@ -330,10 +335,13 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     }),
     // Typed to the contract, not to this one default: a test that drives a
     // real pull ("updated") must be able to swap the implementation.
+    dismissShareSkips: vi.fn(async () => undefined),
     refreshSharedView: vi.fn(
       async (): Promise<RefreshSharedViewResult> => ({
         status: "unchanged",
         changedPaths: 0,
+        refusedOps: 0,
+        refusedDetail: null,
       }),
     ),
     onWorkspaceActivity: vi.fn((callback: () => void) => {
@@ -846,6 +854,24 @@ describe("heading-target file opens", () => {
 // whose commit/effects had not flushed yet read as "untouched", and the
 // stored state clobbered it. The gate must be a ref set SYNCHRONOUSLY inside
 // the mutation, before React even queues the update.
+// One share's durable skip record, as the registry holds it.
+const SKIPPED_RECORD = {
+  ops: [
+    {
+      originId: "origin-granter",
+      originSeq: 7,
+      opKind: "moment.append",
+      code: "share-boundary-violation",
+      detail:
+        "replicated moment is outside the share boundary: the share " +
+        "granted version main, the relay offered version version-other",
+      atMs: 1000,
+    },
+  ],
+  more: 1,
+  generation: 3,
+};
+
 describe("ui-state merge-on-load", () => {
   it("a user open QUEUED before the load resolves wins over stored state (the exact stale-ref race)", async () => {
     const stored = deferred<WorkspaceUiState | null>();
@@ -943,7 +969,12 @@ describe("ui-state merge-on-load", () => {
     // The pull lands, and the listing it triggers no longer has the file.
     bridge.listWorkspaceFiles = listing("a.md", "b.md");
     await act(async () => {
-      pull.resolve({ status: "updated", changedPaths: 1 });
+      pull.resolve({
+        status: "updated",
+        changedPaths: 1,
+        refusedOps: 0,
+        refusedDetail: null,
+      });
       await pull.promise;
     });
 
@@ -951,6 +982,203 @@ describe("ui-state merge-on-load", () => {
       expect(screen.queryByTestId("tab-shared-gone.md")).toBeNull();
     });
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  // A refresh can record a refusal on an early page and then die on a later
+  // one. The evidence is already durable at that point — reading it only on
+  // the success path would keep it invisible until a lucky refresh.
+  it("shows a refusal recorded by a refresh that then failed", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: [], activeTab: null }),
+    );
+    bridge.refreshSharedView = vi.fn(async () => {
+      throw new Error("relay went away mid-page");
+    });
+    bridge.getWorkspaceRegistry = vi.fn(async () => ({
+      workspaces: [
+        {
+          ...WORKSPACE,
+          shareView: {
+            shareId: "share-1",
+            granterEmail: "granter@dohc.test",
+            skippedOps: {
+              ops: [
+                {
+                  originId: "origin-granter",
+                  originSeq: 4,
+                  opKind: "moment.append",
+                  code: "share-boundary-violation",
+                  detail: "the share granted version main, the relay offered version other",
+                  atMs: 1000,
+                },
+              ],
+              more: 0,
+              generation: 1,
+            },
+          },
+        },
+      ],
+    }));
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+    });
+
+    const refused = await screen.findByTestId("shared-view-refused");
+    expect(
+      refused.textContent,
+      "MUTATION: reading the record only after a successful refresh hides evidence the failed one already wrote",
+    ).toContain("dohc skipped 1 update outside what this share covers");
+  });
+
+  // The record is written DURING the pull, so a refusal that happens while
+  // this shell is mounted has to appear without a remount. Reading the boot
+  // snapshot in props would show it only after the workspace is reopened.
+  it("shows a refusal recorded by a refresh that ran while the shell was open", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: [], activeTab: null }),
+    );
+    let recorded = false;
+    bridge.refreshSharedView = vi.fn(async () => {
+      // What the recorder does mid-pull: the registry now holds the skip.
+      recorded = true;
+      return {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        refusedOps: 1,
+        refusedDetail: "the share granted version main, the relay offered version other",
+      };
+    });
+    bridge.getWorkspaceRegistry = vi.fn(async () => ({
+      workspaces: [
+        {
+          ...WORKSPACE,
+          shareView: {
+            shareId: "share-1",
+            granterEmail: "granter@dohc.test",
+            ...(recorded
+              ? {
+                  skippedOps: {
+                    ops: [
+                      {
+                        originId: "origin-granter",
+                        originSeq: 7,
+                        opKind: "moment.append",
+                        code: "share-boundary-violation",
+                        detail:
+                          "the share granted version main, the relay offered version other",
+                        atMs: 1000,
+                      },
+                    ],
+                    more: 0,
+                    generation: 3,
+                  },
+                }
+              : {}),
+          },
+        },
+      ],
+    }));
+    // Mounts with NO skip record: the shell's boot snapshot is healthy.
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+    });
+
+    const refused = await screen.findByTestId("shared-view-refused");
+    expect(
+      refused.textContent,
+      "MUTATION: reading the boot snapshot hides a refusal until the workspace is reopened",
+    ).toContain("dohc skipped 1 update outside what this share covers");
+  });
+
+  // A refused op is SKIPPED and the pull keeps going, so the shared view goes
+  // on looking healthy while it quietly stops carrying part of what the
+  // granter shares. The warning comes from the RECORD, not from the last
+  // refresh: the cursor has committed past those ops, so a quiet refresh must
+  // not clear it and a restart must not lose it.
+  it("says so when a share's record holds ops its pulls skipped", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: [], activeTab: null }),
+    );
+    // A refresh that finds nothing new. The warning must survive it.
+    bridge.refreshSharedView = vi.fn(async () => ({
+      status: "unchanged" as const,
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    }));
+    const dismiss = vi.fn(
+      async (_payload: { workspaceId: string; generation: number }) => undefined,
+    );
+    bridge.dismissShareSkips = dismiss;
+    // The record the shell re-reads. Dismissing does NOT delete it: main
+    // raises acknowledgedGeneration and the ops stay, so the fixture models
+    // that rather than a record that vanishes.
+    let acknowledged = 0;
+    bridge.getWorkspaceRegistry = vi.fn(async () => ({
+      workspaces: [
+        {
+          ...WORKSPACE,
+          shareView: {
+            shareId: "share-1",
+            granterEmail: "granter@dohc.test",
+            skippedOps: {
+              ...SKIPPED_RECORD,
+              acknowledgedGeneration: acknowledged,
+            },
+          },
+        },
+      ],
+    }));
+    dismiss.mockImplementation(async (payload) => {
+      acknowledged = payload.generation;
+      return undefined;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        skippedOps: SKIPPED_RECORD,
+      },
+    });
+
+    const lines = await screen.findAllByTestId("shared-view-refused");
+    const boundary = lines.find(
+      (line) => line.getAttribute("data-kind") === "boundary",
+    );
+    expect(
+      boundary?.textContent,
+      "MUTATION: reading the last refresh instead of the record clears the warning while the content is still missing",
+    ).toContain("dohc skipped 1 update outside what this share covers");
+    expect(boundary?.textContent).toContain("granter@dohc.test");
+    expect(boundary?.getAttribute("title")).toContain("version-other");
+    // The overflow keeps no class, so it names no cause and sends the reader
+    // nowhere.
+    const overflow = lines.find(
+      (line) => line.getAttribute("data-kind") === "unknown",
+    );
+    expect(overflow?.textContent).toContain(
+      "dohc skipped 1 more update from this share",
+    );
+    expect(overflow?.textContent).not.toContain("granter@dohc.test");
+
+    // The only honest recovery this surface has: the user says they have seen
+    // it. That is recorded durably — and it HIDES the warning rather than
+    // deleting the evidence, because the content it names is gone for good.
+    await userEvent.click(
+      screen.getAllByTestId("shared-view-refused-dismiss")[0]!,
+    );
+    expect(dismiss).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      // The generation on screen: a refusal recorded since this render is not
+      // acknowledged by this click.
+      generation: SKIPPED_RECORD.generation,
+    });
+    await waitFor(() => {
+      expect(screen.queryAllByTestId("shared-view-refused")).toHaveLength(0);
+    });
   });
 
   // P1: closing a DIRTY tab unmounts the inspector mid-draft, and its cleanup

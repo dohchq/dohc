@@ -7,6 +7,7 @@ import {
   ShareUnavailableError,
   type PullShareViewResult,
   type ShareViewChangedPath,
+  type ShareViewRefusal,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
@@ -21,6 +22,12 @@ export type SharedViewRefreshStatus = "updated" | "unchanged" | "ended";
 export interface RefreshSharedViewOutcome {
   status: SharedViewRefreshStatus;
   changedPaths: number;
+  // Ops the pull refused. The pull skips them and keeps going, so without
+  // this the view silently stops carrying part of what the granter shares.
+  refusedOps: number;
+  // The first refusal's message, for the UI. It names the constraint the op
+  // broke; the whole list goes to the log.
+  refusedDetail: string | null;
 }
 
 /**
@@ -284,6 +291,7 @@ export async function refreshSharedViewOnce(input: {
     relay: SyncRelayConnection;
     shareId: string;
     grantedSelector: PinnedShareSelector;
+    recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
   }) => Promise<PullShareViewResult>;
   // Required at the factory boundary for the same reason: every rooted caller
   // must explicitly select its store implementation.
@@ -292,6 +300,10 @@ export async function refreshSharedViewOnce(input: {
   // Read BEFORE the pull and never repaired from the relay, so no pull ever
   // runs unscoped and no refresh can re-pin a wider selector.
   pinnedSelector: unknown;
+  // Where a refused op is written down. Called before the cursor that skips
+  // past it is committed, and idempotent by origin coordinate, because a
+  // re-fetched page repeats refusals the record already holds.
+  recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
 }): Promise<RefreshSharedViewOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
@@ -303,10 +315,16 @@ export async function refreshSharedViewOnce(input: {
       relay: input.relay,
       shareId: input.shareId,
       grantedSelector,
+      recordRefusals: input.recordRefusals,
     });
   } catch (error) {
     if (error instanceof ShareUnavailableError) {
-      return { status: "ended", changedPaths: 0 };
+      return {
+        status: "ended",
+        changedPaths: 0,
+        refusedOps: 0,
+        refusedDetail: null,
+      };
     }
     throw error;
   }
@@ -317,8 +335,19 @@ export async function refreshSharedViewOnce(input: {
     input.store,
   );
   await pull.commitCursor();
+  // Logged one line per refusal, because the count alone cannot be diagnosed.
+  // The engine's message names the constraint, and for a version refusal its
+  // limit, unit and observed usage.
+  for (const refusal of pull.refusals) {
+    console.error(
+      `[desktop] share ${input.shareId} skipped ${refusal.opKind} ` +
+        `${refusal.originId}@${refusal.originSeq} (${refusal.code}): ${refusal.detail}`,
+    );
+  }
   return {
     status: pull.changedPaths.length > 0 ? "updated" : "unchanged",
     changedPaths: pull.changedPaths.length,
+    refusedOps: pull.refusalCount,
+    refusedDetail: pull.refusals[0]?.detail ?? null,
   };
 }

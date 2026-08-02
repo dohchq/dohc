@@ -10768,6 +10768,16 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "hasMore": outcome.has_more,
             "applied": outcome.applied,
             "skipped": outcome.skipped,
+            // Why each skipped op was skipped. A skip is silent otherwise, and
+            // a share that quietly stops carrying a granter's edits is exactly
+            // the state a recipient cannot diagnose without this.
+            "refusals": outcome.refusals.iter().map(|refusal| json!({
+                "originId": refusal.origin_id,
+                "originSeq": refusal.origin_seq,
+                "opKind": refusal.op_kind,
+                "code": refusal.code,
+                "detail": refusal.detail,
+            })).collect::<Vec<_>>(),
             "nextCursor": outcome.pending_cursor.cursor,
             "changedPaths": outcome.changed_paths.into_iter().map(|change| json!({
                 "path": change.path,
@@ -11120,6 +11130,8 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         SyncError::InvalidInput { .. }
         | SyncError::UnsupportedOperation
         | SyncError::ShareBoundaryViolation
+        | SyncError::ShareVersionMismatch { .. }
+        | SyncError::ShareVersionUnusable { .. }
         | SyncError::BlobInvalid => ErrorCode::InvalidParams,
         // Same condition as its relay twin, so the same code. A blob over a
         // fixed ceiling is a size refusal on either path.
@@ -11911,13 +11923,21 @@ mod tests {
     }
 
     #[test]
-    fn share_view_outcome_json_surfaces_has_more() {
+    fn share_view_outcome_json_surfaces_has_more_and_every_refusal() {
         let value = relay_outcome_json(RelayOperationOutcome::ShareViewPulled(
             dohc_engine_sync::ShareViewPullOutcome {
-                fetched: 1,
+                fetched: 2,
                 has_more: true,
                 applied: 0,
-                skipped: 0,
+                skipped: 1,
+                refusals: vec![dohc_engine_sync::ShareViewRefusal {
+                    origin_id: "granter".to_owned(),
+                    origin_seq: 4,
+                    op_kind: "moment.append".to_owned(),
+                    code: "share-boundary-violation",
+                    detail: "the share granted version main, the relay offered version other"
+                        .to_owned(),
+                }],
                 changed_paths: Vec::new(),
                 pending_cursor: ShareCursor {
                     kind: dohc_engine_sync::CursorKind::ShareView,
@@ -11931,6 +11951,13 @@ mod tests {
             value["hasMore"], true,
             "MUTATION: omitting hasMore hides that the pending cursor is only a bounded prefix"
         );
+        assert_eq!(
+            value["refusals"][0]["detail"],
+            "the share granted version main, the relay offered version other",
+            "MUTATION: serializing a bare count leaves the client nothing to tell the user"
+        );
+        assert_eq!(value["refusals"][0]["originSeq"], 4);
+        assert_eq!(value["refusals"][0]["code"], "share-boundary-violation");
     }
 
     #[test]

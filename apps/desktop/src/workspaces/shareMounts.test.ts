@@ -96,6 +96,7 @@ async function refreshShareMountOnce(
     relay: harness.relay,
     pull,
     pinnedSelector: input.pinnedSelector ?? PINNED_SELECTOR,
+    recordRefusals: async () => undefined,
     openStore: input.openStore ?? harness.openStore,
   });
 }
@@ -287,7 +288,12 @@ describe("refreshShareMountOnce", () => {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
-    expect(second).toEqual({ status: "unchanged", changedPaths: 0 });
+    expect(second).toEqual({
+      status: "unchanged",
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
 
     relay.addWrite("docs/brief.md", "the brief v2");
     const third = await refreshShareMountOnce(harness, {
@@ -327,7 +333,12 @@ describe("refreshShareMountOnce", () => {
       },
     });
 
-    expect(outcome).toEqual({ status: "updated", changedPaths: 1 });
+    expect(outcome).toEqual({
+      status: "updated",
+      changedPaths: 1,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
     expect(
       await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex/docs/brief.md"), "utf8"),
     ).toBe("the brief");
@@ -348,7 +359,12 @@ describe("refreshShareMountOnce", () => {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
-    expect(outcome).toEqual({ status: "ended", changedPaths: 0 });
+    expect(outcome).toEqual({
+      status: "ended",
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
     expect(
       await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex", "plan.md"), "utf8"),
     ).toBe("keep me");
@@ -461,7 +477,12 @@ describe("refreshShareMountOnce", () => {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
-    expect(quiet).toEqual({ status: "unchanged", changedPaths: 0 });
+    expect(quiet).toEqual({
+      status: "unchanged",
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
   });
 
   it("creates NOTHING outside the workspace when a dir symlink sits on a deep write path", async () => {

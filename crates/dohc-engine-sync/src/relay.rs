@@ -12,7 +12,7 @@ use crate::cursor::{
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::{
     ApplyOutcome, BlobContent, BlobHydration, BlobKind, ObservedBytes, RelayError,
-    ReplicationEnvelope, SyncError, blob_ceiling, hydrate_blob_content,
+    ReplicationEnvelope, ShareDisposition, SyncError, blob_ceiling, hydrate_blob_content,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,12 +232,103 @@ pub struct ShareViewChangedPath {
     pub content_kind: &'static str,
 }
 
+/// The relay's share bootstrap op. Payload-free by contract, and the one op a
+/// share-view pull skips without calling it a refusal.
+const BOOTSTRAP_OP_KIND: &str = "workspace.init";
+
+/// The bounds the desktop's `ShareSkippedOpsSummary` enforces on a persisted
+/// refusal (`apps/desktop/src/ipc/bridgeContract.ts`), in UTF-16 code units —
+/// what zod's `.max()` counts.
+///
+/// A refusal that breaks them is worse than no refusal at all. The client
+/// decodes strictly, so an empty op kind throws and wedges the pull on every
+/// retry; an oversized one is persisted and the next workspace listing fails
+/// to parse. The relay picks these values, so they are normalized HERE, where
+/// the refusal is built — a diagnostic must be well formed whatever it is
+/// diagnosing.
+const MAX_REFUSAL_OP_KIND_UNITS: usize = 128;
+const MAX_REFUSAL_DETAIL_UNITS: usize = 2048;
+
+/// What an op kind becomes when the relay's is not one. The real cause is in
+/// `detail`, and the coordinate stays exactly as served.
+const INVALID_OP_KIND: &str = "invalid-op-kind";
+
+fn bounded_units(value: &str, limit: usize) -> String {
+    if value.encode_utf16().count() <= limit {
+        return value.to_owned();
+    }
+    let mut bounded = String::new();
+    let mut units = 0;
+    for character in value.chars() {
+        let width = character.len_utf16();
+        if units + width > limit {
+            break;
+        }
+        bounded.push(character);
+        units += width;
+    }
+    bounded
+}
+
+impl ShareViewRefusal {
+    /// Build a refusal whose every field is one the recipient can persist and
+    /// read back. Only the op kind can be unusable — the coordinate was
+    /// checked before this, and the code is ours — so it is the one field
+    /// that can be replaced.
+    fn new(
+        origin_id: String,
+        origin_seq: i64,
+        op_kind: &str,
+        code: &'static str,
+        detail: String,
+    ) -> Self {
+        let usable_kind =
+            !op_kind.is_empty() && op_kind.encode_utf16().count() <= MAX_REFUSAL_OP_KIND_UNITS;
+        Self {
+            origin_id,
+            origin_seq,
+            op_kind: if usable_kind {
+                op_kind.to_owned()
+            } else {
+                INVALID_OP_KIND.to_owned()
+            },
+            code,
+            detail: bounded_units(&detail, MAX_REFUSAL_DETAIL_UNITS),
+        }
+    }
+}
+
+/// One op a share-view pull refused, so the refusal reaches the caller instead
+/// of being a bare count. Mirrors `SharedChannelRejection`, and adds `detail`
+/// because a version refusal names a limit, a unit and an observed usage that
+/// a code alone throws away.
+///
+/// A skipped op is not a failed pull: the page continues, and one op a
+/// diverging relay serves cannot wedge the whole share. The cost of that
+/// liveness is that a recipient can go on seeing stale content, so the reason
+/// travels with the outcome and the client surfaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareViewRefusal {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub op_kind: String,
+    /// The stable machine code, from `SyncError::code`.
+    pub code: &'static str,
+    /// The refusal message, which names the constraint the op broke.
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareViewPullOutcome {
     pub fetched: usize,
     pub has_more: bool,
     pub applied: usize,
     pub skipped: usize,
+    /// Why the skipped ops were skipped, in page order. Bounded by the page
+    /// itself: a page carries at most `MAX_PULL_OPS` ops. A page entry too
+    /// malformed to parse into an envelope has no origin identity to report,
+    /// so it is counted in `skipped` without a refusal.
+    pub refusals: Vec<ShareViewRefusal>,
     pub changed_paths: Vec<ShareViewChangedPath>,
     pub pending_cursor: crate::ShareCursor,
 }
@@ -919,13 +1010,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 skipped += 1;
                 continue;
             }
+            // The shared-CHANNEL lane keeps its bare skip: its outcome carries
+            // per-op rejections for the boundary, and a malformed envelope
+            // here is reported through `skipped` as it always was.
             let envelope = match share_envelope(workspace_id, op) {
                 Ok(envelope) => envelope,
-                Err(RelayError::InvalidResponse) => {
+                Err(_) => {
                     skipped += 1;
                     continue;
                 }
-                Err(error) => return Err(error),
             };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
@@ -956,10 +1049,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         reason: "share-boundary-violation".to_owned(),
                     });
                 }
-                Err(SyncError::InvalidInput { .. }) => {
-                    skipped += 1;
-                }
-                Err(error) => return Err(local(error)),
+                // Every other class asks `share_disposition`, which is
+                // exhaustive over `SyncError`. This lane keeps no list of its
+                // own: a list is a thing to forget, and forgetting one here
+                // wedges the pull rather than losing a count.
+                Err(error) => match error.share_disposition() {
+                    ShareDisposition::Skip => skipped += 1,
+                    ShareDisposition::Abort => return Err(local(error)),
+                },
             }
         }
         let committed = crate::commit_share_cursor(
@@ -1139,6 +1236,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
         let fetched = page.ops.len();
         let ops = page.ops;
+        // The cursor this page was FETCHED at, kept for the ops that carry no
+        // usable coordinate of their own. See `page_position_origin`.
+        let page_cursor = cursor;
         cursor = page.next_cursor;
         let boundary = crate::ShareBoundary {
             share_id: share_id.to_owned(),
@@ -1148,16 +1248,47 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         };
         let mut applied = 0_usize;
         let mut skipped = 0_usize;
+        let mut refusals = Vec::new();
         let mut changed = BTreeMap::<String, ShareViewChangedPath>::new();
-        for op in ops {
+        for (index, op) in ops.into_iter().enumerate() {
+            // The coordinate BEFORE the envelope is built: a malformed op the
+            // engine will not apply still commits the cursor past itself, and
+            // when its origin coordinate is usable there is an identity to
+            // attach the reason to. Only an op with no usable coordinate is a
+            // bare skip — that one genuinely has nothing to record.
+            let coordinate = usable_coordinate(&op);
             let envelope = match share_envelope(workspace_id, op) {
                 Ok(envelope) => envelope,
-                Err(RelayError::InvalidResponse) => {
+                Err(ShareEnvelopeError { op_kind, cause }) => {
                     skipped += 1;
+                    // An op whose own coordinate is unusable is filed under
+                    // its POSITION in the page instead. Its cursor commits
+                    // past it either way, so "no identity" cannot mean "no
+                    // durable record" — that would lose exactly the ops least
+                    // able to identify themselves.
+                    let (origin_id, origin_seq) =
+                        coordinate.unwrap_or_else(|| page_position_origin(page_cursor, index));
+                    refusals.push(ShareViewRefusal::new(
+                        origin_id,
+                        origin_seq,
+                        &op_kind,
+                        cause.code(),
+                        cause.detail,
+                    ));
                     continue;
                 }
-                Err(error) => return Err(error),
             };
+            // The relay serves `workspace.init` to a path/version share as its
+            // bootstrap op (`services/sync-relay/src/shareFilter.ts`), and this
+            // recipient needs nothing from it: `replay_share_view_op` ensures
+            // the local main version itself. So it is skipped as EXPECTED, not
+            // refused — the boundary still admits only `moment.append` and
+            // `version.create`, and reporting this healthy skip as a refusal
+            // would make the first pull of every share look damaged.
+            if envelope.op_kind == BOOTSTRAP_OP_KIND {
+                skipped += 1;
+                continue;
+            }
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
                     let (primary, nested_refusals) = outcome.into_primary_and_refusals();
@@ -1179,11 +1310,28 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         }
                     }
                 }
-                Err(SyncError::ShareBoundaryViolation | SyncError::InvalidInput { .. }) => {
-                    skipped += 1;
-                    continue;
-                }
-                Err(error) => return Err(local(error)),
+                // `share_disposition` decides, and it is exhaustive over
+                // `SyncError` — a new variant fails to compile there until its
+                // author chooses, rather than falling into a catch-all and
+                // wedging this pull. Listing the classes here instead would
+                // put that choice in a place nobody is forced to visit.
+                Err(error) => match error.share_disposition() {
+                    // Skip and continue: one op the relay should not have
+                    // served must not wedge the share. The reason travels with
+                    // the outcome so the skip is visible rather than silent.
+                    ShareDisposition::Skip => {
+                        skipped += 1;
+                        refusals.push(ShareViewRefusal::new(
+                            envelope.origin_id,
+                            envelope.origin_seq,
+                            &envelope.op_kind,
+                            error.code(),
+                            error.to_string(),
+                        ));
+                        continue;
+                    }
+                    ShareDisposition::Abort => return Err(local(error)),
+                },
             }
             let mut replay = ShareViewReplayContext {
                 transport: &self.transport,
@@ -1201,6 +1349,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             has_more: page.has_more,
             applied,
             skipped,
+            refusals,
             changed_paths: changed.into_values().collect(),
             pending_cursor: crate::ShareCursor {
                 kind: crate::CursorKind::ShareView,
@@ -2145,10 +2294,74 @@ fn validate_share_page(
     Ok(())
 }
 
+/// Why a served op could not become an envelope, kept whole so the refusal can
+/// name it. The op kind travels with it because the envelope was never built.
+struct ShareEnvelopeError {
+    op_kind: String,
+    cause: EnvelopeRefusal,
+}
+
+struct EnvelopeRefusal {
+    code: &'static str,
+    detail: String,
+}
+
+impl EnvelopeRefusal {
+    const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+/// The namespace that keeps a page position out of the relay's identity space.
+///
+/// A unit separator, and the reason is mechanical: a relay origin id becomes a
+/// coordinate only through `usable_coordinate`, which runs
+/// `crate::model::bounded`, which rejects every ASCII control byte. So no id
+/// the relay can serve begins with this, and the two spaces cannot meet. The
+/// readable part after it is for a human reading a registry file and carries
+/// no guarantee at all — without this prefix, a relay origin literally named
+/// `share-page:0` at seq 1 would be the same durable coordinate as the op at
+/// index 1 of the page fetched at cursor 0, and the recipient's merge would
+/// read the second as a retry of the first.
+///
+/// `page_position_origins_cannot_alias_a_relay_origin` holds the two ends
+/// together, so relaxing `bounded` breaks a test rather than a boundary.
+const PAGE_POSITION_NAMESPACE: char = '\u{1f}';
+
+/// The identity for an op whose own coordinate is unusable: where it sat in
+/// the page.
+///
+/// Idempotent across re-pulls, which is what a durable record needs. A page is
+/// fetched at a cursor and the relay's log is append-only, so the same cursor
+/// returns the same ops in the same order and the same op lands on the same
+/// coordinate — the recipient's merge then recognizes it as one it already
+/// counted. A relay that answers the same cursor with different ops can make
+/// two of them share a coordinate; that costs one entry in a bounded list, and
+/// the relay was lying about its log.
+pub(crate) fn page_position_origin(page_cursor: i64, index: usize) -> (String, i64) {
+    (
+        format!("{PAGE_POSITION_NAMESPACE}share-page:{page_cursor}"),
+        index as i64,
+    )
+}
+
+/// The origin coordinate a refusal can be filed under, or `None` when the op
+/// carries none this record could ever match again.
+fn usable_coordinate(op: &ShareReplicationEnvelope) -> Option<(String, i64)> {
+    if crate::model::bounded(&op.origin_id, "origin").is_err() {
+        return None;
+    }
+    if op.origin_seq < 0 || op.origin_seq > crate::model::MAX_WIRE_INTEGER {
+        return None;
+    }
+    Some((op.origin_id.clone(), op.origin_seq))
+}
+
 fn share_envelope(
     workspace_id: &str,
     op: ShareReplicationEnvelope,
-) -> Result<ReplicationEnvelope, RelayError> {
+) -> Result<ReplicationEnvelope, ShareEnvelopeError> {
+    let op_kind = op.op_kind.clone();
     let envelope = ReplicationEnvelope {
         workspace_id: workspace_id.to_owned(),
         origin_id: op.origin_id,
@@ -2157,10 +2370,82 @@ fn share_envelope(
         payload: op.payload,
         recorded_at_ms: op.recorded_at_ms,
     };
-    envelope
-        .validate()
-        .map_err(|_| RelayError::InvalidResponse)?;
+    if let Err(error) = envelope.validate() {
+        return Err(ShareEnvelopeError {
+            op_kind,
+            cause: describe_envelope_refusal(&envelope, error),
+        });
+    }
     Ok(envelope)
+}
+
+/// The refusal message, with the numbers where the check has them.
+///
+/// `ReplicationEnvelope::validate` answers with a static reason, so the
+/// oversized-payload case is MEASURED here for the report — the same
+/// measurement, taken again to say how far over the op was rather than only
+/// that it was over. A caller that cannot see the size cannot tell a payload
+/// one byte past the limit from one ten times it.
+fn describe_envelope_refusal(envelope: &ReplicationEnvelope, error: SyncError) -> EnvelopeRefusal {
+    let code = error.code();
+    // In the order `ReplicationEnvelope::validate` checks them, so the branch
+    // taken here is the one that actually refused.
+    //
+    // The origin id first, and it matters MOST: an op whose origin id is
+    // unusable is filed under its page position, so the reader never sees the
+    // value at all and cannot tell an empty one from a small overrun or from
+    // a hundred kilobytes.
+    // The CLAUSE that fired, from the validator itself. An id can break this
+    // rule three ways, and citing the length bound for one that satisfies it
+    // names a constraint the op met.
+    if let Some(clause) = crate::model::unbounded_clause(&envelope.origin_id) {
+        return EnvelopeRefusal {
+            code,
+            detail: format!("{error}: {clause}"),
+        };
+    }
+    // Then the sequence, the coordinate's other half and refused for the same
+    // reason it is unusable AS a coordinate: an op with one is filed under its
+    // page position, so this value never reaches the reader either.
+    if envelope.origin_seq < 0 || envelope.origin_seq > crate::model::MAX_WIRE_INTEGER {
+        return EnvelopeRefusal {
+            code,
+            detail: format!(
+                "{error}: 0 to {} inclusive, offered {}",
+                crate::model::MAX_WIRE_INTEGER,
+                envelope.origin_seq
+            ),
+        };
+    }
+    // Then the op kind, for the same reason: the refusal replaces an unusable
+    // kind with a placeholder, so without the numbers a reader cannot tell a
+    // one-byte overrun from a kilobyte of junk.
+    let op_kind_bytes = envelope.op_kind.len();
+    if envelope.op_kind.is_empty() || op_kind_bytes > crate::model::MAX_OP_KIND_BYTES {
+        return EnvelopeRefusal {
+            code,
+            detail: format!(
+                "{error}: at most {} bytes, offered {op_kind_bytes} bytes",
+                crate::model::MAX_OP_KIND_BYTES
+            ),
+        };
+    }
+    let observed = serde_json::to_vec(&envelope.payload)
+        .map(|encoded| encoded.len())
+        .ok();
+    match observed {
+        Some(observed) if observed > crate::model::MAX_PAYLOAD_JSON_BYTES => EnvelopeRefusal {
+            code,
+            detail: format!(
+                "{error}: at most {} bytes, offered {observed} bytes",
+                crate::model::MAX_PAYLOAD_JSON_BYTES
+            ),
+        },
+        _ => EnvelopeRefusal {
+            code,
+            detail: error.to_string(),
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,6 +12,195 @@ export interface RemoteIdentity {
   ownerUserId: string;
 }
 
+// Ops a share pull SKIPPED, kept with the share record because the skip is
+// DURABLE: the pull commits its cursor past a refused op, so that content
+// never arrives again unless the granter writes the same path a second time.
+// A transient count would clear on the next quiet refresh and on restart,
+// while the content stays missing.
+export interface ShareSkippedOp {
+  originId: string;
+  originSeq: number;
+  opKind: string;
+  // The engine's stable code and its message. The message names the
+  // constraint the op broke, and for a version refusal its limit, unit and
+  // observed usage.
+  code: string;
+  detail: string;
+  atMs: number;
+}
+
+// The relay chooses how many ops it serves; this registry is a local file the
+// app rewrites whenever a workspace changes. So the list is retained up to
+// MAX_RETAINED_SKIPPED_OPS and the rest are counted, not stored.
+export interface ShareSkippedOps {
+  ops: ShareSkippedOp[];
+  more: number;
+  // The coordinates this record has counted, retained ones included. The
+  // retained list alone cannot answer "have I counted this?" once an op
+  // overflows its cap and is dropped, so a refetched page would count it
+  // again on every retry.
+  counted?: string[];
+  // Bumped on every write that adds a skipped op.
+  generation: number;
+  // The generation the user has seen. Dismissing RAISES this; it never
+  // deletes an op. The cursor has already committed past those ops, so the
+  // record is the only remaining evidence of what is missing — destroying it
+  // would be an irreversible change behind a one-click control. Hiding is
+  // reversible, keeps the coordinates for diagnosis, and makes a later
+  // refusal (a higher generation) speak up again on its own.
+  acknowledgedGeneration?: number;
+  // Whether ops were skipped BEYOND the counted total. Set the first time an
+  // op arrives that this record cannot prove it has already counted and
+  // cannot remember — past MAX_TRACKED_SKIP_COORDINATES there is nowhere to
+  // put it, so it is not counted at all rather than counted again on the next
+  // retry. The total stays a number the record can stand behind, and the copy
+  // reads "more than N".
+  inexact?: boolean;
+  // The last batch of unrememberable refusals, as the coordinates themselves.
+  // In the inexact regime the record cannot tell a new op from a repeat, so
+  // it cannot answer "is this news?" per op — but it can answer "is this the
+  // same batch I just saw?", which is what keeps a refetched page from
+  // re-raising a warning the user dismissed. A batch it has not just seen
+  // moves the generation: more content was skipped and its cursor committed,
+  // and staying silent would leave that hidden behind the acknowledgement.
+  //
+  // The coordinates, not a hash of them. A 32-bit digest is forgeable — two
+  // one-op batches collide with a little searching, and the second would then
+  // commit silently behind an acknowledgement of the first. The identity here
+  // IS the data, so there is nothing to forge. A batch too large to keep
+  // (`MAX_TRACKED_BATCH_COORDINATES`) records no identity at all, and the
+  // next batch is treated as news — visible rather than silent.
+  lastUncountedBatch?: string[];
+}
+
+// The largest batch of unrememberable refusals this record keeps the identity
+// of. A page carries at most `MAX_PULL_OPS` ops; keeping every coordinate of
+// every such page would put the relay in charge of this file's size. Past
+// this, the record keeps no identity and the next batch reads as news.
+export const MAX_TRACKED_BATCH_COORDINATES = 64;
+
+function sameBatch(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return false;
+  if (left.length !== right.length) return false;
+  return left.every((key, index) => key === right[index]);
+}
+
+export const MAX_RETAINED_SKIPPED_OPS = 20;
+
+// Coordinates one share's skip record remembers having counted. Far above the
+// retained-op cap on purpose: a coordinate is a short string, and remembering
+// it is the whole reason a refetched page does not count the same op twice.
+//
+// A per-origin high-water mark was the cheaper shape and it was wrong: it can
+// only stand for "everything below this is counted" while ops arrive in
+// sequence order, and nothing checks that — `validate_share_page` checks the
+// page cursor, not the order within an origin. A relay serving seq 100 then
+// seq 99 would have had 99 read as a retry of something never counted. A set
+// makes no ordering assumption at all.
+export const MAX_TRACKED_SKIP_COORDINATES = 512;
+
+function coordinate(op: { originId: string; originSeq: number }): string {
+  return `${op.originId}\u0000${op.originSeq}`;
+}
+
+/**
+ * Merge newly refused ops into a share's durable record.
+ *
+ * Idempotent by origin coordinate: a page can be re-fetched (a crash before
+ * the cursor commit, a retry after a later page failed), and the same op must
+ * not stack up. Ops beyond the retention cap raise `more` instead.
+ */
+export function mergeShareSkippedOps(
+  existing: ShareSkippedOps | undefined,
+  incoming: readonly ShareSkippedOp[],
+): ShareSkippedOps {
+  const ops = [...(existing?.ops ?? [])];
+  // Every coordinate this record has counted: the retained ops, plus the ones
+  // it counted and could not keep. Membership is the ONLY duplicate test —
+  // there is no ordering assumption to break.
+  const counted = new Set([
+    ...ops.map(coordinate),
+    ...(existing?.counted ?? []),
+  ]);
+  let added = false;
+  let inexact = existing?.inexact ?? false;
+  const uncounted: string[] = [];
+  for (const op of incoming) {
+    const key = coordinate(op);
+    if (counted.has(key)) continue;
+    if (counted.size >= MAX_TRACKED_SKIP_COORDINATES) {
+      // Nowhere left to remember it, so a refetched page could not tell this
+      // op from a new one. Counting it would let the total drift upward, so
+      // the count stops and the record says it is incomplete instead.
+      //
+      // Visibility is a separate question from exactness. `inexact` flips
+      // once, but every LATER batch of ops the record cannot place is more
+      // content skipped past a committed cursor — leaving those silent would
+      // hide them behind an acknowledgement forever. They are counted as news
+      // per BATCH below, which is the identity this record still has.
+      inexact = true;
+      uncounted.push(key);
+      continue;
+    }
+    counted.add(key);
+    added = true;
+    if (ops.length < MAX_RETAINED_SKIPPED_OPS) ops.push(op);
+  }
+  // A batch of ops the record could not place is news UNLESS it is the batch
+  // it just saw — that is the retry, and a retry must not resurrect an
+  // acknowledged warning.
+  const batch =
+    uncounted.length > 0 && uncounted.length <= MAX_TRACKED_BATCH_COORDINATES
+      ? [...uncounted].sort()
+      : undefined;
+  const lastUncountedBatch =
+    uncounted.length > 0 ? batch : existing?.lastUncountedBatch;
+  if (uncounted.length > 0 && !sameBatch(batch, existing?.lastUncountedBatch)) {
+    added = true;
+  }
+  // Only a write that recorded something moves the generation: a refetched
+  // page that changes nothing must not resurrect an acknowledged warning.
+  const generation = (existing?.generation ?? 0) + (added ? 1 : 0);
+  return {
+    ops,
+    // Derived, never accumulated: one counter cannot drift from the set it
+    // counts.
+    more: counted.size - ops.length,
+    counted: [...counted],
+    generation,
+    ...(existing?.acknowledgedGeneration !== undefined
+      ? { acknowledgedGeneration: existing.acknowledgedGeneration }
+      : {}),
+    ...(inexact ? { inexact: true } : {}),
+    ...(lastUncountedBatch !== undefined ? { lastUncountedBatch } : {}),
+  };
+}
+
+/**
+ * Record that the user has seen everything up to `generation`.
+ *
+ * Nothing is deleted. A refusal recorded between the render and the click has
+ * a higher generation, so it stays unacknowledged and the warning comes back
+ * on its own — the race a destructive clear had to guard against does not
+ * exist here. An acknowledgement never moves backwards, so a stale click
+ * cannot un-see a newer one.
+ */
+export function acknowledgeShareSkips(
+  skipped: ShareSkippedOps,
+  generation: number,
+): ShareSkippedOps {
+  return {
+    ...skipped,
+    acknowledgedGeneration: Math.max(
+      skipped.acknowledgedGeneration ?? 0,
+      Math.min(generation, skipped.generation),
+    ),
+  };
+}
+
 // A shared VIEW received through a relay share grant (PR 18): read-only,
 // refreshed from the share, never pushed. `ended` marks a revoked share —
 // the local copy stays readable but stops refreshing.
@@ -29,6 +218,10 @@ export interface ShareViewIdentity {
   // relay able to damage a record would answer with a wider scope.
   grantedSelector: { paths: string[]; versionId: string | null };
   ended?: boolean;
+  // Ops this share's pulls skipped, and why. Durable on purpose: the cursor
+  // has moved past them, so the content stays missing until the granter
+  // writes those paths again. Cleared only when the user dismisses it.
+  skippedOps?: ShareSkippedOps;
   // The relay this share was opened from. A refresh only ever runs against
   // this origin relay; signed into a different relay, the refresh is skipped
   // rather than misreading a 404 as "the share ended" (PR 18 gate fix).
@@ -76,6 +269,9 @@ export interface ShareMountRecord {
   // selection, and a record without one is damaged.
   grantedSelector: { paths: string[]; versionId: string | null };
   ended?: boolean;
+  // Same durable skip record as ShareViewIdentity.skippedOps, for the same
+  // reason: a mount's pulls commit past a refused op too.
+  skippedOps?: ShareSkippedOps;
 }
 
 export interface RegistryEntry extends CreatedWorkspace {
@@ -217,6 +413,83 @@ export function createRegistryStore(registryFile: string) {
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
       entry.shareView = shareView;
       write(registry);
+    },
+
+    /**
+     * Mark a shared view ended, merging into whatever the record holds NOW.
+     *
+     * The caller learns a share ended from a pull, and that same pull may have
+     * recorded skipped ops on its way. Writing back the pre-pull snapshot it
+     * was holding would drop them, and the cursor has already committed past
+     * those ops. So the read-and-merge lives here, where a caller cannot pass
+     * a stale copy at all.
+     */
+    /**
+     * Record that the user has seen a share's skipped ops. Hides the warning;
+     * keeps the evidence. `shareId` names a mounted share, absent means the
+     * workspace's own shared view.
+     */
+    acknowledgeShareSkips(
+      workspaceId: string,
+      shareId: string | undefined,
+      generation: number,
+    ): void {
+      const registry = read();
+      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
+      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      // Copy-on-write, like completeJoinBootstrap above: the cache may only
+      // show the warning hidden once the same change reached disk. Mutating
+      // first and writing after would hide it in this process while the file
+      // still holds it — quiet now, back after a restart.
+      let updated: RegistryEntry;
+      if (shareId === undefined) {
+        const shareView = entry.shareView;
+        if (!shareView) throw new Error(`Unknown shared view: ${workspaceId}`);
+        if (!shareView.skippedOps) return;
+        updated = {
+          ...entry,
+          shareView: {
+            ...shareView,
+            skippedOps: acknowledgeShareSkips(shareView.skippedOps, generation),
+          },
+        };
+      } else {
+        const mounts = entry.shareMounts ?? [];
+        const target = mounts.find((mount) => mount.shareId === shareId);
+        if (!target) throw new Error(`Unknown share mount: ${shareId}`);
+        const skippedOps = target.skippedOps;
+        if (!skippedOps) return;
+        updated = {
+          ...entry,
+          shareMounts: mounts.map((mount) =>
+            mount.shareId === shareId
+              ? {
+                  ...mount,
+                  skippedOps: acknowledgeShareSkips(skippedOps, generation),
+                }
+              : mount,
+          ),
+        };
+      }
+      write({
+        ...registry,
+        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
+      });
+    },
+
+    markShareViewEnded(workspaceId: string): void {
+      const registry = read();
+      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
+      if (!entry?.shareView) throw new Error(`Unknown shared view: ${workspaceId}`);
+      // Copy-on-write for the same reason as the acknowledgement above.
+      const updated: RegistryEntry = {
+        ...entry,
+        shareView: { ...entry.shareView, ended: true },
+      };
+      write({
+        ...registry,
+        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
+      });
     },
 
     // MU-C4: replace the workspace's joined shared-channel set. Upserts and

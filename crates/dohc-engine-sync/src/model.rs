@@ -61,11 +61,31 @@ impl ReplicationEnvelope {
     }
 }
 
+/// The clause of `bounded` a value breaks, phrased for a refusal whose reader
+/// never sees the value. `None` when the value passes.
+///
+/// `bounded` is written in terms of this so the rule and the report of which
+/// part of it fired cannot drift apart. Reporting the length clause for an id
+/// that is short but carries a control byte tells the reader a bound the id
+/// SATISFIES, which reads as a contradiction and hides the real cause.
+pub(crate) fn unbounded_clause(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return Some("it is empty".to_owned());
+    }
+    if value.len() > MAX_IDENTIFIER_BYTES {
+        return Some(format!(
+            "at most {MAX_IDENTIFIER_BYTES} bytes, offered {} bytes",
+            value.len()
+        ));
+    }
+    if value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Some("it carries a control byte".to_owned());
+    }
+    None
+}
+
 pub(crate) fn bounded(value: &str, reason: &'static str) -> Result<(), crate::SyncError> {
-    if value.is_empty()
-        || value.len() > MAX_IDENTIFIER_BYTES
-        || value.bytes().any(|byte| byte.is_ascii_control())
-    {
+    if unbounded_clause(value).is_some() {
         return Err(crate::SyncError::InvalidInput { reason });
     }
     Ok(())

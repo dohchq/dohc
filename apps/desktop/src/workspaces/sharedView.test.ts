@@ -12,6 +12,7 @@ import {
   materializeSharedViewPaths,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
 } from "./sharedView";
+import type { ShareViewRefusal } from "@dohc/workspace-contracts/relay";
 
 // These tests drive the pull with the selector a share record pins. It is a
 // REAL selector — no paths and no version selects nothing at all, which the
@@ -81,6 +82,7 @@ async function refreshSharedViewOnce(
     workspaceId: string;
     shareId: string;
     pinnedSelector?: unknown;
+    recordRefusals?: (refusals: ShareViewRefusal[]) => Promise<void>;
   },
 ) {
   const target = { workspaceId: input.workspaceId, rootPath: input.rootDir };
@@ -94,6 +96,7 @@ async function refreshSharedViewOnce(
       shareId: input.shareId,
       pull,
       pinnedSelector: input.pinnedSelector ?? PINNED_SELECTOR,
+      recordRefusals: input.recordRefusals ?? (async () => undefined),
       store,
     });
   } finally {
@@ -114,6 +117,16 @@ class FakeShareRelay {
   // a test can prove that a refresh never reaches it.
   metadataRequests = 0;
   private nextSeq = 1;
+
+  // A moment the share never granted: same shape, another lineage. The pinned
+  // selector follows main, so the recipient's boundary refuses this one.
+  addWriteFromAnotherVersion(path: string, content: string, versionId: string): void {
+    this.addWrite(path, content);
+    const served = this.ops[this.ops.length - 1] as {
+      payload: Record<string, unknown>;
+    };
+    served.payload.versionId = versionId;
+  }
 
   addWrite(path: string, content: string): void {
     const relaySeq = this.nextSeq++;
@@ -219,7 +232,12 @@ describe("shared view refresh", () => {
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
     });
-    expect(first).toEqual({ status: "updated", changedPaths: 2 });
+    expect(first).toEqual({
+      status: "updated",
+      changedPaths: 2,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("first body");
     expect(await readFile(join(rootDir, "docs/nested/deep.md"), "utf8")).toBe("deep body");
     // The cursor moved because refreshSharedViewOnce committed it through
@@ -233,7 +251,12 @@ describe("shared view refresh", () => {
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
     });
-    expect(idle).toEqual({ status: "unchanged", changedPaths: 0 });
+    expect(idle).toEqual({
+      status: "unchanged",
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
 
     relay.addWrite("docs/a.md", "updated body");
     relay.addDelete("docs/nested/deep.md");
@@ -242,7 +265,12 @@ describe("shared view refresh", () => {
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
     });
-    expect(second).toEqual({ status: "updated", changedPaths: 2 });
+    expect(second).toEqual({
+      status: "updated",
+      changedPaths: 2,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("updated body");
     await expect(stat(join(rootDir, "docs/nested/deep.md"))).rejects.toMatchObject({
       code: "ENOENT",
@@ -256,7 +284,12 @@ describe("shared view refresh", () => {
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
     });
-    expect(ended).toEqual({ status: "ended", changedPaths: 0 });
+    expect(ended).toEqual({
+      status: "ended",
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("updated body");
 
     // Provable migration: the pull really went through the daemon share RPC.
@@ -311,6 +344,7 @@ describe("shared view refresh", () => {
             rootPath: rootDir,
           }),
           pinnedSelector,
+          recordRefusals: async () => undefined,
           pull: async (input) => {
             pulls += 1;
             return await harness.pullFor({
@@ -347,6 +381,7 @@ describe("shared view refresh", () => {
         shareId: SHARE_ID,
         store: harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir }),
         pinnedSelector: undefined,
+        recordRefusals: async () => undefined,
         pull: async () => {
           throw new Error("unreachable");
         },
@@ -359,6 +394,73 @@ describe("shared view refresh", () => {
 
   // A pinned selector is used EXACTLY as recorded, and the relay is never
   // asked to restate it. There is no code path left that could.
+  // The pull SKIPS an op it refuses and keeps going, which is the right
+  // liveness call — one op a diverging relay serves must not wedge the share.
+  // The cost is that the view quietly stops carrying part of what the granter
+  // shares, so the refusal has to reach the caller and the user. The engine
+  // produces these (see `share_view_pull_reports_why_it_skipped_a_version_
+  // refused_op`); what this pins is that the refresh does not swallow them.
+  //
+  // The daemon double deliberately enforces no grant, so the refusal is
+  // supplied here rather than provoked — provoking it would need a second
+  // implementation of the boundary rule in a test double, which is how a
+  // double starts certifying fiction.
+  it("reports the refusals its pull returned instead of swallowing them", async () => {
+    const rootDir = await tempRoot();
+    const errors: string[] = [];
+    const logged = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args: unknown[]) => {
+        errors.push(args.map(String).join(" "));
+      });
+    try {
+      const outcome = await refreshSharedViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: { baseUrl: "http://relay.test", token: TOKEN },
+        shareId: SHARE_ID,
+        pinnedSelector: PINNED_SELECTOR,
+        recordRefusals: async () => undefined,
+        store: stubStore(async () => {
+          throw new Error("no changed path is materialized in this test");
+        }),
+        pull: async () => ({
+          fetched: 2,
+          applied: 1,
+          skipped: 1,
+          refusalCount: 1,
+          refusals: [
+            {
+              originId: "origin-granter",
+              originSeq: 7,
+              opKind: "moment.append",
+              code: "share-boundary-violation",
+              detail:
+                "replicated moment is outside the share boundary: the share " +
+                "granted version main, the relay offered version version-other",
+            },
+          ],
+          changedPaths: [],
+          nextCursor: 2,
+          commitCursor: async () => undefined,
+        }),
+      });
+
+      expect(
+        outcome.refusedOps,
+        "MUTATION: swallowing the refusal leaves a bare count the user never sees",
+      ).toBe(1);
+      expect(outcome.refusedDetail).toContain("version-other");
+      // And it is logged whole, with the op it refused: the count alone
+      // cannot be diagnosed.
+      const log = errors.join(" | ");
+      expect(log).toContain("origin-granter@7");
+      expect(log).toContain("version-other");
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   it("pulls with the pinned selector and never asks the relay for another", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -370,8 +472,14 @@ describe("shared view refresh", () => {
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
       pinnedSelector: { paths: ["docs"], versionId: null },
+      recordRefusals: async () => undefined,
     });
-    expect(first).toEqual({ status: "updated", changedPaths: 1 });
+    expect(first).toEqual({
+      status: "updated",
+      changedPaths: 1,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("first body");
 
     relay.addWrite("docs/b.md", "second body");
@@ -380,8 +488,14 @@ describe("shared view refresh", () => {
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
       pinnedSelector: { paths: ["docs"], versionId: null },
+      recordRefusals: async () => undefined,
     });
-    expect(second).toEqual({ status: "updated", changedPaths: 1 });
+    expect(second).toEqual({
+      status: "updated",
+      changedPaths: 1,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
 
     // The share metadata route is what a re-pin would have to call. Nothing
     // in a refresh touches it.

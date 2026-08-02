@@ -203,9 +203,34 @@ export interface ShareViewChangedPath {
   contentKind: "text" | "binary";
 }
 
+// One op the pull refused. A share-view pull SKIPS an op it will not apply
+// rather than failing the page — one op a diverging relay serves must not
+// wedge the share — so this is how the skip stops being silent. `detail` is
+// the engine's refusal message: it names the constraint, and for a version
+// refusal its limit, unit and observed usage.
+export interface ShareViewRefusal {
+  originId: string;
+  originSeq: number;
+  opKind: string;
+  code: string;
+  detail: string;
+}
+
+// How many refusals ONE pull keeps in memory across its pages. The durable
+// record is the truth (each page is handed to the caller's recorder before
+// its cursor commits); this aggregate is for logging and the immediate
+// result, and a hostile relay must not be able to grow it in proportion to
+// its log.
+export const MAX_REPORTED_REFUSALS = 20;
+
 export interface PullShareViewResult {
   fetched: number;
   applied: number;
+  skipped: number;
+  // Up to MAX_REPORTED_REFUSALS entries, in page order. `refusalCount` is the
+  // true total.
+  refusals: ShareViewRefusal[];
+  refusalCount: number;
   changedPaths: ShareViewChangedPath[];
   nextCursor: number;
   // Persist the cursor only after the caller has materialized changedPaths

@@ -12,13 +12,20 @@
 // while the relay refused it at creation. It lives here so there is nothing
 // to restate.
 
-/** Budget for a share's version id. Bounded because it crosses the wire. */
+/**
+ * Budget for a share's version id. Bounded because it crosses the wire.
+ *
+ * The unit is UTF-16 code units — what `String.length` counts — so one astral
+ * character spends two. Every surface that reports this limit must say that
+ * unit: "characters" would misreport an astral id by half. The engine twin
+ * (`crates/dohc-engine-sync/src/share.rs`) counts the same unit.
+ */
 export const MAX_SHARE_VERSION_ID_CHARS = 128;
 
 /**
  * Whether `value` is a version id the relay could have issued: a non-empty,
- * untrimmed-free string within the character budget. `null` and `undefined`
- * are NOT version ids — a selector that follows main carries no version, and
+ * untrimmed-free string within the budget above. `null` and `undefined` are
+ * NOT version ids — a selector that follows main carries no version, and
  * callers must handle that state explicitly rather than through this check.
  */
 export function isValidShareVersionId(value: unknown): value is string {

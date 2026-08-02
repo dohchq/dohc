@@ -55,6 +55,11 @@ const {
 } = await import(
   pathToFileURL(join(repoRoot, "packages/security-contract/src/index.ts")).href
 );
+const { MAX_SHARE_VERSION_ID_CHARS, isValidShareVersionId } = await import(
+  pathToFileURL(
+    join(repoRoot, "packages/security-contract/src/shareSelector.ts"),
+  ).href
+);
 await unregisterTsx();
 
 const inputs = [
@@ -110,12 +115,53 @@ const vectors = inputs.map(([path, rustClaimed]) => ({
   read: classifyEngineFilePathForRead(path).kind,
 }));
 
+// The selector's VERSION dimension, asked of the same oracle. The share
+// boundary refuses a served moment whose claimed `versionId` is not one the
+// relay could have issued, and it must refuse EXACTLY the ids the TypeScript
+// rule refuses. One vector per clause, plus the two characters where
+// JavaScript's trim set and Rust's `char::is_whitespace` disagree: a twin that
+// splits on those is not a twin.
+//
+// The astral pair pins the UNIT. 65 emoji are 65 characters and 130 UTF-16
+// code units, so a twin that counts characters calls that id valid and
+// misreports the length it refuses by half.
+const versionIdInputs = [
+  "main",
+  "version-1",
+  "",
+  " padded",
+  "padded ",
+  "\tpadded",
+  "padded\n",
+  "\u00a0padded",
+  // JavaScript trims U+FEFF and does not trim U+0085.
+  "\ufeffpadded",
+  "\u0085kept",
+  "x".repeat(MAX_SHARE_VERSION_ID_CHARS),
+  "x".repeat(MAX_SHARE_VERSION_ID_CHARS + 1),
+  // One astral character is TWO UTF-16 code units, which is the unit the
+  // budget counts.
+  "\u{1f600}".repeat(MAX_SHARE_VERSION_ID_CHARS / 2),
+  "\u{1f600}".repeat(MAX_SHARE_VERSION_ID_CHARS / 2 + 1),
+];
+
 const fixture = {
   wireIds: {
     agent: AGENT_CHANNEL_WIRE_ID,
     general: GENERAL_CHANNEL_WIRE_ID,
   },
   vectors,
+  shareVersionIds: {
+    maxChars: MAX_SHARE_VERSION_ID_CHARS,
+    vectors: versionIdInputs.map((value) => ({
+      value,
+      valid: isValidShareVersionId(value),
+      // The unit the rule measures, carried so the twin agrees on the NUMBER
+      // it reports and not only on the verdict. `String.length` counts UTF-16
+      // code units, so one astral character spends two.
+      utf16Length: value.length,
+    })),
+  },
 };
 writeFileSync(
   join(outputDir, "security-contract.json"),

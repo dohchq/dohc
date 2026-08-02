@@ -38,6 +38,7 @@ pub use cursor::{
     commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
     read_shared_peer_position,
 };
+pub(crate) use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,
@@ -59,13 +60,16 @@ pub use relay::{
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
     PushResponse, RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest,
-    ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRequest,
-    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
-    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
+    ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal,
+    ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
+    SharedChannelRejection, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
-pub use share::{ShareBoundary, ShareGrant, ShareSurface, apply_shared_envelope};
+pub use share::{
+    MAX_SHARE_VERSION_ID_CHARS, ShareBoundary, ShareGrant, ShareSurface, apply_shared_envelope,
+    is_valid_share_version_id,
+};
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
     LeaseProbe, NoLiveLeases, YdocApplyResult, YdocDrainResult, apply_ydoc_envelope,

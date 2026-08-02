@@ -1670,6 +1670,9 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
                 6,
                 "moment.append",
                 json!({
+                    // The version this share granted: the secret-path refusal
+                    // below must be what stops this op, not the version rule.
+                    "versionId": "shared-version",
                     "operation": "write",
                     "path": ".env",
                     "payloadAfterPath": ".env",
@@ -1705,6 +1708,23 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
     assert_eq!(pulled["applied"], 1);
     assert_eq!(pulled["changedPaths"][0]["path"], "notes/view.md");
     assert_eq!(pulled["pendingCursor"]["kind"], "shareView");
+    // The skipped op's REASON crosses the wire. A pull that skips and keeps
+    // going is the right call, and it is also how a shared view quietly stops
+    // carrying part of what the granter shares — the client can only tell the
+    // user because this rides along.
+    assert_eq!(pulled["skipped"], 1);
+    assert_eq!(pulled["refusals"][0]["opKind"], "moment.append");
+    assert_eq!(
+        pulled["refusals"][0]["code"], "share-boundary-violation",
+        "MUTATION: dropping refusals from the wire leaves the client a bare count: {}",
+        pulled["refusals"]
+    );
+    assert!(
+        pulled["refusals"][0]["detail"]
+            .as_str()
+            .expect("refusal detail")
+            .contains("outside the share boundary")
+    );
     assert_eq!(
         relay
             .state
@@ -1923,6 +1943,9 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
             1,
             "moment.append",
             json!({
+                // The version this share granted, so the corrupt replacement
+                // below is what rejects the rename, not the version rule.
+                "versionId": "shared-version",
                 "operation": "rename",
                 "path": "notes/new.md",
                 "payloadBeforePath": "notes/old.md",

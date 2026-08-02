@@ -196,6 +196,9 @@ export async function refreshShareMountOnce(input: {
   // Read from the mount record before this pull, exactly as a standalone
   // view does.
   pinnedSelector: unknown;
+  // Same durable skip record a standalone view keeps, written to the MOUNT's
+  // record: a mount's pulls commit past a refused op too.
+  recordRefusals: Parameters<typeof refreshSharedViewOnce>[0]["recordRefusals"];
   openStore: (workspace: {
     workspaceId: string;
     rootPath: string;
@@ -232,12 +235,17 @@ export async function refreshShareMountOnce(input: {
       shareId: input.mount.shareId,
       pull: input.pull,
       pinnedSelector: input.pinnedSelector,
+      recordRefusals: input.recordRefusals,
       store,
     });
     if (repaired === 0) return outcome;
     return {
       status: outcome.status === "ended" ? "ended" : "updated",
       changedPaths: outcome.changedPaths + repaired,
+      // A repair changes what the projection holds, never why the pull
+      // refused an op: those carry through untouched.
+      refusedOps: outcome.refusedOps,
+      refusedDetail: outcome.refusedDetail,
     };
   } finally {
     // Best-effort, like every other session teardown in this flow: a failing

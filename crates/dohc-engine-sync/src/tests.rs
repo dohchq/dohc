@@ -4989,7 +4989,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         "peer",
         0,
         "moment.append",
-        json!({"path":"shared/docs/.env"}),
+        json!({"versionId":"main","path":"shared/docs/.env"}),
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &view, &secret, &NoFaults),
@@ -5220,6 +5220,7 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
         0,
         "moment.append",
         json!({
+            "versionId": "main",
             "path": "shared/docs/a.md",
             "payloadAfterPath": "outside/b.md"
         }),
@@ -5233,6 +5234,7 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
         0,
         "moment.append",
         json!({
+            "versionId": "main",
             "path": "shared/docs/a.md",
             "payloadAfterPath": "shared/docs/b.md"
         }),
@@ -5241,6 +5243,185 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
         apply_shared_envelope(&mut engine, &boundary, &inside, &NoFaults),
         Ok(ApplyOutcome::Applied(_))
     ));
+}
+
+/// A pinned grant for `shared/docs`, on the version the share names — `None`
+/// is the relay's live-follow-main selector.
+fn share_view_version_boundary(version_id: Option<&str>) -> ShareBoundary {
+    ShareBoundary {
+        share_id: "share-view".to_owned(),
+        surface: ShareSurface::ShareView,
+        channel_wire_id: None,
+        granted: Some(ShareGrant {
+            paths: vec!["shared/docs".to_owned()],
+            version_id: version_id.map(str::to_owned),
+        }),
+    }
+}
+
+fn share_view_moment(payload: serde_json::Value) -> ReplicationEnvelope {
+    envelope("view-version", 0, "moment.append", payload)
+}
+
+/// The version rule from the recipient's side, on BOTH selector shapes the
+/// relay can state. The relay serves a `moment.append` only when the moment's
+/// version equals the share's target version — the selector's `versionId`, or
+/// `main` when it names none (`services/sync-relay/src/shareFilter.ts`). This
+/// proves the recipient states the SAME rule for both, so a relay whose
+/// selection diverges from the pinned grant cannot land another lineage's
+/// moments in the shared view.
+///
+/// The main-following case is the one worth naming: a grant with NO version is
+/// a live-follow of `main`, not "compare nothing". Reading it the second way
+/// would make this check vacuous for every path share, which is the dominant
+/// shape.
+#[test]
+fn share_view_moment_from_an_ungranted_version_is_refused_naming_both_versions() {
+    let (_scratch, _path, mut engine) = store();
+    let moment = |version: &str| {
+        share_view_moment(json!({
+            "versionId": version,
+            "operation": "write",
+            "path": "shared/docs/a.md",
+            "payloadAfterPath": "shared/docs/a.md"
+        }))
+    };
+    for (granted, entitled) in [(None, "main"), (Some("version-granted"), "version-granted")] {
+        let boundary = share_view_version_boundary(granted);
+        let refusal =
+            apply_shared_envelope(&mut engine, &boundary, &moment("version-other"), &NoFaults)
+                .expect_err("a moment from an ungranted lineage is refused");
+        assert!(
+            matches!(
+                &refusal,
+                SyncError::ShareVersionMismatch { op_kind, granted, offered }
+                    if op_kind == "moment.append"
+                        && granted == entitled
+                        && offered == "version-other"
+            ),
+            "MUTATION: a {granted:?} grant compares nothing, so the recipient replays a lineage              the grant never named: {refusal:?}"
+        );
+        let message = refusal.to_string();
+        assert!(
+            message.contains(entitled) && message.contains("version-other"),
+            "the refusal must name the granted and the offered version: {message}"
+        );
+        assert!(
+            matches!(
+                apply_shared_envelope(&mut engine, &boundary, &moment(entitled), &NoFaults),
+                Ok(ApplyOutcome::Applied(_))
+            ),
+            "the granted version's own moments still apply"
+        );
+    }
+}
+
+/// Fail closed on SHAPE, not only on value: a served moment whose `versionId`
+/// is not one the relay could have issued cannot be version-checked at all, so
+/// it is refused rather than applied unchecked. Otherwise a relay disarms the
+/// rule above by dropping or corrupting one field. The refusal does not depend
+/// on WHICH version the share pinned, and it is counted as the share-boundary
+/// event it is rather than as a generic malformed payload.
+#[test]
+fn share_view_moment_without_a_version_identity_is_refused_as_malformed() {
+    let (_scratch, _path, mut engine) = store();
+    // Both selector shapes the relay can state: live-follow main, and a
+    // named version share.
+    for version_id in [None, Some("version-granted")] {
+        let boundary = share_view_version_boundary(version_id);
+        for stripped in [
+            json!({"path": "shared/docs/a.md"}),
+            json!({"versionId": null, "path": "shared/docs/a.md"}),
+            json!({"versionId": 7, "path": "shared/docs/a.md"}),
+            // Not a version id the relay could have issued, so not one this
+            // boundary reads as one either — the shared selector rule
+            // (`packages/security-contract/src/shareSelector.ts`), held to its
+            // oracle in `tests/security_contract.rs`.
+            json!({"versionId": "", "path": "shared/docs/a.md"}),
+            json!({"versionId": " version-granted", "path": "shared/docs/a.md"}),
+            json!({"versionId": "x".repeat(MAX_SHARE_VERSION_ID_CHARS + 1), "path": "shared/docs/a.md"}),
+        ] {
+            let outcome = apply_shared_envelope(
+                &mut engine,
+                &boundary,
+                &share_view_moment(stripped.clone()),
+                &NoFaults,
+            );
+            assert!(
+                matches!(outcome, Err(SyncError::ShareVersionUnusable { .. })),
+                "MUTATION: an unchecked payload is accepted, so stripping versionId disarms the version rule: {stripped} -> {outcome:?}"
+            );
+        }
+    }
+}
+
+/// The refusal has to be actionable, and an agent reading it acts on the unit.
+/// The budget counts UTF-16 code units — `String.length` in the shared rule —
+/// so 65 emoji are 130 units over a 128 limit, not 65 "characters". A refusal
+/// that reports characters names a number the limit does not compare against,
+/// and the caller cannot tell how far over it is.
+///
+/// The absent case has no observed length to report, and says so rather than
+/// inventing a zero.
+#[test]
+fn an_unusable_version_id_names_the_limit_the_unit_and_the_observed_length() {
+    let (_scratch, _path, mut engine) = store();
+    let boundary = share_view_version_boundary(None);
+    let astral = "\u{1f600}".repeat(MAX_SHARE_VERSION_ID_CHARS / 2 + 1);
+    assert_eq!(astral.chars().count(), 65);
+    let oversized = apply_shared_envelope(
+        &mut engine,
+        &boundary,
+        &share_view_moment(json!({"versionId": astral, "path": "shared/docs/a.md"})),
+        &NoFaults,
+    )
+    .expect_err("an oversized version id is refused");
+    assert!(
+        matches!(
+            &oversized,
+            SyncError::ShareVersionUnusable {
+                op_kind,
+                limit: MAX_SHARE_VERSION_ID_CHARS,
+                observed: Some(130)
+            } if op_kind == "moment.append"
+        ),
+        "MUTATION: counting characters reports 65 against a 128 limit, which reads as inside it: {oversized:?}"
+    );
+    let message = oversized.to_string();
+    assert!(
+        message.contains("128 UTF-16 code units") && message.contains("130 UTF-16 code units"),
+        "the refusal must name the limit, the unit, and the observed length: {message}"
+    );
+    // This message is PERSISTED as the refusal detail and shown on a notice
+    // whose copy deliberately claims no scope. A scope claim here contradicts
+    // both that copy and the code that classifies this as malformed.
+    assert!(
+        !message.contains("outside the share boundary"),
+        "MUTATION: the detail claims the share excluded an op it may well cover: {message}"
+    );
+
+    let absent = apply_shared_envelope(
+        &mut engine,
+        &boundary,
+        &share_view_moment(json!({"path": "shared/docs/a.md"})),
+        &NoFaults,
+    )
+    .expect_err("a moment with no version id is refused");
+    assert!(
+        matches!(
+            &absent,
+            SyncError::ShareVersionUnusable {
+                op_kind,
+                limit: MAX_SHARE_VERSION_ID_CHARS,
+                observed: None
+            } if op_kind == "moment.append"
+        ),
+        "a payload with no version id string has no observed length: {absent:?}"
+    );
+    assert!(
+        absent.to_string().contains("no versionId string"),
+        "the refusal must say the field was absent rather than report a zero length: {absent}"
+    );
 }
 
 #[derive(Default)]
@@ -11603,6 +11784,7 @@ fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
         origin_seq: seq,
         op_kind: "moment.append".to_owned(),
         payload: json!({
+            "versionId": "main",
             "path": path,
             "payloadAfterPath": path,
             "operation": "selector-only"
@@ -11637,6 +11819,7 @@ fn share_view_write_op(seq: i64, path: &str, sha256: &str) -> ShareReplicationEn
         origin_seq: seq,
         op_kind: "moment.append".to_owned(),
         payload: json!({
+            "versionId": "main",
             "operation": "write",
             "path": path,
             "payloadAfterPath": path,
@@ -11645,6 +11828,964 @@ fn share_view_write_op(seq: i64, path: &str, sha256: &str) -> ShareReplicationEn
         }),
         recorded_at_ms: 10 + seq,
     }
+}
+
+/// The same served write, on the version a share pinned. A version share's
+/// served moments name THAT version, never `main` — the relay's
+/// `targetVersionId` decides which, and this mirrors it in the fixture.
+fn share_view_write_op_on(
+    seq: i64,
+    path: &str,
+    sha256: &str,
+    version_id: &str,
+) -> ShareReplicationEnvelope {
+    let mut op = share_view_write_op(seq, path, sha256);
+    op.payload["versionId"] = json!(version_id);
+    op
+}
+
+/// The WIRING for the version rule's shape half: `pull_share_view` turns the
+/// malformed-payload refusal into a skip BEFORE replay, so a relay that
+/// strips `versionId` from a served moment gets nothing replayed and its blob
+/// is never requested.
+#[test]
+fn share_view_pull_skips_a_moment_with_no_version_identity_before_requesting_its_blob() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let versioned = b"versioned body".to_vec();
+    let stripped = b"stripped body".to_vec();
+    let versioned_sha = dohc_engine_storage::hex_sha256(&versioned);
+    let stripped_sha = dohc_engine_storage::hex_sha256(&stripped);
+    let mut stripped_op = share_view_write_op(1, "docs/stripped.md", &stripped_sha);
+    stripped_op
+        .payload
+        .as_object_mut()
+        .expect("moment payload")
+        .remove("versionId");
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_write_op(0, "docs/versioned.md", &versioned_sha),
+                        stripped_op,
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(versioned_sha.clone(), versioned), (stripped_sha, stripped)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a malformed served moment is skipped, not fatal");
+
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [versioned_sha],
+        "MUTATION: accepting a moment with no version identity replays it and downloads its blob"
+    );
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (2, 1, 1),
+        "the versioned op applies and the stripped one is counted as skipped"
+    );
+    assert_eq!(
+        outcome
+            .changed_paths
+            .iter()
+            .map(|changed| changed.path.as_str())
+            .collect::<Vec<_>>(),
+        ["docs/versioned.md"]
+    );
+}
+
+/// The sibling of the bootstrap case. A version share's `version.create`
+/// carries the SOURCE version's files at fork time, redacted to the grant —
+/// legitimately EMPTY when that version forked with no files, or when none of
+/// its files sit inside the granted paths. The relay serves that op either
+/// way (`shareFilter.ts` keeps the op and redacts the list), so refusing it
+/// for naming no path reports damage on a healthy share.
+///
+/// Its version is what scopes it, and that is checked. Each snapshot is
+/// scoped by its own path, and there are none.
+#[test]
+fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
+    let (_scratch, _path, mut engine) = store();
+    let boundary = ShareBoundary {
+        share_id: "share-view".to_owned(),
+        surface: ShareSurface::ShareView,
+        channel_wire_id: None,
+        granted: Some(ShareGrant {
+            paths: vec!["shared/docs".to_owned()],
+            version_id: Some("version-granted".to_owned()),
+        }),
+    };
+    let empty = envelope(
+        "granter",
+        0,
+        "version.create",
+        json!({ "versionId": "version-granted", "forkSnapshots": [] }),
+    );
+    assert!(
+        matches!(
+            apply_shared_envelope(&mut engine, &boundary, &empty, &NoFaults),
+            Ok(ApplyOutcome::Applied(_))
+        ),
+        "MUTATION: refusing an empty snapshot list records damage on a healthy version share"
+    );
+    // The version dimension still decides: another version's create is refused
+    // whether or not it carries snapshots.
+    let ungranted = envelope(
+        "granter",
+        1,
+        "version.create",
+        json!({ "versionId": "version-other", "forkSnapshots": [] }),
+    );
+    // And it names BOTH versions, like the moment path: a reader who cannot
+    // see which lineage was offered against the one granted cannot tell a
+    // relay serving the wrong version from a share that was never widened.
+    let refusal = apply_shared_envelope(&mut engine, &boundary, &ungranted, &NoFaults);
+    assert!(
+        matches!(
+            &refusal,
+            Err(SyncError::ShareVersionMismatch { op_kind, granted, offered })
+                if op_kind == "version.create"
+                    && granted == "version-granted"
+                    && offered == "version-other"
+        ),
+        "MUTATION: an ungranted create names neither version, so the reader is told only that something was outside the share: {refusal:?}"
+    );
+    // And it says WHICH operation was refused. This detail is persisted and
+    // read back later, so calling a create a moment describes an operation
+    // that never happened, on a surface where the op itself is gone.
+    let detail = refusal
+        .expect_err("an ungranted create is refused")
+        .to_string();
+    assert!(
+        detail.contains("version.create") && !detail.contains("moment"),
+        "MUTATION: a refused version.create reports itself as a moment: {detail}"
+    );
+    // The malformed twin says the same thing: a create whose version id is not
+    // one the relay could have issued must not report a moment either.
+    let unreadable = envelope(
+        "granter",
+        2,
+        "version.create",
+        json!({ "versionId": "  padded  ", "forkSnapshots": [] }),
+    );
+    let malformed = apply_shared_envelope(&mut engine, &boundary, &unreadable, &NoFaults)
+        .expect_err("a create with an unusable version id is refused")
+        .to_string();
+    assert!(
+        malformed.contains("version.create") && !malformed.contains("moment"),
+        "MUTATION: a create carrying an unreadable version id reports itself as a moment: {malformed}"
+    );
+    // A moment that references no path stays refused — and as MALFORMED, not
+    // as a scope decision: there is nothing to place, and the grant may well
+    // have covered whatever it meant to name.
+    let pathless = share_view_moment(json!({ "versionId": "version-granted" }));
+    assert!(
+        matches!(
+            apply_shared_envelope(&mut engine, &boundary, &pathless, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ),
+        "MUTATION: a payload with nothing to place is reported as the share excluding it"
+    );
+    // Only the EXPLICIT empty list is healthy. A missing, null, or non-array
+    // field is a payload this boundary cannot read: admitting it would replay
+    // a version with no files and commit the cursor past it, which is the
+    // silent loss this whole mechanism exists to make visible.
+    // An unreadable payload shape is refused, and refused as MALFORMED: the
+    // reader's copy for a scope decision names the share and its granter, and
+    // neither is at fault for a list the relay sent as something other than a
+    // list.
+    for malformed in [
+        json!({ "versionId": "version-granted" }),
+        json!({ "versionId": "version-granted", "forkSnapshots": null }),
+        json!({ "versionId": "version-granted", "forkSnapshots": {} }),
+        json!({ "versionId": "version-granted", "forkSnapshots": "" }),
+        json!({ "forkSnapshots": [] }),
+        json!({ "versionId": 7, "forkSnapshots": [] }),
+        json!({ "versionId": "version-granted", "forkSnapshots": [{ "blobSha256": "a" }] }),
+    ] {
+        let op = envelope("granter", 2, "version.create", malformed.clone());
+        let outcome = apply_shared_envelope(&mut engine, &boundary, &op, &NoFaults);
+        // The CODE is the contract: it is what gets persisted and what the
+        // reader's copy branches on. Any malformed-class variant is right
+        // here; a scope claim is not.
+        assert!(
+            matches!(&outcome, Err(error) if error.code() == "invalid-input"),
+            "MUTATION: an unreadable payload is admitted like an empty one, or reported as the share excluding it: {malformed} -> {outcome:?}"
+        );
+    }
+}
+
+/// The relay serves `workspace.init` to every path/version share as its
+/// bootstrap op, and the relay's own tests pin that. This recipient needs
+/// nothing from it, so it is skipped — but a HEALTHY first pull must not
+/// report a refusal, or the banner that says "this share stopped carrying
+/// changes" fires on every share the moment it is opened.
+#[test]
+fn share_view_pull_skips_the_relay_bootstrap_op_without_calling_it_a_refusal() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"granted body".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    // A REAL origin id. The bootstrap op the relay serves carries the
+    // granter's own origin, so it reaches the boundary — an empty one would
+    // be refused as a malformed envelope first and prove nothing.
+    let bootstrap = ShareReplicationEnvelope {
+        origin_id: "granter".to_owned(),
+        origin_seq: 0,
+        op_kind: "workspace.init".to_owned(),
+        payload: json!({}),
+        recorded_at_ms: 5,
+    };
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![bootstrap, share_view_write_op(1, "docs/a.md", &sha)],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a bootstrap op is skipped, not fatal");
+
+    assert_eq!((outcome.applied, outcome.skipped), (1, 1));
+    assert_eq!(
+        outcome.refusals,
+        Vec::new(),
+        "MUTATION: reporting the bootstrap skip as a refusal makes every healthy share look damaged"
+    );
+}
+
+/// A refusal class the pull's skip arm does not list does not merely lose its
+/// copy: it falls to the error arm, ABORTS the pull, and the cursor never
+/// advances — so the same page is fetched forever and every valid op behind
+/// it is never applied. That is the failure mode a new error variant meeting
+/// an old match arm produces, and it is worse than the wrong copy that
+/// introduced the variant.
+#[test]
+fn share_view_pull_completes_past_an_unknown_op_kind_and_applies_its_neighbours() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"granted body".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        ShareReplicationEnvelope {
+                            origin_id: "peer".to_owned(),
+                            origin_seq: 0,
+                            op_kind: "future.op".to_owned(),
+                            payload: json!({ "versionId": "main", "path": "docs/a.md" }),
+                            recorded_at_ms: 10,
+                        },
+                        share_view_write_op(1, "docs/b.md", &sha),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("MUTATION: an unlisted refusal class aborts the pull and the page retries forever");
+
+    assert_eq!(
+        (outcome.applied, outcome.skipped),
+        (1, 1),
+        "the unknown kind is skipped and its valid neighbour still applies"
+    );
+    assert_eq!(
+        outcome
+            .refusals
+            .iter()
+            .map(|refusal| (refusal.op_kind.as_str(), refusal.code))
+            .collect::<Vec<_>>(),
+        [("future.op", "invalid-input")],
+        "MUTATION: the promised refusal is never persisted: {:?}",
+        outcome.refusals
+    );
+    assert_eq!(share_view_pull_changed(&outcome), ["docs/b.md"]);
+}
+
+/// The page-position identity has to be IDEMPOTENT, or the durable record it
+/// exists to feed counts the same skipped op again on every re-pull. A page is
+/// fetched at a cursor and the log is append-only, so the same cursor returns
+/// the same ops in the same order.
+#[test]
+fn share_view_pull_files_a_coordinateless_skip_under_a_stable_page_position() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let page = || {
+        (
+            0,
+            ShareViewResponse {
+                ops: vec![ShareReplicationEnvelope {
+                    origin_id: String::new(),
+                    origin_seq: 0,
+                    op_kind: "moment.append".to_owned(),
+                    payload: json!({ "versionId": "main", "path": "docs/a.md" }),
+                    recorded_at_ms: 10,
+                }],
+                next_cursor: 1,
+                has_more: false,
+            },
+        )
+    };
+    let client = RelaySyncClient::new(PagedShareRelay::new([], [page()]));
+
+    let first = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a coordinateless op is skipped, not fatal");
+    // The cursor is NOT committed here, so the next pull re-fetches the page —
+    // exactly the retry the record has to survive.
+    let again = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("the same page pulls again");
+
+    let identity = |outcome: &ShareViewPullOutcome| {
+        outcome
+            .refusals
+            .iter()
+            .map(|refusal| (refusal.origin_id.clone(), refusal.origin_seq))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        identity(&first),
+        vec![("\u{1f}share-page:0".to_owned(), 0)],
+        "an op with no coordinate of its own is filed under where it sat: {:?}",
+        first.refusals
+    );
+    assert_eq!(
+        identity(&again),
+        identity(&first),
+        "MUTATION: an unstable page identity counts the same skipped op again on every re-pull"
+    );
+}
+
+/// An op kind this engine cannot interpret is not a scope decision: no grant
+/// admits it, widening the share changes nothing, and only the sender can fix
+/// it. A KNOWN kind a share does not carry is the opposite — chats and secrets
+/// are outside what any file share covers.
+#[test]
+fn share_view_separates_an_unknown_op_kind_from_one_a_share_does_not_carry() {
+    let (_scratch, _path, mut engine) = store();
+    let boundary = share_view_version_boundary(None);
+    let unknown = envelope(
+        "granter",
+        0,
+        "future.op",
+        json!({ "path": "shared/docs/a.md" }),
+    );
+    let outcome = apply_shared_envelope(&mut engine, &boundary, &unknown, &NoFaults);
+    assert!(
+        matches!(&outcome, Err(error) if error.code() == "invalid-input"),
+        "MUTATION: an op kind nothing can interpret is reported as the share excluding it, and the reader is sent to a granter who cannot widen a grant to admit it: {outcome:?}"
+    );
+    // A known kind a share does not carry stays a scope decision.
+    let chat = envelope(
+        "granter",
+        1,
+        "chat.message.append",
+        json!({ "threadId": "t", "path": "shared/docs/a.md" }),
+    );
+    assert!(
+        matches!(
+            apply_shared_envelope(&mut engine, &boundary, &chat, &NoFaults),
+            Err(SyncError::ShareBoundaryViolation)
+        ),
+        "MUTATION: a chat op is reported as unreadable rather than out of scope"
+    );
+}
+
+/// A refusal is data the recipient PERSISTS and reads back, so it has to be
+/// well formed whatever it is diagnosing. The relay picks the op kind: an
+/// empty one makes the client's strict decode throw, wedging the pull on
+/// every retry, and an oversized one lands in the registry and breaks the
+/// next workspace listing. Neither is a diagnostic — both are the relay
+/// choosing how this client fails.
+#[test]
+fn share_view_pull_reports_an_unusable_op_kind_under_a_bounded_placeholder() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                ops: vec![
+                    ShareReplicationEnvelope {
+                        origin_id: "peer".to_owned(),
+                        origin_seq: 0,
+                        op_kind: String::new(),
+                        payload: json!({ "versionId": "main", "path": "docs/a.md" }),
+                        recorded_at_ms: 10,
+                    },
+                    ShareReplicationEnvelope {
+                        origin_id: "peer".to_owned(),
+                        origin_seq: 1,
+                        op_kind: "k".repeat(200),
+                        payload: json!({ "versionId": "main", "path": "docs/b.md" }),
+                        recorded_at_ms: 11,
+                    },
+                ],
+                next_cursor: 2,
+                has_more: false,
+            },
+        )],
+    ));
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("an unusable op kind is skipped, not fatal");
+
+    assert_eq!(
+        outcome
+            .refusals
+            .iter()
+            .map(|refusal| refusal.op_kind.as_str())
+            .collect::<Vec<_>>(),
+        ["invalid-op-kind", "invalid-op-kind"],
+        "MUTATION: copying the relay's op kind wedges the client's decode or poisons its registry: {:?}",
+        outcome.refusals
+    );
+    for refusal in &outcome.refusals {
+        // The bounds the recipient's schema enforces, in the unit it counts.
+        assert!(!refusal.op_kind.is_empty());
+        assert!(refusal.op_kind.encode_utf16().count() <= 128);
+        assert!(!refusal.detail.is_empty());
+        assert!(refusal.detail.encode_utf16().count() <= 2048);
+        // The cause still reaches the reader, and the coordinate is real.
+        assert!(refusal.detail.contains("op_kind"), "{}", refusal.detail);
+        assert_eq!(refusal.origin_id, "peer");
+    }
+    // The placeholder took the value away, so the numbers are the only thing
+    // left that says HOW unusable it was: a one-byte overrun and a kilobyte
+    // of junk read identically without them.
+    assert!(
+        outcome.refusals[1].detail.contains("at most 128 bytes")
+            && outcome.refusals[1].detail.contains("offered 200 bytes"),
+        "MUTATION: the refusal names no limit and no observed size for a value it also hid: {}",
+        outcome.refusals[1].detail
+    );
+    assert!(
+        outcome.refusals[0].detail.contains("offered 0 bytes"),
+        "an empty op kind measures as zero rather than saying nothing: {}",
+        outcome.refusals[0].detail
+    );
+}
+
+/// A malformed envelope is skipped, and its cursor commits past it — so when
+/// the op carries a usable origin coordinate, the reason has somewhere to
+/// live. An oversized `moment.append` payload is the concrete case: the relay
+/// serves it, the engine cannot build an envelope from it, and without this
+/// the recipient loses that content permanently with nothing said and no
+/// limit named.
+#[test]
+fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let oversized = "x".repeat(MAX_PAYLOAD_JSON_BYTES + 1);
+    let oversized_payload = json!({ "versionId": "main", "path": oversized });
+    let encoded = serde_json::to_vec(&oversized_payload)
+        .expect("payload encodes")
+        .len();
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                ops: vec![
+                    ShareReplicationEnvelope {
+                        origin_id: "peer".to_owned(),
+                        origin_seq: 0,
+                        op_kind: "moment.append".to_owned(),
+                        payload: oversized_payload.clone(),
+                        recorded_at_ms: 10,
+                    },
+                    // No usable coordinate: nothing to file a refusal under.
+                    ShareReplicationEnvelope {
+                        origin_id: String::new(),
+                        origin_seq: 1,
+                        op_kind: "moment.append".to_owned(),
+                        payload: json!({ "versionId": "main", "path": "docs/a.md" }),
+                        recorded_at_ms: 11,
+                    },
+                ],
+                next_cursor: 2,
+                has_more: false,
+            },
+        )],
+    ));
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a malformed op is skipped, not fatal");
+
+    assert_eq!((outcome.applied, outcome.skipped), (0, 2));
+    // Both are recorded. The one with a usable coordinate is filed under it;
+    // the one without is filed under WHERE IT SAT in the page, because its
+    // cursor commits past it either way and "no identity" must not mean "no
+    // durable record".
+    assert_eq!(
+        outcome
+            .refusals
+            .iter()
+            .map(|refusal| (refusal.origin_id.as_str(), refusal.origin_seq))
+            .collect::<Vec<_>>(),
+        [("peer", 0), ("\u{1f}share-page:0", 1)],
+        "MUTATION: a malformed op loses its reason — the one with a coordinate, or the one whose only identity is its page position: {:?}",
+        outcome.refusals
+    );
+    // The op filed under its page position never shows the reader its origin
+    // id, so the numbers are all that separate an empty one from a small
+    // overrun or from a hundred kilobytes.
+    let page_filed = &outcome.refusals[1].detail;
+    assert!(
+        page_filed.contains("it is empty"),
+        "MUTATION: an origin id the reader never sees is refused without naming what was wrong with it: {page_filed}"
+    );
+    let detail = &outcome.refusals[0].detail;
+    assert!(
+        detail.contains(&MAX_PAYLOAD_JSON_BYTES.to_string())
+            && detail.contains(&encoded.to_string()),
+        "MUTATION: the refusal names no limit and no observed size, so one byte over reads like ten times over: {detail}"
+    );
+}
+
+/// An origin id can break its rule three ways, and the refusal must name the
+/// one that fired.
+///
+/// This reader never sees the value — the op is filed under its page position
+/// — so the message is all they get. Citing the length bound for a short id
+/// carrying a control byte reports a constraint the op SATISFIED, which reads
+/// as a contradiction and sends the reader looking for a size problem that
+/// does not exist.
+#[test]
+fn a_refused_origin_id_names_the_clause_it_broke() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let malformed = |origin_id: String| ShareReplicationEnvelope {
+        origin_id,
+        origin_seq: 0,
+        op_kind: "moment.append".to_owned(),
+        payload: json!({ "versionId": "main", "path": "docs/a.md" }),
+        recorded_at_ms: 10,
+    };
+    let oversized = "p".repeat(crate::model::MAX_IDENTIFIER_BYTES + 1);
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                ops: vec![
+                    malformed(String::new()),
+                    malformed(oversized),
+                    // Short, well under the byte bound, and still refused —
+                    // the case a length-only message misreports.
+                    malformed("peer\u{1}one".to_owned()),
+                ],
+                next_cursor: 3,
+                has_more: false,
+            },
+        )],
+    ));
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("malformed ops are skipped, not fatal");
+
+    let details = outcome
+        .refusals
+        .iter()
+        .map(|refusal| refusal.detail.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(details.len(), 3, "{details:?}");
+    assert!(
+        details[0].contains("it is empty") && !details[0].contains("bytes"),
+        "MUTATION: an empty origin id is reported against a size bound it did not break: {}",
+        details[0]
+    );
+    assert!(
+        details[1].contains(&format!(
+            "at most {} bytes, offered {} bytes",
+            crate::model::MAX_IDENTIFIER_BYTES,
+            crate::model::MAX_IDENTIFIER_BYTES + 1
+        )),
+        "MUTATION: the one clause that HAS numbers reports none, so one byte over reads like ten times over: {}",
+        details[1]
+    );
+    assert!(
+        details[2].contains("it carries a control byte") && !details[2].contains("bytes,"),
+        "MUTATION: a short origin id refused for a control byte is told a length limit it satisfies: {}",
+        details[2]
+    );
+}
+
+/// A sequence outside the wire range is the coordinate's OTHER half, and it is
+/// refused for the same reason it cannot be one: the op is filed under its page
+/// position, so the reader never sees the value.
+///
+/// The bare reason names no range and no offered number, which leaves "outside
+/// the wire integer range" indistinguishable between a negative sequence, an
+/// off-by-one at the boundary, and a number a hundred times too large.
+#[test]
+fn a_refused_origin_seq_names_the_range_and_what_was_offered() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let out_of_range = |origin_seq: i64| ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq,
+        op_kind: "moment.append".to_owned(),
+        payload: json!({ "versionId": "main", "path": "docs/a.md" }),
+        recorded_at_ms: 10,
+    };
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                ops: vec![
+                    out_of_range(-1),
+                    out_of_range(crate::model::MAX_WIRE_INTEGER + 1),
+                ],
+                next_cursor: 2,
+                has_more: false,
+            },
+        )],
+    ));
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("an out-of-range sequence is skipped, not fatal");
+
+    let range = format!("0 to {} inclusive", crate::model::MAX_WIRE_INTEGER);
+    let details = outcome
+        .refusals
+        .iter()
+        .map(|refusal| refusal.detail.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(details.len(), 2, "{details:?}");
+    assert!(
+        details[0].contains(&range) && details[0].contains("offered -1"),
+        "MUTATION: a sequence the reader never sees is refused with no range and no offered value: {}",
+        details[0]
+    );
+    assert!(
+        details[1].contains(&range)
+            && details[1].contains(&format!("offered {}", crate::model::MAX_WIRE_INTEGER + 1)),
+        "MUTATION: one past the range reads the same as a number a hundred times too large: {}",
+        details[1]
+    );
+}
+
+/// The tie between the page-position namespace and the origin-id validator.
+///
+/// The namespace is only airtight while `bounded` rejects the character it is
+/// built from. Relaxing that validator would silently hand the relay the
+/// ability to name an origin inside this recipient's own identity space, so it
+/// breaks here instead.
+#[test]
+fn page_position_origins_cannot_alias_a_relay_origin() {
+    let (origin_id, _) = crate::relay::page_position_origin(0, 1);
+    assert!(
+        crate::model::bounded(&origin_id, "origin").is_err(),
+        "MUTATION: a page position is spelled with characters a relay may also use, so the relay can name this recipient's own coordinates: {origin_id:?}"
+    );
+}
+
+/// The aliasing hole itself: a relay origin named exactly like the readable
+/// part of a page position.
+///
+/// Both refusals are durable and both commit their cursor, so they must be two
+/// records. Sharing one coordinate would make the recipient's merge read the
+/// second as a retry of the first — and an acknowledgement of the first would
+/// then hide a later, different refusal that never spoke for itself.
+#[test]
+fn a_relay_origin_named_like_a_page_position_stays_a_separate_refusal() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                ops: vec![
+                    // A valid relay origin id spelled like the readable part of
+                    // a page position, at the sequence the op below sits at.
+                    ShareReplicationEnvelope {
+                        origin_id: "share-page:0".to_owned(),
+                        origin_seq: 1,
+                        op_kind: "moment.append".to_owned(),
+                        payload: json!({ "versionId": "main" }),
+                        recorded_at_ms: 10,
+                    },
+                    // Index 1 of the page fetched at cursor 0: the synthetic
+                    // coordinate the op above is trying to occupy.
+                    ShareReplicationEnvelope {
+                        origin_id: String::new(),
+                        origin_seq: 7,
+                        op_kind: "moment.append".to_owned(),
+                        payload: json!({ "versionId": "main", "path": "docs/a.md" }),
+                        recorded_at_ms: 11,
+                    },
+                ],
+                next_cursor: 2,
+                has_more: false,
+            },
+        )],
+    ));
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("malformed ops are skipped, not fatal");
+
+    assert_eq!((outcome.applied, outcome.skipped), (0, 2));
+    let coordinates = outcome
+        .refusals
+        .iter()
+        .map(|refusal| (refusal.origin_id.as_str(), refusal.origin_seq))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coordinates,
+        [("share-page:0", 1), ("\u{1f}share-page:0", 1)],
+        "MUTATION: a relay origin can occupy a page-position coordinate, so one refusal is merged away as a retry of the other: {coordinates:?}"
+    );
+}
+
+/// A skipped op must not be a silent one. The pull keeps going — one op a
+/// diverging relay serves must not wedge the share — so the ONLY way the
+/// recipient learns its shared view stopped carrying a granter's edits is the
+/// refusal the outcome carries. It has to hold the constraint, and for a
+/// version refusal the limit, the unit and the observed usage.
+#[test]
+fn share_view_pull_reports_why_it_skipped_a_version_refused_op() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"granted body".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let mismatched = share_view_write_op_on(0, "docs/other.md", &sha, "version-other");
+    let mut unusable = share_view_write_op(1, "docs/unusable.md", &sha);
+    unusable.payload["versionId"] = json!("\u{1f600}".repeat(MAX_SHARE_VERSION_ID_CHARS / 2 + 1));
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![mismatched, unusable],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "version-granted"),
+            &NoFaults,
+        )
+        .expect("refused ops are skipped, not fatal");
+
+    assert_eq!(outcome.skipped, 2);
+    assert_eq!(
+        outcome
+            .refusals
+            .iter()
+            .map(|refusal| (refusal.origin_seq, refusal.op_kind.as_str(), refusal.code))
+            .collect::<Vec<_>>(),
+        [
+            // A mismatch IS a scope decision: the grant names one version and
+            // the op is on another.
+            (0, "moment.append", "share-boundary-violation"),
+            // An unusable version id is not. The grant may well cover the
+            // update, and the client's copy must not send the reader to the
+            // granter about a field only the relay can fix.
+            (1, "moment.append", "invalid-input")
+        ],
+        "MUTATION: dropping the refusal detail leaves the caller a bare skipped count, or files a malformed field under the share's scope: {:?}",
+        outcome.refusals
+    );
+    assert!(
+        outcome.refusals[0].detail.contains("version-granted")
+            && outcome.refusals[0].detail.contains("version-other"),
+        "a mismatch must reach the caller naming both versions: {}",
+        outcome.refusals[0].detail
+    );
+    assert!(
+        outcome.refusals[1].detail.contains("128 UTF-16 code units")
+            && outcome.refusals[1].detail.contains("130 UTF-16 code units"),
+        "an unusable version id must reach the caller naming its limit, unit and observed usage: {}",
+        outcome.refusals[1].detail
+    );
+}
+
+/// The version rule on the PRODUCTION path. `pull_share_view` carries the
+/// pinned grant into the boundary, so a relay that serves a moment from a
+/// lineage the grant never named is refused before replay: nothing lands, and
+/// the moment's blob is never requested. The boundary unit tests prove the
+/// refusal; this proves the pull runs it.
+#[test]
+fn share_view_pull_refuses_a_moment_from_an_ungranted_version_before_requesting_its_blob() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let granted_body = b"granted lineage body".to_vec();
+    let ungranted_body = b"ungranted lineage body".to_vec();
+    let granted_sha = dohc_engine_storage::hex_sha256(&granted_body);
+    let ungranted_sha = dohc_engine_storage::hex_sha256(&ungranted_body);
+    let granted_op = share_view_write_op_on(0, "docs/granted.md", &granted_sha, "version-granted");
+    let ungranted_op =
+        share_view_write_op_on(1, "docs/ungranted.md", &ungranted_sha, "version-other");
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![granted_op, ungranted_op],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([
+            (granted_sha.clone(), granted_body),
+            (ungranted_sha, ungranted_body),
+        ]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "version-granted"),
+            &NoFaults,
+        )
+        .expect("an ungranted lineage is skipped, not fatal");
+
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [granted_sha],
+        "MUTATION: a pull that does not carry the pinned version downloads the ungranted lineage's blob"
+    );
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (2, 1, 1),
+        "the granted version's moment applies and the other lineage is counted as skipped"
+    );
+    assert_eq!(
+        outcome
+            .changed_paths
+            .iter()
+            .map(|changed| changed.path.as_str())
+            .collect::<Vec<_>>(),
+        ["docs/granted.md"],
+        "MUTATION: the ungranted lineage's moment is replayed into the local view"
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "docs/ungranted.md")
+            .expect("share-view path read is answerable"),
+        None,
+        "MUTATION: the ungranted lineage lands in the recipient's shared view"
+    );
 }
 
 /// The secret-path refusal itself is proven at the enforcement function by
@@ -11746,7 +12887,11 @@ fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop
                     origin_id: "peer".to_owned(),
                     origin_seq: 0,
                     op_kind: "moment.append".to_owned(),
-                    payload: json!({"operation": "delete", "path": "app/.env"}),
+                    payload: json!({
+                        "versionId": "main",
+                        "operation": "delete",
+                        "path": "app/.env"
+                    }),
                     recorded_at_ms: 10,
                 }],
                 next_cursor: 1,
@@ -11909,8 +13054,8 @@ fn share_view_pull_applies_every_tracked_path_under_a_whole_workspace_version_gr
                 0,
                 ShareViewResponse {
                     ops: vec![
-                        share_view_write_op(0, "docs/a.md", &first_sha),
-                        share_view_write_op(1, "projects/b.md", &second_sha),
+                        share_view_write_op_on(0, "docs/a.md", &first_sha, "shared-version"),
+                        share_view_write_op_on(1, "projects/b.md", &second_sha, "shared-version"),
                     ],
                     next_cursor: 2,
                     has_more: false,
@@ -13997,6 +15142,11 @@ fn share_view_binary_write_op(seq: i64, path: &str, sha256: &str) -> ShareReplic
         origin_seq: seq,
         op_kind: "moment.append".to_owned(),
         payload: json!({
+            // The version the grant below follows. A served moment names its
+            // version, and the boundary refuses one that does not — without
+            // this the op is skipped there and the ceiling under test is
+            // never reached.
+            "versionId": "main",
             "operation": "write",
             "path": path,
             "payloadAfterPath": path,
