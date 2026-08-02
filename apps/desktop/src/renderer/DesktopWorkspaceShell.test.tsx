@@ -2974,6 +2974,119 @@ describe("history page", () => {
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
   });
 
+  // Statements about the active version are ordered by the ISSUE counter, and
+  // main serves these calls concurrently — so a request issued earlier can
+  // answer later. A late answer restating a version the workspace has already
+  // moved past must not lower what the workspace said: doing so would leave a
+  // watermark below the answers still in flight, and the next one describing
+  // the version the user left would read as fresh and paint it.
+  it("keeps a late answer from lowering what the workspace already said", async () => {
+    const opening = deferred<ListEngineMomentsResult>();
+    const late = deferred<ListEngineMomentsResult>();
+    const stale = deferred<ListEngineMomentsResult>();
+    let failSwitchRefresh!: (error: Error) => void;
+    const switchRefresh = new Promise<never>((_resolve, reject) => {
+      failSwitchRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      opening.promise,
+      late.promise,
+      stale.promise,
+      switchRefresh,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    let switched = false;
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "try-1",
+          name: "Try: launch note",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: switched ? "main" : "try-1",
+    }));
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      switched = true;
+      return { activeVersionId: "main", changedFileCount: 0 };
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      opening.resolve(
+        historyPage(
+          [historyMoment("m-opening", "Wrote the note in the try version")],
+          "try-1",
+        ),
+      );
+      await opening.promise;
+    });
+    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+
+    // Two refreshes go out, in this order. They will answer in the other one.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+
+    // The switch: the workspace says Main, which is the newest statement of all
+    // — issued after both refreshes. The switch's own refresh fails, so nothing
+    // newer than those two ever answers.
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const mainItem = (await screen.findAllByTestId("version-item")).find(
+      (item) => item.dataset.versionId === "main",
+    );
+    await user.click(mainItem!);
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(4));
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+
+    // The EARLIER of the two refreshes answers first, and it is right about
+    // Main — it just says nothing the workspace has not already said.
+    await act(async () => {
+      late.resolve(historyPage([historyMoment("m-late", "Back on main")], "main"));
+      await late.promise;
+    });
+    expect(await screen.findByText("Back on main")).toBeTruthy();
+
+    // The later one describes the version the user left. It is newer than that
+    // Main answer and older than the workspace's statement, and it loses to the
+    // statement.
+    await act(async () => {
+      stale.resolve(
+        historyPage(
+          [historyMoment("m-stale", "Edited the note in the try version")],
+          "try-1",
+        ),
+      );
+      await stale.promise;
+    });
+
+    expect(screen.queryByText("Edited the note in the try version")).toBeNull();
+    expect(screen.getByText("Back on main")).toBeTruthy();
+  });
+
   // The same callback runs for merges, conflict resolutions, and a "Set aside"
   // that was already on Main — none of which change the active version. Clearing
   // the held refresh on every one of them threw away a good answer, and when the

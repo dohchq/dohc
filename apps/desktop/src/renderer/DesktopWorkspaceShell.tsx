@@ -1902,6 +1902,10 @@ export function DesktopWorkspaceShell(props: {
       .then(({ activeVersionId }) =>
         noteActiveEngineVersion(versionToken, activeVersionId),
       )
+      // A failed read leaves the previous statement standing, which is not
+      // permanent blindness: history answers carry the active version too, so
+      // the next refresh that succeeds was issued later and repairs the guard.
+      // Narrowing the window in between is #555.
       .catch(() => undefined);
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
