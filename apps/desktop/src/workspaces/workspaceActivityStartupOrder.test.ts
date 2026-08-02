@@ -98,13 +98,14 @@ describe("workspaceActivity startup ordering", () => {
     // daemonOwnsCapture: that flag makes both enqueues below return early, so
     // only the client-side capture has a chain whose order can be read.
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () =>
-        createWorkspaceEngineCapture({
+      captureFor: () => ({
+        capture: createWorkspaceEngineCapture({
           workspaceId: WORKSPACE_ID,
           rootPath: root,
           store: trackedStore,
           rustEngineSessions: sessions,
         }),
+      }),
     });
     await activity.open(workspace);
     await activity.stopAll();
