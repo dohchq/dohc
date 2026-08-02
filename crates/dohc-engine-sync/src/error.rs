@@ -1,5 +1,17 @@
 use dohc_engine_storage::StorageError;
 
+/// How much of an oversized blob the refusing layer actually measured. Ingest
+/// holds the whole body and reports an exact size. A transport that stops
+/// reading at its own bound never learns the full size, and reports the floor
+/// it proved rather than inventing a total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ObservedBytes {
+    #[error("{0} bytes")]
+    Exact(usize),
+    #[error("at least {0} bytes")]
+    AtLeast(usize),
+}
+
 /// Engine-side replication failure taxonomy. Messages never include payloads,
 /// content, keys, or bearer credentials.
 #[derive(Debug, thiserror::Error)]
@@ -81,13 +93,11 @@ pub enum RelayError {
     BlobReferenceMissing,
     #[error("relay blob content failed integrity validation")]
     BlobInvalid,
-    #[error(
-        "relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
-    )]
+    #[error("relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed}")]
     BlobTooLarge {
         constraint: &'static str,
         limit_bytes: usize,
-        observed_bytes: usize,
+        observed: ObservedBytes,
     },
     #[error("relay key envelope is missing")]
     KeyEnvelopeMissing,

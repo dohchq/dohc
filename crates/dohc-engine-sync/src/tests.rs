@@ -1158,7 +1158,7 @@ fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
         Err(RelayError::BlobTooLarge {
             constraint: "MAX_TEXT_BYTES",
             limit_bytes: MAX_TEXT_BYTES,
-            observed_bytes: MAX_TEXT_BYTES + 1,
+            observed: ObservedBytes::Exact(MAX_TEXT_BYTES + 1),
         })
     );
     assert!(

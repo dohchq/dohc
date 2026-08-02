@@ -11002,6 +11002,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use dohc_engine_runtime::{CompoundWrite, FaultInjector, FaultPoint, LifecycleState};
+    use dohc_engine_sync::ObservedBytes;
     use dohc_engine_testkit::{GateFaults, ScratchDir};
     use std::time::Duration;
 
@@ -11075,7 +11076,7 @@ mod tests {
         let surfaced = map_runtime(RuntimeError::Relay(RelayError::BlobTooLarge {
             constraint: "MAX_TEXT_BYTES",
             limit_bytes: 10 * 1024 * 1024,
-            observed_bytes: 10 * 1024 * 1024 + 1,
+            observed: ObservedBytes::Exact(10 * 1024 * 1024 + 1),
         }));
         assert_eq!(surfaced.code, ErrorCode::PayloadTooLarge);
         assert_eq!(

@@ -9,10 +9,11 @@ use std::time::Duration;
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
     BlobDownloadRequest, BlobHaveRequest, BlobKind, BlobUploadRequest, ClaimRequest, EpochRequest,
-    KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, NoLiveLeases, ProbeRequest, PullRequest,
-    RelayError, RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest,
-    ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome,
-    blob_ceiling, journal_local_replication_op, read_pushed_seq, read_relay_cursor,
+    KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, NoLiveLeases, ObservedBytes, ProbeRequest,
+    PullRequest, RelayError, RelaySyncClient, RelayTransport, ReplicationEnvelope,
+    ShareBlobRequest, ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest,
+    SyncPassOutcome, blob_ceiling, journal_local_replication_op, read_pushed_seq,
+    read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::ScratchDir;
@@ -1409,8 +1410,49 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
         Err(RelayError::BlobTooLarge {
             constraint,
             limit_bytes,
-            observed_bytes: limit_bytes + 1,
+            observed: ObservedBytes::Exact(limit_bytes + 1),
         })
     );
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
+}
+
+#[test]
+fn a_blob_body_past_the_read_limit_still_names_the_ceiling() {
+    // A one-byte overage reaches ingest, which reports an exact size. A larger
+    // one never finishes reading, so the transport reports the floor it proved
+    // rather than inventing a total. Both name a constraint, a limit, and a
+    // unit; the diagnostic does not fall off a cliff at two bytes.
+    //
+    // MUTATION: map the read failure back to a bare `RelayError::InvalidResponse`
+    // and this fails — the caller learns nothing about which limit it broke.
+    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Text);
+    let far_over = limit_bytes + 4096;
+    let server = FakeServer::start(move |request| match request.path() {
+        path if path.starts_with("/sync/ws/blobs/") => TestResponse::bytes(vec![b'a'; far_over]),
+        _ => TestResponse::json(500, json!({"code": "internal_error"})),
+    });
+    let error = transport(&server)
+        .download_blob(BlobDownloadRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            sha256: "b".repeat(64),
+        })
+        .expect_err("a body past the read limit is refused");
+    assert_eq!(
+        error,
+        RelayError::BlobTooLarge {
+            constraint: "MAX_INGEST_BLOB_BYTES",
+            limit_bytes,
+            observed: ObservedBytes::AtLeast(limit_bytes + 2),
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "relay blob exceeds MAX_INGEST_BLOB_BYTES: limit {limit_bytes} bytes, \
+             observed at least {} bytes",
+            limit_bytes + 2
+        )
+    );
 }

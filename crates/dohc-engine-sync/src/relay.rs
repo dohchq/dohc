@@ -11,8 +11,8 @@ use crate::cursor::{
 };
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::{
-    ApplyOutcome, BlobContent, BlobHydration, BlobKind, RelayError, ReplicationEnvelope, SyncError,
-    blob_ceiling, hydrate_blob_content,
+    ApplyOutcome, BlobContent, BlobHydration, BlobKind, ObservedBytes, RelayError,
+    ReplicationEnvelope, SyncError, blob_ceiling, hydrate_blob_content,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1293,7 +1293,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::BlobTooLarge {
                     constraint,
                     limit_bytes,
-                    observed_bytes: response.bytes.len(),
+                    observed: ObservedBytes::Exact(response.bytes.len()),
                 });
             }
             if hex_sha256(&response.bytes) != sha256 {
@@ -1323,7 +1323,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     } => RelayError::BlobTooLarge {
                         constraint,
                         limit_bytes,
-                        observed_bytes,
+                        observed: ObservedBytes::Exact(observed_bytes),
                     },
                     other => local(other),
                 })? {
