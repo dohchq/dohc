@@ -300,6 +300,9 @@ export interface WorkspaceEngineCapture {
   // would double-replicate and collide (P0D) with the ydoc.update stream). The
   // returned session's close() lifts the guard. Rejects (secret path,
   // not-found, already-live) propagate to the caller, which uses the plain editor.
+  // Runs on the capture chain, so the session's version binding is decided in
+  // the same serialized step that registers it as live: a version operation
+  // either vacates this session or runs after it, never around it (#493).
   openYDocSession(input: {
     path: string;
     onRemoteUpdate: (update: Uint8Array) => void;
@@ -1809,12 +1812,11 @@ export function createWorkspaceEngineCapture(
       // retire records the reconcile keeps. This is not the blanket
       // live-path skip gate fix 1 removed: ordinary capture of a live path is
       // untouched; only the retirement decision defers to ownership.
-      // Two checks, and BOTH are load-bearing. The marker lookup is memoized
-      // once per batch, but openYDocSession does NOT run on the capture
-      // chain — a document opened partway through a batch is absent from a
-      // memo built earlier in that same batch. The live-session check covers
-      // exactly that window; deleting it would reopen the race for a doc the
-      // user just opened.
+      // Two checks, and BOTH are load-bearing. The marker lookup answers
+      // "has this document ever settled", so a session opened on a path with
+      // no marker yet is absent from it. The live-session check covers exactly
+      // that document; deleting it would retire the record of a doc the user
+      // just opened and has not saved.
       if (liveYDocSessions.has(event.path)) return;
       if ((await ydocOwnedPaths()).has(event.path)) return;
       // The path stopped being engine-ownable text: retire it from engine
@@ -2317,191 +2319,203 @@ export function createWorkspaceEngineCapture(
 
     registerExpectedEngineEvents,
 
-    async openYDocSession(input) {
-      // Resolve the active version through this capture's store, then open the
-      // provider through the same Rust workspace-session owner. Capture,
-      // version work, and Y.Doc work therefore share one daemon workspace lease.
-      const engine = await engineStore();
-      const versionId = await activeVersionIdOf(engine);
-      const reportSaveState = (
-        state: EngineYDocSaveState,
-        token: number,
-      ): void => {
-        try {
-          input.onSaveState?.(state, token);
-        } catch {
-          // Observer boundary: a renderer-facing status hook must never
-          // re-enter the session or wedge the settle chain.
-        }
-      };
-      const onSettled = async (
-        result: {
-          sha256: string;
-          markdown: string | null;
-          // The daemon reports whether the settled document reached the workspace
-          // file. Only an explicit success may continue to the save notification.
-          materialized: boolean;
-        },
-        token: number,
-      ) => {
-        // The settle committed, but the engine says the FILE did not move
-        // (materialization blocked by containment — a symlinked target — with
-        // the write pending a retry). Say so rather than report a save the
-        // disk never received.
-        if (result.materialized === false) {
-          onError(
-            `ydoc settle of ${input.path}`,
-            new Error(
-              "the engine committed the settle but could not write the file (blocked target); the write is pending a retry",
-            ),
-          );
-          reportSaveState("error", token);
-          return;
-        }
-        // #338. The ENGINE owns the artifact: a settle it reports as
-        // materialized either wrote the file or found those bytes already
-        // there. The desktop used to write them AGAIN ("the mirror of the same
-        // bytes"), which was redundant every time it agreed with the engine
-        // and destructive the one time it did not — an unchanged projection is
-        // answered from the lineage without touching the file, so the mirror
-        // replaced whatever an outside writer had put there. The desktop now
-        // writes NOTHING here. It reads the file to decide what to REPORT.
-        //
-        // The digest comes from a bounded streaming hash, not from
-        // readDiskTextState: that reader answers "can capture own this?" and
-        // returns no sha at all past its 5 MiB cap, which would have read as
-        // "no proof of drift" for the largest files — the worst case to guess
-        // wrong about.
-        const digest = await digestSettledFile(rootPath, input.path);
-        if (digest.kind === "unverifiable") {
-          // dohc could not check the file, which is not the same as knowing it
-          // changed: a transient lock (a scanner holding it open) must not
-          // send the user to History for a file that probably holds exactly
-          // this document. It is the retryable failure — the next settle
-          // checks again.
-          onError(
-            `ydoc settle of ${input.path}`,
-            new Error(
-              `the engine settled the document but dohc could not check the file: ${digest.reason}`,
-            ),
-          );
-          reportSaveState("error", token);
-          return;
-        }
-        if (digest.kind === "changed" || digest.sha256 !== result.sha256) {
-          // Gone, too big to be this document, or simply different: in none of
-          // those does the file hold what the editor holds. A delete counts as
-          // changed — it is an intent, and recreating the file would be the
-          // same overwrite in reverse. The text stays in the CRDT and in
-          // History either way.
-          reportSaveState("changed-on-disk", token);
-          return;
-        }
-        // The file holds the settled bytes, so the ENGINE's write of them is
-        // ours: register it, and a watcher event that lands after the
-        // live-path guard lifts on close is recognized instead of re-journaled
-        // as an external edit. Registering on the drift path instead would arm
-        // a suppression for bytes nobody wrote, which could swallow a later
-        // genuine event carrying that same sha.
-        registerExpectedEngineEvents([
-          { path: input.path, operation: "write", sha256: result.sha256 },
-        ]);
-        reportSaveState("saved", token);
-      };
-      const onSettleStart = (token: number) => reportSaveState("settling", token);
-      // The one place a background settle failure is observable. Log it with
-      // the path and the wire error, and tell the editor the file on disk is
-      // behind — a settle that never lands is the user's content going
-      // nowhere.
-      const onSettleError = (error: unknown, token: number) => {
-        onError(`ydoc settle of ${input.path}`, error);
-        reportSaveState("error", token);
-      };
-      let entry: LiveYDocSession | null = null;
-      const session = await openRestartSafeRustYDocSession({
-        versionId,
-        path: input.path,
-        ...(input.contentKind ? { contentKind: input.contentKind } : {}),
-        onDead: () => {
-          if (
-            entry !== null &&
-            liveYDocSessions.get(input.path) === entry &&
-            entry.status === "live"
-          ) {
-            entry.status = "dead-generation";
+    openYDocSession(input) {
+      // ON THE CAPTURE CHAIN, deliberately (#493). The version this session
+      // binds to is read here and the registry entry is written at the end,
+      // with a daemon round trip in between. Off the chain, a switch/merge/
+      // create running in that gap swept a registry the session had not
+      // reached yet: the sweep vacated nothing, and the session went live
+      // against the version the user just LEFT. Everything typed into it
+      // settled into that version's lineage and materialized its
+      // projection over the folder the switch had just written. Running the
+      // open as a chain task makes "which version is active" and "this path
+      // has a live session" one indivisible step against every version op.
+      return enqueueResult("open ydoc session", async () => {
+        // Resolve the active version through this capture's store, then open the
+        // provider through the same Rust workspace-session owner. Capture,
+        // version work, and Y.Doc work therefore share one daemon workspace lease.
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        const reportSaveState = (
+          state: EngineYDocSaveState,
+          token: number,
+        ): void => {
+          try {
+            input.onSaveState?.(state, token);
+          } catch {
+            // Observer boundary: a renderer-facing status hook must never
+            // re-enter the session or wedge the settle chain.
           }
-        },
-        onAlive: () => {
-          if (
-            entry !== null &&
-            liveYDocSessions.get(input.path) === entry &&
-            entry.status === "dead-generation"
-          ) {
-            entry.status = "live";
+        };
+        const onSettled = async (
+          result: {
+            sha256: string;
+            markdown: string | null;
+            // The daemon reports whether the settled document reached the workspace
+            // file. Only an explicit success may continue to the save notification.
+            materialized: boolean;
+          },
+          token: number,
+        ) => {
+          // The settle committed, but the engine says the FILE did not move
+          // (materialization blocked by containment — a symlinked target — with
+          // the write pending a retry). Say so rather than report a save the
+          // disk never received.
+          if (result.materialized === false) {
+            onError(
+              `ydoc settle of ${input.path}`,
+              new Error(
+                "the engine committed the settle but could not write the file (blocked target); the write is pending a retry",
+              ),
+            );
+            reportSaveState("error", token);
+            return;
           }
-        },
-        onRemoteUpdate: input.onRemoteUpdate,
-        onSettled,
-        onSettleStart,
-        onSettleError,
-      });
-      // Register the live session only after the open succeeds (a secret/
-      // not-found/already-live rejection propagates to the caller and never
-      // guards a path that has no session). The close below drops the entry
-      // ONLY when teardown succeeds (gate fix 5): a failing close retains a
-      // failing-close entry so the reservation/retry are not lost and capture
-      // stays deferred for the path.
-      const closeEntry = async (
-        opts?: WorkspaceEngineYDocCloseOptions,
-      ): Promise<void> => {
-        try {
-          await session.close(opts);
-        } catch (error) {
-          if (error instanceof YdocReleasedWithSettleFailureError) {
-            // The daemon session and its lease ARE gone — only the settle
-            // failed. Lift the guard like a clean teardown (capture of the
-            // path must resume; nothing holds the reservation) and rethrow so
-            // the settle failure still surfaces to the caller.
+          // #338. The ENGINE owns the artifact: a settle it reports as
+          // materialized either wrote the file or found those bytes already
+          // there. The desktop used to write them AGAIN ("the mirror of the same
+          // bytes"), which was redundant every time it agreed with the engine
+          // and destructive the one time it did not — an unchanged projection is
+          // answered from the lineage without touching the file, so the mirror
+          // replaced whatever an outside writer had put there. The desktop now
+          // writes NOTHING here. It reads the file to decide what to REPORT.
+          //
+          // The digest comes from a bounded streaming hash, not from
+          // readDiskTextState: that reader answers "can capture own this?" and
+          // returns no sha at all past its 5 MiB cap, which would have read as
+          // "no proof of drift" for the largest files — the worst case to guess
+          // wrong about.
+          const digest = await digestSettledFile(rootPath, input.path);
+          if (digest.kind === "unverifiable") {
+            // dohc could not check the file, which is not the same as knowing it
+            // changed: a transient lock (a scanner holding it open) must not
+            // send the user to History for a file that probably holds exactly
+            // this document. It is the retryable failure — the next settle
+            // checks again.
+            onError(
+              `ydoc settle of ${input.path}`,
+              new Error(
+                `the engine settled the document but dohc could not check the file: ${digest.reason}`,
+              ),
+            );
+            reportSaveState("error", token);
+            return;
+          }
+          if (digest.kind === "changed" || digest.sha256 !== result.sha256) {
+            // Gone, too big to be this document, or simply different: in none of
+            // those does the file hold what the editor holds. A delete counts as
+            // changed — it is an intent, and recreating the file would be the
+            // same overwrite in reverse. The text stays in the CRDT and in
+            // History either way.
+            reportSaveState("changed-on-disk", token);
+            return;
+          }
+          // The file holds the settled bytes, so the ENGINE's write of them is
+          // ours: register it, and a watcher event that lands after the
+          // live-path guard lifts on close is recognized instead of re-journaled
+          // as an external edit. Registering on the drift path instead would arm
+          // a suppression for bytes nobody wrote, which could swallow a later
+          // genuine event carrying that same sha.
+          registerExpectedEngineEvents([
+            { path: input.path, operation: "write", sha256: result.sha256 },
+          ]);
+          reportSaveState("saved", token);
+        };
+        const onSettleStart = (token: number) => reportSaveState("settling", token);
+        // The one place a background settle failure is observable. Log it with
+        // the path and the wire error, and tell the editor the file on disk is
+        // behind — a settle that never lands is the user's content going
+        // nowhere.
+        const onSettleError = (error: unknown, token: number) => {
+          onError(`ydoc settle of ${input.path}`, error);
+          reportSaveState("error", token);
+        };
+        let entry: LiveYDocSession | null = null;
+        const session = await openRestartSafeRustYDocSession({
+          versionId,
+          path: input.path,
+          ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+          onDead: () => {
+            if (
+              entry !== null &&
+              liveYDocSessions.get(input.path) === entry &&
+              entry.status === "live"
+            ) {
+              entry.status = "dead-generation";
+            }
+          },
+          onAlive: () => {
+            if (
+              entry !== null &&
+              liveYDocSessions.get(input.path) === entry &&
+              entry.status === "dead-generation"
+            ) {
+              entry.status = "live";
+            }
+          },
+          onRemoteUpdate: input.onRemoteUpdate,
+          onSettled,
+          onSettleStart,
+          onSettleError,
+        });
+        // Register the live session only after the open succeeds (a secret/
+        // not-found/already-live rejection propagates to the caller and never
+        // guards a path that has no session). The close below drops the entry
+        // ONLY when teardown succeeds (gate fix 5): a failing close retains a
+        // failing-close entry so the reservation/retry are not lost and capture
+        // stays deferred for the path.
+        const closeEntry = async (
+          opts?: WorkspaceEngineYDocCloseOptions,
+        ): Promise<void> => {
+          try {
+            await session.close(opts);
+          } catch (error) {
+            if (error instanceof YdocReleasedWithSettleFailureError) {
+              // The daemon session and its lease ARE gone — only the settle
+              // failed. Lift the guard like a clean teardown (capture of the
+              // path must resume; nothing holds the reservation) and rethrow so
+              // the settle failure still surfaces to the caller.
+              if (liveYDocSessions.get(input.path) === entry) {
+                liveYDocSessions.delete(input.path);
+              }
+              throw error;
+            }
+            // The reservation may still be held and the on-disk state is
+            // indeterminate — retain a failing-close guard so a retry/force-close
+            // can complete the teardown, and DO NOT swallow (data-integrity
+            // teardown). captureOnePath keeps deferring this path meanwhile.
             if (liveYDocSessions.get(input.path) === entry) {
-              liveYDocSessions.delete(input.path);
+              entry.status = "failing-close";
             }
             throw error;
           }
-          // The reservation may still be held and the on-disk state is
-          // indeterminate — retain a failing-close guard so a retry/force-close
-          // can complete the teardown, and DO NOT swallow (data-integrity
-          // teardown). captureOnePath keeps deferring this path meanwhile.
+          // Lift the guard exactly when the session tears down (releasing the
+          // single-canonical reservation), so ordinary capture of this path
+          // resumes for the next opener / external editor.
           if (liveYDocSessions.get(input.path) === entry) {
-            entry.status = "failing-close";
+            liveYDocSessions.delete(input.path);
           }
-          throw error;
-        }
-        // Lift the guard exactly when the session tears down (releasing the
-        // single-canonical reservation), so ordinary capture of this path
-        // resumes for the next opener / external editor.
-        if (liveYDocSessions.get(input.path) === entry) {
-          liveYDocSessions.delete(input.path);
-        }
-      };
-      entry = {
-        path: input.path,
-        versionId,
-        session,
-        status: "live",
-        close: closeEntry,
-      };
-      liveYDocSessions.set(input.path, entry);
-      return {
-        doc: session.doc,
-        initialUpdate: session.initialUpdate,
-        contentKind: session.contentKind,
-        path: session.path,
-        applyLocalUpdate: (update) => session.applyLocalUpdate(update),
-        settleNow: (opts) => session.settleNow(opts),
-        applyExternalMarkdownEdit: (markdown) =>
-          session.applyExternalMarkdownEdit(markdown),
-        close: closeEntry,
-      };
+        };
+        entry = {
+          path: input.path,
+          versionId,
+          session,
+          status: "live",
+          close: closeEntry,
+        };
+        liveYDocSessions.set(input.path, entry);
+        return {
+          doc: session.doc,
+          initialUpdate: session.initialUpdate,
+          contentKind: session.contentKind,
+          path: session.path,
+          applyLocalUpdate: (update) => session.applyLocalUpdate(update),
+          settleNow: (opts) => session.settleNow(opts),
+          applyExternalMarkdownEdit: (markdown) =>
+            session.applyExternalMarkdownEdit(markdown),
+          close: closeEntry,
+        };
+      });
     },
 
     settleAndCloseLiveSessionsForPath(pathOrPrefix) {

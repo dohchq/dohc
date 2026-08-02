@@ -2772,3 +2772,228 @@ describe("Rust engine session selection", () => {
     expect(providerOpened).toBe(1);
   });
 });
+
+// #493. A Y.Doc session's version binding and its registry entry are decided
+// one daemon round trip apart: `openYDocSession` reads the active version,
+// opens the provider, and only then records the session as live. Off the
+// capture chain, a version operation running inside that gap swept a registry
+// the session had not reached yet — so the sweep vacated nothing, and the
+// session went live against the version the user had just LEFT. Everything
+// typed into it settled into that version's lineage and materialized its
+// projection over the folder the operation had just written.
+//
+// Both tests STAGE the interleaving rather than race it. The daemon request
+// that marks "this version operation is past its live-session sweep" blocks,
+// the open is issued INSIDE that window, and the window is then held open for
+// a full daemon round trip the test drives itself (`listVersions`) — strictly
+// more turns than an unserialized open needs to reach the provider. So an
+// empty provider log at that point is PROOF the open is queued behind the
+// chain, not evidence that it happened to be slower.
+describe("workspaceEngineCapture Y.Doc session ordering against version operations", () => {
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((settle) => {
+      resolve = settle;
+    });
+    return { promise, resolve };
+  }
+
+  function recordingProvider(openedVersionIds: string[]) {
+    return async (
+      options: EngineYdocProviderSessionOptions,
+    ): Promise<EngineYdocProviderSession> => {
+      openedVersionIds.push(options.versionId);
+      const doc = new Y.Doc();
+      return {
+        doc,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        contentKind: "plaintext",
+        path: options.path,
+        lineage: "present" as const,
+        applyLocalUpdate: async () => undefined,
+        settleNow: async () =>
+          ({ sha256: "c".repeat(64), markdown: "" }) as never,
+        close: async () => undefined,
+      } as never;
+    };
+  }
+
+  it("opens a session against the version a running switch is ENTERING, never the one it is leaving", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "plan.md",
+      text: "main\n",
+    });
+    const openedVersionIds: string[] = [];
+    const switchReachedMaterialization = deferred();
+    const releaseSwitch = deferred();
+    // The daemon materializes the entered version INSIDE versions.setActive,
+    // so blocking that request holds the switch exactly where the issue puts
+    // it: past the live-session sweep, still rewriting the folder.
+    const sessions = mockLiveSessions(
+      loopback,
+      undefined,
+      undefined,
+      async (request) => {
+        if (request.method !== VERSIONED_METHOD.versionsSetActive) return;
+        const params = request.params as { versionId?: string };
+        // createVersion's own set-active is not the switch under test.
+        if (params.versionId !== "main") return;
+        switchReachedMaterialization.resolve();
+        await releaseSwitch.promise;
+      },
+    );
+    const engine = capture(root, {
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      openRustYDocProviderSession: recordingProvider(openedVersionIds),
+    });
+
+    // Create-and-switch leaves "Draft" active; the switch under test returns
+    // to Main, so the two versions are distinguishable in the assertion.
+    const created = await engine.createVersion("Draft");
+    const draftVersionId = created.activeVersionId;
+    expect(draftVersionId).not.toBe("main");
+
+    const switching = engine.switchVersion("main");
+    await switchReachedMaterialization.promise;
+    const opening = engine.openYDocSession({
+      path: "plan.md",
+      onRemoteUpdate: () => undefined,
+    });
+    // Hold the window open for two full daemon round trips. The open's own
+    // active-version read was issued first and travels the same transport, so
+    // an off-chain open has already reached the provider by the time these
+    // return.
+    await engine.listVersions();
+    await engine.listVersions();
+    // MUTATION: drop the enqueueResult wrapper from openYDocSession. The open
+    // reads the active version while set-active is still blocked and opens the
+    // provider on [draftVersionId] — a live session on the version the user
+    // left, which the switch's sweep had already passed and could not vacate.
+    expect(openedVersionIds).toEqual([]);
+
+    releaseSwitch.resolve();
+    const session = await opening;
+    await switching;
+
+    // Whatever the user types next belongs to the version they are looking at.
+    expect(openedVersionIds).toEqual(["main"]);
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  // The loopback has no conflict ledger, and mergeVersionIntoMain reads one
+  // unconditionally to resume an already-open conflict. An empty page is the
+  // honest answer for a workspace that has never conflicted, and it keeps the
+  // merge under test a REAL merge instead of a rejected one.
+  class MergeableLoopbackEngine extends VersionedLoopbackEngine {
+    override async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "conflicts.list") {
+        return {
+          id: request.id,
+          result: { conflicts: [], nextAfterConflictId: null },
+        };
+      }
+      return await super.sendRequest(request);
+    }
+  }
+
+  it("opens a session only after a running merge has finished reading and writing heads", async () => {
+    const root = await tempRoot();
+    const loopback = new MergeableLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "plan.md",
+      text: "main\n",
+    });
+    const openedVersionIds: string[] = [];
+    const order: string[] = [];
+    const mergeReachedHeads = deferred();
+    const releaseMerge = deferred();
+    // conflicts.list runs after the merge's sweep and flush, before it reads
+    // or writes a single head — the "merging immediately after an edit" window.
+    const sessions = mockLiveSessions(
+      loopback,
+      undefined,
+      undefined,
+      async (request) => {
+        if (request.method !== "conflicts.list") return;
+        order.push("merge:reads-heads");
+        mergeReachedHeads.resolve();
+        await releaseMerge.promise;
+      },
+    );
+    const engine = capture(root, {
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      openRustYDocProviderSession: async (options) => {
+        order.push("ydoc:open");
+        return await recordingProvider(openedVersionIds)(options);
+      },
+    });
+
+    const created = await engine.createVersion("Draft");
+    const draftVersionId = created.activeVersionId;
+    const merging = engine.mergeVersionIntoMain(draftVersionId);
+    await mergeReachedHeads.promise;
+    const opening = engine.openYDocSession({
+      path: "plan.md",
+      onRemoteUpdate: () => undefined,
+    });
+    // Same verification staging as the switch test: two round trips the test
+    // drives itself, so an unserialized open has provably reached the provider.
+    await engine.listVersions();
+    await engine.listVersions();
+    // MUTATION: drop the enqueueResult wrapper from openYDocSession. The open
+    // lands INSIDE the merge, so this reads
+    // ["merge:reads-heads", "ydoc:open"] — a session seeded from a head the
+    // merge is in the middle of replacing, and invisible to the sweep that was
+    // supposed to vacate it.
+    expect(order).toEqual(["merge:reads-heads"]);
+
+    releaseMerge.resolve();
+    const session = await opening;
+    await merging;
+
+    expect(order).toEqual(["merge:reads-heads", "ydoc:open"]);
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("still opens a session on the active version when no version operation is running", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "plan.md",
+      text: "main\n",
+    });
+    const openedVersionIds: string[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      daemonOwnsCapture: true,
+      openRustYDocProviderSession: recordingProvider(openedVersionIds),
+    });
+
+    const first = await engine.openYDocSession({
+      path: "plan.md",
+      onRemoteUpdate: () => undefined,
+    });
+    await first.close({ settle: false });
+    const created = await engine.createVersion("Draft");
+    const second = await engine.openYDocSession({
+      path: "plan.md",
+      onRemoteUpdate: () => undefined,
+    });
+
+    expect(openedVersionIds).toEqual(["main", created.activeVersionId]);
+    await second.close({ settle: false });
+    await engine.stop();
+  });
+});
