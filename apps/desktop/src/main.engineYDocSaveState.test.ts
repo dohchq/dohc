@@ -48,11 +48,15 @@ describe("engine Y.Doc save-state reporting in main", () => {
     // The count belongs in the hand-over callback, which fires when the
     // update reaches the provider. What that callback promises is proved
     // behaviorally in workspaces/workspaceEngineYDocSession.test.ts.
+    //
+    // Textual order alone would not prove it: `applyLocalUpdate(input.update)`
+    // followed on the NEXT LINE by a bare `noteLocalEdit(...)` reads as "later
+    // in the file" while reintroducing #514 exactly. So pin that noteLocalEdit
+    // IS the hand-over callback.
     const handler = handlerSource("engineYDocApplyUpdate");
-    const applyAt = handler.indexOf("entry.session.applyLocalUpdate(");
-    const countAt = handler.indexOf("noteLocalEdit(");
-    expect(applyAt).toBeGreaterThan(-1);
-    expect(countAt).toBeGreaterThan(applyAt);
+    expect(handler).toMatch(
+      /entry\.session\.applyLocalUpdate\(\s*input\.update,\s*\(\)\s*=>\s*noteLocalEdit\(/,
+    );
   });
 
   // The defaulted seq is pinned BEHAVIORALLY in ipc/bridgeContract.test.ts
