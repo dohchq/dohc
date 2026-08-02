@@ -1337,6 +1337,71 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
   }, 20_000);
 
+  // A destination change inside the ACTIVE file moves no tab, so the check
+  // above cannot see it — but the user did navigate, and a late DM would open
+  // Chats over the line they just jumped to.
+  it("discards an in-flight DM navigation when a search result moves within the active file", async () => {
+    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [DM_GRAPH_NODE],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    // a.md is open and active, and a search has results inside it.
+    await user.click(await screen.findByText("a.md"));
+    expect((await screen.findByTestId("tab-a.md")).dataset.active).toBe("true");
+    await user.click(screen.getByTestId("activity-search"));
+    await user.type(screen.getByTestId("search-input"), "apples");
+    await waitFor(() => expect(bridge.searchWorkspace).toHaveBeenCalled());
+    const searchPayload = bridge.searchWorkspace.mock.calls.at(-1)![0];
+    act(() => {
+      bridge.emitSearchResults({
+        searchId: searchPayload.searchId,
+        entries: [
+          {
+            path: "a.md",
+            line: 12,
+            column: 9,
+            preview: "I ate 10 apples",
+            matchStart: 9,
+            matchEnd: 15,
+          },
+        ],
+        done: true,
+        limitHit: false,
+      });
+    });
+    await screen.findByTestId("search-result-row");
+
+    // Start a canonical DM navigation and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    // Back to the results and jump to the line. The tab never moves: a.md was
+    // already active, so only the in-document destination changed.
+    await user.click(screen.getByTestId("activity-search"));
+    await user.click(await screen.findByTestId("search-result-row"));
+    expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      await sync.promise;
+    });
+    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+  }, 20_000);
+
   // A request that is merely in flight has not answered anything, and a
   // request that fails never will. Superseding on ISSUE would drop the only
   // answer there is and leave the explorer empty with nothing to retry it.

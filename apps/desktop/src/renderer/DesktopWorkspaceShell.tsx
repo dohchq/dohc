@@ -1746,6 +1746,10 @@ export function DesktopWorkspaceShell(props: {
   // side-effect-free (StrictMode/concurrent replays would re-fire them).
   const openFile = useCallback(
     (path: string, target?: HeadingTarget) => {
+      // A heading jump is a destination change mutateWb's tab check cannot
+      // see: the file may already BE the active tab, and the user still went
+      // somewhere new inside it.
+      if (target) invalidateDmNavigation(dmNavigationRequest);
       // Heading jumps are one open command, never durable tab state. Every
       // ordinary explorer/tab open therefore clears a prior jump before the
       // file can become active again.
@@ -1974,6 +1978,10 @@ export function DesktopWorkspaceShell(props: {
         });
         return;
       }
+      // Landing at a line is the same kind of destination change: openFile
+      // below cannot see it, because the result may be in the file the user is
+      // already reading.
+      invalidateDmNavigation(dmNavigationRequest);
       setSearchScrollTarget({ path, line, nonce: ++scrollNonce.current });
       openFile(path);
     },
