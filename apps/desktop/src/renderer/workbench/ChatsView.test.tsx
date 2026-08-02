@@ -479,6 +479,46 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.queryByTestId("chats-new-channel-name")).toBeNull();
   });
 
+  // The share lookup is optional, so a failure returns "unknown" — which is
+  // not the same as "there are none". A badge refresh must not spend a
+  // teammate's pending invitation on a transient signed-out blip.
+  it("keeps cached share metadata when the badge refresh cannot reach it", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [
+        {
+          shareId: "share-received",
+          channelWireId: "wire-received",
+          granterEmail: "owner@example.com",
+          access: "read-write",
+          ended: false,
+        },
+      ],
+      joined: [],
+    });
+    const view = render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+
+    // The read lands. Channels answer; the optional share lookup does not.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
+    view.rerender(navigator(1));
+
+    // The badge catches up, and the invitation is still on offer.
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+  });
+
   it("does not refetch while the revision stands still", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ unreadCount: 2 })],

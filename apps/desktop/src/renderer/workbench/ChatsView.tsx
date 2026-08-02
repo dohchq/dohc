@@ -1045,14 +1045,23 @@ export function ChatsView(props: {
         const [result, shares] = await Promise.all([
           bridge().listChatChannels({ workspaceId }),
           // Sharing is OPTIONAL: solo / signed-out workspaces simply render
-          // without the sharing affordances.
+          // without the sharing affordances. Whether the lookup FAILED is
+          // kept separate from what it returned — null is not an answer, it
+          // is the absence of one, and it fails closed in channelIsLocked.
           bridge()
             .listChatChannelShares({ workspaceId })
-            .catch(() => null),
+            .then((value) => ({ answered: true, value }) as const)
+            .catch(() => ({ answered: false, value: null }) as const),
         ]);
         if (superseded()) return;
-        setChannelShares(shares);
-        setSharesWorkspaceId(workspaceId);
+        // A background refresh that could not reach the share metadata keeps
+        // what it already had: dropping to "unknown" would wipe the cached
+        // invitations and share controls, and lock every joined channel, for
+        // a refresh the user never asked for.
+        if (shares.answered || !options?.background) {
+          setChannelShares(shares.value);
+          setSharesWorkspaceId(workspaceId);
+        }
         setOverview({
           status: "ready",
           channels: result.channels,
