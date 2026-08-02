@@ -304,7 +304,7 @@ describe("Rust engine daemon lifecycle", () => {
       maxRestarts: 1,
       initialBackoffMs: 0,
       healthyResetMs: HEALTHY_RESET_MS,
-      restartWindowMs: 60_000,
+      restartWindowMs: 120_000,
       maxRestartsPerWindow: 3,
       launch: async (options) => {
         exits.push(options.onExit);
@@ -321,6 +321,8 @@ describe("Rust engine daemon lifecycle", () => {
         exits[generation]?.(1, null);
         // Every relaunch runs the smoke against a real temporary directory, so
         // waitFor's 1s default is not enough under a loaded full-suite run.
+        // The per-test timeout below has to exceed this, or the test dies
+        // before waitFor ever gives up.
         await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
           timeout: 5_000,
         });
@@ -332,16 +334,20 @@ describe("Rust engine daemon lifecycle", () => {
       exits[3]?.(1, null);
 
       await vi.waitFor(() => expect(terminalFailures).toHaveLength(1), {
-        timeout: 2_000,
+        timeout: 5_000,
       });
-      expect(terminalFailures[0]?.message).toMatch(
-        /crashed again after restarting 3 times in the last 60000ms; the restart limit \(3 restarts per 60000ms\) is reached, so it will not be restarted/,
+      expect(terminalFailures[0]?.message).toBe(
+        "The Rust engine crashed again after 3 restarts in the last 2 minutes. " +
+          "The limit is 3 restarts per 2 minutes. dohc stopped restarting it.",
       );
+      expect(terminalFailures[0]?.cause).toMatchObject({
+        message: "Rust engine daemon exited unexpectedly with code 1.",
+      });
       expect(exits).toHaveLength(4);
     } finally {
       await lifecycle.stop();
     }
-  });
+  }, 20_000);
 
   it("forgets restarts older than the rolling window", async () => {
     // MUTATION: drop the timestamp pruning in restartAfterExit and restarts
@@ -381,7 +387,159 @@ describe("Rust engine daemon lifecycle", () => {
     } finally {
       await lifecycle.stop();
     }
-  });
+  }, 20_000);
+
+  it("spends one window slot per crash, not per launch attempt", async () => {
+    // MUTATION: move the recordCrash call inside the attempt loop and the
+    // flaky first attempt of every crash burns a second slot — terminal
+    // arrives at crash 2 with only 2 generations launched, so both counts
+    // below fail. maxRestarts: 1 cannot tell the two apart; this needs a
+    // crash that costs more than one attempt.
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const terminalFailures: Error[] = [];
+    let launchCount = 0;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 3,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      restartWindowMs: 120_000,
+      maxRestartsPerWindow: 3,
+      launch: async (options) => {
+        launchCount += 1;
+        // Every crash costs two attempts: the first replacement fails its
+        // handshake, the second one takes.
+        if (launchCount > 1 && launchCount % 2 === 0) {
+          throw new Error("replacement handshake failed");
+        }
+        exits.push(options.onExit);
+        return new FakeClient();
+      },
+      onFailure: (error, terminal) => {
+        if (terminal) terminalFailures.push(error);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      for (let generation = 0; generation < 3; generation += 1) {
+        exits[generation]?.(1, null);
+        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
+          timeout: 5_000,
+        });
+        await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
+      }
+      expect(terminalFailures).toHaveLength(0);
+      exits[3]?.(1, null);
+
+      await vi.waitFor(() => expect(terminalFailures).toHaveLength(1), {
+        timeout: 5_000,
+      });
+      expect(terminalFailures[0]?.message).toMatch(/after 3 restarts/);
+      // 4 generations from 7 launch calls: 3 crashes recovered, each after one
+      // failed attempt. Counting attempts would have stopped at 2 generations.
+      expect(exits).toHaveLength(4);
+      expect(launchCount).toBe(7);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("expires window entries on the wall clock when the host suspends", async () => {
+    // performance.now() does not advance while a Linux host sleeps, so a
+    // laptop that wakes after the window would find its old crashes still
+    // "recent" and terminate on the next one.
+    // MUTATION: drop the wall-clock half of the filter and the retained
+    // entries end this run terminal at the third crash.
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const terminalFailures: Error[] = [];
+    const restartWindowMs = 120_000;
+    let wallNow = 0;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      restartWindowMs,
+      maxRestartsPerWindow: 2,
+      // The suspended host: its monotonic clock stands still while the wall
+      // clock crosses the window several times over.
+      monotonicNowMs: () => 0,
+      wallNowMs: () => wallNow,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new FakeClient();
+      },
+      onFailure: (error, terminal) => {
+        if (terminal) terminalFailures.push(error);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      for (let generation = 0; generation < 3; generation += 1) {
+        wallNow += restartWindowMs * 4;
+        exits[generation]?.(1, null);
+        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
+          timeout: 5_000,
+        });
+        await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
+      }
+
+      expect(exits).toHaveLength(4);
+      expect(terminalFailures).toHaveLength(0);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
+
+  it("expires window entries on the monotonic clock when the wall clock steps back", async () => {
+    // The inverse host fault: an NTP or VM correction moves the wall clock
+    // backwards, stranding entries in the future where no wall comparison
+    // ever expires them.
+    // MUTATION: drop the monotonic half of the filter and the stranded
+    // entries end this run terminal at the third crash.
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const terminalFailures: Error[] = [];
+    const restartWindowMs = HEALTHY_RESET_MS * 2;
+    let wallNow = 10 * 60_000;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      restartWindowMs,
+      maxRestartsPerWindow: 2,
+      wallNowMs: () => wallNow,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new FakeClient();
+      },
+      onFailure: (error, terminal) => {
+        if (terminal) terminalFailures.push(error);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      for (let generation = 0; generation < 3; generation += 1) {
+        // Each crash sees a wall clock a further ten minutes in the past.
+        wallNow -= 10 * 60_000;
+        exits[generation]?.(1, null);
+        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
+          timeout: 5_000,
+        });
+        // Real elapsed time, which the untouched monotonic clock measures,
+        // crosses the window between crashes.
+        await new Promise((resolve) => setTimeout(resolve, restartWindowMs * 4));
+      }
+
+      expect(exits).toHaveLength(4);
+      expect(terminalFailures).toHaveLength(0);
+    } finally {
+      await lifecycle.stop();
+    }
+  }, 20_000);
 
   it("counts a replacement that handshakes then hangs as a failed restart", async () => {
     let initialExit: EngineClientSpawnOptions["onExit"];

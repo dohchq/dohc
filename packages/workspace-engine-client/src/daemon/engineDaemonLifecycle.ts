@@ -51,6 +51,8 @@ export interface EngineDaemonLifecycleOptions {
   healthyResetMs?: number;
   restartWindowMs?: number;
   maxRestartsPerWindow?: number;
+  monotonicNowMs?: () => number;
+  wallNowMs?: () => number;
   requestTimeoutMs?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
   // Fires once per launched-and-healthy daemon generation (the first launch
@@ -123,6 +125,15 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+// The restart window reaches the user through a dialog, so it is spoken in
+// minutes there. Test-scale windows stay in milliseconds; no honest wording
+// rounds 40ms to a minute.
+function describeWindow(windowMs: number): string {
+  const minutes = windowMs / 60_000;
+  if (!Number.isInteger(minutes) || minutes < 1) return `${windowMs}ms`;
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
 function resultObject(
   response: Response,
   method: string,
@@ -144,6 +155,8 @@ export class EngineDaemonLifecycle {
   private readonly fileExists: (path: string) => boolean;
   private readonly tokenFactory: () => string;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly monotonicNowMs: () => number;
+  private readonly wallNowMs: () => number;
   private client: EngineDaemonClient | null = null;
   private restartPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
@@ -151,7 +164,7 @@ export class EngineDaemonLifecycle {
   private activeGeneration = 0;
   private nextRequestId = 1;
   private restartAttempts = 0;
-  private restartTimestamps: number[] = [];
+  private restartTimestamps: { mono: number; wall: number }[] = [];
   private running = false;
   private stopping = false;
   private healthyResetTimer: ReturnType<typeof setTimeout> | null = null;
@@ -179,6 +192,8 @@ export class EngineDaemonLifecycle {
           const timer = setTimeout(resolve, delayMs);
           timer.unref();
         }));
+    this.monotonicNowMs = options.monotonicNowMs ?? (() => performance.now());
+    this.wallNowMs = options.wallNowMs ?? (() => Date.now());
   }
 
   async start(): Promise<void> {
@@ -542,48 +557,26 @@ export class EngineDaemonLifecycle {
     this.running = false;
     this.client = null;
     const detail = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
-    this.reportFailure(
-      new EngineDaemonUnavailableError(
-        `Rust engine daemon exited unexpectedly with ${detail}.`,
-      ),
-      false,
+    const exitError = new EngineDaemonUnavailableError(
+      `Rust engine daemon exited unexpectedly with ${detail}.`,
     );
+    this.reportFailure(exitError, false);
     if (!this.restartPromise) {
-      this.restartPromise = this.restartAfterExit().finally(() => {
+      this.restartPromise = this.restartAfterExit(exitError).finally(() => {
         this.restartPromise = null;
       });
       void this.restartPromise.catch(() => undefined);
     }
   }
 
-  private async restartAfterExit(): Promise<void> {
+  private async restartAfterExit(exitError: Error): Promise<void> {
     const maxRestarts = this.options.maxRestarts ?? DEFAULT_MAX_RESTARTS;
-    const windowMs = this.options.restartWindowMs ?? DEFAULT_RESTART_WINDOW_MS;
-    const maxPerWindow =
-      this.options.maxRestartsPerWindow ?? DEFAULT_MAX_RESTARTS_PER_WINDOW;
-    let lastError: Error = new EngineDaemonUnavailableError(
-      "Rust engine daemon exited unexpectedly.",
-    );
+    // One entry per crash, not per launch attempt: the attempts inside a
+    // single crash are what `maxRestarts` already bounds, and counting them
+    // here would spend the window on one crash the daemon recovered from.
+    this.recordCrash(exitError);
+    let lastError: Error = exitError;
     while (this.restartAttempts < maxRestarts) {
-      // `restartAttempts` bounds a burst; a healthy generation resets it. This
-      // window bounds the rate, so a daemon that dies just past healthyResetMs
-      // over and over still ends terminal instead of restarting forever.
-      // performance.now() rather than the wall clock: an NTP or VM correction
-      // that steps the clock backwards would strand timestamps in the future
-      // and end a later restart terminal that the window should have forgotten.
-      const now = performance.now();
-      this.restartTimestamps = this.restartTimestamps.filter(
-        (at) => at > now - windowMs,
-      );
-      if (this.restartTimestamps.length >= maxPerWindow) {
-        const terminal = new EngineDaemonUnavailableError(
-          `Rust engine crashed again after restarting ${this.restartTimestamps.length} times in the last ${windowMs}ms; the restart limit (${maxPerWindow} restarts per ${windowMs}ms) is reached, so it will not be restarted.`,
-          { cause: lastError },
-        );
-        this.reportFailure(terminal, true);
-        throw terminal;
-      }
-      this.restartTimestamps.push(now);
       const attempt = ++this.restartAttempts;
       const delay = Math.min(
         (this.options.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS) *
@@ -607,6 +600,36 @@ export class EngineDaemonLifecycle {
     );
     this.reportFailure(terminal, true);
     throw terminal;
+  }
+
+  // Throws the terminal failure when this crash is one too many for the
+  // window. `restartAttempts` bounds a burst and a healthy generation resets
+  // it, so only this window can end a daemon that dies just past
+  // healthyResetMs over and over.
+  private recordCrash(exitError: Error): void {
+    const windowMs = this.options.restartWindowMs ?? DEFAULT_RESTART_WINDOW_MS;
+    const maxPerWindow =
+      this.options.maxRestartsPerWindow ?? DEFAULT_MAX_RESTARTS_PER_WINDOW;
+    // Neither clock survives both failure modes alone, so an entry expires
+    // when EITHER says it is older than the window. A backwards wall step
+    // (NTP, VM adjust) under-ages entries the monotonic side still expires; a
+    // host suspend stops the monotonic clock, and the wall side expires the
+    // entries that slept through the window.
+    const mono = this.monotonicNowMs();
+    const wall = this.wallNowMs();
+    this.restartTimestamps = this.restartTimestamps.filter(
+      (at) => at.mono > mono - windowMs && at.wall > wall - windowMs,
+    );
+    if (this.restartTimestamps.length >= maxPerWindow) {
+      const window = describeWindow(windowMs);
+      const terminal = new EngineDaemonUnavailableError(
+        `The Rust engine crashed again after ${this.restartTimestamps.length} restarts in the last ${window}. The limit is ${maxPerWindow} restarts per ${window}. dohc stopped restarting it.`,
+        { cause: exitError },
+      );
+      this.reportFailure(terminal, true);
+      throw terminal;
+    }
+    this.restartTimestamps.push({ mono, wall });
   }
 
   private scheduleHealthyReset(generation: number): void {
