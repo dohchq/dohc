@@ -102,24 +102,39 @@ export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 ///   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
 ///
 /// WHY THIS VALUE. It is the largest round value that provably fits the frame
-/// in the worst case, and it clears `CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS` by
+/// in the worst case, and it clears `CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES` by
 /// more than double — which matters, because that corpus figure grew by 6%
 /// during the writing of this change alone. UTF-8 never spends less than one
 /// byte per UTF-16 code unit, so a bound in BYTES caps the code units that
 /// drive the cost above for every script.
 ///
+/// WHAT IT HOLDS, per script, because bytes are not characters. About
+/// 1,048,576 characters of ASCII; about 524,288 of Latin-1 accented text or
+/// Greek or Cyrillic at two bytes; about 349,525 of CJK or most other
+/// three-byte text; about 262,144 emoji. The corpus behind the healthy figure
+/// is ASCII-dominated source and Markdown, so it says nothing about how large
+/// a healthy CJK document is — that is the open question in this number, and
+/// it is why the guard pins the CJK case explicitly rather than trusting a
+/// character count to stand in for a byte one.
+///
 /// Above the bound the surface degrades rather than refuses: keep a side, then
 /// edit the file in the editor, which is incremental and pays none of this.
 export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 1024 * 1024;
 
-/// The largest document in the measured corpus, in characters — the healthy
+/// The largest document in the measured corpus, in UTF-8 BYTES — the healthy
 /// maximum the bound above has to clear (AGENTS.md: set a limit that rejects
 /// work beyond the measured healthy range).
+///
+/// BYTES, because that is the unit the bound is enforced in. Recording it in
+/// characters compared two different things and proved nothing for any
+/// multi-byte script: a 400,000-character CJK document is comfortably under
+/// the character maximum and about 1.2 MiB of UTF-8, which this surface
+/// refuses. `engineTextLimits.test.ts` now pins that case directly.
 ///
 /// A SNAPSHOT, re-read by conflictPane.measure.test.ts, which prints the
 /// current corpus every run. It drifts as the repository grows; when it passes
 /// the bound, re-measure both rather than nudging this number.
-export const CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS = 495_878;
+export const CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES = 496_029;
 
 export type ConflictPreview = {
   /// The text the pane paints.

@@ -19,7 +19,8 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
-  CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS,
+  CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES,
+  applyCombinedChange,
 } from "./conflictPane";
 
 const repoRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
@@ -54,10 +55,28 @@ describe("the bound on what a combined copy can be edited to", () => {
     );
   });
 
-  it("sits above the largest healthy document", () => {
+  it("sits above the largest healthy document, in the unit it is enforced in", () => {
+    // Both numbers are UTF-8 bytes. Comparing the byte limit against a
+    // CHARACTER count proved nothing for any multi-byte script — see below.
     expect(CONFLICT_COMBINED_EDIT_MAX_BYTES).toBeGreaterThan(
-      CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS,
+      CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES,
     );
+  });
+
+  it("measures a multi-byte document in bytes, not characters", () => {
+    // The case that made the unit matter: a CJK document well under the
+    // corpus's CHARACTER maximum, and over the bound in bytes. If the enforced
+    // limit ever went back to counting characters, this document would be
+    // accepted and then refused by the engine.
+    const han = String.fromCodePoint(0x65e5);
+    const cjk = han.repeat(400_000);
+    expect(cjk.length).toBeLessThan(CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES);
+    expect(applyCombinedChange(cjk).accepted).toBe(false);
+
+    // And the honest capacity of the bound for that script: three bytes per
+    // character, so about a third of the byte figure.
+    const fits = han.repeat(Math.floor(CONFLICT_COMBINED_EDIT_MAX_BYTES / 3));
+    expect(applyCombinedChange(fits).accepted).toBe(true);
   });
 
   it("keeps the imported frame budget equal to the daemon's", () => {

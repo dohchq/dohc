@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
-  CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS,
+  CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES,
   CONFLICT_PREVIEW_MAX_CHARS,
   CONFLICT_PREVIEW_MAX_LINES,
   conflictPreview,
@@ -75,6 +75,10 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
   it("reports the size of representative healthy documents", () => {
     const lines: number[] = [];
     const chars: number[] = [];
+    // BYTES is the unit CONFLICT_COMBINED_EDIT_MAX_BYTES is enforced in, so it
+    // is the one the healthy maximum has to be recorded in. Characters stay
+    // beside it because the preview windows are counted in those.
+    const bytes: number[] = [];
     const longestLine: number[] = [];
     let overCharWindow = 0;
     let overLineWindow = 0;
@@ -96,6 +100,7 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
       const fileLines = text.split("\n");
       lines.push(fileLines.length);
       chars.push(text.length);
+      bytes.push(Buffer.byteLength(text, "utf8"));
       const widestLine = fileLines.reduce((widest, line) => Math.max(widest, line.length), 0);
       longestLine.push(widestLine);
       if (widestLine > CONFLICT_PREVIEW_MAX_CHARS) overLongestLine += 1;
@@ -109,6 +114,7 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
         `\n\n${lines.length.toLocaleString("en-US")} tracked text files\n` +
         `${describeSpread("lines", lines)}\n` +
         `${describeSpread("chars", chars)}\n` +
+        `${describeSpread("utf-8 bytes", bytes)}\n` +
         `${describeSpread("longest line", longestLine)}\n\n` +
         `over the character window: ${overCharWindow} ` +
         `(${((overCharWindow / lines.length) * 100).toFixed(1)}%)\n` +
@@ -348,7 +354,7 @@ createRoot(document.getElementById("root")).render(createElement(Bench));
       };
 
       const ladder = [
-        CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS,
+        CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES,
         CONFLICT_COMBINED_EDIT_MAX_BYTES,
         2 * 1024 * 1024,
         4 * 1024 * 1024,
@@ -383,7 +389,7 @@ createRoot(document.getElementById("root")).render(createElement(Bench));
         `\nCONFLICT_COMBINED_EDIT_MAX_BYTES = ` +
           `${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")}` +
           `\nlargest healthy document = ` +
-          `${CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS.toLocaleString("en-US")} characters` +
+          `${CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES.toLocaleString("en-US")} UTF-8 bytes` +
           `\n\naccepted keystroke, native event to settled DOM\n` +
           `${acceptedRows.join("\n")}` +
           `\n\nrefused keystroke at the bound (React restores the whole value)\n` +
