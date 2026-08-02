@@ -1628,7 +1628,7 @@ fn shared_channel_replicated_chat_is_findable_through_the_real_search_reader() {
         share_id: "search-share".to_owned(),
         surface: ShareSurface::SharedChannel,
         channel_wire_id: Some("search-wire".to_owned()),
-        path_prefix: None,
+        granted: None,
     };
     let channel = replicated_envelope(
         "shared-peer",

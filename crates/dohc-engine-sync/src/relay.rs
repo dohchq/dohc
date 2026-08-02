@@ -908,7 +908,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             share_id: share_id.to_owned(),
             surface: crate::ShareSurface::SharedChannel,
             channel_wire_id: Some(channel_wire_id.to_owned()),
-            path_prefix: None,
+            granted: None,
         };
         let mut applied = 0_usize;
         let mut refused = 0_usize;
@@ -1111,11 +1111,21 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(SharedChannelPushOutcome { pushed })
     }
 
+    /// Pull one page of a received share.
+    ///
+    /// `granted` is the selector the relay stated for this share, pinned by
+    /// the recipient on first read, and it is enforced against every inbound
+    /// op. The relay selects the page, but the relay is not trusted to select
+    /// it honestly: an op addressing a path outside the pinned selector — or
+    /// claiming a version it does not grant — is skipped before replay, so
+    /// its blob is never requested. There is no unscoped pull: the grant is
+    /// required, and one that selects nothing admits nothing.
     pub fn pull_share_view(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         share_id: &str,
+        granted: &crate::ShareGrant,
         faults: &dyn FaultInjector,
     ) -> Result<ShareViewPullOutcome, RelayError> {
         let mut cursor =
@@ -1134,7 +1144,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             share_id: share_id.to_owned(),
             surface: crate::ShareSurface::ShareView,
             channel_wire_id: None,
-            path_prefix: None,
+            granted: Some(granted.clone()),
         };
         let mut applied = 0_usize;
         let mut skipped = 0_usize;

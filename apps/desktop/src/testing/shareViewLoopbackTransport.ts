@@ -49,6 +49,10 @@ import {
 //    sha256 and hash-verified, and the bearer token comes from what
 //    `workspace.open` was told — so a wrong token or a revoked share reaches
 //    the same 401 / 404 translation the daemon produces.
+//  - NOT REAL: the grant. This double serves whatever the relay double put in
+//    the log; it does not re-check `grantedSelector`. Containment is the Rust
+//    share boundary's job (`crates/dohc-engine-sync/src/share.rs`) and is
+//    tested there. Do not read a passing test here as proof a scope holds.
 //  - NOT REAL: durability. Cursors and file state live in this object, so they
 //    survive a `workspace.close` (as the daemon's SQLite would) but not the
 //    process. Anything that must be proven ON DISK needs a real daemon.
@@ -539,7 +543,10 @@ export interface ShareViewDaemonHarness {
     workspaceId: string;
     rootPath: string;
     shareMount?: true;
-  }): (input: { shareId: string }) => Promise<PullShareViewResult>;
+  }): (input: {
+    shareId: string;
+    grantedSelector: { paths: string[]; versionId: string | null };
+  }) => Promise<PullShareViewResult>;
   closeAll(): Promise<void>;
 }
 
@@ -589,7 +596,8 @@ export function createShareViewDaemonHarness(
     },
     pullFor(target) {
       const client = live.bind({ ...target, relay: bound });
-      return async ({ shareId }) => await client.pullShareView({ shareId });
+      return async ({ shareId, grantedSelector }) =>
+        await client.pullShareView({ shareId, grantedSelector });
     },
     async closeAll() {
       await sessions.closeAll();

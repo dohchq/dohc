@@ -358,7 +358,10 @@ import {
   parseSyncCode,
   relayUrlsMatch,
 } from "./workspaces/syncCode";
-import { refreshSharedViewOnce } from "./workspaces/sharedView";
+import {
+  SharePinInvalidError,
+  refreshSharedViewOnce,
+} from "./workspaces/sharedView";
 import {
   assertMountableSelector,
   createMountDirectory,
@@ -386,7 +389,10 @@ import type {
   ChatThread,
   VersionedTextMomentSummary,
 } from "@dohc/workspace-contracts/engine";
-import { fetchShareViewInfo } from "./workspaces/shareViewInfo";
+import {
+  ShareSelectorInvalidError,
+  fetchShareViewInfo,
+} from "./workspaces/shareViewInfo";
 import { fetchSharedChannelInfo } from "./workspaces/sharedChannelInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
@@ -4356,8 +4362,18 @@ function registerIpcHandlers(
       if (error instanceof RelayUnauthorizedError) {
         throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
       }
+      if (error instanceof ShareSelectorInvalidError) {
+        throw new Error(
+          "This share can't be opened: the server didn't say what it shares. Try again later.",
+        );
+      }
       throw error;
     }
+    // A chat-channel code has no file selector, so there is no scope to
+    // enforce and nothing to project. Refuse it here rather than record a
+    // grant of "everything" (the mount path says the same through
+    // assertMountableSelector).
+    assertMountableSelector(info.selector);
     const rootPath = usableRoot(input.rootPath);
     const existingEntries = await readdir(rootPath).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
@@ -4378,6 +4394,9 @@ function registerIpcHandlers(
     setWorkspaceShareView(created.workspaceId, {
       shareId: parsed.shareId,
       granterEmail: info.granterEmail,
+      // Pin the selector the relay just stated, so later pulls enforce it
+      // instead of trusting the relay's selection each time.
+      grantedSelector: info.selector,
       // Persist the origin relay so a later refresh signed into a DIFFERENT
       // relay is skipped instead of misreading a 404 as "share ended".
       relayUrl: credentials.relayUrl,
@@ -4395,9 +4414,13 @@ function registerIpcHandlers(
         relay,
         shareId: parsed.shareId,
         store: sharedViewStoreFor(created),
+        // Just pinned on the record above; the refresh reads it back through
+        // the same defensive parse every later refresh uses.
+        pinnedSelector: info.selector,
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
+            grantedSelector: input.grantedSelector,
           }),
       });
       if (outcome.status === "ended") {
@@ -4457,17 +4480,33 @@ function registerIpcHandlers(
       rootPath: workspace.rootPath,
       relay,
     });
-    const outcome = await refreshSharedViewOnce({
-      rootDir: workspace.rootPath,
-      workspaceId: workspace.workspaceId,
-      relay,
-      shareId: shareView.shareId,
-      store: sharedViewStoreFor(workspace),
-      pull: async (input) =>
-        await daemonRelay.pullShareView({
-          shareId: input.shareId,
-        }),
-    });
+    let outcome;
+    try {
+      outcome = await refreshSharedViewOnce({
+        rootDir: workspace.rootPath,
+        workspaceId: workspace.workspaceId,
+        relay,
+        shareId: shareView.shareId,
+        store: sharedViewStoreFor(workspace),
+        pinnedSelector: shareView.grantedSelector,
+        pull: async (input) =>
+          await daemonRelay.pullShareView({
+            shareId: input.shareId,
+            grantedSelector: input.grantedSelector,
+          }),
+      });
+    } catch (error) {
+      // A damaged pin does not heal on the next try, and re-asking the relay
+      // for one would let it restate a wider scope. Say so instead of
+      // reporting "refreshed, nothing new" forever.
+      if (error instanceof SharePinInvalidError) {
+        throw new Error(
+          "This shared view's record is damaged, so it can't refresh safely. " +
+            "Remove it, then open the share code again.",
+        );
+      }
+      throw error;
+    }
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
       // refreshing; the notice survives restarts.
@@ -4565,6 +4604,8 @@ function registerIpcHandlers(
       granterEmail: info.granterEmail,
       relayUrl: credentials.relayUrl,
       recipientEmail: credentials.email ?? null,
+      // Pin the selector the relay just stated (same reason as a view).
+      grantedSelector: info.selector,
     };
     await createMountDirectory(workspace.rootPath, mount.label);
     const mountRelayTarget = relayTargetForShareMount(
@@ -4591,9 +4632,13 @@ function registerIpcHandlers(
         mount,
         relay,
         openStore: sharedViewStoreFor,
+        // Just pinned on the record above; read back through the same
+        // defensive parse every later refresh uses.
+        pinnedSelector: info.selector,
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
+            grantedSelector: input.grantedSelector,
           }),
       });
       if (outcome.status === "ended") throw new ShareUnavailableError();
@@ -4695,9 +4740,11 @@ function registerIpcHandlers(
           mount,
           relay,
           openStore: sharedViewStoreFor,
+          pinnedSelector: mount.grantedSelector,
           pull: async (input) =>
             await daemonRelay.pullShareView({
               shareId: input.shareId,
+              grantedSelector: input.grantedSelector,
             }),
         });
         if (outcome.status === "ended") {
@@ -4723,6 +4770,15 @@ function registerIpcHandlers(
         if (error instanceof RelayUnauthorizedError) {
           throw new Error(
             "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+          );
+        }
+        // A damaged pin is permanent, like the expired session above: no
+        // later refresh repairs it, and the relay must not be asked for a
+        // replacement scope. Reporting "unchanged" would hide it forever.
+        if (error instanceof SharePinInvalidError) {
+          throw new Error(
+            `The record for the share in "${mount.label}" is damaged, so it can't ` +
+              "refresh safely. Remove that share, then add it again.",
           );
         }
         // One mount's network failure must not stop the others; report it

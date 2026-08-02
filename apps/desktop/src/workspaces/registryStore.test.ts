@@ -125,6 +125,7 @@ describe("registry store", () => {
       label: "alex",
       granterEmail: "alex@example.com",
       relayUrl: "http://relay.test",
+      grantedSelector: { paths: ["docs"], versionId: null },
     };
     store.setShareMounts("ws-1", [mount]);
     expect(store.find("ws-1")?.shareMounts).toEqual([mount]);
@@ -152,21 +153,31 @@ describe("registry store", () => {
 
   it("persists a shared-view identity and its ended state (PR 18)", () => {
     store.register(personal);
-    store.setShareView("ws-1", { shareId: "share-1", granterEmail: "granter@dohc.test" });
+    store.setShareView("ws-1", {
+      shareId: "share-1",
+      granterEmail: "granter@dohc.test",
+      grantedSelector: { paths: ["docs"], versionId: null },
+    });
     expect(store.find("ws-1")?.shareView).toEqual({
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
+      grantedSelector: { paths: ["docs"], versionId: null },
     });
     // Marking ended survives a fresh read of the same file.
     store.setShareView("ws-1", {
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
+      grantedSelector: { paths: ["docs"], versionId: null },
       ended: true,
     });
     const reread = createRegistryStore(registryPath);
     expect(reread.find("ws-1")?.shareView?.ended).toBe(true);
     expect(() =>
-      store.setShareView("ws-unknown", { shareId: "s", granterEmail: null }),
+      store.setShareView("ws-unknown", {
+        shareId: "s",
+        granterEmail: null,
+        grantedSelector: { paths: ["docs"], versionId: null },
+      }),
     ).toThrow(/Unknown workspace/);
   });
 
@@ -175,6 +186,7 @@ describe("registry store", () => {
     store.setShareView("ws-1", {
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
+      grantedSelector: { paths: ["docs"], versionId: null },
       relayUrl: "https://relay.origin.example",
     });
     const reread = createRegistryStore(registryPath);

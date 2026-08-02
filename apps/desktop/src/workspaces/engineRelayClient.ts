@@ -477,7 +477,10 @@ export interface EngineRelayWorkspaceClient {
   }): Promise<PushSharedChannelResult>;
   pullShareView(input: {
     shareId: string;
-    pathPrefix?: string;
+    // The selector the relay stated for this share, pinned on first read.
+    // Required, because the engine has no unscoped pull: a caller that cannot
+    // resolve a selector must skip its refresh, not widen it.
+    grantedSelector: { paths: readonly string[]; versionId: string | null };
   }): Promise<PullShareViewResult>;
 }
 
@@ -824,7 +827,7 @@ export class EngineRelayClient {
           pushed: numberField(result, "pushed", "share.channel.push"),
         };
       },
-      pullShareView: async ({ shareId, pathPrefix = "" }) => {
+      pullShareView: async ({ shareId, grantedSelector }) => {
         let fetched = 0;
         let applied = 0;
         let nextCursor = 0;
@@ -843,7 +846,13 @@ export class EngineRelayClient {
             await request("share.view.pull", {
               workspaceId: workspace.workspaceId,
               shareId,
-              pathPrefix,
+              // Both dimensions, always. Dropping the paths leaves a grant
+              // that selects everything under a version; dropping the version
+              // leaves one the engine refuses outright.
+              grantedSelector: {
+                paths: [...grantedSelector.paths],
+                versionId: grantedSelector.versionId,
+              },
             }),
             "share.view.pull",
           );

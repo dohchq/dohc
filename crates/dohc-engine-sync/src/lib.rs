@@ -63,7 +63,7 @@ pub use relay::{
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
-pub use share::{ShareBoundary, ShareSurface, apply_shared_envelope};
+pub use share::{ShareBoundary, ShareGrant, ShareSurface, apply_shared_envelope};
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
     LeaseProbe, NoLiveLeases, YdocApplyResult, YdocDrainResult, apply_ydoc_envelope,

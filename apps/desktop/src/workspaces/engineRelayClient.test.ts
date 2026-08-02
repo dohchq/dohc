@@ -34,6 +34,12 @@ import {
 } from "./shareMounts";
 import { syncJoinedSharedChannels } from "./sharedChannels";
 import { refreshSharedViewOnce } from "./sharedView";
+
+// Every test in this file pulls with the selector its share record pins. The
+// damaged-record path has its own tests in sharedView.test.ts. This is a REAL
+// selector — no paths and no version selects nothing at all, which the engine
+// refuses.
+const PINNED_SELECTOR = { paths: ["docs"], versionId: null };
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
 class MockDaemon implements EngineDaemonClient {
@@ -407,8 +413,12 @@ describe("EngineRelayClient", () => {
       relay,
       shareId: "share-view",
       store,
+      pinnedSelector: PINNED_SELECTOR,
       pull: async (input) =>
-        await client.pullShareView({ shareId: input.shareId }),
+        await client.pullShareView({
+          shareId: input.shareId,
+          grantedSelector: input.grantedSelector,
+        }),
     });
 
     expect(outcome).toEqual({ status: "unchanged", changedPaths: 0 });
@@ -432,7 +442,43 @@ describe("EngineRelayClient", () => {
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
-      pathPrefix: "",
+      grantedSelector: { paths: ["docs"], versionId: null },
+    });
+    await sessions.closeAll();
+  });
+
+  // Both dimensions of the accepted selector reach the engine intact. Dropping
+  // either one widens the grant: no paths reads as "the whole workspace", and
+  // no version reads as "any version's fork".
+  it("sends the accepted selector's paths AND version to the engine", async () => {
+    const { rootPath, daemon, sessions, client, relay } = await harness();
+    const store = createCaptureLiveStores(
+      { workspaceId: "workspace-a", rootPath },
+      sessions,
+    ).store;
+    await refreshSharedViewOnce({
+      rootDir: rootPath,
+      workspaceId: "workspace-a",
+      relay,
+      shareId: "share-view",
+      store,
+      pinnedSelector: { paths: ["docs"], versionId: "v1" },
+      pull: async (input) =>
+        await client.pullShareView({
+          shareId: input.shareId,
+          grantedSelector: input.grantedSelector,
+        }),
+    });
+
+    expect(
+      daemon.requests.find(
+        (request) => request.method === "share.view.pull",
+      )?.params,
+      "MUTATION: dropping either dimension on the wire widens the accepted grant",
+    ).toEqual({
+      workspaceId: "workspace-a",
+      shareId: "share-view",
+      grantedSelector: { paths: ["docs"], versionId: "v1" },
     });
     await sessions.closeAll();
   });
@@ -495,8 +541,12 @@ describe("EngineRelayClient", () => {
         relay,
         shareId: "share-view",
         store,
+        pinnedSelector: PINNED_SELECTOR,
         pull: async (input) =>
-          await client.pullShareView({ shareId: input.shareId }),
+          await client.pullShareView({
+            shareId: input.shareId,
+            grantedSelector: input.grantedSelector,
+          }),
       }),
     ).resolves.toEqual({ status: "updated", changedPaths: 1 });
 
@@ -522,8 +572,12 @@ describe("EngineRelayClient", () => {
         relay,
         openStore: (workspace) =>
           createCaptureLiveStores(workspace, sessions).store,
+        pinnedSelector: PINNED_SELECTOR,
         pull: async (input) =>
-          await mountRelay.pullShareView({ shareId: input.shareId }),
+          await mountRelay.pullShareView({
+            shareId: input.shareId,
+            grantedSelector: input.grantedSelector,
+          }),
       }),
     ).resolves.toEqual({ status: "unchanged", changedPaths: 0 });
 
@@ -579,7 +633,10 @@ describe("EngineRelayClient", () => {
     ).store;
 
     await expect(
-      client.pullShareView({ shareId: "share-revoked" }),
+      client.pullShareView({
+        shareId: "share-revoked",
+        grantedSelector: { paths: ["docs"], versionId: null },
+      }),
     ).rejects.toBeInstanceOf(ShareUnavailableError);
     await expect(
       refreshSharedViewOnce({
@@ -588,8 +645,12 @@ describe("EngineRelayClient", () => {
         relay,
         shareId: "share-revoked",
         store,
+        pinnedSelector: PINNED_SELECTOR,
         pull: async (input) =>
-          await client.pullShareView({ shareId: input.shareId }),
+          await client.pullShareView({
+            shareId: input.shareId,
+            grantedSelector: input.grantedSelector,
+          }),
       }),
     ).resolves.toEqual({ status: "ended", changedPaths: 0 });
     await expect(
@@ -798,7 +859,10 @@ describe("EngineRelayClient", () => {
     ).resolves.toMatchObject({ fetched: 2, applied: 2, nextCursor: 2 });
     expect(channelPulls).toBe(2);
 
-    const view = await client.pullShareView({ shareId: "share-view" });
+    const view = await client.pullShareView({
+      shareId: "share-view",
+      grantedSelector: { paths: ["docs"], versionId: null },
+    });
     expect(view).toMatchObject({
       fetched: 2,
       applied: 2,

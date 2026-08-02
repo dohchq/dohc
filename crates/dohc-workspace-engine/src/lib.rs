@@ -2194,6 +2194,7 @@ impl EngineService {
                 RelayOperation::PullShareView {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
+                    granted: params.granted_selector.into(),
                 },
                 "share.view.pull",
             )
@@ -8325,8 +8326,29 @@ struct SharedChannelParams {
 struct ShareViewParams {
     workspace_id: String,
     share_id: String,
-    #[serde(default, rename = "pathPrefix")]
-    _legacy_path_prefix: Option<String>,
+    /// The selector the relay stated for this share, pinned by the caller on
+    /// first read. REQUIRED, and required as an object: absent and explicit
+    /// `null` both parse as "no scope", which is the one pull nothing checks.
+    /// Serde refuses either — a caller with no selector must resolve one
+    /// before it pulls.
+    granted_selector: GrantedSelectorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GrantedSelectorParams {
+    paths: Vec<String>,
+    #[serde(default)]
+    version_id: Option<String>,
+}
+
+impl From<GrantedSelectorParams> for dohc_engine_sync::ShareGrant {
+    fn from(params: GrantedSelectorParams) -> Self {
+        Self {
+            paths: params.paths,
+            version_id: params.version_id,
+        }
+    }
 }
 
 #[derive(Deserialize)]

@@ -18,6 +18,16 @@ export interface RemoteIdentity {
 export interface ShareViewIdentity {
   shareId: string;
   granterEmail: string | null;
+  // The selector the relay stated for this share, pinned here when the record
+  // is created so every later pull enforces it locally instead of trusting
+  // the relay to send only what it granted. Empty `paths` with a `versionId`
+  // is a whole-workspace version share; `versionId` null follows main.
+  //
+  // REQUIRED. Both accept paths resolve a selector before the record exists,
+  // so a record without one is damaged, never merely old. Its refresh refuses
+  // rather than asking the relay for a replacement — that ask is the one a
+  // relay able to damage a record would answer with a wider scope.
+  grantedSelector: { paths: string[]; versionId: string | null };
   ended?: boolean;
   // The relay this share was opened from. A refresh only ever runs against
   // this origin relay; signed into a different relay, the refresh is skipped
@@ -61,6 +71,10 @@ export interface ShareMountRecord {
   // account, a refresh must SKIP (not flip the mount to ended). Null on
   // records from before this field existed — those refresh as before.
   recipientEmail?: string | null;
+  // Same REQUIRED pinned selector as ShareViewIdentity.grantedSelector, for
+  // the same reason: the mount's pulls enforce it against the relay's
+  // selection, and a record without one is damaged.
+  grantedSelector: { paths: string[]; versionId: string | null };
   ended?: boolean;
 }
 

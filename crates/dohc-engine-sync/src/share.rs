@@ -20,7 +20,30 @@ pub struct ShareBoundary {
     pub share_id: String,
     pub surface: ShareSurface,
     pub channel_wire_id: Option<String>,
-    pub path_prefix: Option<String>,
+    /// The share's pinned selector. A ShareView boundary without one admits
+    /// nothing: an unscoped view pull would enforce no containment, which is
+    /// the whole property this boundary exists to hold. A SharedChannel
+    /// boundary carries none by design — it scopes by `channel_wire_id`.
+    pub granted: Option<ShareGrant>,
+}
+
+/// The selector the RELAY stated for a received share, pinned by the
+/// recipient the first time it read it and enforced against every later pull
+/// (trust on first use). The recipient never chooses or reviews this scope;
+/// pinning only stops the relay from restating a wider one later.
+///
+/// Mirrors the relay's own `ShareSelector`
+/// (`services/sync-relay/src/shareFilter.ts`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShareGrant {
+    /// Granted paths. Each selects itself and everything beneath it. EMPTY
+    /// selects every tracked path, but ONLY together with a `version_id` —
+    /// see `path_within_grant`.
+    pub paths: Vec<String>,
+    /// The granted version. `None` is a live-follow share of the workspace's
+    /// main version, which is never entitled to a `version.create`; `Some(id)`
+    /// is a version share, entitled to exactly that version's create.
+    pub version_id: Option<String>,
 }
 
 /// Apply an inbound shared op only if its channel/path selector remains inside
@@ -190,17 +213,33 @@ fn thread_bound_to_wire(
 
 /// Fail-closed ShareView scoping. EVERY referenced path (`path`,
 /// `payloadBeforePath`, `payloadAfterPath`, `beforePath`) must classify
-/// `Tracked` and sit within the grant prefix, and at least one must be present
-/// — mirroring `services/sync-relay/src/shareFilter.ts` moment.append
+/// `Tracked` and sit within the pinned grant, and at least one must be
+/// present — mirroring `services/sync-relay/src/shareFilter.ts` moment.append
 /// all-paths visibility so a rename crossing the boundary cannot leak the
 /// outside path.
 fn enforce_share_view_boundary(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    let prefix = boundary.path_prefix.as_deref();
+    // No pinned grant, no containment to enforce — so nothing is admitted.
+    let granted = boundary
+        .granted
+        .as_ref()
+        .ok_or(SyncError::ShareBoundaryViolation)?;
     if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
         return Err(SyncError::ShareBoundaryViolation);
+    }
+    // The version dimension, mirroring the relay: only a VERSION share is
+    // entitled to a `version.create`, and only to the version it was granted.
+    // This is the ONLY op the recipient can check that way — the relay
+    // minimizes a served `moment.append` down to paths, blob and operation,
+    // so an inbound moment carries no version identity at all.
+    if op.op_kind == "version.create" {
+        let claimed = op.payload.get("versionId").and_then(Value::as_str);
+        match (granted.version_id.as_deref(), claimed) {
+            (Some(entitled), Some(claimed)) if entitled == claimed => {}
+            _ => return Err(SyncError::ShareBoundaryViolation),
+        }
     }
     let mut paths = Vec::new();
     for field in [
@@ -232,30 +271,66 @@ fn enforce_share_view_boundary(
         return Err(SyncError::ShareBoundaryViolation);
     }
     for path in paths {
-        if classify_share_path(path) != PathClass::Tracked
-            || prefix.is_some_and(|prefix| !path_within_prefix(path, prefix))
-        {
+        if classify_share_path(path) != PathClass::Tracked || !path_within_grant(path, granted) {
             return Err(SyncError::ShareBoundaryViolation);
         }
     }
     Ok(())
 }
 
-fn path_within_prefix(path: &str, prefix: &str) -> bool {
-    prefix.is_empty()
-        || path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|tail| tail.starts_with('/'))
+/// The relay's own selection rule (`shareFilter.ts` `pathVisibleThroughShare`),
+/// re-run against the pinned grant. A granted path selects itself and
+/// everything beneath it. NO paths selects every tracked path, but only for a
+/// version share: the relay answers `selector.versionId !== null` there, and
+/// refuses to create a selector with neither dimension at all
+/// (`validateShareSelector`, `empty_selector`). Reading no paths as "the whole
+/// workspace" regardless of version is exactly the divergence that would let a
+/// grant the relay serves NOTHING through admit everything here.
+fn path_within_grant(path: &str, grant: &ShareGrant) -> bool {
+    if grant.paths.is_empty() {
+        return grant.version_id.is_some();
+    }
+    grant.paths.iter().any(|selected| {
+        path == selected
+            || path
+                .strip_prefix(selected.as_str())
+                .is_some_and(|tail| tail.starts_with('/'))
+    })
 }
 
 #[cfg(test)]
-mod path_prefix_tests {
-    use super::path_within_prefix;
+mod granted_path_tests {
+    use super::{ShareGrant, path_within_grant};
+
+    fn grant(paths: &[&str], version_id: Option<&str>) -> ShareGrant {
+        ShareGrant {
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            version_id: version_id.map(str::to_owned),
+        }
+    }
 
     #[test]
-    fn empty_prefix_is_the_tracked_workspace_root() {
-        assert!(path_within_prefix("notes/plan.md", ""));
-        assert!(path_within_prefix("plan.md", ""));
+    fn no_paths_selects_the_whole_tracked_workspace_only_for_a_version_share() {
+        let version_share = grant(&[], Some("v1"));
+        assert!(path_within_grant("notes/plan.md", &version_share));
+        assert!(path_within_grant("plan.md", &version_share));
+    }
+
+    /// The relay refuses to create this selector and serves nothing through
+    /// one that exists anyway. The mirror must agree.
+    #[test]
+    fn no_paths_and_no_version_selects_nothing() {
+        let selects_nothing = grant(&[], None);
+        assert!(!path_within_grant("notes/plan.md", &selects_nothing));
+        assert!(!path_within_grant("plan.md", &selects_nothing));
+    }
+
+    #[test]
+    fn a_granted_path_selects_itself_and_its_children_only() {
+        let granted = grant(&["notes"], None);
+        assert!(path_within_grant("notes", &granted));
+        assert!(path_within_grant("notes/plan.md", &granted));
+        assert!(!path_within_grant("notes-private/plan.md", &granted));
+        assert!(!path_within_grant("other/plan.md", &granted));
     }
 }

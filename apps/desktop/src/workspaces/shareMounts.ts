@@ -131,14 +131,16 @@ export async function createMountDirectory(
   await mkdir(rootDir); // NOT recursive: EEXIST refuses adoption
 }
 
-// A mount needs file content to follow: a selector with no paths and no
-// version is a different grant kind (a chat-channel share) that must be
-// joined from Chats, not mounted as an (empty) folder.
-export function assertMountableSelector(selector: {
-  paths: readonly string[];
-  versionId: string | null;
-}): void {
-  if (selector.paths.length === 0 && selector.versionId === null) {
+// A mount needs file content to follow. A null selector is a different grant
+// kind (a chat-channel share, which carries no file selector at all) and must
+// be joined from Chats, not mounted as an (empty) folder. An unreadable
+// selector never reaches here — `fetchShareViewInfo` refuses it outright,
+// because softening one into "grants everything" is exactly the widening this
+// containment exists to stop.
+export function assertMountableSelector(
+  selector: { paths: readonly string[]; versionId: string | null } | null,
+): asserts selector is { paths: readonly string[]; versionId: string | null } {
+  if (selector === null) {
     throw new Error(
       "This code is for a shared chat channel — join it from Chats instead of mounting it.",
     );
@@ -191,6 +193,9 @@ export async function refreshShareMountOnce(input: {
   mount: Pick<ShareMountRecord, "shareId" | "label">;
   relay: SyncRelayConnection;
   pull: Parameters<typeof refreshSharedViewOnce>[0]["pull"];
+  // Read from the mount record before this pull, exactly as a standalone
+  // view does.
+  pinnedSelector: unknown;
   openStore: (workspace: {
     workspaceId: string;
     rootPath: string;
@@ -226,6 +231,7 @@ export async function refreshShareMountOnce(input: {
       relay: input.relay,
       shareId: input.mount.shareId,
       pull: input.pull,
+      pinnedSelector: input.pinnedSelector,
       store,
     });
     if (repaired === 0) return outcome;
