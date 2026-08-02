@@ -222,6 +222,14 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
 
   private dropHeadAfter: string | null = null;
 
+  /**
+   * Refuse every out-of-band body read. A resolution has COMMITTED before its
+   * answer is read, so anything the desktop still has to fetch to materialize
+   * is a window where the folder keeps the losing content and the conflict is
+   * already closed.
+   */
+  failEveryBlobRead = false;
+
   /// Model a head that vanished between the resolve write and the desktop's
   /// read-back: a concurrent delete, or an engine that acked a write it lost.
   dropHeadAfterBinaryResolve(path: string): void {
@@ -262,6 +270,10 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
   }
 
   override async sendRequest(request: Request): Promise<Response> {
+    if (this.failEveryBlobRead && request.method === VERSIONED_METHOD.textReadBlob) {
+      this.requests.push(request);
+      throw new Error("blob-egress-unavailable");
+    }
     if (request.method === "conflicts.list") {
       this.requests.push(request);
       const workspace = this.requiredWorkspace(request);
@@ -428,10 +440,19 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
           : String(local.mergedText);
       // Only a COMBINED body is bounded, and by the control frame that carried
       // it — the daemon puts no size check on a side choice, which sends no
-      // text at all (lib.rs conflicts_resolve).
-      // The daemon measures the whole REQUEST, not the body alone: the same
-      // envelope carries two 16 KiB metadata fields and five identifiers.
-      const encodedRequest = jsonStringEncodedLength(JSON.stringify(params));
+      // text at all (lib.rs conflicts_resolve). What it measures is the whole
+      // REQUEST: the same envelope carries two 16 KiB metadata fields and five
+      // identifiers.
+      //
+      // The SERIALIZED envelope, measured in UTF-8 bytes, is the frame’s
+      // payload. Running the serialized text back through
+      // `jsonStringEncodedLength` would count every quote and backslash a
+      // second time and refuse a newline-heavy request the transport carries
+      // comfortably.
+      const encodedRequest = Buffer.byteLength(
+        JSON.stringify({ type: "request", ...request }),
+        "utf8",
+      );
       if (resolution === "apply-merged" && encodedRequest > RESOLVE_REQUEST_FRAME_BYTES) {
         throw new Error(
           `merged-text-exceeds-wire-limit: one control frame carries a resolve ` +
@@ -1281,6 +1302,9 @@ describe("mergeVersionIntoMain", () => {
     // `versionedText.write` -> this refuses. MUTATION: drop hydratedSnapshot
     // -> the mirror throws on the withheld body.
     const { root, engine, conflict, loopback } = await openDivergedTextConflict();
+    // Every out-of-band read fails. A resolution that still needed one would
+    // commit, throw, and leave the folder on the losing content.
+    loopback.failEveryBlobRead = true;
     const combined = `combined ✓ line\n`.repeat(12_000);
     expect(Buffer.byteLength(combined, "utf8")).toBeGreaterThan(
       MAX_DESKTOP_CAPTURE_TEXT_BYTES,
@@ -1294,18 +1318,18 @@ describe("mergeVersionIntoMain", () => {
     expect(merged.conflict.resolution).toBe("applied-merged");
     expect(await readText(root, "plan.md")).toBe(combined);
     expect(await engine.listOpenConflicts()).toHaveLength(0);
-    // The body came back out of band, and ONCE: the settled snapshot and the
-    // moment's after-body are the same body under the same digest, so
-    // hydrating them apart would stream it twice.
+    // NOTHING was fetched to get here. The body the answer withheld is the
+    // body this call submitted, so the write materialized from what the caller
+    // already held.
     //
-    // MUTATION: give each hydration its own reader -> two streams, not one.
-    const hydrations = loopback.requests.filter(
-      (request) => request.method === VERSIONED_METHOD.textReadBlob,
-    );
-    expect(hydrations).toHaveLength(1);
-    expect((hydrations[0]!.params as JsonObject).sha256).toBe(
-      sha256Utf8(combined),
-    );
+    // MUTATION: drop the offer, or give each hydration its own reader -> a
+    // post-commit read appears, and with `failEveryBlobRead` set it takes the
+    // write down with it.
+    expect(
+      loopback.requests.filter(
+        (request) => request.method === VERSIONED_METHOD.textReadBlob,
+      ),
+    ).toHaveLength(0);
     await engine.stop();
   });
 
@@ -1335,6 +1359,7 @@ describe("mergeVersionIntoMain", () => {
 
     const merge = await engine.mergeVersionIntoMain(draftId);
     expect(merge.conflicts).toHaveLength(1);
+    loopback.failEveryBlobRead = true;
     const applied = await engine.resolveConflict(merge.conflicts[0].id, {
       kind: "apply-incoming",
     });
@@ -1342,6 +1367,31 @@ describe("mergeVersionIntoMain", () => {
     expect(applied.conflict.resolution).toBe("applied-incoming");
     expect(await readText(root, "plan.md")).toBe(incoming);
     expect(await engine.listOpenConflicts()).toHaveLength(0);
+    await engine.stop();
+  });
+
+  it("applies an escape-heavy combined body the frame still carries", async () => {
+    // 3 MiB of newlines is 6 MiB encoded: past half the frame, comfortably
+    // inside it. Measuring the SERIALIZED envelope a second time through the
+    // encoder would count every backslash again and refuse this at about
+    // 2.8 MiB — a limit the daemon does not have.
+    //
+    // MUTATION: measure `jsonStringEncodedLength(JSON.stringify(params))` ->
+    // the fixture refuses a request the daemon accepts.
+    const { root, engine, conflict } = await openDivergedTextConflict();
+    const combined = "\n".repeat(3 * 1024 * 1024);
+    expect(jsonStringEncodedLength(combined)).toBeGreaterThan(
+      RESOLVE_REQUEST_FRAME_BYTES / 2,
+    );
+    expect(jsonStringEncodedLength(combined)).toBeLessThan(RESOLVE_REQUEST_FRAME_BYTES);
+
+    const merged = await engine.resolveConflict(conflict.id, {
+      kind: "apply-merged",
+      text: combined,
+    });
+
+    expect(merged.conflict.resolution).toBe("applied-merged");
+    expect(await readText(root, "plan.md")).toBe(combined);
     await engine.stop();
   });
 

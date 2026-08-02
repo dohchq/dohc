@@ -26,7 +26,7 @@ import {
   type VersionedTextListEntry,
   type VersionedTextReadValue,
 } from "@dohc/workspace-engine-client";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   EngineWorkspaceSessions,
@@ -574,37 +574,71 @@ export function createCaptureLiveStores(
   }
 
   /**
-   * One fetch per digest, for the bodies ONE answer withheld.
+   * The bodies ONE answer withheld: offered first, fetched only if unknown,
+   * and fetched once per digest.
    *
    * Digests repeat inside a single answer. A resolution’s settled snapshot and
    * its moment’s `afterText` are the same body under the same digest, and a
    * delete or rename binds one digest to both moment sides (`delete_text_in_tx`
    * and the rename insert, store.rs). Hydrating them apart streams a
    * multi-megabyte blob twice for one answer.
+   *
+   * The offer matters more than the cache. A resolution has COMMITTED by the
+   * time its answer is read, so a read that fails between the commit and the
+   * materialization leaves the folder on the losing content while the conflict
+   * is closed — the exact shape this surface exists to prevent. A caller that
+   * already holds the settled body (it submitted the combined text, or it read
+   * the side it chose) never has to take that risk.
    */
-  type WithheldBodyReader = (sha256: string, path: string) => Promise<string>;
+  interface WithheldBodyReader {
+    (sha256: string, path: string): Promise<string>;
+    /**
+     * A body this call ALREADY HOLDS. Offering it removes the read that would
+     * otherwise stand between a committed write and the folder it belongs in.
+     *
+     * The caller offers text it can name but not address: the digest is the
+     * answer’s, so an offer only satisfies a hydration when the two agree
+     * byte for byte. An offer that does not match is ignored, and the read
+     * happens as before.
+     */
+    offer(text: string | null | undefined): void;
+  }
 
   function withheldBodies(): WithheldBodyReader {
     const bodies = new Map<string, Promise<string>>();
-    return (sha256, path) => {
+    const offered: string[] = [];
+    const reader = (sha256: string, path: string): Promise<string> => {
       const cached = bodies.get(sha256);
       if (cached !== undefined) return cached;
-      const body = runRead(async (adapter) => {
-        const text = await adapter.readTextBlob({
-          workspaceId: workspace.workspaceId,
-          sha256,
-        });
-        if (text === null) {
-          throw new VersionedTextStoreError(
-            "state-corrupt",
-            `Engine text blob ${sha256} for ${path} is unreadable.`,
-          );
-        }
-        return text;
-      });
+      // Hashing happens HERE, not at the offer: only an over-cap answer ever
+      // asks, and only then is a candidate worth a digest.
+      const held = offered.find(
+        (candidate) =>
+          createHash("sha256").update(candidate, "utf8").digest("hex") === sha256,
+      );
+      const body =
+        held === undefined
+          ? runRead(async (adapter) => {
+              const text = await adapter.readTextBlob({
+                workspaceId: workspace.workspaceId,
+                sha256,
+              });
+              if (text === null) {
+                throw new VersionedTextStoreError(
+                  "state-corrupt",
+                  `Engine text blob ${sha256} for ${path} is unreadable.`,
+                );
+              }
+              return text;
+            })
+          : Promise.resolve(held);
       bodies.set(sha256, body);
       return body;
     };
+    reader.offer = (text: string | null | undefined) => {
+      if (typeof text === "string") offered.push(text);
+    };
+    return reader;
   }
 
   /**
@@ -1062,6 +1096,13 @@ export function createCaptureLiveStores(
       }
       const conflict = conflictFromWire(raw.conflict as ConflictRecord);
       const withheld = withheldBodies();
+      // Everything a settled body can be, on this path, is already in hand:
+      // the combined text this call submitted, the side it chose, and the head
+      // that side replaced (the moment’s before-body). None of them needs a
+      // post-commit read.
+      if (input.resolution.kind === "apply-merged") withheld.offer(input.resolution.text);
+      withheld.offer(existing.incoming.text);
+      withheld.offer(existing.current.text);
       if (raw.write !== null) {
         const write = raw.write as {
           object: unknown;
