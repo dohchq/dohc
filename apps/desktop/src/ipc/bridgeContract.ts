@@ -75,10 +75,16 @@ const PATH_STRING = z.string().min(1).max(4096);
 // UTF-8 (`crates/dohc-engine-domain/src/store.rs`) — and it never gates a
 // settle on the smaller in-band response cap
 // (`crates/dohc-engine-runtime/src/actor.rs` settle), so an over-cap document
-// lands on disk like any other. The bridge carries the same contract, so a
-// body the engine stored can always reach the renderer. Zod counts UTF-16 code
+// lands on disk like any other. The bound below is the engine's own, so the
+// bridge is never the gate that rejects a stored body. Zod counts UTF-16 code
 // units and UTF-8 never spends less than one byte per code unit, so this
 // character bound admits every body the engine could hold.
+//
+// Matching the STORAGE contract does not promise that every stored body
+// arrives. The daemon caps one wire string at 8 MiB (`WireLimits`,
+// `crates/dohc-engine-protocol/src/limits.rs`), so a larger body reaches the
+// renderer only by blob hydration. `versionedText.read` and the moment
+// timeline hydrate; the conflict and compare lanes do not — see VERSION_TEXT.
 //
 // One REQUEST field shares the schema — the combined conflict resolution at
 // VERSION_TEXT. There this bound is only a ceiling on what crosses IPC; the
@@ -1584,6 +1590,16 @@ export const WORKSPACE_VERSION_NAME_MAX = 80;
 // Conflict and compare sides are the same hydrated stored bodies the timeline
 // carries, passed through verbatim (`engineHistoryIpc.ts` versionConflictForIpc,
 // `versionCompare.ts`), so they carry the engine's own text contract.
+//
+// This raise fixes the 2 MB to ~8 MB band, where the bridge was the only
+// rejecting gate. It does not make every stored side listable. The daemon
+// serializes a conflict's three sides in band and refuses the page with
+// `conflict-row-exceeds-wire-limit` above 8 MiB minus envelope headroom
+// (`crates/dohc-workspace-engine/src/lib.rs:244-248,7482-7491`), and neither
+// the conflict nor the compare lane hydrates an over-cap side out of band.
+// #537 tracks that. The bound stays the engine's storage contract rather than
+// the transport's current ceiling: a second hand-copied constant is the drift
+// #517 was filed about, and it would have to move again when #537 lands.
 //
 // The combined resolution (`keep-combined` below) is the one REQUEST use, and
 // its contract is NOT this one: the engine caps a combined write at its 128 KiB

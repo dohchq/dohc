@@ -277,6 +277,12 @@ describe("version texts the engine accepted cross the bridge", () => {
   it("lists a conflict whose side is larger than the old 2 MB bound", () => {
     // The unrecoverable case from the issue: resolving needs a conflictId that
     // only this listing supplies, so a rejected listing left the user stuck.
+    //
+    // 3 MiB on purpose. The daemon serializes all three sides in band and
+    // refuses the page above 8 MiB minus envelope headroom
+    // (`lib.rs:244-248,7482-7491`), so a row this size does reach main, and
+    // this schema was the only gate rejecting it. #537 covers the band above
+    // that cap, where the daemon still refuses and no hydration path exists.
     const side = "x".repeat(3 * 1024 * 1024);
     const conflict = versionConflictForIpc({
       ...base,
@@ -307,11 +313,16 @@ describe("version texts the engine accepted cross the bridge", () => {
     expect(compared.files[0]!.incomingText).toBe(incomingText);
   });
 
-  it("carries a conflict side at the engine's own text contract", () => {
+  it("admits a conflict side at the engine's own text contract", () => {
     // Stated absolutely, not as ENGINE_TEXT_MAX_CHARS: the bound the bridge
     // owes is the engine's MAX_TEXT_BYTES
     // (`crates/dohc-engine-domain/src/store.rs`), so lowering the bridge
     // constant must fail this, never move it.
+    //
+    // A SCHEMA claim only. A side this large does not reach main today: the
+    // wire caps one string at 8 MiB and the conflict page refuses above its
+    // row cap (#537). The bridge still owes the storage contract, so that it
+    // needs no edit when the hydration path lands.
     const engineMaxTextBytes = 10 * 1024 * 1024;
     expect(ENGINE_TEXT_MAX_CHARS).toBe(engineMaxTextBytes);
     const side = "x".repeat(engineMaxTextBytes);
