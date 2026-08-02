@@ -2423,20 +2423,6 @@ export function createWorkspaceEngineCapture(
           reportSaveState("saved", token);
         };
         const onSettleStart = (token: number) => reportSaveState("settling", token);
-        // #496. A CLOSE is the one settle that can meet a head another writer
-        // already moved: the daemon's capture ingests an edit made outside dohc
-        // and the close-settle then refuses ConflictStaleTarget. That is #495's
-        // changed-on-disk by a second route — the file holds the outside
-        // author's work, this document's text is in the CRDT and in History, and
-        // nothing failed that the user must retry. Report it as such and let the
-        // close finish clean, so how loud a close is stops depending on a race
-        // the user cannot see.
-        //
-        // Only the stale-target refusal, and only during a close. Every other
-        // settle failure is still a failure: it says the user's edits did NOT
-        // reach the engine, which is exactly what "error" and its retry advice
-        // are for. A stale target OUTSIDE a close keeps reporting `error` too —
-        // that document stays open, so its retry is real.
         // The one place a background settle failure is observable. Log it with
         // the path and the wire error, and tell the editor the file on disk is
         // behind — a settle that never lands is the user's content going
