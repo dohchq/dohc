@@ -16,6 +16,7 @@ import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
+  applyCombinedChange,
   conflictPreview,
   exceedsUtf8Bytes,
   utf8ByteLength,
@@ -1259,13 +1260,13 @@ function ConflictResolver(props: {
   }, []);
 
   const onCombinedChange = useCallback((next: string) => {
-    if (exceedsUtf8Bytes(next, CONFLICT_COMBINED_EDIT_MAX_BYTES)) {
-      // One walk of the refused body, in the handler rather than the render.
-      setRefusedBytes(utf8ByteLength(next));
+    const change = applyCombinedChange(next);
+    if (!change.accepted) {
+      setRefusedBytes(change.refusedBytes);
       return;
     }
     setRefusedBytes(null);
-    setCombined(next);
+    setCombined(change.text);
   }, []);
 
   const resolve = useCallback(

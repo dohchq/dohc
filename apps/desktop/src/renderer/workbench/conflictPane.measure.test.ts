@@ -18,9 +18,16 @@
 
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { readFileSync, statSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { transformWithEsbuild } from "vite";
 import { describe, it } from "vitest";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
@@ -132,119 +139,259 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
   }, 600_000);
 });
 
+
 // The benchmark behind CONFLICT_COMBINED_EDIT_MAX_BYTES (#566).
 //
-// That limit REJECTS otherwise valid combined text, so AGENTS.md requires its
-// evidence to live in a focused benchmark rather than a comment. The rows
-// above cannot supply it: they measure corpus sizes and preview slicing in
-// Node, and this cost is Chromium's.
+// That limit REJECTS otherwise valid combined text, so AGENTS.md wants its
+// evidence in a focused benchmark rather than a comment. The rows above cannot
+// supply it: they measure corpus sizes and preview slicing in Node, and this
+// cost is Chromium's.
 //
-// WHAT ONE KEYSTROKE COSTS. "Combine by hand" is a CONTROLLED textarea, so
-// every keystroke runs `onCombinedChange` — `exceedsUtf8Bytes` over the whole
-// draft — and then React assigns the whole new value back to the element. This
-// drives BOTH halves in the browser, at the pane's own font and width, with
-// the SHIPPED `exceedsUtf8Bytes` handed to the page as source rather than
-// reimplemented, so the number cannot drift from the function it describes.
+// IT DRIVES THE SHIPPING PATH, which is the whole point. A first version
+// assigned `textarea.value` directly and reported 26-36 ms at half a megabyte.
+// That number was fiction: it forced a whole-value write on every keystroke,
+// and the real path does not do that. A real keystroke is
 //
-// Re-run it when Chromium or React move:
+//   native input event -> React onChange -> applyCombinedChange -> setState
+//   -> commit -> controlled value reconciled
+//
+// and React skips the value write when the browser's own incremental edit has
+// already produced the value it wanted. So this bundles React and the REAL
+// `applyCombinedChange`, types with `keyboard.insertText` so the native event
+// fires, and times from that event until the DOM settles. The measured cost
+// fell by about sixty times, and the bound moved because of it.
+//
+// The bound is raised inside the bundle for the ACCEPTED ladder, so the cost
+// curve can be read past the value the product ships — otherwise the guard
+// refuses the very rows a recalibration would need.
 //
 //   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
 //
 // It reports rather than asserts, like its siblings: the numbers are
-// wall-clock and machine-specific, and a threshold here would be a gate that
-// fails on a slow laptop rather than on a regression.
+// wall-clock and machine-specific.
 describe.skipIf(!measuring)("combine textarea keystroke latency", () => {
-  it("reports what one keystroke costs across draft sizes", async () => {
-    // Resolved from the desktop package, which has playwright as a devDep.
-    const require = createRequire(`${repoRoot}apps/desktop/`);
-    const { chromium } = require("playwright") as typeof import("playwright");
+  // Rolldown resolves module specifiers with forward slashes; repoRoot carries
+  // native separators on Windows.
+  const posixRoot = repoRoot.split(String.fromCharCode(92)).join('/');
+  const bundleRequire = createRequire(`${posixRoot}apps/desktop/`);
+  const resolveFrom = (specifier: string) =>
+    bundleRequire.resolve(specifier, { paths: [`${posixRoot}apps/desktop`] });
 
+  // A real React controlled textarea calling the SHIPPED decision. The only
+  // benchmark-local code is the JSX shell around it.
+  // Written with createElement rather than JSX: the entry is three elements,
+  // and avoiding JSX avoids depending on which jsx runtime the bundler picks.
+  const benchSource = `
+import { createElement, useEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { applyCombinedChange } from ${JSON.stringify(
+    `${posixRoot}apps/desktop/src/renderer/workbench/conflictPane.ts`,
+  )};
+
+function Bench() {
+  const [combined, setCombined] = useState("");
+  const [refusedBytes, setRefusedBytes] = useState(null);
+  useEffect(() => { window.__seed = (text) => setCombined(text); }, []);
+  return createElement("div", null,
+    createElement("textarea", {
+      id: "draft",
+      rows: 6,
+      value: combined,
+      onChange: (event) => {
+        const change = applyCombinedChange(event.target.value);
+        if (!change.accepted) { setRefusedBytes(change.refusedBytes); return; }
+        setRefusedBytes(null);
+        setCombined(change.text);
+      },
+      style: { font: "11px/16px monospace", width: "320px", resize: "vertical" },
+    }),
+    createElement("p", { id: "refused" }, refusedBytes === null ? "" : String(refusedBytes)),
+  );
+}
+createRoot(document.getElementById("root")).render(createElement(Bench));
+`;
+
+  async function bundle(editingBound: number | null): Promise<string> {
+    const { build } = bundleRequire("vite") as typeof import("vite");
+    const directory = mkdtempSync(join(tmpdir(), "dohc-combine-bench-"));
+    const entry = join(directory, "entry.js");
+    writeFileSync(entry, benchSource);
+    try {
+      const output = await build({
+        logLevel: "error",
+        configFile: false,
+        // ANCHORED, because a bare "react" alias prefix-matches
+        // "react/jsx-dev-runtime" and rolldown then looks for it underneath
+        // react's index.js.
+        resolve: {
+          alias: [
+            { find: /^react$/, replacement: resolveFrom("react") },
+            { find: /^react-dom$/, replacement: resolveFrom("react-dom") },
+            { find: /^react-dom\/client$/, replacement: resolveFrom("react-dom/client") },
+            { find: /^react\/jsx-runtime$/, replacement: resolveFrom("react/jsx-runtime") },
+            {
+              find: /^react\/jsx-dev-runtime$/,
+              replacement: resolveFrom("react/jsx-dev-runtime"),
+            },
+          ],
+        },
+        mode: "production",
+        define: { "process.env.NODE_ENV": JSON.stringify("production") },
+        plugins:
+          editingBound === null
+            ? []
+            : [
+                {
+                  name: "raise-editing-bound",
+                  transform(code: string, id: string) {
+                    if (!id.replace(/\\/g, "/").endsWith("conflictPane.ts")) return null;
+                    return code.replace(
+                      /CONFLICT_COMBINED_EDIT_MAX_BYTES = [^;]+;/,
+                      `CONFLICT_COMBINED_EDIT_MAX_BYTES = ${editingBound};`,
+                    );
+                  },
+                },
+              ],
+        build: {
+          write: false,
+          minify: false,
+          lib: { entry, formats: ["iife"], name: "combineBench" },
+        },
+      });
+      const built = Array.isArray(output) ? output[0] : output;
+      return (built as unknown as { output: { code: string }[] }).output[0].code;
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  it("reports what one keystroke costs through the real controlled path", async () => {
+    const { chromium } = bundleRequire("playwright") as typeof import("playwright");
     const browser = await chromium.launch();
     try {
-      const page = await browser.newPage();
-      // The pane's own textarea: `font-mono text-[11px] leading-4`, six rows,
-      // inside the 720px dialog's padded column.
-      await page.setContent(
-        `<textarea id="draft" rows="6" style="font:11px/16px monospace;width:320px"></textarea>`,
-      );
-      // The REAL module, not a copy of one function. conflictPane.ts imports
-      // nothing, so transpiling it is enough to run it in the page — and the
-      // guard keeps the module-private helper it actually calls, which
-      // stringifying the exported function alone would have left behind.
-      const moduleSource = readFileSync(
-        `${repoRoot}apps/desktop/src/renderer/workbench/conflictPane.ts`,
-        "utf8",
-      );
-      const transpiled = await transformWithEsbuild(moduleSource, "conflictPane.ts", {
-        loader: "ts",
-        format: "cjs",
-      });
-      await page.evaluate((source) => {
-        const shipped = { exports: {} as Record<string, unknown> };
-        new Function("module", "exports", source)(shipped, shipped.exports);
-        (globalThis as unknown as Record<string, unknown>).exceedsUtf8Bytes =
-          shipped.exports.exceedsUtf8Bytes;
-      }, transpiled.code);
+      const open = async (editingBound: number | null) => {
+        const page = await browser.newPage();
+        // A benchmark that silently renders nothing is worse than one that
+        // fails: surface whatever the page throws.
+        page.on("pageerror", (error) => {
+          console.error("benchmark page error:", error.message);
+        });
+        await page.setContent(`<div id="root"></div>`);
+        await page.addScriptTag({ content: await bundle(editingBound) });
+        await page.waitForSelector("#draft");
+        // Timed from the NATIVE input event until the DOM settles to its final
+        // value: one longer when accepted, restored when refused. No React
+        // internals, so the number survives a React upgrade.
+        await page.evaluate(() => {
+          const draft = document.getElementById("draft") as HTMLTextAreaElement;
+          const scope = globalThis as unknown as Record<string, unknown>;
+          draft.addEventListener(
+            "input",
+            () => {
+              const started = performance.now();
+              const settle = () => {
+                if (draft.value.length === scope.__expect) {
+                  scope.__result = performance.now() - started;
+                  return;
+                }
+                requestAnimationFrame(settle);
+              };
+              requestAnimationFrame(settle);
+            },
+            true,
+          );
+        });
+        return page;
+      };
 
-      const rows: string[] = [];
-      for (const size of [
-        100_000, 250_000, CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS, CONFLICT_COMBINED_EDIT_MAX_BYTES,
-        1_048_576, 4 * 1024 * 1024, 8 * 1024 * 1024,
-      ]) {
-        const timings = await page.evaluate(
-          ({ length, limit }) => {
-            const draft = document.getElementById("draft") as HTMLTextAreaElement;
-            const guard = (globalThis as unknown as {
-              exceedsUtf8Bytes: (text: string, limitBytes: number) => boolean;
-            }).exceedsUtf8Bytes;
-            const body = "x".repeat(length);
-            const guardMs: number[] = [];
-            let refusals = 0;
-            const assignMs: number[] = [];
-            for (let stroke = 0; stroke < 21; stroke += 1) {
-              const next = body.slice(0, length - 1) + String.fromCharCode(97 + (stroke % 26));
-              const beforeGuard = performance.now();
-              const refused = guard(next, limit);
-              guardMs.push(performance.now() - beforeGuard);
-              refusals += refused ? 1 : 0;
-              // Measured even when the guard refuses. What a draft past the
-              // bound WOULD cost is the evidence for not raising the bound,
-              // and it is the only place that number can come from.
-              const beforeAssign = performance.now();
-              draft.value = next;
-              // Force layout, or the assignment is deferred out of the sample.
-              void draft.scrollHeight;
-              assignMs.push(performance.now() - beforeAssign);
-            }
-            const median = (samples: number[]) =>
-              samples.length === 0
-                ? Number.NaN
-                : [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)];
-            return { guard: median(guardMs), assign: median(assignMs), refusals };
-          },
-          { length: size, limit: CONFLICT_COMBINED_EDIT_MAX_BYTES },
-        );
-        const total = timings.guard + timings.assign;
-        rows.push(
-          `${size.toLocaleString("en-US").padStart(11)} chars` +
-            `  guard ${timings.guard.toFixed(2).padStart(6)} ms` +
-            `  assign ${timings.assign.toFixed(2).padStart(7)} ms` +
-            `  keystroke ${total.toFixed(2).padStart(7)} ms` +
-            (timings.refusals > 0
-              ? "   past the bound: refused, cost shown is what raising it would buy"
-              : ""),
+      const median = async (
+        page: Awaited<ReturnType<typeof open>>,
+        size: number,
+        settledLength: number,
+        samples = 15,
+      ) => {
+        const times: number[] = [];
+        for (let sample = 0; sample < samples; sample += 1) {
+          await page.evaluate(
+            ({ length, expected }) => {
+              const scope = globalThis as unknown as Record<string, unknown> & {
+                __seed: (text: string) => void;
+              };
+              scope.__seed("x".repeat(length));
+              scope.__expect = expected;
+              scope.__result = null;
+            },
+            { length: size, expected: settledLength },
+          );
+          await page.waitForFunction(
+            (length) =>
+              (document.getElementById("draft") as HTMLTextAreaElement).value.length ===
+              length,
+            size,
+          );
+          await page.focus("#draft");
+          await page.keyboard.press("End");
+          await page.keyboard.insertText("z");
+          await page.waitForFunction(
+            () => (globalThis as unknown as Record<string, unknown>).__result !== null,
+            null,
+            { timeout: 60_000 },
+          );
+          times.push(
+            (await page.evaluate(
+              () => (globalThis as unknown as Record<string, unknown>).__result,
+            )) as number,
+          );
+        }
+        times.sort((left, right) => left - right);
+        return times[Math.floor(times.length / 2)];
+      };
+
+      const ladder = [
+        CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS,
+        CONFLICT_COMBINED_EDIT_MAX_BYTES,
+        2 * 1024 * 1024,
+        4 * 1024 * 1024,
+        8 * 1024 * 1024,
+      ];
+      const accepted = await open(64 * 1024 * 1024);
+      await median(accepted, 262_144, 262_145, 3);
+      const acceptedRows: string[] = [];
+      for (const size of ladder) {
+        const elapsed = await median(accepted, size, size + 1);
+        acceptedRows.push(
+          `${size.toLocaleString("en-US").padStart(11)} chars  ` +
+            `${elapsed.toFixed(2).padStart(7)} ms` +
+            (size > CONFLICT_COMBINED_EDIT_MAX_BYTES ? "   past the bound" : ""),
         );
       }
+      await accepted.close();
+
+      // The one expensive keystroke is the refused one: React puts the whole
+      // controlled value back, which is the write an accepted keystroke never
+      // makes.
+      const refused = await open(null);
+      await median(refused, 262_144, 262_145, 3);
+      const refusedMs = await median(
+        refused,
+        CONFLICT_COMBINED_EDIT_MAX_BYTES,
+        CONFLICT_COMBINED_EDIT_MAX_BYTES,
+      );
+      await refused.close();
 
       console.log(
         `\nCONFLICT_COMBINED_EDIT_MAX_BYTES = ` +
           `${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")}` +
           `\nlargest healthy document = ` +
-          `${CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS.toLocaleString("en-US")} characters\n\n` +
-          `${rows.join("\n")}\n`,
+          `${CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS.toLocaleString("en-US")} characters` +
+          `\n\naccepted keystroke, native event to settled DOM\n` +
+          `${acceptedRows.join("\n")}` +
+          `\n\nrefused keystroke at the bound (React restores the whole value)\n` +
+          `${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US").padStart(11)} chars  ` +
+          `${refusedMs.toFixed(2).padStart(7)} ms\n`,
       );
     } finally {
       await browser.close();
     }
-  }, 600_000);
+  }, 900_000);
 });

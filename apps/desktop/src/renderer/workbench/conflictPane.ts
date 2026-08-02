@@ -68,40 +68,49 @@ export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 /// This is a renderer bound, not the engine's. #569 replaced the old
 /// merged-text cap with a frame budget: `conflicts.resolve` succeeds when the
 /// whole JSON-ENCODED request fits `RESOLVE_REQUEST_FRAME_BYTES` (8 MiB), so
-/// what a body may weigh is whatever the rest of its request leaves. Every
-/// body this box can hold is far inside that, which leaves responsiveness as
-/// the only thing still binding — and responsiveness is this surface's own
-/// problem, so it owns the number. `engineTextLimits.test.ts` proves the two
-/// agree, by importing the frame contract rather than restating it.
+/// what a body may weigh is whatever the rest of its request leaves.
 ///
-/// MEASURED, and the measurement is committed rather than described:
-/// `conflictPane.measure.test.ts` drives the real guard and a real controlled
-/// textarea in the Chromium this app ships, at the pane's own font and width,
-/// and prints one keystroke's cost across the ladder. Run it to reproduce or
-/// recalibrate — after a Chromium or React upgrade, or when the corpus row
-/// below passes this bound:
+/// WHAT BINDS IT is that frame, not responsiveness. JSON escaping costs at
+/// most six bytes per raw byte — a body of control characters is the worst
+/// case — so a body must stay under about (8 MiB minus the envelope) / 6.
+/// `engineTextLimits.test.ts` proves this value clears that with the imported
+/// contract rather than a restated number: at this bound the worst case is
+/// 6 MiB encoded, leaving about 2 MiB of the frame spare.
+///
+/// RESPONSIVENESS TURNED OUT NOT TO BIND, and the first version of this
+/// constant was wrong about that. Its benchmark assigned `textarea.value`
+/// directly and reported 26-36 ms per keystroke here, which set the bound at
+/// half this. That measured a write the shipping path does not make: on an
+/// ordinary keystroke the browser applies the edit itself, and React's
+/// controlled input skips the value write because the DOM already holds what
+/// it wanted. Driving the REAL path — native input event, `onChange`,
+/// `applyCombinedChange`, commit — costs about 1 ms per MiB:
+///
+///     495,878 characters   0.6 ms
+///   1,048,576 characters   1.1 ms
+///   8,388,608 characters   9.0 ms
+///
+/// The one expensive keystroke is the REFUSED one, about 28 ms at half a
+/// megabyte and rising with the draft: a refusal leaves React holding a value
+/// the DOM disagrees with, so it writes the whole string back. That lands once
+/// when the user reaches the bound, which is the price of not letting the
+/// draft grow without limit.
+///
+/// Re-measure with conflictPane.measure.test.ts, which drives the shipping
+/// component in the Chromium this app ships:
 ///
 ///   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
 ///
-/// What it showed when this number was chosen: a keystroke costs about 6 ms at
-/// 100,000 characters, 15 ms at 250,000, and 26-36 ms at this bound depending
-/// on machine load — while 1 MiB costs 53-77 ms and 8 MiB costs 438-590 ms.
-/// The guard itself is about 1 ms of that; the rest is React assigning the
-/// whole value back to a controlled element on every keystroke.
+/// WHY THIS VALUE. It is the largest round value that provably fits the frame
+/// in the worst case, and it clears `CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS` by
+/// more than double — which matters, because that corpus figure grew by 6%
+/// during the writing of this change alone. UTF-8 never spends less than one
+/// byte per UTF-16 code unit, so a bound in BYTES caps the code units that
+/// drive the cost above for every script.
 ///
-/// WHY THIS VALUE. It is the smallest round bound that clears
-/// `CONFLICT_HEALTHY_DOCUMENT_MAX_CHARS`, so it never refuses a document the
-/// size of a real one (AGENTS.md), and every larger choice buys nothing but
-/// latency. UTF-8 never spends less than one byte per UTF-16 code unit, so a
-/// bound in BYTES caps the code units that drive that cost for every script.
-///
-/// The trade this makes, stated plainly: a document whose characters are
-/// mostly multi-byte reaches this bound at fewer characters than an ASCII one,
-/// and the corpus behind the healthy range is ASCII-dominated source and
-/// Markdown. Above the bound the surface degrades rather than refuses — keep a
-/// side, then edit the file in the editor, which is incremental and pays none
-/// of this cost.
-export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 512 * 1024;
+/// Above the bound the surface degrades rather than refuses: keep a side, then
+/// edit the file in the editor, which is incremental and pays none of this.
+export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 1024 * 1024;
 
 /// The largest document in the measured corpus, in characters — the healthy
 /// maximum the bound above has to clear (AGENTS.md: set a limit that rejects
@@ -219,4 +228,24 @@ export function exceedsUtf8Bytes(text: string, limitBytes: number): boolean {
 /// walk is paid on a body the user cannot apply anyway.
 export function utf8ByteLength(text: string): number {
   return utf8Bytes(text, Number.POSITIVE_INFINITY);
+}
+
+/// What one change to the combined copy does: it is taken, or it is refused
+/// for being past the editing bound and the attempted size is reported.
+export type CombinedChange =
+  | { accepted: true; text: string }
+  | { accepted: false; refusedBytes: number };
+
+/// The decision behind every keystroke in the combine textarea.
+///
+/// Exported as a pure function so the thing that runs per keystroke is one
+/// piece of code with one set of tests — and so the browser benchmark in
+/// conflictPane.measure.test.ts can drive the SHIPPING decision rather than a
+/// copy of it that could quietly disagree.
+export function applyCombinedChange(next: string): CombinedChange {
+  if (exceedsUtf8Bytes(next, CONFLICT_COMBINED_EDIT_MAX_BYTES)) {
+    // One walk of the refused body, paid on a body that cannot be applied.
+    return { accepted: false, refusedBytes: utf8ByteLength(next) };
+  }
+  return { accepted: true, text: next };
 }
