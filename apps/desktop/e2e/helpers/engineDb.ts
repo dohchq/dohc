@@ -67,20 +67,27 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["replication_log", ["op_kind", "payload_json"]],
 ];
 
-// The engine builds its schema through an ordered migration ledger
-// (crates/dohc-engine-storage/src/migration.rs). A transactional migration
-// INSERTS its `engine_migrations` row inside the same transaction as its DDL,
-// so a migration that has not committed has no row at all: "every row present
-// is complete" is true in the middle of the chain and says nothing.
+// PRESENCE is the read gate. Every migration this engine ships is transactional
+// (crates/dohc-engine-storage/src/migration.rs) — DDL and `engine_migrations`
+// row commit together — so a read-only connection sees a name only after the
+// migration that adds it committed. Every name above present therefore means
+// every read below is valid, whatever ordinal the store has reached.
 //
-// Only the LAST migration this build applies settles the ledger. Ordinals are
-// strictly increasing (`validate_migration_order`) and applied in order, so a
-// complete terminal row means every earlier migration committed before it
-// started. An empty ledger is the degenerate case — no terminal row, poll again.
+// The two sides come from different places: the ledger belongs to the DAEMON
+// BINARY, the migration list to the SOURCE TREE. This repo's e2e workflow
+// stages a prebuilt `dohc-workspace-engine.exe`, so a store settled at an
+// EARLIER ordinal than the source is a normal state — and gating reads on the
+// source terminal left every helper here answering 0/[]/false in it, silently
+// and forever.
 //
-// The terminal ordinal is READ FROM the migration source, never pinned here: a
-// stale constant would report "settled" while a newly added migration was still
-// running, which is the bug this replaces.
+// The ledger therefore only classifies an ABSENT name: settled at the source
+// terminal is a defect and throws, short of it may still be migrating and
+// polls. Ordinals apply in strictly increasing order
+// (`validate_migration_order`), so a complete terminal row means every earlier
+// migration committed before it started. An empty ledger settles nothing.
+//
+// The terminal ordinal is READ FROM the source, never pinned here: a stale
+// constant would call a store settled while a newly added migration ran.
 const MIGRATION_SOURCE = fileURLToPath(
   new URL("../../../../crates/dohc-engine-storage/src/migration.rs", import.meta.url),
 );
@@ -130,12 +137,8 @@ function schemaSettled(db: EngineDb): boolean {
   return Number(row?.n ?? 0) === 1;
 }
 
-// Once the ledger has settled, every name above MUST be there. A dropped or
-// renamed one throws and says which: treating it as "not ready" instead would
-// make the gate false forever, every helper would return 0/[]/false, and the
-// `toBe(0)` and `toEqual([])` call sites would pass on nothing — the shape this
-// file exists to remove.
-function requireSchema(db: EngineDb): void {
+// Which of the names above this store does not have.
+function missingSchemaNames(db: EngineDb): string[] {
   const missing: string[] = [];
   for (const [table, columns] of SCHEMA_READ_HERE) {
     const present = new Set(
@@ -150,21 +153,26 @@ function requireSchema(db: EngineDb): void {
     }
     for (const column of columns) if (!present.has(column)) missing.push(`${table}.${column}`);
   }
-  if (missing.length > 0) {
-    throw new Error(
-      `engine.db has no ${missing.join(", ")}, and its migration ledger has settled: ` +
-        "these e2e readers query a schema the engine no longer has.",
-    );
-  }
+  return missing;
 }
 
 export function withEngineDb<T>(rootPath: string, fn: (db: EngineDb) => T): T | null {
   let db: EngineDb | null = null;
   try {
     db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), { readOnly: true });
+    const missing = missingSchemaNames(db);
+    if (missing.length === 0) return fn(db);
+    // Absent AND settled is a defect, and it says which name and where the
+    // ledger stopped. Returning "not ready" instead would leave the gate shut
+    // forever, every helper would answer 0/[]/false, and the `toBe(0)` and
+    // `toEqual([])` call sites would pass on nothing — the shape this file
+    // exists to remove.
     if (!schemaSettled(db)) return null;
-    requireSchema(db);
-    return fn(db);
+    throw new Error(
+      `engine.db has no ${missing.join(", ")}, and its migration ledger has settled at ` +
+        `ordinal ${terminalMigrationOrdinal()}: these e2e readers query a schema the ` +
+        "engine no longer has.",
+    );
   } catch (error) {
     if (isDbNotOpenable(error, db !== null)) return null;
     throw error;
