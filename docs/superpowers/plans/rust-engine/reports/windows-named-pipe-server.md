@@ -39,3 +39,13 @@ The Windows named pipe is weaker than a Unix socket protected by a `0700` direct
 The mitigation is a fresh 128-bit random pipe-name capability on every boot plus the existing independent 256-bit request token. Both values are stored under the CLI state directory, and every request must still pass the token check before protocol-version or request-schema parsing.
 
 On Windows, the `0700`/`0600` mode arguments and `chmod` calls do not create a protective DACL. Confidentiality of both `dohc-cli-endpoint` and `dohc-cli-token` depends entirely on the inherited ACL of `%APPDATA%\dohc`. If another OS user can read that directory, that user can obtain both the pipe capability and the authentication token and can issue authenticated CLI requests. The random name does not protect against that case. This residual gap does not exist in the same form when the POSIX state directory and socket are actually enforced as owner-only by `0700`/`0600` permissions.
+
+## The client half (#333)
+
+`packages/cli/src/client.ts` refused win32 in both `locateCliEndpoint` and `sendCliRequest`, so nothing could reach the pipe the server had been serving. Discovery now selects the artifact by platform: `dohc-cli.sock` on POSIX, `dohc-cli-endpoint` on Windows. A Windows state dir counts as live only when the token file is readable and the descriptor holds a name matching `\\.\pipe\dohc-cli-<32+ hex>`; the client dials that name and sends the boot token exactly as it does over a Unix socket.
+
+The pattern match is not decoration. The descriptor is a file, and the client sends the boot token to whatever it names. Without the check, anyone who can write the descriptor could point an authenticated CLI at an endpoint of their choosing and collect the token. With it, a rewritten descriptor can only redirect to another `dohc-cli-*` pipe, and the writer already needed read access to the state dir — which yields the token directly, so the check adds no new assumption.
+
+`locateCliEndpoint` throws `desktop app not running` on Windows when nothing resolves. A dead Unix path is still nameable, so that case keeps returning the preferred endpoint and lets the connection report the failure; a pipe name is not derivable, so there is nothing honest to return.
+
+Authorization is unchanged and identical on both platforms: the 64-hex boot token, compared with `timingSafeEqual` before version and schema parsing. The difference remains the one recorded above — a `0600` Unix socket denies the connection, the pipe denies only the request.

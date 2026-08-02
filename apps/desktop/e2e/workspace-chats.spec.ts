@@ -85,12 +85,11 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     // external write path post-cutover (the retired TS in-process store is
     // refused by daemon-owned workspaces). It must arrive UNREAD.
     //
-    // TRACKED GAP (#333): this used to happen while the app was RUNNING,
-    // proving live cross-process unread invalidation. Single-daemon ownership
-    // makes that impossible here (a second daemon cannot attach to the app's
-    // store, and the CLI socket — the real concurrent path into the RUNNING
-    // app's daemon — is Unix-only). A replacement live-unread test is filed
-    // as https://github.com/dohc-ai/dohc/issues/333.
+    // What this pins is durability across a relaunch. The live case — an
+    // external write reaching the RUNNING app — needs the CLI endpoint into
+    // the app's own daemon, and is covered by "an agent chat written by the
+    // CLI while the app runs arrives unread live" in
+    // workspace-chats-feed.spec.ts (#333).
     await desktop.close();
     await seedThroughDaemon(
       { workspaceId, rootPath: temp.rootPath },
@@ -116,42 +115,44 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     // still restore the Chats panel open; blind-clicking would then TOGGLE
     // it closed. Reveal it only when it is not already showing — what this
     // test pins is chat-data durability, not panel-visibility persistence.
-    if (!(await page.getByTestId("chats-view").isVisible())) {
+    const panel = page.getByTestId("chats-panel");
+    // The workbench restores an open Chats tab too, so the editor can render a
+    // second chats surface with its own channel list. Read the navigator from
+    // the panel and the conversation from the editor.
+    const view = page.locator("main");
+    if (!(await panel.isVisible())) {
       await page.getByTestId("titlebar-chats-sidebar").click();
     }
-    await expect(page.getByTestId("chats-channel-name")).toHaveText("general");
-    await page.getByTestId("chats-channel").click();
+    await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
+    await panel.getByTestId("chats-channel").click();
     // Two threads exist now (the agent seeded one between sessions), so pick
     // the composer-created one by its snippet title.
-    await page
+    await view
       .getByTestId("chats-thread")
       .filter({ hasText: "Let's plan the launch this week." })
       .click();
-    await expect(page.getByTestId("chats-message-body")).toHaveCount(2);
+    await expect(view.getByTestId("chats-message-body")).toHaveCount(2);
 
     // Back to the channel: the agent thread carries an unread badge.
-    await page.getByTestId("chats-thread-back").click();
-    const agentThreadRow = page
+    await view.getByTestId("chats-thread-back").click();
+    const agentThreadRow = view
       .getByTestId("chats-thread")
       .filter({ hasText: "zeppelin-cadence" });
     await expect(agentThreadRow).toBeVisible();
     await expect(agentThreadRow.getByTestId("chats-thread-unread")).toHaveText("1");
 
     // The channel list rolls the unread up.
-    await page.getByTestId("chats-channel-back").click();
-    await expect(page.getByTestId("chats-channel-unread")).toHaveText("1");
+    await view.getByTestId("chats-channel-back").click();
+    await expect(view.getByTestId("chats-channel-unread")).toHaveText("1");
 
     // Opening the thread marks it read; the badges clear at both levels.
-    await page
-      .locator('[data-testid="chats-view"][data-variant="page"]')
-      .getByTestId("chats-channel")
-      .click();
+    await view.getByTestId("chats-channel").click();
     await agentThreadRow.click();
-    await expect(page.getByTestId("chats-message-author")).toHaveText("Ice's agent");
-    await page.getByTestId("chats-thread-back").click();
-    await expect(page.getByTestId("chats-thread-unread")).toHaveCount(0);
-    await page.getByTestId("chats-channel-back").click();
-    await expect(page.getByTestId("chats-channel-unread")).toHaveCount(0);
+    await expect(view.getByTestId("chats-message-author")).toHaveText("Ice's agent");
+    await view.getByTestId("chats-thread-back").click();
+    await expect(view.getByTestId("chats-thread-unread")).toHaveCount(0);
+    await view.getByTestId("chats-channel-back").click();
+    await expect(view.getByTestId("chats-channel-unread")).toHaveCount(0);
 
     // WS-D integration: engine search finds the channel message and renders
     // it as a Chat result with the snippet title.
