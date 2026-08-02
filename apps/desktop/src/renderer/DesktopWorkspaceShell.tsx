@@ -1349,17 +1349,24 @@ export function DesktopWorkspaceShell(props: {
     };
   }, [workspaceId]);
 
-  // Latest-wins (refreshHistory idiom): fourteen call sites issue listings —
-  // mount, the watcher, imports, restores, the share pull — and they can
-  // resolve out of order. Each request ADVANCES the sequence, so an older
-  // snapshot can never commit over a newer one. Without this, the mount
-  // listing overtaking the post-pull listing would show a stale tree AND make
-  // the reconciliation below read a live file as deleted.
+  // Latest-wins: fourteen call sites issue listings — mount, the watcher,
+  // imports, restores, the share pull — and they can resolve out of order. An
+  // older snapshot committing last would show a stale tree AND make the
+  // reconciliation below read a live file as deleted.
+  //
+  // Supersession is decided when a response COMMITS, not when it is issued. A
+  // newer request that is merely in flight has not answered anything yet, and
+  // if it fails it never will: dropping this answer for it would leave the
+  // explorer empty after a failed refresh, with nothing to retry it. So an
+  // older answer fills an unanswered UI, and the newer one supersedes it when
+  // it lands. Only an answer OLDER than what is already displayed is dropped.
   const filesRequest = useRef(0);
+  const committedFilesRequest = useRef(0);
   const refreshFiles = useCallback(async () => {
     const request = ++filesRequest.current;
     const result = await bridge().listWorkspaceFiles({ workspaceId });
-    if (request !== filesRequest.current) return;
+    if (request <= committedFilesRequest.current) return;
+    committedFilesRequest.current = request;
     setFiles(result.files);
     setFolders(result.folders ?? []);
     setFilesLoaded(true);

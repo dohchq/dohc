@@ -815,6 +815,52 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
+  // A request that is merely in flight has not answered anything, and a
+  // request that fails never will. Superseding on ISSUE would drop the only
+  // answer there is and leave the explorer empty with nothing to retry it.
+  it("commits an older listing when the newer request failed", async () => {
+    const older = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let failNewer!: (error: Error) => void;
+    const newer = new Promise<never>((_resolve, reject) => {
+      failNewer = reject;
+    });
+    let issued = 0;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(() => (++issued === 1 ? older.promise : newer));
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The newer request fails. Nothing has been displayed yet.
+    await act(async () => {
+      failNewer(new Error("listing failed"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("a.md")).toBeNull();
+
+    // The older answer arrives — and it is the only answer there is.
+    await act(async () => {
+      older.resolve({
+        files: [
+          { path: "a.md", kind: "file" },
+          { path: "b.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await older.promise;
+    });
+
+    expect(await screen.findByText("a.md")).toBeTruthy();
+    expect(screen.getByText("b.md")).toBeTruthy();
+  });
+
   // Listings resolve out of order (the mount listing can overtake the one the
   // share pull triggered). An older snapshot committing last would show a
   // stale tree and, worse, make the reconciliation read a live file as
