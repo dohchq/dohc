@@ -334,6 +334,22 @@ export async function runCanonicalDmNavigation(input: {
   }
 }
 
+/** The record a pending canonical DM navigation checks itself against. */
+type DmNavigationRequest = { workspaceId: string; sequence: number };
+
+// Cancel any in-flight canonical DM navigation so its late answer cannot land
+// a chat destination over wherever the user went meanwhile. REPLACE the
+// record, never increment it in place: openCanonicalDmInTab installs the very
+// object it then compares against, so an in-place increment moves the pending
+// navigation's captured sequence too, its isCurrent() compares the object with
+// itself, and the cancellation is a no-op.
+function invalidateDmNavigation(request: { current: DmNavigationRequest }): void {
+  request.current = {
+    workspaceId: request.current.workspaceId,
+    sequence: request.current.sequence + 1,
+  };
+}
+
 export function pendingHeadingTargetForOpen(
   path: string,
   target?: HeadingTarget,
@@ -1297,7 +1313,7 @@ export function DesktopWorkspaceShell(props: {
   // the update. Loading stored state is the only setWb that bypasses this.
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
-      dmNavigationRequest.current.sequence += 1;
+      invalidateDmNavigation(dmNavigationRequest);
       userTouchedWb.current = true;
       setWb(updater);
     },
@@ -1465,13 +1481,7 @@ export function DesktopWorkspaceShell(props: {
       // active tab exactly as mutateWb does, so it owes the same invalidation
       // — otherwise an in-flight DM navigation still passes its isCurrent()
       // check and lands its destination on top of the tab we just activated.
-      // REPLACE the record, never increment it in place: openCanonicalDmInTab
-      // installs the very object it then compares against, so mutating it
-      // would move its captured sequence too and the check would still pass.
-      dmNavigationRequest.current = {
-        workspaceId: dmNavigationRequest.current.workspaceId,
-        sequence: dmNavigationRequest.current.sequence + 1,
-      };
+      invalidateDmNavigation(dmNavigationRequest);
       // Activating a neighbour remounts the keyed inspector — that is an OPEN
       // (closeFileTab idiom). Without the mark, the inspector's mount measure
       // brackets whatever stale mark came before it.
@@ -1770,7 +1780,7 @@ export function DesktopWorkspaceShell(props: {
     setChatsReadRevision((current) => current + 1);
   }, []);
   const onChatsNav = useCallback((nav: ChatsNav) => {
-    dmNavigationRequest.current.sequence += 1;
+    invalidateDmNavigation(dmNavigationRequest);
     chatsNav.current = nav;
     setSelectedChatsNav(nav);
   }, []);

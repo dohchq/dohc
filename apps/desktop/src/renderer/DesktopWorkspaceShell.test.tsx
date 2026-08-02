@@ -1185,6 +1185,61 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
   }, 20_000);
 
+  // The same invalidation from the other side: mutateWb is THE seam every
+  // user-driven transition routes through, so a file click has to cancel a
+  // pending DM navigation. It incremented the pending request in place, and
+  // since the navigation holds that very object, its isCurrent() compared the
+  // object against itself and the cancellation did nothing.
+  it("discards an in-flight DM navigation when the user opens a file", async () => {
+    const dmNode = {
+      path: "chat-thread:dm-thread",
+      kind: "chat-thread" as const,
+      threadId: "dm-thread",
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      channelName: "alice@example.com",
+      channelKind: "dm" as const,
+      title: "Direct message",
+      incoming: 1,
+      outgoing: 0,
+    };
+    const sync = deferred<{ available: boolean; dms: never[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [dmNode, { path: "a.md", title: "A", incoming: 0, outgoing: 0 }],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    // Start a canonical DM navigation and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === dmNode.path)!);
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    // The user goes somewhere else: opening a file is a plain mutateWb
+    // transition, which is what must cancel the navigation.
+    const afterNav = await screen.findAllByTestId("graph-file-row");
+    await user.click(afterNav.find((row) => row.dataset.path === "a.md")!);
+    expect((await screen.findByTestId("tab-a.md")).dataset.active).toBe("true");
+
+    // The navigation answers late. It is stale, so it must not open Chats
+    // over the file the user just opened.
+    await act(async () => {
+      sync.resolve({ available: true, dms: [] });
+      await sync.promise;
+    });
+    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+  }, 20_000);
+
   // A request that is merely in flight has not answered anything, and a
   // request that fails never will. Superseding on ISSUE would drop the only
   // answer there is and leave the explorer empty with nothing to retry it.
