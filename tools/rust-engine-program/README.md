@@ -11,6 +11,7 @@ local evidence pipeline.
 | Script | What it does |
 | --- | --- |
 | `run-rust-checks.mjs` | Rust policy gate: native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
+| `native-target.mjs` | The gate's first step, importable so it can be tested: asks rustc through cargo what it compiled for. See [Native target](#native-target). |
 | `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 
 Banked soak artifacts live in `soak-evidence/`; see
@@ -111,13 +112,38 @@ what it compiled for reflects all of them. Parsing `.cargo/config.toml` cannot
 (no stable `cargo config get`), and watching for a `target/<triple>/` directory
 cannot either (the `RUSTFLAGS` route never creates one).
 
-The check costs a check-build of one crate and its dependencies. The `clippy`
-step that follows reuses those artifacts, so the gate pays for them either way.
+Cargo can also be configured to build for several targets at once. The gate
+counts the `target_arch` lines rather than the distinct values, because two
+triples that share an arch and an os (`…-linux-gnu` and `…-linux-musl`) collapse
+to one value each and would read as a single native target. Anything other than
+exactly one target fails. On the pinned cargo 1.96.1 the probe never gets that
+far: cargo refuses `cargo rustc -- <args>` under multiple targets and exits 101,
+which fails the gate anyway. The count is therefore latent on this toolchain —
+defense for a cargo that answers rather than refusing, not a reachable hole
+today.
 
-What it does **not** catch: a host where the whole toolchain is emulated, Node
-and cargo alike. Both then report the emulated architecture and agree. Rust
-exposes no host-hardware fact to test that against, so it stays an operator
-responsibility.
+The check costs a check-build of one crate and its dependencies. Most of that
+work is shared with later steps, but not all of it: the probe compiles
+`dohc-engine-protocol` with its default features while `clippy` passes
+`--all-features`, so tokio and its dependencies are checked once per feature
+set. Measured, the guard's own cost is one extra tokio check-build — seconds on
+a warm target dir.
+
+What it does **not** catch:
+
+- **A fully emulated host**, Node and cargo alike. Both then report the emulated
+  architecture and agree. Rust exposes no host-hardware fact to test that
+  against.
+- **An execution redirect.** The probe proves the target the code was *compiled*
+  for. A `target.<triple>.runner` in cargo's config makes `cargo test` hand the
+  test binary to another command — a wrapper, an emulator, a remote shell — so a
+  natively compiled suite can still execute somewhere else.
+
+Both stay an operator responsibility.
+
+`native-target.mjs` holds the guard, so it can be imported and tested;
+`scripts/native-target-guard.test.mjs` covers the multi-target count, a
+cross-compile, an unmappable host, and a failed probe.
 
 The retired `run-native-suite.mjs` guard was not this. It accepted
 `--expect-arch=<x64|arm64>` and compared `os.arch()`, the architecture *Node*

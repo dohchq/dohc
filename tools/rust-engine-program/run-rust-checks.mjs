@@ -28,6 +28,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { arch, platform, release } from "node:os";
+import { verifyNativeTarget } from "./native-target.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -73,101 +74,13 @@ const required = [
   },
 ];
 
-// The evidence line records a platform. This asks Rust what it actually
-// compiled for, so the record is not the operator's assertion.
-//
-// The question is asked of rustc THROUGH cargo, so every channel that can
-// retarget a build is reflected by construction: CARGO_BUILD_TARGET, any
-// spelling of `[build].target` anywhere in cargo's hierarchical config, and a
-// `--target` injected through RUSTFLAGS. The last one is why the cheaper
-// checks do not work — it reaches rustc while cargo still writes to
-// `target/debug`, so neither parsing `.cargo/config.toml` nor watching for a
-// `target/<triple>/` directory can see it.
-//
-// Cost: this check-builds dohc-engine-protocol and its dependencies. The
-// clippy step that follows reuses those artifacts, so the gate pays for them
-// either way. It runs first and unconditionally: a guard behind a flag no
-// call site passes is not a guard.
-const NATIVE_PROBE =
-  "cargo rustc -p dohc-engine-protocol --lib --profile check -- --print cfg";
-
-// The host the evidence line claims, in rustc's vocabulary.
-const RUST_ARCH = {
-  x64: "x86_64",
-  arm64: "aarch64",
-  ia32: "x86",
-  arm: "arm",
-  ppc64: "powerpc64",
-  s390x: "s390x",
-  riscv64: "riscv64",
-  loong64: "loongarch64",
-};
-const RUST_OS = {
-  win32: "windows",
-  darwin: "macos",
-  linux: "linux",
-  freebsd: "freebsd",
-  openbsd: "openbsd",
-  android: "android",
-  aix: "aix",
-  sunos: "solaris",
-};
-
-function cfgValues(stdout, key) {
-  const values = new Set();
-  for (const line of stdout.split(/\r?\n/)) {
-    const m = /^([a-z_]+)="(.*)"$/.exec(line.trim());
-    if (m && m[1] === key) values.add(m[2]);
-  }
-  return [...values];
-}
-
-function verifyNativeTarget() {
-  const claimed = `${platform()}/${arch()}`;
-  const want = `${RUST_ARCH[arch()]}/${RUST_OS[platform()]}`;
-  if (!RUST_ARCH[arch()] || !RUST_OS[platform()]) {
-    return {
-      ok: false,
-      reason: `no rustc arch/os name is known for the Node host ${claimed}, so the run cannot be verified native`,
-    };
-  }
-
-  const res = spawnSync(NATIVE_PROBE, {
-    cwd: repoRoot,
-    shell: true,
-    encoding: "utf8",
-  });
-  if (res.error || res.status !== 0) {
-    return {
-      ok: false,
-      // The reason ends up on the one-line evidence record, so keep it on one
-      // line.
-      reason: `\`${NATIVE_PROBE}\` failed (exit ${res.status}${res.error ? `, ${res.error.message}` : ""}); cargo's effective target is unknown — last output: ${(res.stderr ?? "").trim().split(/\r?\n/).slice(-3).join(" / ") || "(none)"}`,
-    };
-  }
-
-  const arches = cfgValues(res.stdout, "target_arch");
-  const oses = cfgValues(res.stdout, "target_os");
-  const envs = cfgValues(res.stdout, "target_env");
-  if (arches.length !== 1 || oses.length !== 1) {
-    return {
-      ok: false,
-      reason: `cargo compiled for ${Math.max(arches.length, oses.length)} targets (${arches.join(",")} / ${oses.join(",")}); native evidence requires exactly 1, the host's ${want}`,
-    };
-  }
-
-  const got = `${arches[0]}/${oses[0]}`;
-  if (got !== want) {
-    return {
-      ok: false,
-      reason: `cargo compiled for ${got}, not the host's ${want} (Node reports ${claimed}); a cross-compiled or emulated run must not be recorded as native evidence — unset CARGO_BUILD_TARGET, remove \`[build].target\` from every \`.cargo/config[.toml]\` up to CARGO_HOME, and remove \`--target\` from RUSTFLAGS`,
-    };
-  }
-  return {
-    ok: true,
-    cfg: [arches[0], oses[0], ...envs.filter(Boolean)].join("/"),
-  };
-}
+// Cost of the native-target probe: a check-build of dohc-engine-protocol and
+// its dependencies. It is not free and not fully shared — the probe compiles
+// the crate's default features while the clippy step below passes
+// `--all-features`, so tokio and its dependencies are checked once for each
+// feature set. Measured, the guard's own cost is one extra tokio check-build,
+// seconds on a warm target dir. It runs first and unconditionally: a guard
+// behind a flag no call site passes is not a guard.
 
 // Optional supply-chain checks: run only when the tool is installed.
 const optional = [
@@ -187,6 +100,8 @@ const native = verifyNativeTarget();
 if (native.ok) {
   console.log(`  rust cfg ${native.cfg} — matches the host.`);
 } else {
+  // cargo's full output first: its primary error sits above the tail.
+  if (native.output) console.error(native.output);
   console.error(`  native target — FAILED: ${native.reason}`);
   failed = true;
 }
