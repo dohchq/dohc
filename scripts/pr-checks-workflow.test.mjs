@@ -120,6 +120,17 @@ test("the verdict is read from its own field, not found anywhere in the line", (
   );
 });
 
+test("an extra ` | ` is rejected, because the verdict is read by position", () => {
+  // Reading the verdict from field 4 makes the field count load-bearing: a
+  // sixth field shifts every later field, and the rows this line carries would
+  // otherwise satisfy all nine required steps while the verdict being read
+  // came from somewhere else.
+  assert.throws(
+    () => requireCiPassVerdict(`${passVerdict} note=SKIP [a | b]`),
+    /expected exactly 5/,
+  );
+});
+
 test("the verdict line a real gate run printed passes as written", () => {
   // Verbatim from C:/w/iss-nativeev-gate3.log, 2026-08-02 — a passing local
   // run of tools/rust-engine-program/run-rust-checks.mjs. The parser has to
