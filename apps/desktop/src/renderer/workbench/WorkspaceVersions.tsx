@@ -1087,23 +1087,25 @@ type SeedCandidate = {
   missing: string;
 };
 
-type CombineSeed =
-  /// The copy the textarea starts from, and the line that says where it came
-  /// from.
-  | { available: true; text: string; startedFrom: string }
-  /// No side is small enough for the engine to apply. `smallestBytes` is the
-  /// closest any of them came.
-  | { available: false; smallestBytes: number };
+/// Where "Combine by hand" starts, and the line that says where that is.
+type CombineSeed = { text: string; startedFrom: string };
 
 /// Pick where "Combine by hand" starts: the first side, in preference order,
-/// that the engine could actually apply.
+/// that the engine could actually apply — or an empty copy, which it always
+/// can.
 ///
-/// Two ways a preferred side loses. It can be over the in-band cap while its
-/// SIBLING is not — a 5 MiB incoming copy beside a 3 KB copy on Main is still
-/// a conflict a user can combine by hand. And it can be ABSENT, which is not
-/// the same as unusable: a side with no file is a zero-byte start, and the
-/// engine takes an empty combined copy like any other. Both used to remove the
-/// affordance entirely, refusing work the engine accepts.
+/// There is no unavailable case, because `apply-merged` measures the SUBMITTED
+/// text and nothing else (`lib.rs:7587-7594`). Whatever the two sides weigh, a
+/// user writing a short replacement by hand is posting a body the engine
+/// takes. So the sides only decide what the box is PREFILLED with, never
+/// whether the affordance exists.
+///
+/// Three ways that prefill is chosen, in order. A side that fits wins — and a
+/// side over the cap loses to its smaller SIBLING, because a 5 MiB incoming
+/// copy beside a 3 KB copy on Main is still a conflict a user can combine.
+/// Failing that, a side with no file is a zero-byte start. Failing that, both
+/// copies are too large to load into the box, and it starts empty — which is
+/// a worse start, but not a refusal.
 function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
   const present = candidates.filter(
     (candidate): candidate is SeedCandidate & { text: string } => candidate.text !== null,
@@ -1112,22 +1114,20 @@ function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
     (candidate) => !exceedsUtf8Bytes(candidate.text, CONFLICT_COMBINED_MAX_BYTES),
   );
   if (fitting) {
-    return {
-      available: true,
-      text: fitting.text,
-      startedFrom: `Started from ${fitting.name}'s copy.`,
-    };
+    return { text: fitting.text, startedFrom: `Started from ${fitting.name}'s copy.` };
   }
-  // No copy fits, but a side with no file is a start that always fits. Ranked
-  // below every present side: starting empty must never beat starting from a
-  // copy the user could have edited.
+  // Ranked below every present side: starting empty must never beat starting
+  // from a copy the user could have edited.
   const absent = candidates.find((candidate) => candidate.text === null);
   if (absent) {
-    return { available: true, text: "", startedFrom: `${absent.missing} This starts empty.` };
+    return { text: "", startedFrom: `${absent.missing} This starts empty.` };
   }
   return {
-    available: false,
-    smallestBytes: Math.min(...present.map((candidate) => utf8ByteLength(candidate.text))),
+    text: "",
+    startedFrom:
+      `Both copies are larger than ` +
+      `${CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes, so this ` +
+      `starts empty. That is the largest combined copy dohc can apply.`,
   };
 }
 
@@ -1210,6 +1210,18 @@ function ConflictResolver(props: {
   // counted every byte of it and assigned the whole string to the textarea's
   // value. Refusing the change keeps the box at its last good content, so
   // nothing the user already wrote is lost, and names the size they tried.
+  // OPENING the box clears the last refusal, and that is the only place that
+  // needs to. The warning names a size the user TRIED; carrying it onto a box
+  // they have just reopened, holding a seed that fits, describes nothing that
+  // is true. Clearing on Cancel as well reads as tidier and is dead: the
+  // warning only renders inside the box, so between a cancel and the next open
+  // there is nothing to show — and two clears that cover the same path mean
+  // neither can be tested, because each masks the other.
+  const startCombine = useCallback((seed: string) => {
+    setRefusedBytes(null);
+    setCombined(seed);
+  }, []);
+
   const onCombinedChange = useCallback((next: string) => {
     if (exceedsUtf8Bytes(next, CONFLICT_COMBINED_MAX_BYTES)) {
       // One walk of the refused body, in the handler rather than the render.
@@ -1327,23 +1339,12 @@ function ConflictResolver(props: {
               </button>
             </div>
           </div>
-          {combined === null && combineSeed?.available === false ? (
-            <p
-              data-testid="version-conflict-combine-unavailable"
-              className="mb-0 mt-2 text-[11px] leading-4 text-subtle"
-            >
-              The smallest copy here is{" "}
-              {combineSeed.smallestBytes.toLocaleString("en-US")} bytes. dohc can
-              apply a combined copy up to{" "}
-              {CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes. Keep one
-              copy, then edit the file.
-            </p>
-          ) : combined === null && combineSeed?.available === true ? (
+          {combined === null && combineSeed !== null ? (
             <button
               type="button"
               data-testid="version-conflict-combine"
               disabled={busy}
-              onClick={() => setCombined(combineSeed.text)}
+              onClick={() => startCombine(combineSeed.text)}
               className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >
               Combine by hand instead…
@@ -1356,7 +1357,7 @@ function ConflictResolver(props: {
               >
                 Combined copy for Main
               </label>
-              {combineSeed?.available === true ? (
+              {combineSeed !== null ? (
                 <p
                   data-testid="version-conflict-combined-source"
                   className="m-0 text-[11px] leading-4 text-subtle"
@@ -1388,6 +1389,7 @@ function ConflictResolver(props: {
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
+                  data-testid="version-conflict-combine-cancel"
                   disabled={busy}
                   onClick={() => setCombined(null)}
                   className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"

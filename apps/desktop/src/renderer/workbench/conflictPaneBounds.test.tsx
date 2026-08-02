@@ -12,11 +12,26 @@ import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
 // cannot see — a render-count assertion cannot, and every bound test here
 // passed while twenty collapsed 10 MiB cards cost 750 ms on mount.
 const utf8ByteLengthSpy = vi.hoisted(() => vi.fn());
+const exceedsUtf8BytesSpy = vi.hoisted(() => vi.fn());
 vi.mock("./conflictPane", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./conflictPane")>();
   utf8ByteLengthSpy.mockImplementation(actual.utf8ByteLength);
-  return { ...actual, utf8ByteLength: utf8ByteLengthSpy };
+  exceedsUtf8BytesSpy.mockImplementation(actual.exceedsUtf8Bytes);
+  return {
+    ...actual,
+    utf8ByteLength: utf8ByteLengthSpy,
+    exceedsUtf8Bytes: exceedsUtf8BytesSpy,
+  };
 });
+
+/// Every walk of a whole side, whichever function made it. Asserting on the
+/// COUNT rather than on the spies keeps the numbers in a failure message
+/// readable — vitest serialises recorded arguments, and these are 10 MiB
+/// strings, which used to kill the run with `RangeError: Invalid array length`
+/// instead of printing the assertion.
+function measurements(): number {
+  return utf8ByteLengthSpy.mock.calls.length + exceedsUtf8BytesSpy.mock.calls.length;
+}
 
 const { CONFLICT_COMBINED_MAX_BYTES, CONFLICT_PREVIEW_MAX_CHARS } = await import(
   "./conflictPane"
@@ -56,6 +71,7 @@ const bridgeMock = {
 
 beforeEach(() => {
   utf8ByteLengthSpy.mockClear();
+  exceedsUtf8BytesSpy.mockClear();
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
   bridgeMock.listWorkspaceVersions.mockResolvedValue({
     versions: [
@@ -127,17 +143,31 @@ describe("a conflict side pane", () => {
 });
 
 describe("combine by hand", () => {
-  it("is not offered when NEITHER side fits, and names the limit", async () => {
+  it("still offers an empty start when NEITHER copy fits, and says why", async () => {
+    // `apply-merged` measures the SUBMITTED text and nothing else, so a short
+    // replacement written by hand is a body the engine takes however large the
+    // two sides are. Removing the affordance refused work it accepts.
     await openReview([
       conflict({ currentText: hugeBody("a"), incomingText: hugeBody("b") }),
     ]);
-    expect(screen.queryByTestId("version-conflict-combine")).toBeNull();
-    const note = screen.getByTestId("version-conflict-combine-unavailable");
-    expect(note.textContent).toContain(
-      CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US"),
+    fireEvent.click(screen.getByTestId("version-conflict-combine"));
+    expect(
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
+        .value,
+    ).toBe("");
+    expect(
+      screen.getByTestId("version-conflict-combined-source").textContent,
+    ).toBe(
+      `Both copies are larger than ${CONFLICT_COMBINED_MAX_BYTES.toLocaleString(
+        "en-US",
+      )} bytes, so this starts empty. That is the largest combined copy dohc ` +
+        `can apply.`,
     );
-    expect(note.textContent).toContain("bytes");
-    expect(note.textContent).toContain("Keep one copy, then edit the file.");
+    // And it can be applied: an empty combined copy is under every cap.
+    expect(
+      (screen.getByTestId("version-conflict-apply-combined") as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
   });
 
   it("is offered for a side that fits, seeded with the incoming copy", async () => {
@@ -150,7 +180,6 @@ describe("combine by hand", () => {
     expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
       "Started from Feature's copy.",
     );
-    expect(screen.queryByTestId("version-conflict-combine-unavailable")).toBeNull();
   });
 
   it("falls back to the OTHER side when the preferred one is over the cap", async () => {
@@ -160,7 +189,6 @@ describe("combine by hand", () => {
     await openReview([
       conflict({ currentText: "main side\n", incomingText: hugeBody("b") }),
     ]);
-    expect(screen.queryByTestId("version-conflict-combine-unavailable")).toBeNull();
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
       (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
@@ -211,6 +239,25 @@ describe("combine by hand", () => {
     expect(screen.queryByTestId("version-conflict-combined-too-large")).toBeNull();
   });
 
+  it("does not carry a refusal onto a box the user reopened", async () => {
+    // The warning names a size the user TRIED. Shown above a pristine seed
+    // that fits, it describes nothing that is true.
+    await openReview([conflict()]);
+    fireEvent.click(screen.getByTestId("version-conflict-combine"));
+    fireEvent.change(screen.getByTestId("version-conflict-combined-input"), {
+      target: { value: "x".repeat(CONFLICT_COMBINED_MAX_BYTES + 1) },
+    });
+    expect(screen.getByTestId("version-conflict-combined-too-large")).not.toBeNull();
+
+    fireEvent.click(screen.getByTestId("version-conflict-combine-cancel"));
+    fireEvent.click(screen.getByTestId("version-conflict-combine"));
+    expect(
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
+        .value,
+    ).toBe("feature side\n");
+    expect(screen.queryByTestId("version-conflict-combined-too-large")).toBeNull();
+  });
+
   it("accepts a change exactly at the cap and refuses one byte more", async () => {
     await openReview([conflict()]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
@@ -238,7 +285,6 @@ describe("combine by hand", () => {
     await openReview([
       conflict({ currentText: null, incomingText: hugeBody("b") }),
     ]);
-    expect(screen.queryByTestId("version-conflict-combine-unavailable")).toBeNull();
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
       (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
@@ -292,12 +338,13 @@ describe("a list of open conflicts", () => {
     await openReview(heavy);
     // The open card measures its two over-cap sides. The nineteen collapsed
     // ones measure nothing.
-    expect(utf8ByteLengthSpy.mock.calls.length).toBe(2);
+    expect(measurements()).toBe(2);
 
     utf8ByteLengthSpy.mockClear();
+    exceedsUtf8BytesSpy.mockClear();
     const cards = screen.getAllByTestId("version-conflict");
     fireEvent.click(within(cards[7]).getByTestId("version-conflict-toggle"));
-    expect(utf8ByteLengthSpy.mock.calls.length).toBe(2);
+    expect(measurements()).toBe(2);
   });
 
   it("never re-measures a side when a local rerender happens", async () => {
@@ -308,7 +355,7 @@ describe("a list of open conflicts", () => {
     await openReview([
       conflict({ currentText: hugeBody("a"), incomingText: hugeBody("b") }),
     ]);
-    expect(utf8ByteLengthSpy.mock.calls.length).toBe(2);
+    expect(measurements()).toBe(2);
 
     let reject: (error: Error) => void = () => {};
     bridgeMock.resolveWorkspaceVersionConflict.mockReturnValue(
@@ -317,12 +364,13 @@ describe("a list of open conflicts", () => {
       }),
     );
     utf8ByteLengthSpy.mockClear();
+    exceedsUtf8BytesSpy.mockClear();
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     expect(screen.getByTestId("version-conflict-busy")).not.toBeNull();
     reject(new Error("nope"));
     await screen.findByTestId("version-conflict-error");
     // Two rerenders, no rescans.
-    expect(utf8ByteLengthSpy.mock.calls.length).toBe(0);
+    expect(measurements()).toBe(0);
   });
 
   it("shows a failure even when the card was collapsed while it ran", async () => {
