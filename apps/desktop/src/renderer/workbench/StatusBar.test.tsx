@@ -170,7 +170,12 @@ describe("update toast", () => {
 describe("sync status surface", () => {
   it("keeps the pinned testid/data-state and shows no count when clean", () => {
     renderBar({
-      syncStatus: { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null },
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
+      },
     });
     const status = screen.getByTestId("sync-status");
     expect(status.getAttribute("data-state")).toBe("synced");
@@ -188,6 +193,7 @@ describe("sync status surface", () => {
         state: "conflict",
         pendingChangeCount: 2,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         conflictCount: 2,
       },
     });
@@ -204,6 +210,7 @@ describe("notice center", () => {
         state: "conflict",
         pendingChangeCount: 2,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         conflictCount: 2,
       },
       agentActive: true,
@@ -257,6 +264,7 @@ describe("notice center", () => {
         state: "conflict",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         conflictCount: 1,
       },
     });
@@ -279,6 +287,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         historyRecordingOff: true,
         // #483: the cause rides main's open-time read, on the same status
         // that decided history is off. One read answers both.
@@ -302,6 +311,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         historyRecordingOff: true,
       },
     });
@@ -346,6 +356,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         unmatchedRemoteResolves: 1,
       },
       onOpenHistory,
@@ -366,6 +377,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         unmatchedRemoteResolves: 1,
       },
       onDismissSyncReview,
@@ -383,6 +395,7 @@ describe("notice center", () => {
           state: "synced",
           pendingChangeCount: 0,
           lastSyncedAtMs: null,
+          historyRecordingUnavailable: false,
           unmatchedRemoteResolves: 0,
         }}
         agentActive={false}
@@ -401,7 +414,12 @@ describe("notice center", () => {
 
   it("shows all clear when there are no notices", async () => {
     renderBar({
-      syncStatus: { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null },
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
+      },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
@@ -414,6 +432,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
         historyCaptureFailed: true,
       },
       onOpenHistory,
@@ -438,6 +457,7 @@ describe("notice center", () => {
       state: "synced" as const,
       pendingChangeCount: 0,
       lastSyncedAtMs: null,
+      historyRecordingUnavailable: false,
       historyCaptureFailed: true,
     };
     const { rerender } = renderBar({ syncStatus: failedStatus });
@@ -617,6 +637,7 @@ describe("notice center", () => {
         state: "cloud-disconnected",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
       },
     });
 
