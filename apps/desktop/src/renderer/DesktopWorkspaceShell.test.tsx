@@ -2318,7 +2318,7 @@ describe("settings entry points", () => {
 // the user gets a true "history is off" under a false cause, the other way a
 // recording workspace promises "no history".
 const UNREADABLE_WARNING =
-  "Workspace settings could not be read. dohc records no history for this workspace until you fix /ws/.dohc/settings.local.json.";
+  "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then reopen the workspace.";
 
 const OPTED_OUT_READ = async (): Promise<WorkspaceSettingsResult> => ({
   settings: {

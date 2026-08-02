@@ -1,4 +1,5 @@
 import {
+  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -207,6 +208,9 @@ describe("workspace settings file store", () => {
     expect(corruptResult.warning).toContain(
       join(corrupt, ".dohc", WORKSPACE_SETTINGS_FILE),
     );
+    // Repairing the file is only half the fix: the capture decision is made at
+    // workspace open, so nothing is recorded until the workspace is reopened.
+    expect(corruptResult.warning).toContain("Then reopen the workspace.");
 
     // The same table packages/mcp asserts against isWorkspaceEngineFlagged.
     // Both readers share one schema, so both must answer OFF for every body.
@@ -352,6 +356,57 @@ describe("workspace settings file store", () => {
       },
       source: "stored",
     });
+  });
+
+  it("keeps both patches when two saves overlap", async () => {
+    // Two controls changed before the first save settles: without a queue both
+    // read the same old file and the later merge drops the earlier patch —
+    // while the dialog reports it saved.
+    const root = await tempRoot();
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+
+    const [first, second] = await Promise.all([
+      saveWorkspaceSettingsFile(root, { privacy: { confirmExternalLinks: false } }),
+      saveWorkspaceSettingsFile(root, { files: { attachmentFolderName: "media" } }),
+    ]);
+    expect(first.refusal).toBeUndefined();
+    expect(second.refusal).toBeUndefined();
+
+    const onDisk = await readWorkspaceSettingsFile(root);
+    expect(onDisk.settings.privacy.confirmExternalLinks).toBe(false);
+    expect(onDisk.settings.files.attachmentFolderName).toBe("media");
+  });
+
+  it("resets over a DIRECTORY sitting at the settings path", async () => {
+    // The refusal points the user at Reset, so Reset has to work for every
+    // state the reader calls unreadable — including a directory, which the
+    // atomic rename cannot land on.
+    const root = await tempRoot();
+    const path = join(root, ".dohc", WORKSPACE_SETTINGS_FILE);
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    await rm(path);
+    await mkdir(path);
+    await writeFile(join(path, "squatter.txt"), "not settings");
+
+    expect((await readWorkspaceSettingsFile(root)).warning).toContain(
+      "not a file dohc can read",
+    );
+    expect(
+      (await saveWorkspaceSettingsFile(root, { privacy: { confirmExternalLinks: false } }))
+        .refusal,
+    ).toBeTruthy();
+
+    // What the Reset control does.
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    expect(await readWorkspaceSettingsFile(root)).toEqual({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored",
+    });
+    // And saving works again afterwards.
+    expect(
+      (await saveWorkspaceSettingsFile(root, { privacy: { confirmExternalLinks: false } }))
+        .settings.privacy.confirmExternalLinks,
+    ).toBe(false);
   });
 
   it("refuses to write through a symlinked .dohc and never lands files outside", async () => {

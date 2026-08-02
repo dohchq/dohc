@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
@@ -30,7 +30,10 @@ function unreadableSettings(
   return {
     settings: UNREADABLE_WORKSPACE_SETTINGS,
     source: "recovered",
-    warning: `${reason} dohc records no history for this workspace until you fix ${path}.`,
+    // The capture decision is made at workspace open, so repairing the file
+    // is only half the fix: nothing is recorded until the workspace is opened
+    // again. The notice owes the user both steps.
+    warning: `${reason} dohc records no history for this workspace. Fix ${path}. Then reopen the workspace.`,
   };
 }
 
@@ -67,6 +70,36 @@ export async function readWorkspaceSettingsFile(
   }
 }
 
+// Saves for ONE workspace run one at a time. Two controls changed before the
+// first save settles would otherwise both read the same old file, and the
+// later merge would drop the earlier patch while the dialog reported it saved.
+const settingsSaveQueues = new Map<string, Promise<unknown>>();
+
+export function saveWorkspaceSettingsFile(
+  rootPath: string,
+  patch: WorkspaceSettingsPatch,
+): Promise<WorkspaceSettingsResult> {
+  const queue = settingsSaveQueues.get(rootPath) ?? Promise.resolve();
+  // A failed save must not block the next one, so both settlements continue.
+  const result = queue.then(
+    () => applyWorkspaceSettingsPatch(rootPath, patch),
+    () => applyWorkspaceSettingsPatch(rootPath, patch),
+  );
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  settingsSaveQueues.set(rootPath, settled);
+  void settled.then(() => {
+    // Drop the entry only if no later save has taken the tail, so the map does
+    // not grow one promise per workspace for the life of the process.
+    if (settingsSaveQueues.get(rootPath) === settled) {
+      settingsSaveQueues.delete(rootPath);
+    }
+  });
+  return result;
+}
+
 // THE save path: the changed controls, applied to the file as it is NOW.
 //
 // Two ways the old whole-object save wrote an opt-out nobody chose. Over a
@@ -79,7 +112,7 @@ export async function readWorkspaceSettingsFile(
 // repair through the very recovery path the refusal prescribes. Merging the
 // patch onto a fresh read closes both, and every other stale-snapshot save
 // with them.
-export async function saveWorkspaceSettingsFile(
+async function applyWorkspaceSettingsPatch(
   rootPath: string,
   patch: WorkspaceSettingsPatch,
 ): Promise<WorkspaceSettingsResult> {
@@ -104,6 +137,14 @@ export async function writeWorkspaceSettingsFile(
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
     await writeFile(tmp, `${JSON.stringify(WorkspaceSettings.parse(settings), null, 2)}\n`);
+    // A directory or a link at the settings path reads as unreadable, and
+    // Reset is what the refusal tells the user to reach for — but the atomic
+    // rename cannot land on either, so the advertised way out would fail.
+    // Clear exactly that path first. The other caller (a patch save) only
+    // reaches here after the file read as a regular file, so it never takes
+    // this branch.
+    const target = await lstat(path).catch(() => null);
+    if (target && !target.isFile()) await rm(path, { recursive: true, force: true });
     await rename(tmp, path);
   } finally {
     await unlink(tmp).catch(() => undefined);

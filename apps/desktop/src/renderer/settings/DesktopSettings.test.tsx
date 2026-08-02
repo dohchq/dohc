@@ -964,7 +964,7 @@ describe("DesktopSettings", () => {
   // main refuses; the dialog must say so and must not claim a save happened.
   it("shows the refusal when the settings file cannot be read, and never says Saved", async () => {
     const warning =
-      "Workspace settings could not be read. dohc records no history for this workspace until you fix /x/.dohc/settings.local.json.";
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/settings.local.json. Then reopen the workspace.";
     const refusal =
       "dohc did not save workspace settings. dohc cannot read /x/.dohc/settings.local.json. Fix that file. Or select Reset workspace in Advanced to replace it.";
     const onDisk = {
