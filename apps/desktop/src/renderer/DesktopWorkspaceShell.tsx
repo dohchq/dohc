@@ -1389,13 +1389,39 @@ export function DesktopWorkspaceShell(props: {
   // is what has to re-run the check.
   useEffect(() => {
     if (!filesLoaded || restoredTabPaths.size === 0) return;
+    // Closing a tab is destructive, so it waits for the NEWEST answer. The
+    // watermark above deliberately lets an older success fill the display —
+    // right for the explorer, wrong for closing tabs, because a pull still in
+    // flight can carry back a file this older listing predates. A pending
+    // request defers the close; its response re-runs this.
+    if (committedFilesRequest.current !== filesRequest.current) return;
+    // A DIRTY tab is never closed. Closing it unmounts the keyed inspector
+    // mid-draft, whose cleanup flushes best-effort to a path that no longer
+    // exists; the write fails, the failure is swallowed, and the draft is
+    // gone with no error and no way back. Waiting costs nothing: this re-runs
+    // when the draft settles, and closes the tab then.
+    const dirtyPath = activeTabDirty ? wb.activeTab : null;
+    const closable =
+      dirtyPath !== null && restoredTabPaths.has(dirtyPath)
+        ? new Set([...restoredTabPaths].filter((path) => path !== dirtyPath))
+        : restoredTabPaths;
     const present = new Set(files.map((file) => file.path));
-    setWb((state) =>
-      pruneMissingRestoredTabs(state, restoredTabPaths, (path) =>
-        present.has(path),
-      ),
-    );
-  }, [files, filesLoaded, restoredTabPaths]);
+    const fileExists = (path: string) => present.has(path);
+    const current = wbRef.current;
+    const next = pruneMissingRestoredTabs(current, closable, fileExists);
+    if (next === current) return;
+    // Closing the ACTIVE tab activates a neighbour, which remounts the keyed
+    // inspector — that is an OPEN (closeFileTab idiom). Without the mark, the
+    // inspector's mount measure brackets whatever stale mark came before it.
+    if (
+      next.activeTab !== current.activeTab &&
+      next.activeTab !== null &&
+      !isVirtualTabPath(next.activeTab)
+    ) {
+      rendererMarks.mark("file-open-start");
+    }
+    setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
+  }, [files, filesLoaded, restoredTabPaths, activeTabDirty, wb.activeTab]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
     setShellError(error instanceof Error ? error.message : fallback);

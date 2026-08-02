@@ -96,6 +96,36 @@ const STORED_STATE: WorkspaceUiState = {
 
 Element.prototype.scrollIntoView = vi.fn();
 
+// The dirty-draft test types into the real markdown editor, which needs the
+// same two globals jsdom lacks that FileInspector.test.tsx stubs.
+vi.stubGlobal(
+  "ResizeObserver",
+  class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+);
+for (const method of ["getClientRects", "getBoundingClientRect"] as const) {
+  Object.defineProperty(Range.prototype, method, {
+    configurable: true,
+    value: () =>
+      method === "getClientRects"
+        ? []
+        : {
+            bottom: 0,
+            height: 0,
+            left: 0,
+            right: 0,
+            top: 0,
+            width: 0,
+            x: 0,
+            y: 0,
+            toJSON: () => {},
+          },
+  });
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => {
@@ -813,6 +843,130 @@ describe("ui-state merge-on-load", () => {
       expect(screen.queryByTestId("tab-shared-gone.md")).toBeNull();
     });
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  // P1: closing a DIRTY tab unmounts the inspector mid-draft, and its cleanup
+  // flushes best-effort to a path that no longer exists. resolveWorkspaceFile
+  // requires the file, the write fails, the failure is swallowed — the draft
+  // would be gone with no error and no way back.
+  it("never closes a restored tab with an unsaved draft, and closes it once saved", async () => {
+    const listing = (...paths: string[]) => ({
+      files: paths.map((path) => ({ path, kind: "file" as const })),
+      folders: [] as string[],
+    });
+    const user = userEvent.setup();
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    renderShell(bridge);
+
+    // Type into the restored tab's document without letting it settle.
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await screen.findByTestId("tab-dirty");
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+
+    // The file disappears from the workspace while that draft is unsaved.
+    bridge.listWorkspaceFiles = vi.fn(async () => listing("b.md"));
+    await act(async () => {
+      bridge.emitWorkspaceActivity();
+      await Promise.resolve();
+    });
+
+    // The tab stays open, so the draft still has somewhere to live.
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-dirty")).toBeTruthy();
+
+    // Once the draft settles, the deferred close completes.
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-a.md")).toBeNull();
+    });
+  }, 20_000);
+
+  // A provisional display-fill must not drive a destructive close: the pull
+  // still in flight can carry back a file the older listing predates.
+  it("defers closing a tab while a newer listing is still pending", async () => {
+    const older = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    const newer = deferred<{
+      files: Array<{ path: string; kind: "file" }>;
+      folders: string[];
+    }>();
+    let issued = 0;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "pulled.md"],
+        activeTab: "b.md",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(() =>
+      ++issued === 1 ? older.promise : newer.promise,
+    );
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    // The older listing lands first and does not know about pulled.md.
+    await act(async () => {
+      older.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      await older.promise;
+    });
+    // It fills the display, but must not close anything: a newer answer is
+    // still coming.
+    expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+
+    // The newer one carries the file back.
+    await act(async () => {
+      newer.resolve({
+        files: [
+          { path: "b.md", kind: "file" },
+          { path: "pulled.md", kind: "file" },
+        ],
+        folders: [],
+      });
+      await newer.promise;
+    });
+    expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+    expect(screen.getAllByText("pulled.md").length).toBeGreaterThan(0);
+  });
+
+  // Closing the ACTIVE tab remounts the keyed inspector on its neighbour —
+  // an open. Without the mark, that mount measure brackets a stale mark.
+  it("marks file-open-start when closing the active tab hands over to a survivor", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["b.md", "gone.md"],
+        activeTab: "gone.md",
+      }),
+    );
+    renderShell(bridge);
+
+    const openStartCalls = () =>
+      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+
+    // Wait for the RESTORE to land first, or the assertions below pass
+    // vacuously against the empty default state.
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+    });
+    expect(openStartCalls()).toBe(1);
+
+    mark.mockRestore();
   });
 
   // A request that is merely in flight has not answered anything, and a
