@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // WS-G2-C-2 — the ONE source of truth for the e2e SQLite helpers that read the
 // workspace engine.db. These are load-bearing for the "no double-journal"
@@ -66,10 +68,54 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
 ];
 
 // The engine builds its schema through an ordered migration ledger
-// (crates/dohc-engine-storage/src/migration.rs). `engine_migrations` holds one
-// row per migration and leaves `completed_at` NULL until that migration
-// finishes, so the LEDGER says whether the schema is still materializing — a
-// missing table never does.
+// (crates/dohc-engine-storage/src/migration.rs). A transactional migration
+// INSERTS its `engine_migrations` row inside the same transaction as its DDL,
+// so a migration that has not committed has no row at all: "every row present
+// is complete" is true in the middle of the chain and says nothing.
+//
+// Only the LAST migration this build applies settles the ledger. Ordinals are
+// strictly increasing (`validate_migration_order`) and applied in order, so a
+// complete terminal row means every earlier migration committed before it
+// started. An empty ledger is the degenerate case — no terminal row, poll again.
+//
+// The terminal ordinal is READ FROM the migration source, never pinned here: a
+// stale constant would report "settled" while a newly added migration was still
+// running, which is the bug this replaces.
+const MIGRATION_SOURCE = fileURLToPath(
+  new URL("../../../../crates/dohc-engine-storage/src/migration.rs", import.meta.url),
+);
+
+let terminalOrdinalCache: number | null = null;
+
+function terminalMigrationOrdinal(): number {
+  if (terminalOrdinalCache !== null) return terminalOrdinalCache;
+  const source = readFileSync(MIGRATION_SOURCE, "utf8");
+  const start = source.indexOf("const BASELINE_MIGRATIONS: &[Migration] = &[");
+  if (start < 0) {
+    throw new Error(`${MIGRATION_SOURCE} has no BASELINE_MIGRATIONS list to read ordinals from.`);
+  }
+  const end = source.indexOf("\n];", start);
+  if (end < 0) {
+    throw new Error(`${MIGRATION_SOURCE} has an unterminated BASELINE_MIGRATIONS list.`);
+  }
+  const ordinals = [...source.slice(start, end).matchAll(/^\s*ordinal:\s*(\d+),/gm)].map((match) =>
+    Number(match[1]),
+  );
+  // The list must be 0..n-1 in order. Anything else means this reader no longer
+  // understands the migration source, and guessing a terminal from it would put
+  // the gate back to reporting "settled" mid-chain.
+  const contiguous =
+    ordinals.length > 0 && ordinals.every((ordinal, index) => ordinal === index);
+  if (!contiguous) {
+    throw new Error(
+      `${MIGRATION_SOURCE} lists migration ordinals [${ordinals.join(", ")}], which are not ` +
+        "0..n-1 in order, so the e2e schema gate cannot tell when the chain has finished.",
+    );
+  }
+  terminalOrdinalCache = ordinals[ordinals.length - 1]!;
+  return terminalOrdinalCache;
+}
+
 function schemaSettled(db: EngineDb): boolean {
   const ledger = db
     .prepare("SELECT name FROM pragma_table_info('engine_migrations')")
@@ -77,13 +123,11 @@ function schemaSettled(db: EngineDb): boolean {
   if (ledger.length === 0) return false;
   const row = db
     .prepare(
-      `SELECT COUNT(*) AS total,
-              COUNT(*) FILTER (WHERE completed_at IS NULL) AS pending
-       FROM engine_migrations`,
+      `SELECT COUNT(*) AS n FROM engine_migrations
+       WHERE ordinal = ? AND completed_at IS NOT NULL`,
     )
-    .get() as { total: number; pending: number } | undefined;
-  // No rows at all is a ledger that has recorded nothing, never a settled one.
-  return Number(row?.total ?? 0) > 0 && Number(row?.pending ?? 0) === 0;
+    .get(terminalMigrationOrdinal()) as { n: number } | undefined;
+  return Number(row?.n ?? 0) === 1;
 }
 
 // Once the ledger has settled, every name above MUST be there. A dropped or
