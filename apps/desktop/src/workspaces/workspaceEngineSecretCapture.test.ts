@@ -327,17 +327,38 @@ describe("listMoments protected pagination", () => {
       beforeMomentOrder: middle.nextBeforeMomentOrder ?? undefined,
     });
 
+    // protected-upper ties text-50, which ends the first page, so it waits
+    // for the page that CONTAINS the end of the tie: a tie can outlast a
+    // page, and a tied protected moment placed at a page's end would jump in
+    // front of the tied text moments the next page appends.
     expect(newest.moments.map((moment) => moment.id)).toEqual([
       "text-60",
       "text-50",
-      "protected-upper",
     ]);
     expect(middle.moments.map((moment) => moment.id)).toEqual([
+      "protected-upper",
       "text-40",
       "protected-middle",
       "text-30",
     ]);
     expect(oldest.moments.map((moment) => moment.id)).toEqual([
+      "text-20",
+      "protected-lower",
+      "text-10",
+    ]);
+    // What the user reads is the pages appended in order; the split above may
+    // move, this may not.
+    expect(
+      [...newest.moments, ...middle.moments, ...oldest.moments].map(
+        (moment) => moment.id,
+      ),
+    ).toEqual([
+      "text-60",
+      "text-50",
+      "protected-upper",
+      "text-40",
+      "protected-middle",
+      "text-30",
       "text-20",
       "protected-lower",
       "text-10",
@@ -421,5 +442,60 @@ describe("listMoments protected pagination", () => {
     ];
     expect(await mergedIds([first, second])).toEqual(expected);
     expect(await mergedIds([second, first])).toEqual(expected);
+  });
+
+  // The rule has to hold across the whole timeline the user reads, not only
+  // inside one page. DesktopWorkspaceShell loads 200 moments at a time and
+  // APPENDS each later page, so a tie group longer than one page would put
+  // the protected moment in front of the tied text moments still to come.
+  it("keeps tied text before a protected moment across a page boundary", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    await loopback.sendRequest({
+      id: 1,
+      method: VERSIONED_METHOD.versionsEnsureMain,
+      workspace: "engine-secret-test",
+      params: { workspaceId: "engine-secret-test" },
+    });
+    // One reconcile pass, one clock reading, one moment more than a page.
+    const tiedTextCount = 201;
+    for (let index = 0; index < tiedTextCount; index += 1) {
+      await loopback.sendRequest({
+        id: index + 2,
+        method: VERSIONED_METHOD.textWrite,
+        workspace: "engine-secret-test",
+        params: {
+          workspaceId: "engine-secret-test",
+          versionId: "main",
+          path: `tied-${index}.md`,
+          text: String(index),
+          origin: "api",
+          momentId: `tied-${index}`,
+          nowMs: 500,
+        },
+      });
+    }
+    const secretStore = {
+      listSecretMoments: vi.fn(async () => [secretMoment("tied-secret", 500)]),
+    } as unknown as SecretFileStore;
+    const engine = daemonCapture(root, loopback, undefined, secretStore);
+
+    // The shell's own paging: 200 per request, later pages appended.
+    const first = await engine.listMoments({ limit: 200 });
+    const second = await engine.listMoments({
+      limit: 200,
+      beforeMomentOrder: first.nextBeforeMomentOrder ?? undefined,
+    });
+    const timeline = [...first.moments, ...second.moments];
+    await engine.stop();
+
+    expect(timeline.filter((moment) => moment.protected)).toHaveLength(1);
+    expect(timeline.map((moment) => moment.id)).toEqual([
+      ...Array.from(
+        { length: tiedTextCount },
+        (_, index) => `tied-${tiedTextCount - 1 - index}`,
+      ),
+      "tied-secret",
+    ]);
   });
 });
