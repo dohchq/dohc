@@ -1,5 +1,24 @@
 use dohc_engine_storage::StorageError;
 
+/// How much of an oversized blob the refusing layer actually measured. Ingest
+/// holds the whole body and reports an exact size. A transport that stops
+/// reading at its own bound never learns the full size, and reports the floor
+/// it proved rather than inventing a total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedBytes {
+    Exact(usize),
+    AtLeast(usize),
+}
+
+impl std::fmt::Display for ObservedBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ObservedBytes::Exact(bytes) => write!(formatter, "{bytes} bytes"),
+            ObservedBytes::AtLeast(bytes) => write!(formatter, "at least {bytes} bytes"),
+        }
+    }
+}
+
 /// Engine-side replication failure taxonomy. Messages never include payloads,
 /// content, keys, or bearer credentials.
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +39,14 @@ pub enum SyncError {
     ShareBoundaryViolation,
     #[error("referenced blob is missing or invalid")]
     BlobInvalid,
+    #[error(
+        "blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
+    )]
+    BlobTooLarge {
+        constraint: &'static str,
+        limit_bytes: usize,
+        observed_bytes: usize,
+    },
     #[error("injected crash")]
     FaultCrash,
 }
@@ -33,7 +60,7 @@ impl SyncError {
             SyncError::RetryableState { .. } => "retryable-state",
             SyncError::UnsupportedOperation => "invalid-input",
             SyncError::ShareBoundaryViolation => "share-boundary-violation",
-            SyncError::BlobInvalid => "invalid-input",
+            SyncError::BlobInvalid | SyncError::BlobTooLarge { .. } => "invalid-input",
             SyncError::FaultCrash => "injected-crash",
         }
     }
@@ -73,6 +100,12 @@ pub enum RelayError {
     BlobReferenceMissing,
     #[error("relay blob content failed integrity validation")]
     BlobInvalid,
+    #[error("relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed}")]
+    BlobTooLarge {
+        constraint: &'static str,
+        limit_bytes: usize,
+        observed: ObservedBytes,
+    },
     #[error("relay key envelope is missing")]
     KeyEnvelopeMissing,
     #[error("share is unavailable")]

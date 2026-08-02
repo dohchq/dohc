@@ -1,14 +1,29 @@
-use dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES;
+use dohc_engine_domain::{MAX_CAPTURE_BINARY_FILE_BYTES, MAX_TEXT_BYTES};
 use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
 use rusqlite::{OptionalExtension, params};
 
 use crate::SyncError;
 use crate::journal::crashes;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BlobKind {
+    Text,
+    Binary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobContent {
     Text(String),
     Binary(Vec<u8>),
+}
+
+impl BlobContent {
+    fn kind(&self) -> BlobKind {
+        match self {
+            BlobContent::Text(_) => BlobKind::Text,
+            BlobContent::Binary(_) => BlobKind::Binary,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,9 +32,34 @@ pub struct BlobHydration {
     pub content: BlobContent,
 }
 
+/// The store's byte ceiling for a blob kind, as a named constraint and its
+/// configured limit. Single source of truth for both ingest checks.
+pub const fn blob_ceiling(kind: BlobKind) -> (&'static str, usize) {
+    match kind {
+        BlobKind::Text => ("MAX_TEXT_BYTES", MAX_TEXT_BYTES),
+        BlobKind::Binary => (
+            "MAX_CAPTURE_BINARY_FILE_BYTES",
+            MAX_CAPTURE_BINARY_FILE_BYTES,
+        ),
+    }
+}
+
+/// The loosest ingest ceiling across blob kinds. A transport must deliver a
+/// blob of this size whole, and one byte more, so ingest refuses an overage by
+/// name instead of the transport refusing it as an unreadable response.
+pub const MAX_INGEST_BLOB_BYTES: usize = {
+    let text = blob_ceiling(BlobKind::Text).1;
+    let binary = blob_ceiling(BlobKind::Binary).1;
+    if text > binary { text } else { binary }
+};
+
 /// Hash-verify and hydrate a bounded content-addressed blob in one transaction.
 /// Existing content is re-verified; a hash collision or poisoned row fails
 /// closed instead of being overwritten.
+///
+/// The ceiling is enforced here, not inherited from a transport response bound,
+/// so every caller ingests under the same store invariants. Relay pulls bail
+/// out earlier, on the undecoded response, to skip the hash and the copy.
 pub fn hydrate_blob_content(
     store: &mut EngineStore,
     blob: &BlobHydration,
@@ -29,6 +69,14 @@ pub fn hydrate_blob_content(
         BlobContent::Text(text) => text.as_bytes(),
         BlobContent::Binary(bytes) => bytes.as_slice(),
     };
+    let (constraint, limit_bytes) = blob_ceiling(blob.content.kind());
+    if bytes.len() > limit_bytes {
+        return Err(SyncError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes: bytes.len(),
+        });
+    }
     if hex_sha256(bytes) != blob.sha256 {
         return Err(SyncError::BlobInvalid);
     }
@@ -57,9 +105,6 @@ pub fn hydrate_blob_content(
                 }
             }
             BlobContent::Binary(bytes) => {
-                if bytes.len() > MAX_CAPTURE_BINARY_FILE_BYTES {
-                    return Err(SyncError::BlobInvalid);
-                }
                 let existing: Option<(i64, Vec<u8>)> = tx
                     .query_row(
                         "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",

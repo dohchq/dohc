@@ -11,8 +11,8 @@ use crate::cursor::{
 };
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::{
-    ApplyOutcome, BlobContent, BlobHydration, RelayError, ReplicationEnvelope, SyncError,
-    hydrate_blob_content,
+    ApplyOutcome, BlobContent, BlobHydration, BlobKind, ObservedBytes, RelayError,
+    ReplicationEnvelope, SyncError, blob_ceiling, hydrate_blob_content,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1281,15 +1281,34 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     missing.push(kind);
                 }
             }
-            if missing.is_empty() {
+            // The loosest ceiling any missing kind allows. An empty `missing`
+            // yields no ceiling and needs no download.
+            let Some((constraint, limit_bytes)) = missing
+                .iter()
+                .copied()
+                .map(blob_ceiling)
+                .max_by_key(|(_, limit_bytes)| *limit_bytes)
+            else {
                 continue;
+            };
+            let response = self
+                .transport
+                .download_blob(BlobDownloadRequest {
+                    workspace_id: workspace_id.to_owned(),
+                    replication_epoch: identity.replication_epoch.clone(),
+                    stream_identity: identity.stream_identity.clone(),
+                    sha256: sha256.clone(),
+                })
+                .map_err(|error| relabel_ceiling(error, constraint, limit_bytes))?;
+            // Refuse before hashing and before copying: a transport is not
+            // trusted to bound its own response, and no kind can accept this.
+            if response.bytes.len() > limit_bytes {
+                return Err(RelayError::BlobTooLarge {
+                    constraint,
+                    limit_bytes,
+                    observed: ObservedBytes::Exact(response.bytes.len()),
+                });
             }
-            let response = self.transport.download_blob(BlobDownloadRequest {
-                workspace_id: workspace_id.to_owned(),
-                replication_epoch: identity.replication_epoch.clone(),
-                stream_identity: identity.stream_identity.clone(),
-                sha256: sha256.clone(),
-            })?;
             if hex_sha256(&response.bytes) != sha256 {
                 return Err(RelayError::BlobInvalid);
             }
@@ -1308,12 +1327,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     },
                     faults,
                 )
-                .map_err(|error| {
-                    if matches!(error, SyncError::BlobInvalid) {
-                        RelayError::BlobInvalid
-                    } else {
-                        local(error)
-                    }
+                .map_err(|error| match error {
+                    SyncError::BlobInvalid => RelayError::BlobInvalid,
+                    SyncError::BlobTooLarge {
+                        constraint,
+                        limit_bytes,
+                        observed_bytes,
+                    } => RelayError::BlobTooLarge {
+                        constraint,
+                        limit_bytes,
+                        observed: ObservedBytes::Exact(observed_bytes),
+                    },
+                    other => local(other),
                 })? {
                     TxnOutcome::Committed(()) => {}
                     TxnOutcome::Crashed { .. } => {
@@ -1326,10 +1351,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum BlobKind {
-    Text,
-    Binary,
+/// A transport bounds a blob body without knowing which kind was asked for, so
+/// it names the loosest ingest ceiling. Only the caller knows the kind. Relabel
+/// the refusal with that kind's real limit: an agent told the wrong number
+/// shrinks its payload to a size that is still refused.
+fn relabel_ceiling(error: RelayError, constraint: &'static str, limit_bytes: usize) -> RelayError {
+    match error {
+        RelayError::BlobTooLarge { observed, .. } => RelayError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed,
+        },
+        other => other,
+    }
 }
 
 fn collect_blob_refs(
@@ -2461,12 +2495,29 @@ fn replay_share_write<T: RelayTransport>(
         );
         return Ok(());
     }
+    // The shared write lands in the store through `write_binary`/`write_text`,
+    // which never pass a blob through ingest hydration. Without this the only
+    // bound left is the generic 64 MiB blob store, so a share could persist a
+    // binary an ordinary capture refuses.
+    let (constraint, limit_bytes) = blob_ceiling(if content_kind == "binary" {
+        BlobKind::Binary
+    } else {
+        BlobKind::Text
+    });
     let bytes = transport
         .share_blob(ShareBlobRequest {
             share_id: share_id.to_owned(),
             sha256: sha256.to_owned(),
-        })?
+        })
+        .map_err(|error| relabel_ceiling(error, constraint, limit_bytes))?
         .bytes;
+    if bytes.len() > limit_bytes {
+        return Err(RelayError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed: ObservedBytes::Exact(bytes.len()),
+        });
+    }
     if hex_sha256(&bytes) != sha256 {
         return Err(RelayError::BlobInvalid);
     }

@@ -2306,8 +2306,9 @@ pub const YDOC_ORIGIN: &str = "ydoc";
 
 /// Maximum binary payload a capture ingest may persist. Mirrors
 /// `MAX_VERSIONED_BINARY_FILE_BYTES` (`versionedTextStore.ts`) and the files
-/// crate's `MAX_CAPTURE_BINARY_BYTES`; the storage blob cap (64 MiB) stays
-/// the generic ceiling for non-capture writers.
+/// crate's `MAX_CAPTURE_BINARY_BYTES`. Replication applies it too: blob ingest
+/// and share replay both refuse a binary above this ceiling. The storage blob
+/// cap (64 MiB) is what remains for writers neither path covers.
 pub const MAX_CAPTURE_BINARY_FILE_BYTES: usize = 5 * 1024 * 1024;
 
 #[doc(hidden)]

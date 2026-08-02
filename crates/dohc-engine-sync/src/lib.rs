@@ -38,8 +38,10 @@ pub use cursor::{
     commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
     read_shared_peer_position,
 };
-pub use error::{RelayError, SyncError};
-pub use hydration::{BlobContent, BlobHydration, hydrate_blob_content};
+pub use error::{ObservedBytes, RelayError, SyncError};
+pub use hydration::{
+    BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,
+};
 pub use journal::{
     AdoptJoinIdentityOutcome, SyncIdentity, ack_replication_peer, adopt_join_identity,
     journal_local_op_in_tx, journal_local_replication_op, list_replication_ops,
