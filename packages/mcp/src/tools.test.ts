@@ -38,6 +38,7 @@ import {
   share,
   testSite,
   writeWorkspaceFile,
+  isWorkspaceEngineFlagged,
   workspaceStatus,
   type ToolContext,
 } from "./tools";
@@ -1377,6 +1378,31 @@ describe("mcp tools operate on allowed paths", () => {
       });
       expect(queried.ok).toBe(true);
       if (queried.ok) expect(queried.rows.length).toBe(1000);
+    });
+  });
+});
+
+// AUDIT-OPTOUT: MCP mirrors the desktop's settings resolution
+// (workspaceSettingsFile.ts). A file that exists but cannot be read may hold
+// the opt-out, so it resolves OFF in both readers — a mutating tool that named
+// a recorder there would tell the agent something false.
+describe("workspace engine flag", () => {
+  it("reads an unreadable settings file as opted out, and an absent one as on", async () => {
+    await withWorkspace(async (ctx) => {
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(true);
+
+      await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+      await writeFile(join(ctx.root, ".dohc", "settings.local.json"), "{not json");
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+      await expect(
+        writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" }),
+      ).resolves.toMatchObject({ ok: true, historyRecording: "off" });
+
+      await writeFile(
+        join(ctx.root, ".dohc", "settings.local.json"),
+        JSON.stringify({ experimental: { workspaceEngineAlpha: true } }),
+      );
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(true);
     });
   });
 });

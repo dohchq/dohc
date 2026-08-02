@@ -81,7 +81,10 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
 export const WorkspaceSettingsResult = z.object({
   settings: WorkspaceSettings,
   source: z.enum(SETTINGS_READ_SOURCES),
-  warning: z.string().min(1).max(500).optional(),
+  // Bounded above a full path, not above a sentence: an unreadable settings
+  // file names its own path in the warning, and the IPC contract bounds a path
+  // at 4096. A shorter bound would reject the warning and fail the whole read.
+  warning: z.string().min(1).max(4600).optional(),
 }).strict();
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 

@@ -32,7 +32,10 @@ import type {
 } from "../ipc/bridgeContract";
 import type { MenuCommandId, SearchResultsEvent } from "../ipc/channels";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
-import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+import {
+  DEFAULT_WORKSPACE_SETTINGS,
+  type WorkspaceSettingsResult,
+} from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import {
   chatMentionOpenTarget,
@@ -150,7 +153,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     // workspace (engine off). Post retirement Phase C that means NO history
     // source at all — the rail shows the history-off placeholder. The engine
     // history surface has its own tests (workbench/EngineHistory.test.ts).
-    getWorkspaceSettings: vi.fn(async () => ({
+    getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
       settings: {
         ...DEFAULT_WORKSPACE_SETTINGS,
         experimental: {
@@ -269,7 +272,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
 // mount (empty history, no try-session, Main only, no chats yet).
 function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
   const bridge = makeBridge(uiStatePromise);
-  bridge.getWorkspaceSettings = vi.fn(async () => ({
+  bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
     settings: {
       ...DEFAULT_WORKSPACE_SETTINGS,
       experimental: {
@@ -1671,5 +1674,35 @@ describe("settings entry points", () => {
 
     await user.keyboard("{Control>},{/Control}");
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+});
+
+// AUDIT-OPTOUT: a settings file that cannot be read reads as opted out, so the
+// workspace records nothing. The Settings dialog is not enough — the user must
+// see it without opening Settings.
+describe("unreadable workspace settings", () => {
+  it("raises the settings warning in the notice center, not only in Settings", async () => {
+    const warning =
+      "Workspace settings use an unsupported shape. dohc records nothing for this workspace until you fix /ws/.dohc/settings.local.json.";
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: {
+          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+          workspaceEngineAlpha: false,
+        },
+      },
+      source: "recovered" as const,
+      warning,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    expect(
+      (await screen.findByTestId("notice-workspace-settings-unreadable"))
+        .textContent,
+    ).toContain("/ws/.dohc/settings.local.json");
   });
 });

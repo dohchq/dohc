@@ -30,6 +30,7 @@ export function StatusBar(props: {
   syncStatus: SyncStatusResult | null;
   agentActive: boolean;
   conflictSummaries: string[];
+  settingsWarning?: string;
   onConnectCloud: () => void;
   onOpenHistory: () => void;
   onOpenConflicts: () => void;
@@ -85,6 +86,7 @@ export function StatusBar(props: {
           syncStatus={props.syncStatus}
           agentActive={props.agentActive}
           conflictSummaries={props.conflictSummaries}
+          {...(props.settingsWarning ? { settingsWarning: props.settingsWarning } : {})}
           onOpenHistory={props.onOpenHistory}
           onOpenConflicts={props.onOpenConflicts}
           {...(props.onDismissSyncReview
