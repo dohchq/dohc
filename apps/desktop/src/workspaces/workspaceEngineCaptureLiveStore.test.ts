@@ -15,12 +15,23 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
 const WORKSPACE_ID = "workspace";
 const WORKSPACE_HANDLE = "workspace-handle";
 const SENTINEL = new Error("sentinel");
+
+// Past `MAX_DESKTOP_CAPTURE_TEXT_BYTES` (128 KiB), so the daemon withholds this
+// body from a moment payload and reports its digest instead. The leading BOM
+// and the two-byte characters make the readback a real UTF-8 check rather than
+// an ASCII one.
+const OVER_CAP_TEXT = `\uFEFF# héllo\n${"é".repeat(70 * 1024)}\n`;
+const OVER_CAP_BYTES = new Uint8Array(Buffer.from(OVER_CAP_TEXT, "utf8"));
+const OVER_CAP_SHA256 = createHash("sha256")
+  .update(OVER_CAP_BYTES)
+  .digest("hex");
 
 function sessionsFor(
   client: EngineDaemonClient,
@@ -53,6 +64,38 @@ function clientFor(
   sendRequest: (request: Request) => Promise<Response>,
 ): EngineDaemonClient {
   return { close: () => undefined, sendRequest };
+}
+
+type CompletedBlob = Parameters<
+  Parameters<NonNullable<EngineDaemonClient["onBlob"]>>[0]
+>[0];
+
+/**
+ * A client that can deliver a completed blob out of band, which is the only
+ * way a body past the 48 KiB egress cap reaches the adapter. `clientFor` has
+ * no `helloAck` and no `onBlob`, so a suite built on it cannot observe blob
+ * hydration at all — it refuses first, on the missing capability.
+ */
+function blobClientFor(
+  sendRequest: (
+    request: Request,
+    deliver: (blob: CompletedBlob) => void,
+  ) => Promise<Response>,
+): EngineDaemonClient {
+  const handlers = new Set<(blob: CompletedBlob) => void>();
+  return {
+    close: () => undefined,
+    helloAck: { capabilities: ["blobs"] },
+    onBlob(handler: (blob: CompletedBlob) => void) {
+      handlers.add(handler);
+      return () => handlers.delete(handler);
+    },
+    async sendRequest(request: Request): Promise<Response> {
+      return await sendRequest(request, (blob) => {
+        for (const handler of handlers) handler(blob);
+      });
+    },
+  } as unknown as EngineDaemonClient;
 }
 
 const snapshot = {
@@ -578,19 +621,184 @@ describe("createCaptureLiveStores", () => {
     expect(detail?.payload.after.path).toBe("renamed.md");
   });
 
-  it("rejects a truncated text moment instead of fabricating empty content", async () => {
-    const client = clientFor(async (request) => {
-      expect(request.method).toBe(VERSIONED_METHOD.momentsGet);
+  it.each(["after", "before"] as const)(
+    "hydrates an over-cap %s moment body out of band (#359)",
+    async (side) => {
+      const requests: Request[] = [];
+      const client = blobClientFor(async (request, deliver) => {
+        requests.push(request);
+        if (request.method === VERSIONED_METHOD.momentsGet) {
+          return {
+            id: request.id,
+            result:
+              side === "after"
+                ? {
+                    ...moment,
+                    afterText: null,
+                    afterBlobSha256: OVER_CAP_SHA256,
+                    afterByteLength: OVER_CAP_BYTES.byteLength,
+                    afterInbandLimitBytes: 128 * 1024,
+                  }
+                : {
+                    ...moment,
+                    beforeText: null,
+                    beforeBlobSha256: OVER_CAP_SHA256,
+                    beforeByteLength: OVER_CAP_BYTES.byteLength,
+                    beforeInbandLimitBytes: 128 * 1024,
+                  },
+          };
+        }
+        expect(request.method).toBe(VERSIONED_METHOD.textReadBlob);
+        // The daemon authorizes the digest against this workspace's text
+        // references before it reads a byte (`read_text_blob_with_hydration`).
+        // A mock that answered every digest would prove nothing about the
+        // request the adapter actually sends.
+        const params = request.params as { sha256?: unknown };
+        if (params.sha256 !== OVER_CAP_SHA256) {
+          throw {
+            wireError: {
+              code: "INVALID_PARAMS",
+              message: "file-not-found",
+              retry: "no",
+            },
+          };
+        }
+        // Past the 48 KiB egress cap the body never rides in band.
+        deliver({
+          requestId: request.id,
+          streamId: request.id,
+          totalBytes: OVER_CAP_BYTES.byteLength,
+          sha256: OVER_CAP_SHA256,
+          bytes: OVER_CAP_BYTES,
+        });
+        return {
+          id: request.id,
+          result: {
+            bytesBase64: null,
+            byteLength: OVER_CAP_BYTES.byteLength,
+            inbandLimitBytes: 48 * 1024,
+          },
+        };
+      });
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+        sessionsFor(client),
+      );
+
+      const detail = await store.getMoment({
+        workspaceId: WORKSPACE_ID,
+        momentId: "resolved-moment",
+      });
+
+      const hydrated =
+        side === "after" ? detail?.payload.after : detail?.payload.before;
+      expect(hydrated?.text).toBe(OVER_CAP_TEXT);
+      // Byte-identical, not merely equal-looking: a decoder that strips the
+      // leading BOM returns a body whose digest no longer matches the one the
+      // moment recorded.
+      expect(Buffer.from(hydrated?.text ?? "", "utf8")).toEqual(
+        Buffer.from(OVER_CAP_BYTES),
+      );
+      expect(
+        createHash("sha256").update(hydrated?.text ?? "", "utf8").digest("hex"),
+      ).toBe(OVER_CAP_SHA256);
+      expect(requests.map((request) => request.method)).toEqual([
+        VERSIONED_METHOD.momentsGet,
+        VERSIONED_METHOD.textReadBlob,
+      ]);
+    },
+  );
+
+  it("hydrates an over-cap moment returned by a write, not just by a read", async () => {
+    const requests: Request[] = [];
+    const client = blobClientFor(async (request, deliver) => {
+      requests.push(request);
+      if (request.method === VERSIONED_METHOD.textWrite) {
+        return {
+          id: request.id,
+          result: {
+            object: { id: "object", workspaceId: WORKSPACE_ID, createdAtMs: 1 },
+            snapshot: { ...snapshot, text: OVER_CAP_TEXT },
+            moment: {
+              ...moment,
+              afterText: null,
+              afterBlobSha256: OVER_CAP_SHA256,
+              afterByteLength: OVER_CAP_BYTES.byteLength,
+              afterInbandLimitBytes: 128 * 1024,
+            },
+            deduped: false,
+          },
+        };
+      }
+      deliver({
+        requestId: request.id,
+        streamId: request.id,
+        totalBytes: OVER_CAP_BYTES.byteLength,
+        sha256: OVER_CAP_SHA256,
+        bytes: OVER_CAP_BYTES,
+      });
       return {
         id: request.id,
         result: {
-          ...moment,
-          afterText: null,
-          afterByteLength: 60 * 1024,
-          afterInbandLimitBytes: 48 * 1024,
+          bytesBase64: null,
+          byteLength: OVER_CAP_BYTES.byteLength,
+          inbandLimitBytes: 48 * 1024,
         },
       };
     });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const written = await store.writeTextFile({
+      workspaceId: WORKSPACE_ID,
+      versionId: "main",
+      path: "note.md",
+      text: OVER_CAP_TEXT,
+      metadata: { origin: "api" },
+    });
+
+    expect(written.moment.payload.after.text).toBe(OVER_CAP_TEXT);
+    expect(requests.map((request) => request.method)).toEqual([
+      VERSIONED_METHOD.textWrite,
+      VERSIONED_METHOD.textReadBlob,
+    ]);
+  });
+
+  it("spends no blob request on a moment whose body already fits", async () => {
+    const requests: Request[] = [];
+    const client = blobClientFor(async (request) => {
+      requests.push(request);
+      return { id: request.id, result: moment };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const detail = await store.getMoment({
+      workspaceId: WORKSPACE_ID,
+      momentId: "resolved-moment",
+    });
+
+    expect(detail?.payload.after.text).toBe("hello");
+    expect(requests.map((request) => request.method)).toEqual([
+      VERSIONED_METHOD.momentsGet,
+    ]);
+  });
+
+  it("rejects a withheld text moment that carries no digest to hydrate from", async () => {
+    const client = blobClientFor(async (request) => ({
+      id: request.id,
+      result: {
+        ...moment,
+        afterText: null,
+        afterBlobSha256: null,
+        afterByteLength: OVER_CAP_BYTES.byteLength,
+        afterInbandLimitBytes: 128 * 1024,
+      },
+    }));
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
       sessionsFor(client),
@@ -601,7 +809,7 @@ describe("createCaptureLiveStores", () => {
         workspaceId: WORKSPACE_ID,
         momentId: "resolved-moment",
       }),
-    ).rejects.toThrow("exceeds the RPC in-band limit");
+    ).rejects.toThrow("carries no text digest");
   });
 
   it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(

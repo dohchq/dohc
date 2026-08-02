@@ -228,14 +228,12 @@ function payloadSnapshot(
     ? moment.beforeContentKind
     : moment.afterContentKind;
   const text = before ? moment.beforeText : moment.afterText;
+  // Every caller hydrates an over-cap body first (`hydratedMoment`), so a
+  // withheld text here carries no digest to hydrate it from. Fabricating "" in
+  // its place would report a wipe that never happened.
   if (contentKind === "text" && text === null) {
-    const limit = before
-      ? moment.beforeInbandLimitBytes
-      : moment.afterInbandLimitBytes;
     throw new Error(
-      `Engine moment text for ${moment.path} exceeds the RPC in-band limit${
-        limit === undefined ? "" : ` (${limit} bytes)`
-      }.`,
+      `Engine moment ${side} text for ${moment.path} is absent and carries no text digest.`,
     );
   }
   const sha256 =
@@ -569,6 +567,58 @@ export function createCaptureLiveStores(
     return await withDomainErrors(async () => await runRawMutation(operation));
   }
 
+  /**
+   * Restore a moment payload body the daemon withheld for being over-cap.
+   *
+   * `moment_json` (lib.rs) nulls a payload text past the in-band limit and
+   * reports its digest instead, exactly as a capped head read does. This store
+   * promises the body, so fetch it out of band — the same hydration
+   * `readTextFile` already performs, keyed off the digest the moment carries.
+   *
+   * A moment whose body already fits makes no extra request, and a metadata
+   * listing (`listMoments`) never reaches here: it reads no payload text.
+   */
+  async function hydratedMoment(moment: MomentRecord): Promise<MomentRecord> {
+    const afterSha256 =
+      moment.afterContentKind === "text" && moment.afterText === null
+        ? moment.afterBlobSha256
+        : null;
+    const beforeSha256 =
+      moment.beforePresent &&
+      moment.beforeContentKind === "text" &&
+      moment.beforeText === null
+        ? moment.beforeBlobSha256
+        : null;
+    if (afterSha256 === null && beforeSha256 === null) return moment;
+    return await runRead(async (adapter) => {
+      const body = async (sha256: string): Promise<string> => {
+        const text = await adapter.readTextBlob({
+          workspaceId: workspace.workspaceId,
+          sha256,
+        });
+        if (text === null) {
+          throw new VersionedTextStoreError(
+            "state-corrupt",
+            `Engine moment text blob ${sha256} for ${moment.path} is unreadable.`,
+          );
+        }
+        return text;
+      };
+      return {
+        ...moment,
+        ...(afterSha256 !== null
+          ? { afterText: await body(afterSha256), afterInbandLimitBytes: null }
+          : {}),
+        ...(beforeSha256 !== null
+          ? {
+              beforeText: await body(beforeSha256),
+              beforeInbandLimitBytes: null,
+            }
+          : {}),
+      };
+    });
+  }
+
   const store = {
     ensureMainVersion: (input: { workspaceId: string }) =>
       runMutation(async (adapter) => await adapter.ensureMainVersion(input)),
@@ -645,7 +695,11 @@ export function createCaptureLiveStores(
       return {
         object: raw.object,
         snapshot: snapshotFromWire(raw.snapshot, input.metadata),
-        moment: momentFromWire(input.workspaceId, raw.moment, input.metadata),
+        moment: momentFromWire(
+          input.workspaceId,
+          await hydratedMoment(raw.moment),
+          input.metadata,
+        ),
       };
     },
 
@@ -684,7 +738,11 @@ export function createCaptureLiveStores(
       return {
         object: raw.object,
         snapshot: snapshotFromWire(value, input.metadata),
-        moment: momentFromWire(input.workspaceId, raw.moment, input.metadata),
+        moment: momentFromWire(
+          input.workspaceId,
+          await hydratedMoment(raw.moment),
+          input.metadata,
+        ),
       };
     },
 
@@ -719,7 +777,8 @@ export function createCaptureLiveStores(
           `Engine delete result for ${input.path} has no preimage.`,
         );
       }
-      const beforePayload = payloadSnapshot(raw.moment, "before");
+      const hydrated = await hydratedMoment(raw.moment);
+      const beforePayload = payloadSnapshot(hydrated, "before");
       const wireBefore: VersionedTextReadValue =
         raw.before.contentKind === "text"
           ? {
@@ -738,7 +797,7 @@ export function createCaptureLiveStores(
       return {
         object: raw.object,
         before,
-        moment: momentFromWire(input.workspaceId, raw.moment, input.metadata),
+        moment: momentFromWire(input.workspaceId, hydrated, input.metadata),
       };
     },
 
@@ -776,7 +835,11 @@ export function createCaptureLiveStores(
         object: raw.object,
         before,
         after,
-        moment: momentFromWire(input.workspaceId, raw.moment, input.metadata),
+        moment: momentFromWire(
+          input.workspaceId,
+          await hydratedMoment(raw.moment),
+          input.metadata,
+        ),
       };
     },
 
@@ -811,7 +874,7 @@ export function createCaptureLiveStores(
       const moment = await runRead(async (adapter) => await adapter.getMoment(input));
       return moment === null
         ? null
-        : momentFromWire(input.workspaceId, moment);
+        : momentFromWire(input.workspaceId, await hydratedMoment(moment));
     },
 
     async compareTextFileVersions(input: {
@@ -888,7 +951,7 @@ export function createCaptureLiveStores(
             snapshot,
             moment: momentFromWire(
               input.workspaceId,
-              raw.moment as MomentRecord,
+              await hydratedMoment(raw.moment as MomentRecord),
               input.metadata,
             ),
           },
@@ -904,7 +967,7 @@ export function createCaptureLiveStores(
           before,
           moment: momentFromWire(
             input.workspaceId,
-            raw.moment as MomentRecord,
+            await hydratedMoment(raw.moment as MomentRecord),
             input.metadata,
           ),
         },
@@ -966,7 +1029,7 @@ export function createCaptureLiveStores(
             snapshot: snapshotFromWire(write.snapshot, input.metadata),
             moment: momentFromWire(
               input.workspaceId,
-              write.moment,
+              await hydratedMoment(write.moment),
               input.metadata,
             ),
           },
@@ -986,7 +1049,7 @@ export function createCaptureLiveStores(
             before: snapshotFromWire(deletion.before, input.metadata),
             moment: momentFromWire(
               input.workspaceId,
-              deletion.moment,
+              await hydratedMoment(deletion.moment),
               input.metadata,
             ),
           },
