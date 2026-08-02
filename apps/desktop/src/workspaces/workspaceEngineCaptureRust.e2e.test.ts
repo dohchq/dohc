@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -444,4 +445,131 @@ it.skipIf(engine.missing)(
     }
   },
   60_000,
+);
+
+// dohc-ai/dohc#337 item 5, driven by its own mechanism: another app holds the
+// `.md` open WITHOUT FILE_SHARE_DELETE, so every attempt to replace it fails
+// with a sharing violation. An ACL cannot model this — the workspace folder
+// grants FILE_DELETE_CHILD, which lets the replace through a deny-write ACE on
+// the file itself.
+async function holdWithoutShareDelete(absolute: string): Promise<() => Promise<void>> {
+  const script =
+    `$f=[System.IO.File]::Open('${absolute.replace(/'/g, "''")}','Open','ReadWrite','Read');` +
+    "Write-Output 'held';[Console]::In.ReadLine()|Out-Null;$f.Close()";
+  const child = spawn(
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
+  await new Promise<void>((resolve, reject) => {
+    let seen = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      seen += chunk.toString();
+      if (seen.includes("held")) resolve();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      seen += chunk.toString();
+    });
+    child.on("exit", () => reject(new Error(`holder exited: ${seen}`)));
+    child.on("error", reject);
+  });
+  return async () => {
+    child.stdin.write("\n");
+    await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+  };
+}
+
+// The journey behind #337 item 5, end to end through the real daemon. It was
+// filed as "no retry OR error", before PR #495 gave the save indicator honest
+// states. The error half is refuted here; the retry half is recorded, and it
+// is a stale indicator rather than lost text.
+it.skipIf(engine.missing || process.platform !== "win32")(
+  "surfaces a blocked save while a file is locked and recovers on the next settle",
+  async () => {
+    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-lock-"));
+    roots.push(root);
+    const markerDirectory = join(root, ".dohc", "engine");
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(
+      join(markerDirectory, "SHADOW_CLONE"),
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "utf8",
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const errors: string[] = [];
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-lock",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context) => errors.push(context),
+    });
+    const absolute = join(root, "note.md");
+    let release: (() => Promise<void>) | null = null;
+    try {
+      await writeFile(absolute, "base\n", "utf8");
+      await waitForPathMoments(capture, "note.md", 1);
+
+      const states: string[] = [];
+      const session = await capture.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+        onSaveState: (state) => states.push(state),
+      });
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, session.initialUpdate);
+      const type = async (text: string) => {
+        const before = Y.encodeStateVector(editor);
+        editor.getText("plainText").insert(0, text);
+        await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+      };
+
+      release = await holdWithoutShareDelete(absolute);
+      await type("locked edit\n");
+
+      // The item's first claim, refuted: the blocked save IS surfaced. The
+      // editor gets the retryable `error` state, whose title tells the user
+      // their edits are here and to try another edit — which is exactly what
+      // lands them below.
+      await expect(session.settleNow()).rejects.toThrow();
+      expect(states).toEqual(["settling", "error"]);
+      expect(errors).toEqual(["ydoc settle of note.md"]);
+      expect(await readFile(absolute, "utf8")).toBe("base\n");
+
+      await release();
+      release = null;
+      states.length = 0;
+      errors.length = 0;
+
+      // The item's second claim, which STANDS: releasing the lock triggers
+      // nothing. Recorded so a retry has to change this line on purpose. The
+      // window is ~3x the settle debounce; no data is at risk here, only the
+      // indicator, which keeps saying "couldn't save" until the next settle.
+      await delay(2500);
+      expect(states).toEqual([]);
+      expect(await readFile(absolute, "utf8")).toBe("base\n");
+
+      // And the next settle recovers completely: BOTH edits reach the file,
+      // so nothing the lock blocked was dropped.
+      await type("second edit\n");
+      await session.settleNow();
+      expect(states).toEqual(["settling", "saved"]);
+      expect(await readFile(absolute, "utf8")).toBe(
+        "second edit\nlocked edit\nbase\n",
+      );
+
+      await expect(session.close()).resolves.toBeUndefined();
+    } finally {
+      await release?.();
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
+    }
+  },
+  120_000,
 );
