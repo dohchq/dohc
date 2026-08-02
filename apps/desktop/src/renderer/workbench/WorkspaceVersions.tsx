@@ -14,6 +14,12 @@ import type {
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
+import {
+  CONFLICT_COMBINED_MAX_BYTES,
+  conflictPreview,
+  exceedsUtf8Bytes,
+  utf8ByteLength,
+} from "./conflictPane";
 import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 
 // Named versions surface (PR 0M-4, workspace-engine alpha). Product
@@ -940,16 +946,13 @@ export function VersionMergeDialog(props: {
                   : `${stage.conflicts.length} files`}
                 . Choose which copy Main should keep — nothing is lost either way.
               </p>
-              <div className="mt-3 flex flex-col gap-3">
-                {stage.conflicts.map((conflict) => (
-                  <ConflictResolver
-                    key={conflict.conflictId}
-                    workspaceId={workspaceId}
-                    conflict={conflict}
-                    sourceName={source.name}
-                    onResolved={onResolved}
-                  />
-                ))}
+              <div className="mt-3">
+                <ConflictList
+                  workspaceId={workspaceId}
+                  conflicts={stage.conflicts}
+                  sourceNameFor={() => source.name}
+                  onResolved={onResolved}
+                />
               </div>
             </>
           ) : null}
@@ -1000,19 +1003,51 @@ function ConflictSidePane(props: {
   /// copy, or this side has no file at all.
   note: string;
 }) {
+  // How many preview windows this side is showing. One press of "Show more"
+  // adds one, so the pane paints a bounded amount per press and the rest of
+  // the side stays reachable (#536).
+  const [windows, setWindows] = useState(1);
+  const preview = useMemo(
+    () => (props.text === null ? null : conflictPreview(props.text, windows)),
+    [props.text, windows],
+  );
   return (
     <div className="flex min-w-0 flex-col overflow-hidden rounded-md border border-line">
       <div className="border-b border-line bg-panel-2 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-subtle">
         {props.heading}
       </div>
-      {props.text === null ? (
+      {preview === null ? (
         <p className="m-0 px-2 py-2 text-[11px] italic leading-4 text-subtle">
           {props.note}
         </p>
       ) : (
-        <pre className="m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words px-2 py-1.5 font-mono text-[11px] leading-4 text-muted">
-          {props.text}
-        </pre>
+        <>
+          <pre
+            data-testid="version-conflict-side-text"
+            className="m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words px-2 py-1.5 font-mono text-[11px] leading-4 text-muted"
+          >
+            {preview.text}
+          </pre>
+          {preview.hiddenChars > 0 ? (
+            <div className="flex items-center justify-between gap-2 border-t border-line bg-panel-2 px-2 py-1">
+              <span
+                data-testid="version-conflict-side-hidden"
+                className="text-[10px] leading-4 text-subtle"
+              >
+                {preview.hiddenChars.toLocaleString("en-US")} more characters
+                hidden
+              </span>
+              <button
+                type="button"
+                data-testid="version-conflict-side-show-more"
+                onClick={() => setWindows((shown) => shown + 1)}
+                className="h-5 shrink-0 cursor-pointer rounded px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+              >
+                Show more
+              </button>
+            </div>
+          ) : null}
+        </>
       )}
     </div>
   );
@@ -1033,23 +1068,33 @@ function sideNote(
 // the versions ("On Main" / "In Client Draft"); a sync divergence names the
 // machines ("On this machine" / "On your other machine") — never sync
 // jargon, and never a misleading version name for a two-machine conflict.
+// Takes the ORIGIN, not the whole conflict, because it is the only field that
+// decides the labels — and because a caller memoizing on the whole conflict
+// object would recompute on every render for no reason.
 function conflictSideLabels(
-  conflict: WorkspaceVersionConflict,
+  origin: WorkspaceVersionConflict["origin"],
   sourceName: string,
 ): {
   currentHeading: string;
   incomingHeading: string;
+  /// Each side's owner, as a possessive subject: "Keep Main's copy",
+  /// "Started from this machine's copy". One name per side, so the two
+  /// sentences can never call the same side different things.
+  currentName: string;
+  incomingName: string;
   keepCurrent: string;
   keepIncoming: string;
   currentMissing: string;
   incomingMissing: string;
 } {
-  if (conflict.origin === "sync") {
+  if (origin === "sync") {
     return {
       currentHeading: "On this machine",
       incomingHeading: "On your other machine",
+      currentName: "this machine",
+      incomingName: "your other machine",
       keepCurrent: "Keep this machine's copy",
-      keepIncoming: "Keep the other machine's copy",
+      keepIncoming: "Keep your other machine's copy",
       currentMissing: "This machine doesn't have this file.",
       incomingMissing: "Your other machine removed this file.",
     };
@@ -1057,6 +1102,8 @@ function conflictSideLabels(
   return {
     currentHeading: "On Main",
     incomingHeading: `In ${sourceName}`,
+    currentName: "Main",
+    incomingName: sourceName,
     keepCurrent: "Keep Main's copy",
     keepIncoming: `Keep ${sourceName}'s copy`,
     currentMissing: "Main doesn't have this file.",
@@ -1064,18 +1111,124 @@ function conflictSideLabels(
   };
 }
 
+/// One side, as a candidate to start a hand-written combined copy from.
+type SeedCandidate = {
+  /// null means the side has no file at all, which is a legitimate — and
+  /// zero-byte — place to start from.
+  text: string | null;
+  /// Whose copy it is, for "Started from Main's copy."
+  name: string;
+  /// What that side says when it has no file, for the sentence that explains
+  /// an empty start.
+  missing: string;
+};
+
+/// Where "Combine by hand" starts, and the line that says where that is.
+type CombineSeed = { text: string; startedFrom: string };
+
+/// Pick where "Combine by hand" starts: the first side, in preference order,
+/// that the engine could actually apply — or an empty copy, which it always
+/// can.
+///
+/// There is no unavailable case, because `apply-merged` measures the SUBMITTED
+/// text and nothing else (`lib.rs:7587-7594`). Whatever the two sides weigh, a
+/// user writing a short replacement by hand is posting a body the engine
+/// takes. So the sides only decide what the box is PREFILLED with, never
+/// whether the affordance exists.
+///
+/// Three ways that prefill is chosen, in order. A side that fits wins — and a
+/// side over the cap loses to its smaller SIBLING, because a 5 MiB incoming
+/// copy beside a 3 KB copy on Main is still a conflict a user can combine.
+/// Failing that, a side with no file is a zero-byte start. Failing that, both
+/// copies are too large to load into the box, and it starts empty — which is
+/// a worse start, but not a refusal.
+function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
+  const present = candidates.filter(
+    (candidate): candidate is SeedCandidate & { text: string } => candidate.text !== null,
+  );
+  const fitting = present.find(
+    (candidate) => !exceedsUtf8Bytes(candidate.text, CONFLICT_COMBINED_MAX_BYTES),
+  );
+  if (fitting) {
+    return { text: fitting.text, startedFrom: `Started from ${fitting.name}'s copy.` };
+  }
+  // Ranked below every present side: starting empty must never beat starting
+  // from a copy the user could have edited.
+  const absent = candidates.find((candidate) => candidate.text === null);
+  if (absent) {
+    return { text: "", startedFrom: `${absent.missing} This starts empty.` };
+  }
+  return {
+    text: "",
+    startedFrom:
+      `Both copies are larger than ` +
+      `${CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes, so this ` +
+      `starts empty. That is the largest combined copy dohc can apply.`,
+  };
+}
+
+// One conflict card. Expanded, it paints two side panes; collapsed, only its
+// header row — so a workspace with many open conflicts paints two panes, not
+// two per conflict (#536). The card stays MOUNTED while collapsed, so a
+// hand-written combined copy survives being collapsed.
 function ConflictResolver(props: {
   workspaceId: string;
   conflict: WorkspaceVersionConflict;
   sourceName: string;
+  expanded: boolean;
+  onToggle: () => void;
   onResolved: (remaining: WorkspaceVersionConflict[]) => void;
 }) {
-  const { conflict, sourceName, workspaceId } = props;
+  const { conflict, expanded, sourceName, workspaceId } = props;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [combined, setCombined] = useState<string | null>(null);
+  // The last change refused for being over the apply cap, in bytes. See the
+  // change handler: the combined copy in state is never over the cap, so this
+  // is how the attempt is reported.
+  const [refusedBytes, setRefusedBytes] = useState<number | null>(null);
   const isBinary = conflict.contentKind === "binary";
-  const labels = conflictSideLabels(conflict, sourceName);
+  const labels = conflictSideLabels(conflict.origin, sourceName);
+  const { currentName, incomingName, currentMissing, incomingMissing } = labels;
+  // What "Combine by hand" would start from, and whether the engine could
+  // apply it. The seed prefers the incoming side, as it always has, but a side
+  // the engine would refuse is not a usable seed — so a side that FITS wins
+  // over the preference, and the affordance only disappears when no side does.
+  //
+  // Gated on `expanded` because it is only read there, and because it is not
+  // free: an over-cap side needs an exact byte count for its message, and a
+  // dialog can hold hundreds of collapsed cards. Counting all of them on mount
+  // was 750 ms for twenty 10 MiB sides against 79 ms for this — the cost this
+  // whole change exists to remove, reintroduced one layer up.
+  //
+  // The dependencies are the PRIMITIVES this reads, never the labels object:
+  // that object is rebuilt every render, so depending on it made every local
+  // rerender — the one after "Keep Main's copy" sets busy, the one after a
+  // refusal — rescan every byte of both sides. A memo that recomputes every
+  // render is not a memo.
+  const combineSeed = useMemo<CombineSeed | null>(
+    () =>
+      expanded && !isBinary
+        ? chooseCombineSeed([
+            {
+              text: conflict.incomingText,
+              name: incomingName,
+              missing: incomingMissing,
+            },
+            { text: conflict.currentText, name: currentName, missing: currentMissing },
+          ])
+        : null,
+    [
+      conflict.currentText,
+      conflict.incomingText,
+      expanded,
+      isBinary,
+      currentName,
+      incomingName,
+      currentMissing,
+      incomingMissing,
+    ],
+  );
   const liveToken = useRef(0);
   useEffect(
     () => () => {
@@ -1083,6 +1236,37 @@ function ConflictResolver(props: {
     },
     [],
   );
+
+  // The combined copy in state is NEVER over the apply cap. Every value it can
+  // hold comes from here or from a seed that already fits, so the controlled
+  // textarea can never be handed a body larger than the cap.
+  //
+  // This is what stops a paste from recreating the whole defect: an unguarded
+  // handler stored a multi-megabyte paste first, and the next render both
+  // counted every byte of it and assigned the whole string to the textarea's
+  // value. Refusing the change keeps the box at its last good content, so
+  // nothing the user already wrote is lost, and names the size they tried.
+  // OPENING the box clears the last refusal, and that is the only place that
+  // needs to. The warning names a size the user TRIED; carrying it onto a box
+  // they have just reopened, holding a seed that fits, describes nothing that
+  // is true. Clearing on Cancel as well reads as tidier and is dead: the
+  // warning only renders inside the box, so between a cancel and the next open
+  // there is nothing to show — and two clears that cover the same path mean
+  // neither can be tested, because each masks the other.
+  const startCombine = useCallback((seed: string) => {
+    setRefusedBytes(null);
+    setCombined(seed);
+  }, []);
+
+  const onCombinedChange = useCallback((next: string) => {
+    if (exceedsUtf8Bytes(next, CONFLICT_COMBINED_MAX_BYTES)) {
+      // One walk of the refused body, in the handler rather than the render.
+      setRefusedBytes(utf8ByteLength(next));
+      return;
+    }
+    setRefusedBytes(null);
+    setCombined(next);
+  }, []);
 
   const resolve = useCallback(
     async (
@@ -1118,7 +1302,13 @@ function ConflictResolver(props: {
       aria-label={`Conflict in ${conflict.path}`}
       className="rounded-lg border border-line bg-bg p-2"
     >
-      <div className="flex items-center gap-1.5 pb-2">
+      <button
+        type="button"
+        data-testid="version-conflict-toggle"
+        aria-expanded={expanded}
+        onClick={props.onToggle}
+        className="flex w-full cursor-pointer items-center gap-1.5 rounded text-left hover:text-ink"
+      >
         {isBinary ? (
           <FileArchive size={12} aria-hidden className="shrink-0 text-subtle" />
         ) : (
@@ -1127,111 +1317,215 @@ function ConflictResolver(props: {
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
           {conflict.path}
         </span>
-      </div>
-      {isBinary ? (
-        <div
-          data-testid="version-conflict-binary"
-          className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
-        >
-          Binary file. Choose which copy to keep.
-        </div>
-      ) : null}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <div className="flex min-w-0 flex-col gap-1.5">
-          <ConflictSidePane
-            heading={labels.currentHeading}
-            text={conflict.currentText}
-            note={sideNote(conflict.currentBinary, labels.currentMissing)}
-          />
-          <button
-            type="button"
-            data-testid="version-conflict-keep-current"
-            disabled={busy}
-            onClick={() => void resolve({ kind: "keep-current" })}
-            className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+        {!expanded && combined !== null ? (
+          <span
+            data-testid="version-conflict-draft-marker"
+            className="shrink-0 text-[10px] text-subtle"
           >
-            {labels.keepCurrent}
-          </button>
-        </div>
-        <div className="flex min-w-0 flex-col gap-1.5">
-          <ConflictSidePane
-            heading={labels.incomingHeading}
-            text={conflict.incomingText}
-            note={sideNote(conflict.incomingBinary, labels.incomingMissing)}
-          />
-          <button
-            type="button"
-            data-testid="version-conflict-keep-incoming"
-            disabled={busy}
-            onClick={() => void resolve({ kind: "keep-incoming" })}
-            className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
-          >
-            {labels.keepIncoming}
-          </button>
-        </div>
-      </div>
-      {!isBinary && combined === null ? (
-        <button
-          type="button"
-          data-testid="version-conflict-combine"
-          disabled={busy}
-          onClick={() =>
-            setCombined(conflict.incomingText ?? conflict.currentText ?? "")
-          }
-          className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
-        >
-          Combine by hand instead…
-        </button>
-      ) : !isBinary ? (
-        <div className="mt-2 flex flex-col gap-1.5">
-          <label
-            className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
-            htmlFor={`combined-${conflict.conflictId}`}
-          >
-            Combined copy for Main
-          </label>
-          <textarea
-            id={`combined-${conflict.conflictId}`}
-            data-testid="version-conflict-combined-input"
-            value={combined ?? ""}
-            disabled={busy}
-            rows={6}
-            onChange={(event) => setCombined(event.target.value)}
-            className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
-          />
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setCombined(null)}
-              className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+            Combined copy in progress
+          </span>
+        ) : null}
+        <ChevronDown
+          size={12}
+          aria-hidden
+          className={`shrink-0 text-subtle ${expanded ? "" : "-rotate-90"}`}
+        />
+      </button>
+      {expanded ? (
+        <div className="pt-2">
+          {isBinary ? (
+            <div
+              data-testid="version-conflict-binary"
+              className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
             >
-              Cancel
-            </button>
-            <button
-              type="button"
-              data-testid="version-conflict-apply-combined"
-              disabled={busy}
-              onClick={() => void resolve({ kind: "keep-combined", text: combined ?? "" })}
-              className="h-7 cursor-pointer rounded-md bg-accent px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
-            >
-              Use this combined copy
-            </button>
+              Binary file. Choose which copy to keep.
+            </div>
+          ) : null}
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <ConflictSidePane
+                heading={labels.currentHeading}
+                text={conflict.currentText}
+                note={sideNote(conflict.currentBinary, labels.currentMissing)}
+              />
+              <button
+                type="button"
+                data-testid="version-conflict-keep-current"
+                disabled={busy}
+                onClick={() => void resolve({ kind: "keep-current" })}
+                className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+              >
+                {labels.keepCurrent}
+              </button>
+            </div>
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <ConflictSidePane
+                heading={labels.incomingHeading}
+                text={conflict.incomingText}
+                note={sideNote(conflict.incomingBinary, labels.incomingMissing)}
+              />
+              <button
+                type="button"
+                data-testid="version-conflict-keep-incoming"
+                disabled={busy}
+                onClick={() => void resolve({ kind: "keep-incoming" })}
+                className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+              >
+                {labels.keepIncoming}
+              </button>
+            </div>
           </div>
+          {combined === null && combineSeed !== null ? (
+            <button
+              type="button"
+              data-testid="version-conflict-combine"
+              disabled={busy}
+              onClick={() => startCombine(combineSeed.text)}
+              className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+            >
+              Combine by hand instead…
+            </button>
+          ) : !isBinary ? (
+            <div className="mt-2 flex flex-col gap-1.5">
+              <label
+                className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                htmlFor={`combined-${conflict.conflictId}`}
+              >
+                Combined copy for Main
+              </label>
+              {combineSeed !== null ? (
+                <p
+                  data-testid="version-conflict-combined-source"
+                  className="m-0 text-[11px] leading-4 text-subtle"
+                >
+                  {combineSeed.startedFrom}
+                </p>
+              ) : null}
+              <textarea
+                id={`combined-${conflict.conflictId}`}
+                data-testid="version-conflict-combined-input"
+                value={combined ?? ""}
+                disabled={busy}
+                rows={6}
+                onChange={(event) => onCombinedChange(event.target.value)}
+                className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+              />
+              {refusedBytes !== null ? (
+                <p
+                  data-testid="version-conflict-combined-too-large"
+                  role="alert"
+                  className="mb-0 text-[11px] leading-4 text-danger"
+                >
+                  That change would make the combined copy{" "}
+                  {refusedBytes.toLocaleString("en-US")} bytes. dohc can apply up
+                  to {CONFLICT_COMBINED_MAX_BYTES.toLocaleString("en-US")} bytes.
+                  Add less text.
+                </p>
+              ) : null}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  data-testid="version-conflict-combine-cancel"
+                  disabled={busy}
+                  onClick={() => setCombined(null)}
+                  className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  data-testid="version-conflict-apply-combined"
+                  disabled={busy}
+                  onClick={() => void resolve({ kind: "keep-combined", text: combined ?? "" })}
+                  className="h-7 cursor-pointer rounded-md bg-accent px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
+                >
+                  Use this combined copy
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
+      {/*
+        OUTSIDE the collapsible region on purpose. A resolution can be running,
+        or can have failed, while the card is collapsed — nothing stops the
+        user opening another conflict mid-request — and a refusal that renders
+        only inside the expanded body tells them nothing at all.
+      */}
       {error ? (
-        <p role="alert" className="mb-0 mt-2 text-[11px] leading-4 text-danger">
+        <p
+          data-testid="version-conflict-error"
+          role="alert"
+          className="mb-0 mt-2 text-[11px] leading-4 text-danger"
+        >
           {error}
         </p>
       ) : null}
       {busy ? (
-        <p role="status" className="mb-0 mt-2 text-[11px] leading-4 text-subtle">
+        <p
+          data-testid="version-conflict-busy"
+          role="status"
+          className="mb-0 mt-2 text-[11px] leading-4 text-subtle"
+        >
           Applying…
         </p>
       ) : null}
     </section>
   );
+}
+
+// Every open conflict, one card each, ONE of them expanded (#536). Both
+// conflict surfaces render through this: the merge dialog and the standalone
+// review dialog. The list can be any length — the engine pages `conflicts.list`
+// but the desktop client drains every page into one array (#562) — so what the
+// list PAINTS must not grow with it.
+function ConflictList(props: {
+  workspaceId: string;
+  conflicts: WorkspaceVersionConflict[];
+  sourceNameFor: (conflict: WorkspaceVersionConflict) => string;
+  onResolved: (remaining: WorkspaceVersionConflict[]) => void;
+}) {
+  // `undefined` means the user has not chosen yet. `null` means the user
+  // collapsed the open card, which is a state they are allowed to be in — the
+  // two must not be the same value, or closing a card reopens the first one.
+  const [chosenId, setChosenId] = useState<string | null | undefined>(undefined);
+  const openId = openConflictId(props.conflicts, chosenId);
+
+  return (
+    <div className="flex flex-col gap-3">
+      {props.conflicts.map((conflict) => (
+        <ConflictResolver
+          key={conflict.conflictId}
+          workspaceId={props.workspaceId}
+          conflict={conflict}
+          sourceName={props.sourceNameFor(conflict)}
+          expanded={conflict.conflictId === openId}
+          onToggle={() =>
+            setChosenId(conflict.conflictId === openId ? null : conflict.conflictId)
+          }
+          onResolved={props.onResolved}
+        />
+      ))}
+    </div>
+  );
+}
+
+/// Which conflict is expanded. Exported for its own tests: the three states it
+/// distinguishes are not obvious from either call site.
+export function openConflictId(
+  conflicts: WorkspaceVersionConflict[],
+  chosenId: string | null | undefined,
+): string | null {
+  const firstId = conflicts[0]?.conflictId ?? null;
+  // Untouched: the first file to decide opens by itself.
+  if (chosenId === undefined) return firstId;
+  // Collapsed on purpose: leave every card closed.
+  if (chosenId === null) return null;
+  // A resolved conflict leaves the list, so a chosen id that is no longer in
+  // it hands the turn to the next file to decide.
+  return conflicts.some((conflict) => conflict.conflictId === chosenId)
+    ? chosenId
+    : firstId;
 }
 
 function changeStatusLabel(status: WorkspaceVersionFileChange["status"]): string {
@@ -1537,19 +1831,14 @@ export function ConflictReviewDialog(props: {
             </p>
           ) : null}
           {state.status === "ready" && conflicts.length > 0 ? (
-            <div className="flex flex-col gap-3">
-              {conflicts.map((conflict) => (
-                <ConflictResolver
-                  key={conflict.conflictId}
-                  workspaceId={workspaceId}
-                  conflict={conflict}
-                  sourceName={
-                    versionNames.get(conflict.sourceVersionId) ?? "the other version"
-                  }
-                  onResolved={onResolved}
-                />
-              ))}
-            </div>
+            <ConflictList
+              workspaceId={workspaceId}
+              conflicts={conflicts}
+              sourceNameFor={(conflict) =>
+                versionNames.get(conflict.sourceVersionId) ?? "the other version"
+              }
+              onResolved={onResolved}
+            />
           ) : null}
         </div>
 
