@@ -411,6 +411,15 @@ relay-visible `replication_log`. File, text and secret writes go to
 `replication_journal`, a different table, and nothing drains one into the other.
 Both belong to #356.
 
+**Status, 2026-08-02.** #535 built origination and gated it on a workspace that
+already replicates with a relay — a `sync_identity` row plus a durable relay
+position (`workspace_replicates_with_relay_in_tx`). A `sync_identity` row alone
+does not qualify, because every ordinary chat write mints one. So this warning
+is no longer a reason to leave the code unwritten. It is now a sequencing
+constraint on **un-gating cloud sync**: land the outbound file lane (#356)
+first, or a synced workspace replicates rich `.md` documents and silently drops
+every other file beside them.
+
 **There is currently no acceptance gate for base origination, and the obvious
 candidate is not one.** `apps/desktop/e2e/workspace-sync-rejoin.spec.ts` is
 disabled and is often cited as the gate for the pair. It is a gate for the
@@ -477,3 +486,28 @@ scenario cannot cover this: it validates the promotion path, not the fresh-creat
 encoder.
 
 Before claiming any sync behaviour works, check which table the write landed in.
+
+## What origination still does not settle
+
+#535 makes one daemon start a lineage. It does not make two daemons converge.
+Three behaviours stay unbuilt, and all three are dormant only because two
+daemons cannot share a relay workspace yet (#356).
+
+- **#546 — the first inbound base overwrites a divergent local head.** The base
+  branch of `ydoc_apply.rs` projects the sender's base over the receiver's
+  snapshot with no before-state comparison. The ordinary file lane opens a
+  conflict in the same situation (`moment_apply.rs`). The base lane must too.
+- **#547 — two peers can originate the same lineage.** Object ids derive from
+  the path, so both peers claim a base for one coordinate and
+  `BaseStateDiverged` wedges it. Base-once needs relay-wide arbitration, or
+  object ids need to stop deriving from the path.
+- **#548 — origination is not retried when a missing dependency resolves.** The
+  encoder declines while a pending row would be dropped, and only a later local
+  append asks again. The drain that resolves the dependency must ask too.
+
+One size question is open too. #549 — the base inherits `MAX_YDOC_UPDATE_BYTES`,
+a cap written for a single update, so a document past 5 MiB of Y.Doc state
+cannot originate and its edits fail.
+
+Do not treat #378 as the end of replicated rich documents. It is the first of
+four steps.

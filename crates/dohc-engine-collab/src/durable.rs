@@ -101,6 +101,14 @@ pub enum CompactOutcome {
     Skipped { pending: i64 },
 }
 
+/// The bytes that originate a lineage: its full-state base, and that base's
+/// state vector for provenance parity with compaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginationBase {
+    pub base: Vec<u8>,
+    pub state_vector: Vec<u8>,
+}
+
 /// The outcome of a base-once claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimOutcome {
@@ -832,6 +840,44 @@ pub fn claim_base_in_tx(
             base_snapshot_sha: base_sha,
         })
     })()
+}
+
+/// Read a doc's marker inside the caller's transaction.
+///
+/// Origination reads the marker under the SAME transaction as the append it
+/// rides and the claim it may commit, so the three cannot disagree.
+pub fn read_marker_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<Marker>, CollabError> {
+    query_marker(tx, key)
+}
+
+/// Encode the base bytes (and their state vector) that ORIGINATE `key`'s
+/// replicated lineage, from the state persisted inside the caller's
+/// transaction.
+///
+/// The encode is a full state of the lineage as it stands right now, never a
+/// fresh markdown seed. A promoted lineage therefore publishes the update rows
+/// it already holds: a fresh seed would mint new Yjs item ids, leave those rows
+/// on the origin alone, and every clean peer would be permanently missing them.
+///
+/// `None` means "do not originate yet": the lineage has an unresolved
+/// dependency, so a full-state encode would silently drop the pending row. A
+/// later append retries once the predecessor lands. This is the same condition
+/// [`maybe_compact`] skips on, for the same reason.
+pub fn encode_origination_base_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<OriginationBase>, CollabError> {
+    let doc = load_for_replay_gate(tx, key)?;
+    if doc.has_missing_updates() {
+        return Ok(None);
+    }
+    Ok(Some(OriginationBase {
+        base: doc.encode_full_state(),
+        state_vector: doc.encode_state_vector(),
+    }))
 }
 
 /// Settle: project the reconstructed Y.Doc to markdown (with provenance),
