@@ -1536,8 +1536,16 @@ describe("workspaceEngineCapture startup reconciliation", () => {
               NonNullable<typeof liveStore.listTextFileMetadata>
             >[0],
           ) => {
-            // Reconciliation's final phase; slow it so an unserialized batch
-            // capture would interleave ahead of it.
+            // Reconciliation's final phase, so its disk scan has already run.
+            // The watcher's file lands HERE, not before start(): a scan that
+            // saw live.md would reconcile it itself, and the pass would then
+            // write both paths in scan order (live.md, offline.md) with the
+            // batch deduped to nothing — a sequence that says nothing about
+            // which task reached the chain first. Created after the scan, the
+            // path can only be written by the batch.
+            await write(root, "live.md", "live edit\n");
+            // Slow, so a batch that jumped the chain interleaves ahead of the
+            // push below instead of racing it.
             await new Promise((resolve) => setTimeout(resolve, 50));
             order.push("reconcile:listTextFileMetadata");
             return await liveStore.listTextFileMetadata!(input);
@@ -1554,19 +1562,25 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       },
     });
 
+    // "Daemon path" here means the daemon-BACKED STORE, not daemon-owns-
+    // capture. Production's only construction (engineCaptureGate.ts) passes
+    // daemonOwnsCapture: true, and under that flag BOTH enqueues below return
+    // early — the daemon captures on its own side and settles through
+    // flushCapture. So this pins the client-side chain contract, not the
+    // capture ownership production actually runs.
     const engine = capture(root, {
       store: trackedStore,
       rustEngineSessions: sessions,
     });
     engine.start();
-    await write(root, "live.md", "live edit\n");
     engine.captureBatch([{ path: "live.md", operation: "update" }]);
     await engine.stop();
 
-    expect([
-      ["write:offline.md", "reconcile:listTextFileMetadata", "write:live.md"],
-      ["write:live.md", "write:offline.md", "reconcile:listTextFileMetadata"],
-    ]).toContainEqual(order);
+    expect(order).toEqual([
+      "write:offline.md",
+      "reconcile:listTextFileMetadata",
+      "write:live.md",
+    ]);
     await liveStore.close();
   });
 
