@@ -1708,22 +1708,6 @@ export interface LinkedChatStoreOptions {
   createId?: (kind: "channel" | "message" | "thread") => string;
 }
 
-export type AgentDispatchStoreErrorCode =
-  | "invalid-input"
-  | "run-not-found"
-  | "run-state-mismatch"
-  | "state-corrupt";
-
-export class AgentDispatchStoreError extends Error {
-  readonly code: AgentDispatchStoreErrorCode;
-
-  constructor(code: AgentDispatchStoreErrorCode, message: string) {
-    super(message);
-    this.name = "AgentDispatchStoreError";
-    this.code = code;
-  }
-}
-
 export type AgentDispatchState = "pending" | "running" | "done" | "failed";
 
 export interface AgentDispatchRecord {
