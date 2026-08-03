@@ -99,6 +99,7 @@ describe("workspaceActivity startup ordering", () => {
     // only the client-side capture has a chain whose order can be read.
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: () => ({
+        shareView: false,
         capture: createWorkspaceEngineCapture({
           workspaceId: WORKSPACE_ID,
           rootPath: root,

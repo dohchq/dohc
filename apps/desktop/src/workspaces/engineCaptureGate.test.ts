@@ -70,7 +70,7 @@ async function writeOptOut(root: string): Promise<void> {
 describe("captureForFlaggedWorkspace decision", () => {
   it("returns the unreadable-file reason with the null capture", async () => {
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root };
+    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
     await writeFile(join(root, ".dohc", WORKSPACE_SETTINGS_FILE), "{not json");
 
@@ -85,9 +85,26 @@ describe("captureForFlaggedWorkspace decision", () => {
     );
   });
 
+  // #540: the gate owns the shared-view rule. The decision carries the
+  // cause, and the settings file — which a shared view does not even
+  // materialize — is never read (a read would produce a warning or a
+  // capture; the assertions refuse both).
+  it("gives a shared view a null capture with the share cause, before any read", async () => {
+    const decision = await captureForFlaggedWorkspace(
+      {
+        workspaceId: "ws-gate-share",
+        rootPath: join(tempBase, "does-not-exist-share-view"),
+        shareView: true,
+      },
+      hooks,
+      unusedSessions,
+    );
+    expect(decision).toEqual({ capture: null, shareView: true });
+  });
+
   it("carries no reason for a deliberate opt-out or a readable file", async () => {
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root };
+    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
     await writeOptOut(root);
     const optedOut = await captureForFlaggedWorkspace(
       workspace,
@@ -100,7 +117,7 @@ describe("captureForFlaggedWorkspace decision", () => {
 
     const on = await tempRoot();
     const recording = await captureForFlaggedWorkspace(
-      { workspaceId: "ws-gate-on", rootPath: on },
+      { workspaceId: "ws-gate-on", rootPath: on, shareView: false },
       hooks,
       unusedSessions,
     );
@@ -116,7 +133,7 @@ describe("dispatchScanEligible", () => {
     // workspace is still open must still dispatch, or it stays pending
     // forever; only the reopen — where captureFor reads the flag — opts out.
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root };
+    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
     const { capture: openCapture } = await captureForFlaggedWorkspace(
       workspace,
       hooks,
@@ -142,7 +159,7 @@ describe("dispatchScanEligible", () => {
 
   it("an unopened workspace answers from the settings file (its open-time read)", async () => {
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root };
+    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
     const closed = activityWith(null, []);
     await expect(dispatchScanEligible(workspace, closed)).resolves.toBe(true);
 

@@ -1597,8 +1597,9 @@ export function DesktopWorkspaceShell(props: {
   // (#540): it materializes no settings file, so the default flag reads ON —
   // but the share's open deliberately installed no capture, and every
   // engine-moments call could only error. Capability identity comes from
-  // main's registry summary. Chats and the other share-aware surfaces keep
-  // their own gating; only the history surface is engine-fed.
+  // main's registry summary. This gates the HISTORY surface only: Chats has
+  // its own share-aware gating, and the versions surface still keys on the
+  // settings read alone (pre-existing, tracked separately).
   const isShareView = Boolean(props.workspace.shareView);
   // Engine history page state (flagged workspaces): newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used

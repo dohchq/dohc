@@ -93,7 +93,12 @@ export interface WorkspaceCaptureDecision {
   // gets a recorder of its own. A capability, not an opt-out and not a
   // failure — without this cause the null capture wears the opt-out's copy,
   // blaming a Settings toggle nobody touched.
-  shareView?: boolean;
+  //
+  // REQUIRED, like the contract field it feeds: an omitted boolean would
+  // read as "not a shared view", and the sole producer of `true` could be
+  // deleted without a compile error. A decision that cannot say must not
+  // compile.
+  shareView: boolean;
 }
 
 export interface WorkspaceCaptureHooks {
@@ -204,7 +209,7 @@ export function createWorkspaceActivity(
           }
           entry.capture = decision.capture;
           entry.settingsWarning = decision.warning ?? null;
-          entry.historyShareView = decision.shareView === true;
+          entry.historyShareView = decision.shareView;
         } catch (error) {
           console.error(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,

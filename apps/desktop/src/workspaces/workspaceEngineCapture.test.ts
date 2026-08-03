@@ -2248,6 +2248,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
       },
       {
         captureFor: (w, hooks) => ({
+          shareView: false,
           capture: createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
@@ -2293,7 +2294,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
       mode: defaultWorkspaceMode("personal"),
     };
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () => ({ capture: null }),
+      captureFor: () => ({ capture: null, shareView: false }),
     });
     await activity.open(workspace);
     expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
@@ -2366,7 +2367,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
             markStopStarted?.();
             await stopCapture();
           };
-          return { capture: engineCapture };
+          return { capture: engineCapture, shareView: false };
         },
       },
     );
@@ -2417,6 +2418,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     const loopback = new VersionedLoopbackEngine();
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (w) => ({
+        shareView: false,
         capture: createWorkspaceEngineCapture({
           workspaceId: w.workspaceId,
           rootPath: w.rootPath,
