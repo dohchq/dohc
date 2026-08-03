@@ -1130,6 +1130,99 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(opens).toBe(2));
   });
 
+  // #564, codex round 2 P1: "Try again" changes the request key, which
+  // clears `openTimedOut` while the retry is still PENDING. The armed
+  // autosave and the unmount flush read `writesRefusedRef`, not `opening`,
+  // so without a retry-window gate the stale draft could reach disk while
+  // the retry binds — the #533 clobber, through the retry itself.
+  it("blocks an armed draft write for the whole retry window", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      let opens = 0;
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        openEngineYDocSession: vi.fn(async () => {
+          opens += 1;
+          // Open 1: plain fallback (writable) — the draft is typed here.
+          // Open 2 (a version switch): the retry deadline expires.
+          // Open 3 (Try again): never answers — the window under test.
+          if (opens === 1) return { available: false };
+          if (opens === 2) return { available: false, openTimedOut: true };
+          return new Promise(() => {});
+        }),
+      });
+
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+      await user.click(screen.getByTestId("markdown-edit-toggle"));
+      await user.type(
+        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+        "typed",
+      );
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+      // A version switch reopens the engine session; this open times out.
+      view.rerender(
+        <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
+      );
+      await screen.findByTestId(
+        "engine-open-timeout-notice",
+        {},
+        { timeout: 5_000 },
+      );
+
+      await user.click(screen.getByText("Try again"));
+      await waitFor(() => expect(opens).toBe(3));
+      // The retry is pending: openTimedOut has cleared, and the armed 800ms
+      // autosave fires inside this window. MUTATION: drop the retry-window
+      // gate from writesRefusedRef -> this write lands.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // #564, codex round 2 P2: when the content read itself failed, the
+  // inspector returns from its loading/error branch before MarkdownView
+  // mounts — the one path where the engine session is the only way back to
+  // the content is exactly where the timeout had no notice and no retry.
+  it("offers the timeout retry even when the content read failed", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    let opens = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        throw new Error("read failed");
+      }),
+      openEngineYDocSession: vi.fn(async () => {
+        opens += 1;
+        return { available: false, openTimedOut: true };
+      }),
+    });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId(
+      "engine-open-timeout-notice",
+      {},
+      { timeout: 5_000 },
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not open this file for editing in time.",
+    );
+    // The read failure stays stated beside it.
+    expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+
+    await user.click(screen.getByText("Try again"));
+    await waitFor(() => expect(opens).toBe(2));
+  });
+
   // THE P1 the review reproduced. Typing during the open wait arms an 800ms
   // autosave AND leaves a pending draft. When the refusal arrived, `readOnly`
   // flipped false->true; `readOnly` was a dependency of the unmount-flush

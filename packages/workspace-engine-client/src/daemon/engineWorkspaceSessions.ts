@@ -301,20 +301,27 @@ export class EngineWorkspaceSessions {
           if (retryAfterTransport) {
             // Both gates bound WAITING, never a healthy first attempt: at
             // quit the failure is final, and past the caller's deadline the
-            // run stops starting new backoff/attempt rounds (#564).
+            // run stops starting new backoff/attempt rounds (#564). The
+            // deadline is checked on BOTH sides of the backoff — an attempt
+            // that ends just inside it must not ride the backoff over the
+            // line and then start a fresh open on a spent budget.
             if (this.shuttingDown) throw error;
-            const waitedMs = this.now() - startedAtMs;
-            if (retryDeadlineMs !== undefined && waitedMs >= retryDeadlineMs) {
-              throw new EngineWorkspaceRetryDeadlineError(
-                workspace.workspaceId,
-                retryDeadlineMs,
-                waitedMs,
-                attempt,
-                error,
-              );
-            }
+            this.throwPastRetryDeadline(
+              workspace.workspaceId,
+              retryDeadlineMs,
+              startedAtMs,
+              attempt,
+              error,
+            );
             await this.interruptibleSleep(transportBackoffMs(attempt));
             if (this.shuttingDown) throw error;
+            this.throwPastRetryDeadline(
+              workspace.workspaceId,
+              retryDeadlineMs,
+              startedAtMs,
+              attempt,
+              error,
+            );
           }
         }
       }
@@ -333,6 +340,28 @@ export class EngineWorkspaceSessions {
   beginShutdown(): void {
     this.shuttingDown = true;
     for (const cancel of [...this.sleepCancels]) cancel();
+  }
+
+  // The one deadline gate every retry ladder consults, on both sides of its
+  // backoff: once the deadline is spent, no new attempt starts — in any
+  // ladder, on any path.
+  private throwPastRetryDeadline(
+    workspaceId: string,
+    retryDeadlineMs: number | undefined,
+    startedAtMs: number,
+    attempt: number,
+    cause: unknown,
+  ): void {
+    if (retryDeadlineMs === undefined) return;
+    const waitedMs = this.now() - startedAtMs;
+    if (waitedMs < retryDeadlineMs) return;
+    throw new EngineWorkspaceRetryDeadlineError(
+      workspaceId,
+      retryDeadlineMs,
+      waitedMs,
+      attempt,
+      cause,
+    );
   }
 
   private async interruptibleSleep(delayMs: number): Promise<void> {
@@ -457,31 +486,34 @@ export class EngineWorkspaceSessions {
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        return await this.open(workspace, entry);
+        return await this.open(workspace, entry, options, startedAtMs);
       } catch (error) {
         if (error instanceof EngineWorkspaceRebindError) throw error;
+        if (error instanceof EngineWorkspaceRetryDeadlineError) throw error;
         lastError = error;
         if (attempt >= maxAttempts) break;
         if (daemonMayBeRelaunching(error)) {
           // The same waiting gates as run()'s operation retries (#564): a
           // daemon-down open is the other place a caller can spend the whole
-          // backoff ladder, and it holds the same resources.
+          // backoff ladder, and it holds the same resources. Checked on both
+          // sides of the backoff, like every other ladder.
           if (this.shuttingDown) break;
-          const waitedMs = this.now() - startedAtMs;
-          if (
-            options.retryDeadlineMs !== undefined &&
-            waitedMs >= options.retryDeadlineMs
-          ) {
-            throw new EngineWorkspaceRetryDeadlineError(
-              workspace.workspaceId,
-              options.retryDeadlineMs,
-              waitedMs,
-              attempt,
-              error,
-            );
-          }
+          this.throwPastRetryDeadline(
+            workspace.workspaceId,
+            options.retryDeadlineMs,
+            startedAtMs,
+            attempt,
+            error,
+          );
           await this.interruptibleSleep(transportBackoffMs(attempt));
           if (this.shuttingDown) break;
+          this.throwPastRetryDeadline(
+            workspace.workspaceId,
+            options.retryDeadlineMs,
+            startedAtMs,
+            attempt,
+            error,
+          );
         }
       }
     }
@@ -494,6 +526,8 @@ export class EngineWorkspaceSessions {
   private async open(
     workspace: EngineWorkspace,
     entry: SessionEntry,
+    options: EngineWorkspaceRunOptions,
+    startedAtMs: number,
   ): Promise<EngineWorkspaceBinding> {
     for (let attempt = 1; ; attempt += 1) {
       const client = this.source.currentClient();
@@ -517,7 +551,33 @@ export class EngineWorkspaceSessions {
             new Error("Rust engine client changed on every open attempt."),
           );
         }
+        // The client-churn ladder waits like every other ladder (#564,
+        // codex): without these gates, churning generations held a caller
+        // through six full opens — past its deadline and past quit.
+        const churn = new Error(
+          "Rust engine client changed while opening the workspace.",
+        );
+        if (this.shuttingDown) {
+          throw new EngineWorkspaceRebindError(workspace.workspaceId, churn);
+        }
+        this.throwPastRetryDeadline(
+          workspace.workspaceId,
+          options.retryDeadlineMs,
+          startedAtMs,
+          attempt,
+          churn,
+        );
         await this.interruptibleSleep(transportBackoffMs(attempt));
+        if (this.shuttingDown) {
+          throw new EngineWorkspaceRebindError(workspace.workspaceId, churn);
+        }
+        this.throwPastRetryDeadline(
+          workspace.workspaceId,
+          options.retryDeadlineMs,
+          startedAtMs,
+          attempt,
+          churn,
+        );
         continue;
       }
       entry.binding = binding;

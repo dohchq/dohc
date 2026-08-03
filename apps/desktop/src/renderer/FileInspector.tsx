@@ -2313,6 +2313,10 @@ export function FileInspector(props: {
   // hook's request key, so a retry is a fresh open under the same
   // stale-response guard as any other request change.
   const [engineRetryNonce, setEngineRetryNonce] = useState(0);
+  const retryEngineOpen = useCallback(
+    () => setEngineRetryNonce((nonce) => nonce + 1),
+    [],
+  );
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -2335,9 +2339,14 @@ export function FileInspector(props: {
   // is stable, so even the child's first-render closures read the live value.
   // A timed-out open (#564) blocks writes the same way: the engine may still
   // bind the document, and a draft written meanwhile would take the disk path
-  // #533 closed.
+  // #533 closed. The refusal stays active WHILE A RETRY IS PENDING, too:
+  // "Try again" changes the request key, which clears `openTimedOut` before
+  // the new open answers, and the write guards deliberately do not read
+  // `opening` (#567 owns that broader question) — without this, the retry
+  // window itself was writable and an armed autosave raced the Y.Doc bind.
+  const retryOpening = engineRetryNonce > 0 && engine.opening;
   const writesRefusedRef = useRef(false);
-  writesRefusedRef.current = notInVersion || engine.openTimedOut;
+  writesRefusedRef.current = notInVersion || engine.openTimedOut || retryOpening;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
@@ -2402,6 +2411,13 @@ export function FileInspector(props: {
           label="file"
           onShare={onShareCurrentPath}
         />
+        {engine.openTimedOut ? (
+          // #564, codex round 2: a failed read returns HERE, before
+          // MarkdownView mounts — without this the timeout had no notice and
+          // no retry on exactly the path where the engine session is the only
+          // way back to the content.
+          <EngineOpenTimedOutNotice onRetry={retryEngineOpen} />
+        ) : null}
         <Empty>{error ? "Couldn't read this file." : "Loading…"}</Empty>
       </div>
     );
@@ -2435,7 +2451,7 @@ export function FileInspector(props: {
             registerSourceToggle={props.registerSourceToggle}
             onPendingDraftChange={setPendingDraft}
             engine={engine}
-            onRetryEngineOpen={() => setEngineRetryNonce((nonce) => nonce + 1)}
+            onRetryEngineOpen={retryEngineOpen}
             writesRefusedRef={writesRefusedRef}
           />
         </div>

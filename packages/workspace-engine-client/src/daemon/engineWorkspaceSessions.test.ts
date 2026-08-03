@@ -797,6 +797,74 @@ describe("EngineWorkspaceSessions", () => {
       expect(clientReads).toBe(3);
     });
 
+    it("does not start attempt N+1 on a budget the backoff spent", async () => {
+      // codex round 2: the deadline was checked only BEFORE the backoff. An
+      // attempt ending just inside it could ride the backoff over the line
+      // and still start a fresh 2 s open on a spent budget (~8 s observed on
+      // a 6 s contract). The clock is re-checked after the backoff.
+      const workspace = await tempWorkspace("workspace-overshoot");
+      const client = new MockClient("handle-overshoot");
+      let nowMs = 0;
+      let attempts = 0;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          now: () => nowMs,
+          sleep: async () => {
+            nowMs += 300;
+          },
+        },
+      );
+
+      const outcome = await sessions
+        .run(
+          workspace,
+          async () => {
+            attempts += 1;
+            nowMs += 4_900;
+            throw { code: "transport-error" };
+          },
+          { retryTransportErrors: true, retryDeadlineMs: 5_000 },
+        )
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      // MUTATION: drop the post-backoff re-check -> a second attempt starts
+      // (4,900 ms was inside the budget when the backoff was armed).
+      expect(attempts).toBe(1);
+    });
+
+    it("bounds the client-churn open ladder the same way", async () => {
+      // codex round 2: churning client generations held a caller through six
+      // full opens — the ladder consulted neither the deadline nor shutdown.
+      const workspace = await tempWorkspace("workspace-churn-deadline");
+      const first = new MockClient("handle-churn-a");
+      const second = new MockClient("handle-churn-b");
+      let nowMs = 0;
+      let reads = 0;
+      const sessions = new EngineWorkspaceSessions(
+        {
+          currentClient: () => {
+            reads += 1;
+            nowMs += 2_500;
+            return reads % 2 === 1 ? first : second;
+          },
+        },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .run(workspace, async () => "unreachable", {
+          retryDeadlineMs: 6_000,
+        })
+        .catch((error: unknown) => error);
+
+      // MUTATION: drop the deadline from the churn ladder -> the full
+      // six-open churn runs and rejects with EngineWorkspaceRebindError.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(reads).toBeLessThanOrEqual(4);
+    });
+
     it("rejects an invalid deadline instead of quietly voiding it", async () => {
       const workspace = await tempWorkspace("workspace-bad-deadline");
       const client = new MockClient("handle-bad-deadline");
@@ -844,6 +912,38 @@ describe("EngineWorkspaceSessions", () => {
       });
       sessions.beginShutdown();
       await expect(run).rejects.toMatchObject({ code: "transport-error" });
+    });
+
+    it("exits the client-churn open ladder", async () => {
+      // codex round 2: beginShutdown resolved the churn ladder's sleep, but
+      // the loop continued without checking — churning generations could
+      // hold the chain into the forced-exit timer.
+      const workspace = await tempWorkspace("workspace-churn-shutdown");
+      const first = new MockClient("handle-churn-c");
+      const second = new MockClient("handle-churn-d");
+      let reads = 0;
+      let sleeping: (() => void) | null = null;
+      const sessions = new EngineWorkspaceSessions(
+        {
+          currentClient: () => {
+            reads += 1;
+            return reads % 2 === 1 ? first : second;
+          },
+        },
+        {
+          sleep: () =>
+            new Promise<void>((resolveSleep) => {
+              sleeping = () => resolveSleep();
+            }),
+        },
+      );
+
+      const run = sessions.run(workspace, async () => "unreachable");
+      await vi.waitFor(() => {
+        expect(sleeping).not.toBeNull();
+      });
+      sessions.beginShutdown();
+      await expect(run).rejects.toBeInstanceOf(EngineWorkspaceRebindError);
     });
 
     it("makes a later transport failure final instead of retried", async () => {
