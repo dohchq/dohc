@@ -436,6 +436,7 @@ import {
 import {
   captureForFlaggedWorkspace,
   dispatchScanEligible,
+  engineOffRefusal,
 } from "./workspaces/engineCaptureGate";
 import {
   readWorkspaceEnginePolicy,
@@ -1687,7 +1688,12 @@ const tryInVersionSessions = createTryInVersionSessions({
     await openWorkspaceActivity(workspace);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
-      throw new Error("Versions are not enabled for this workspace.");
+      throw new Error(
+        engineOffRefusal(
+          activity.getStatus(workspace.workspaceId),
+          "Versions are not enabled for this workspace.",
+        ),
+      );
     }
     desktopMarks.measureSince("try-in-version-ops", "try-in-version-ops-start");
     return capture;
@@ -2192,7 +2198,12 @@ const chatDispatchService = createChatDispatchService({
     const release = await acquireDispatchRunActivity(registered);
     if (!activity.engineCaptureFor(workspace.workspaceId)) {
       await release();
-      throw new Error("Chats are not enabled for this workspace.");
+      throw new Error(
+        engineOffRefusal(
+          activity.getStatus(workspace.workspaceId),
+          "Chats are not enabled for this workspace.",
+        ),
+      );
     }
     return release;
   },
@@ -2309,7 +2320,14 @@ async function openCliWorkspace(
   }
   await openWorkspaceActivity(workspace);
   const capture = activity.engineCaptureFor(workspace.workspaceId);
-  if (!capture) throw new Error("Chats are not enabled for this workspace.");
+  if (!capture) {
+    throw new Error(
+      engineOffRefusal(
+        activity.getStatus(workspace.workspaceId),
+        "Chats are not enabled for this workspace.",
+      ),
+    );
+  }
   const store = linkedChatStoreFor(workspace);
   const daemon = rustEngineDaemon;
   return {
@@ -5042,14 +5060,18 @@ function registerIpcHandlers(
   // requireWorkspace (renderer identity is never trusted) and is gated on the
   // workspace-engine alpha capture being attached — for unflagged workspaces
   // the calls reject.
-  async function requireEngineCapture(workspaceId: string, unavailable: string) {
+  async function requireEngineCapture(workspaceId: string, notEnabled: string) {
     const workspace = requireWorkspace(workspaceId);
     // Idempotent: guarantees the watcher + capture are live before any
     // engine operation touches the chain.
     await openWorkspaceActivity(workspace);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
-      throw new Error(unavailable);
+      // #541: the caller's "not enabled" copy holds only for the real
+      // opt-out — after a failed capture build the refusal names the failure.
+      throw new Error(
+        engineOffRefusal(activity.getStatus(workspace.workspaceId), notEnabled),
+      );
     }
     return { workspace, capture };
   }

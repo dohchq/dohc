@@ -58,6 +58,29 @@ export async function captureForFlaggedWorkspace(
   };
 }
 
+// What a refusal may SAY when the gate produced no capture (#541). "Not
+// enabled" asserts a decision, and after a failed capture build — or an
+// unreadable settings file — the truth is a failure, not a setting the user
+// touched. The refusal names the cause the open-time decision established,
+// from the same status that drives the history-off notice, and falls back to
+// the caller's opt-out copy only when the opt-out is what happened.
+export function engineOffRefusal(
+  status: {
+    settingsWarning?: string;
+    historyRecordingUnavailable: boolean;
+  },
+  notEnabled: string,
+): string {
+  // #483: the warning already names the unreadable file and the fix.
+  if (status.settingsWarning) return status.settingsWarning;
+  if (status.historyRecordingUnavailable) {
+    // Restart, not reopen: main builds the recorder once per workspace per
+    // app session, so reopening the workspace re-reads nothing.
+    return "dohc could not start the workspace engine for this workspace. Restart dohc to try again.";
+  }
+  return notEnabled;
+}
+
 // The gate's predicate on its own, for callers that must honor the opt-out
 // WITHOUT touching the engine (e.g. the chat dispatch scan — for an opted-out
 // workspace, merely resolving its stores would create .dohc/engine/).

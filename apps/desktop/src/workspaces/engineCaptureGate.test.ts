@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   captureForFlaggedWorkspace,
   dispatchScanEligible,
+  engineOffRefusal,
 } from "./engineCaptureGate";
 import type { WorkspaceCaptureHooks } from "./workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -123,6 +124,42 @@ describe("captureForFlaggedWorkspace decision", () => {
     );
     expect(recording.capture).not.toBeNull();
     expect(recording.warning).toBeUndefined();
+  });
+});
+
+// #541: "not enabled" asserts the user's opt-out. After a failed capture
+// build — or an unreadable settings file — that assertion is false, so the
+// refusal must name the established cause instead.
+describe("engineOffRefusal", () => {
+  const NOT_ENABLED = "Versions are not enabled for this workspace.";
+
+  it("keeps the caller's opt-out copy only for the real opt-out", () => {
+    expect(
+      engineOffRefusal({ historyRecordingUnavailable: false }, NOT_ENABLED),
+    ).toBe(NOT_ENABLED);
+  });
+
+  it("names the failure when the capture build failed, never a setting", () => {
+    const refusal = engineOffRefusal(
+      { historyRecordingUnavailable: true },
+      NOT_ENABLED,
+    );
+    expect(refusal).toBe(
+      "dohc could not start the workspace engine for this workspace. Restart dohc to try again.",
+    );
+    // The false cause this guards against: asserting a decision nobody made.
+    expect(refusal).not.toContain("not enabled");
+  });
+
+  it("names the unreadable settings file when that read is the cause (#483)", () => {
+    const warning =
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
+    const refusal = engineOffRefusal(
+      { settingsWarning: warning, historyRecordingUnavailable: false },
+      NOT_ENABLED,
+    );
+    expect(refusal).toBe(warning);
+    expect(refusal).toContain("/ws/.dohc/settings.local.json");
   });
 });
 
