@@ -9,6 +9,7 @@ import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
 import {
   ConflictReviewDialog,
   VersionComparePage,
+  VersionMergeDialog,
   conflictCountCopy,
 } from "./WorkspaceVersions";
 
@@ -31,6 +32,7 @@ const bridgeMock = {
   listWorkspaceVersionConflicts: vi.fn(),
   resolveWorkspaceVersionConflict: vi.fn(),
   compareWorkspaceVersions: vi.fn(),
+  mergeWorkspaceVersion: vi.fn(),
 };
 
 beforeEach(() => {
@@ -138,6 +140,71 @@ describe("ConflictReviewDialog paging", () => {
     // The window is unchanged and the button remains for a retry.
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
     expect(screen.getByTestId("conflict-list-show-more")).toBeTruthy();
+  });
+});
+
+describe("VersionMergeDialog conflict paging", () => {
+  const source = {
+    id: "v-1",
+    name: "Feature",
+    kind: "named" as const,
+    createdAtMs: 1,
+    canMergeIntoMain: true,
+  };
+
+  function renderMerge() {
+    render(
+      <VersionMergeDialog
+        workspaceId="ws-1"
+        source={source}
+        activeTabDirty={false}
+        flushActiveDraft={async () => {}}
+        onWorkspaceStateChanged={() => {}}
+        onClose={() => {}}
+      />,
+    );
+  }
+
+  it("the merge's own count decides the stage, not the open-conflict rows", async () => {
+    // The rows are the first page of ALL open conflicts — a lingering sync
+    // conflict rides along. A clean merge must stay clean.
+    bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
+      mergedFileCount: 2,
+      unchangedFileCount: 0,
+      conflictCount: 0,
+      conflicts: [],
+      nextAfterConflictId: null,
+    });
+    renderMerge();
+    fireEvent.click(screen.getByTestId("version-merge-confirm"));
+    await screen.findByText("Merged 2 files into Main.");
+  });
+
+  it("pages the conflicts stage through the open-conflict listing", async () => {
+    bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
+      mergedFileCount: 0,
+      unchangedFileCount: 0,
+      conflictCount: 2,
+      conflicts: [conflict("c-1")],
+      nextAfterConflictId: "c-1",
+    });
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [conflict("c-2")],
+      nextAfterConflictId: null,
+    });
+    renderMerge();
+    fireEvent.click(screen.getByTestId("version-merge-confirm"));
+    await screen.findByText("More than one file has two copies.", {
+      exact: false,
+    });
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
+
+    fireEvent.click(screen.getByTestId("conflict-list-show-more"));
+    await screen.findByText("2 files have two copies.", { exact: false });
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
+    expect(bridgeMock.listWorkspaceVersionConflicts.mock.calls).toEqual([
+      [{ workspaceId: "ws-1", afterConflictId: "c-1" }],
+    ]);
   });
 });
 
