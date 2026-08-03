@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   playwrightCliPath,
   playwrightRunEnv,
+  requirePlaywrightCli,
   runPlaywright,
 } from "../../scripts/run-playwright.mjs";
 
@@ -50,7 +51,6 @@ async function drive({
   }) as unknown as typeof spawn;
   const run = runPlaywright(["--grep", "@x"], {
     env: { KEEP: "kept" },
-    cliPath: "cli.js",
     platform,
     spawnImpl,
     onTermination: (handler: (signal: string) => void) => {
@@ -137,7 +137,38 @@ describe("runPlaywright", () => {
 
   it("names the missing CLI on a spawn failure and still cleans up", async () => {
     const { error, cacheDir } = await drive({ fail: new Error("spawn ENOENT") });
-    expect(error?.message).toContain("Could not launch the Playwright CLI at cli.js");
+    expect(error?.message).toContain("Could not launch the Playwright CLI at ");
+    expect(error?.message).toContain("run pnpm install");
     expect(existsSync(cacheDir ?? "")).toBe(false);
+  });
+
+  it("refuses a nonexistent CLI path with the remedy, before spawning anything", async () => {
+    const spawnImpl = vi.fn();
+    const missing = join(tmpdir(), "definitely-missing-playwright-cli.js");
+    await expect(
+      runPlaywright([], {
+        cliPath: missing,
+        spawnImpl: spawnImpl as unknown as typeof spawn,
+      }),
+    ).rejects.toThrow(
+      `Could not launch the Playwright CLI at ${missing}. The e2e scripts need the playwright package installed; run pnpm install.`,
+    );
+    expect(spawnImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("requirePlaywrightCli", () => {
+  it("turns a failed package resolution into the named remedy", () => {
+    expect(() =>
+      requirePlaywrightCli(undefined, () => {
+        throw new Error("Cannot find module 'playwright/package.json'");
+      }),
+    ).toThrow(
+      "Could not resolve the playwright package. The e2e scripts need it installed; run pnpm install.",
+    );
+  });
+
+  it("returns the resolved entry when it exists", () => {
+    expect(requirePlaywrightCli(undefined)).toBe(playwrightCliPath());
   });
 });

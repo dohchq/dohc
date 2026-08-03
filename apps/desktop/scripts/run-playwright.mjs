@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { constants as osConstants, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -32,11 +32,49 @@ export function playwrightRunEnv(baseEnv, cacheDir) {
   return { ...baseEnv, PWTEST_CACHE_DIR: cacheDir };
 }
 
+// Resolves and validates the CLI entry, naming the constraint and the remedy
+// when the package is missing. This must run inside runPlaywright's guarded
+// flow: a default parameter evaluates before any try block, and spawning
+// node with a nonexistent script "succeeds" and exits 1 with node's own
+// message — both paths would bypass the actionable error.
+export function requirePlaywrightCli(cliPath, resolveCli = playwrightCliPath) {
+  let resolved = cliPath ?? null;
+  if (resolved === null) {
+    try {
+      resolved = resolveCli();
+    } catch (error) {
+      throw new Error(
+        "Could not resolve the playwright package. The e2e scripts need it installed; run pnpm install.",
+        { cause: error },
+      );
+    }
+  }
+  if (!existsSync(resolved)) {
+    throw new Error(
+      `Could not launch the Playwright CLI at ${resolved}. The e2e scripts need the playwright package installed; run pnpm install.`,
+    );
+  }
+  return resolved;
+}
+
 // Runs the CLI with a per-run transform cache and resolves to the process
 // exit code. The seams exist for the tests; production passes only argv.
+/**
+ * @param {string[]} args
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   cliPath?: string,
+ *   platform?: NodeJS.Platform,
+ *   spawnImpl?: typeof spawn,
+ *   mkdtempImpl?: typeof mkdtempSync,
+ *   rmImpl?: typeof rmSync,
+ *   onTermination?: (forward: (signal: string) => void) => void,
+ * }} [options]
+ * @returns {Promise<number>}
+ */
 export async function runPlaywright(args, {
   env = process.env,
-  cliPath = playwrightCliPath(),
+  cliPath = undefined,
   platform = process.platform,
   spawnImpl = spawn,
   mkdtempImpl = mkdtempSync,
@@ -47,8 +85,9 @@ export async function runPlaywright(args, {
     }
   },
 } = {}) {
+  const cli = requirePlaywrightCli(cliPath);
   const cacheDir = mkdtempImpl(join(tmpdir(), "dohc-playwright-cache-"));
-  const child = spawnImpl(process.execPath, [cliPath, "test", ...args], {
+  const child = spawnImpl(process.execPath, [cli, "test", ...args], {
     stdio: "inherit",
     env: playwrightRunEnv(env, cacheDir),
   });
@@ -72,7 +111,7 @@ export async function runPlaywright(args, {
     return signalNumber ? 128 + signalNumber : 1;
   } catch (error) {
     throw new Error(
-      `Could not launch the Playwright CLI at ${cliPath}. The e2e scripts need the playwright package installed; run pnpm install.`,
+      `Could not launch the Playwright CLI at ${cli}. The e2e scripts need the playwright package installed; run pnpm install.`,
       { cause: error },
     );
   } finally {
