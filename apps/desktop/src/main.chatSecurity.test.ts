@@ -189,4 +189,39 @@ describe("main-process chat authorization", () => {
       "readOnly: Boolean(sharedViewOf(workspaceId))",
     );
   });
+
+  // #541: the cause-aware refusal helpers are behavior-tested in
+  // engineCaptureGate.test.ts, but the WIRING is the user-visible fix —
+  // reverting a call site to a bare "not enabled" throw passes the whole
+  // desktop suite. These pins make that revert fail.
+  it("routes every null-capture refusal through the cause-aware helper", () => {
+    function slice(startMarker: string, endMarker: string): string {
+      const start = mainSource.indexOf(startMarker);
+      const end = mainSource.indexOf(endMarker, start);
+      if (start < 0 || end < 0) {
+        throw new Error(`Missing main.ts region ${startMarker} .. ${endMarker}`);
+      }
+      return mainSource.slice(start, end);
+    }
+
+    // The single gate behind the 30+ versions/chats/engine-history handlers.
+    expect(
+      slice(
+        "async function requireEngineCapture(",
+        "async function requireVersionOperations(",
+      ),
+    ).toContain("engineOffRefusal(");
+    // The dispatch prepare seam: cause before release, recovery from the
+    // actual close — both live inside the helper, so the wiring must use it.
+    expect(
+      slice("prepareRunWorkspace: async (workspace)", "authorizeServiceNote:"),
+    ).toContain("releaseAndRefuseWithoutCapture({");
+    // The two manual sites outside requireEngineCapture.
+    expect(
+      slice("operationsFor: async (workspaceId)", "startRun: async"),
+    ).toContain("engineOffRefusal(");
+    expect(
+      slice("async function openCliWorkspace(", "const store = linkedChatStoreFor("),
+    ).toContain("engineOffRefusal(");
+  });
 });

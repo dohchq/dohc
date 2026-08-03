@@ -85,6 +85,10 @@ describe("captureForFlaggedWorkspace decision", () => {
     expect(decision.warning).toContain(
       join(root, ".dohc", WORKSPACE_SETTINGS_FILE),
     );
+    // The retry-path refusal rewrites this exact SUFFIX (#541): a template
+    // that stops ending with it would silently hand retry callers the
+    // restart instruction again. Pinned against the real producer.
+    expect(decision.warning).toMatch(/ Then restart dohc\.$/);
   });
 
   // #540: the gate owns the shared-view rule. The decision carries the
