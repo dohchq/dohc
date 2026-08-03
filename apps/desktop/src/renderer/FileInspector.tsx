@@ -1609,7 +1609,7 @@ function MarkdownView(props: {
                   engineChipState === "error"
                     ? "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit."
                     : engineChipState === "file-locked"
-                      ? "Another program has this file open, so dohc can't update it on disk. Your edits are saved in this document's history. dohc retries until the file is free."
+                      ? "Another program has this file open, so dohc can't update it on disk. dohc has your edits saved and retries until the file is free."
                       : engineChipState === "read-only"
                         ? "This document is shared with you to read. Your changes stay on screen but are not saved."
                         : engineChipState === "changed-on-disk"

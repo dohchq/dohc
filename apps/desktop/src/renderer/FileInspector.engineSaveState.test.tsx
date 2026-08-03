@@ -117,11 +117,13 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     const header = await screen.findByTestId("markdown-save-state");
     expect(header.getAttribute("data-state")).toBe("file-locked");
     expect(header.textContent).toBe("File in use");
+    // The copy claims the durable Y.Doc state, never a completed History
+    // entry: with typing continuing under a held lock, the newest edits are
+    // journaled but not yet settled into a moment (#595 round 5).
     expect(header.getAttribute("title")).toContain("Another program has this file open");
-    expect(header.getAttribute("title")).toContain(
-      "Your edits are saved in this document's history",
-    );
-    expect(header.getAttribute("title")).toContain("dohc retries until the file is free");
+    expect(header.getAttribute("title")).toContain("dohc has your edits saved");
+    expect(header.getAttribute("title")).not.toContain("history");
+    expect(header.getAttribute("title")).toContain("retries until the file is free");
     // The tab dot stays dirty: the disk is behind this document.
     await waitFor(() =>
       expect(onSaveStateChange).toHaveBeenLastCalledWith("error"),

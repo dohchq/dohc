@@ -2996,45 +2996,81 @@ export function createWorkspaceEngineCapture(
         // cannot pay that debt. This detached ladder reopens enough state to
         // settle: the lineage is durable, an unchanged projection routes
         // through the engine's idempotent settle, and that replays the
-        // pending write. A live entry for the path means a newer session
-        // owns the same debt (every settle of the doc replays the pending
-        // job) — stand down silently, including when the reopen loses that
-        // race to the daemon's busy refusal.
+        // pending write.
+        //
+        // Round 5: the payment runs ON the capture chain — the serialization
+        // point every version operation runs through — and re-checks the
+        // world at fire time, so the locked-write debt has exactly one owner
+        // and always fires behind the version fence:
+        //
+        // - A live entry for the path TRANSFERS the debt: opening a document
+        //   settles nothing by itself, so the live session's settle is asked
+        //   for explicitly — a still-held lock re-enters its provider
+        //   ladder, and its failures report through the ordinary settle
+        //   channel. Running on the chain is what makes the check
+        //   authoritative: an open cannot interleave with it.
+        // - A workspace that moved to ANOTHER version drops the debt with a
+        //   trace. Reopening the captured version here would run outside the
+        //   fence and could write the OLD version's projection over the
+        //   active one. Nothing durable is lost: the version fence replays
+        //   pending materializations before any switch scans the filesystem
+        //   (lib.rs, materialize_replay_pending_for_fence — fatal on
+        //   failure), so a SUCCEEDED switch already paid or carried it.
         const scheduleDetachedLockedSettle = (delayMs: number): void => {
           if (stopped) return;
           setTimeout(() => {
-            void (async () => {
-              if (stopped || liveYDocSessions.has(input.path)) return;
-              const { session: retrySession } =
-                await openRestartSafeRustYDocSession({
-                  versionId,
-                  path: input.path,
-                  ...(input.contentKind
-                    ? { contentKind: input.contentKind }
-                    : {}),
-                  onDead: () => undefined,
-                  onAlive: () => undefined,
-                  onRemoteUpdate: () => undefined,
-                  onSettleStart: () => undefined,
-                  onSettleError: () => undefined,
-                  onSettled: () => undefined,
-                });
-              try {
-                await retrySession.settleNow({ summary: "session close" });
-              } finally {
-                await retrySession
-                  .close({ settle: false })
+            enqueue(`ydoc close retry of ${input.path}`, async () => {
+              if (stopped) return;
+              const live = liveYDocSessions.get(input.path);
+              if (live) {
+                void live.session
+                  .settleNow({ summary: "session close" })
                   .catch(() => undefined);
+                return;
               }
-            })().catch((retryError: unknown) => {
-              if (liveYDocSessions.has(input.path)) return;
-              if (isFileLockedCause(retryError)) {
-                scheduleDetachedLockedSettle(
-                  Math.min(delayMs * 2, LOCKED_CLOSE_RETRY_CAP_MS),
+              const activeVersionId = await activeVersionIdOf(engine);
+              if (activeVersionId !== versionId) {
+                onError(
+                  `ydoc close retry of ${input.path}`,
+                  new Error(
+                    `locked-write retry dropped: the workspace moved to version ${activeVersionId} while a pending write for version ${versionId} waited; the version fence replay owns pending writes across switches`,
+                  ),
                 );
                 return;
               }
-              onError(`ydoc close retry of ${input.path}`, retryError);
+              try {
+                const { session: retrySession } =
+                  await openRestartSafeRustYDocSession({
+                    versionId,
+                    path: input.path,
+                    ...(input.contentKind
+                      ? { contentKind: input.contentKind }
+                      : {}),
+                    onDead: () => undefined,
+                    onAlive: () => undefined,
+                    onRemoteUpdate: () => undefined,
+                    onSettleStart: () => undefined,
+                    onSettleError: () => undefined,
+                    onSettled: () => undefined,
+                  });
+                try {
+                  await retrySession.settleNow({ summary: "session close" });
+                } finally {
+                  await retrySession
+                    .close({ settle: false })
+                    .catch(() => undefined);
+                }
+              } catch (retryError) {
+                if (isFileLockedCause(retryError)) {
+                  scheduleDetachedLockedSettle(
+                    Math.min(delayMs * 2, LOCKED_CLOSE_RETRY_CAP_MS),
+                  );
+                  return;
+                }
+                // A non-lock failure is new information; the enqueue wrapper
+                // reports it through onError with this task's context.
+                throw retryError;
+              }
             });
           }, delayMs);
         };

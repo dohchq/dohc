@@ -2415,6 +2415,7 @@ async function lockedRebindCapture(prefix: string) {
     settledMarkdowns: [] as string[],
     generation: 0,
     generationOptions: [] as EngineYdocProviderSessionOptions[],
+    errors: [] as string[],
   };
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
@@ -2500,9 +2501,9 @@ async function lockedRebindCapture(prefix: string) {
     rootPath,
     rustEngineSessions: sessions,
     openRustYDocProviderSession: openProvider,
-    onError: () => undefined,
+    onError: (context) => state.errors.push(context),
   });
-  return { capture, state };
+  return { capture, state, loopback, workspaceId };
 }
 
 it("re-arms a pending locked settle on the generation that replaces a dead one", async () => {
@@ -2697,3 +2698,112 @@ it("a replicated release with a non-lock settle failure arms no detached retry",
   expect(state.settledMarkdowns).toEqual([]);
   await capture.stop();
 }, 10_000);
+
+it("the version fence drops a detached locked retry after a switch", async () => {
+  // #595 round 5 P1: the debt was armed for the version the document lived
+  // in. If the workspace moves before the timer fires, reopening the OLD
+  // version outside the capture chain could write its projection over the
+  // active version. The retry runs on the chain and fences on the active
+  // version at fire time: dropped, with a trace — the fence replay owns
+  // pending writes across switches.
+  const { capture, state, loopback, workspaceId } = await lockedRebindCapture(
+    "dohc-ydoc-fence-drop-",
+  );
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "old version edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The workspace moves to a new version while the timer sleeps, and the
+  // lock releases.
+  const ensured = await loopback.sendRequest({
+    id: 9_001,
+    method: "versions.ensureMain",
+    workspace: workspaceId,
+    params: { workspaceId },
+  });
+  const main = ensured.result as { id?: string };
+  const created = await loopback.sendRequest({
+    id: 9_002,
+    method: "versions.createNamed",
+    workspace: workspaceId,
+    params: {
+      workspaceId,
+      name: "fence-target",
+      fromVersionId: main.id ?? "main",
+    },
+    idempotencyKey: "fence-create-1",
+  } as Parameters<typeof loopback.sendRequest>[0]);
+  const createdVersion = created.result as { id?: string };
+  await loopback.sendRequest({
+    id: 9_003,
+    method: "versions.setActive",
+    workspace: workspaceId,
+    params: { workspaceId, versionId: createdVersion.id! },
+  });
+  state.locked = false;
+
+  // The fence drops the debt: no reopen of the old version, nothing written,
+  // and the drop leaves a trace.
+  await expect
+    .poll(
+      () => state.errors.filter((context) => context.includes("close retry")),
+      { timeout: 15_000 },
+    )
+    .toHaveLength(1);
+  expect(state.generation).toBe(1);
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 20_000);
+
+it("a reopen before the timer fires receives the locked debt, not silence", async () => {
+  // #595 round 5 P2: opening a document settles nothing by itself, so a
+  // stand-down that merely SEES the live session would strand the pending
+  // write until the user happens to edit. The retry transfers the debt: it
+  // asks the live session to settle, and that session's own machinery owns
+  // it from there.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-debt-transfer-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "transferred edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The user reopens the document before the retry fires, then the lock
+  // releases. No edit ever happens in the reopened session.
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  expect(state.generation).toBe(2);
+  state.locked = false;
+
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["transferred edit"]);
+  // The debt was paid THROUGH the live session — no detached reopen.
+  expect(state.generation).toBe(2);
+  await reopened.close({ settle: false });
+  await capture.stop();
+}, 20_000);
