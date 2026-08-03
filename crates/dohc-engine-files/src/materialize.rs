@@ -1994,14 +1994,22 @@ fn terminal_lock_classification(err: std::io::Error, target: &Path) -> Materiali
     }
 }
 
-/// Whether an ACCESS_DENIED replace failure is really a HELD HANDLE, not an
-/// ACL: opening the target for DELETE access with full sharing answers 32/33
-/// exactly when another handle without FILE_SHARE_DELETE is the contender —
-/// the very thing the replace needs and could not get — while a DACL denial
-/// answers ACCESS_DENIED again. A successful probe open means the contender
-/// released between attempts: also a lock, and the retry lands.
+/// What a DELETE-access probe open of the replace target observed.
 #[cfg(windows)]
-fn replace_denial_is_handle_lock(target: &Path) -> bool {
+enum DeleteProbe {
+    /// 32/33: another handle without FILE_SHARE_DELETE holds the target —
+    /// the very access the replace needs and could not get. Proof of a lock.
+    Contended,
+    /// The probe opened. This proves NOTHING about the replace failure: a
+    /// read-only attribute grants a DELETE-access open and still fails the
+    /// replace with ACCESS_DENIED (#595 round 6).
+    Opened,
+    /// Any other failure (a DACL denies the probe too, the target vanished).
+    Other,
+}
+
+#[cfg(windows)]
+fn probe_delete_open(target: &Path) -> DeleteProbe {
     use std::os::windows::fs::OpenOptionsExt;
     const DELETE: u32 = 0x0001_0000;
     const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4; // read | write | delete
@@ -2010,26 +2018,46 @@ fn replace_denial_is_handle_lock(target: &Path) -> bool {
         .share_mode(SHARE_ALL)
         .open(target)
     {
-        Ok(_) => true,
-        Err(err) => matches!(err.raw_os_error(), Some(32) | Some(33)),
+        Ok(_) => DeleteProbe::Opened,
+        Err(err) if matches!(err.raw_os_error(), Some(32) | Some(33)) => DeleteProbe::Contended,
+        Err(_) => DeleteProbe::Other,
     }
 }
 
-/// The terminal classification after a bounded replace loop exhausts. 32/33
-/// keep the retryable `FileLocked` contract outright; ERROR_ACCESS_DENIED is
-/// ambiguous at THIS boundary (#554's own dogfood shape: a handle held
-/// without FILE_SHARE_DELETE fails the replace with 5, exactly like an ACL),
-/// so it is resolved by probing the target — a handle-lock stays retryable,
-/// a DACL denial is terminal io. Everything else is terminal io.
-fn terminal_replace_classification(err: std::io::Error, target: &Path) -> MaterializeError {
+/// Resolve a bounded replace loop's exhaustion. `Ok(())` means the final
+/// reattempt LANDED the replace. 32/33 keep the retryable `FileLocked`
+/// contract outright. ERROR_ACCESS_DENIED is ambiguous at this boundary
+/// (#554's dogfood shape: a handle held without FILE_SHARE_DELETE fails the
+/// replace with 5, exactly like an ACL or a read-only attribute), and only
+/// an OBSERVED sharing violation proves the lock — the probe's verdict:
+/// contended is `FileLocked`; an OPEN probe proves nothing, so the replace
+/// is reattempted once (the transient contender may be gone) and a repeat
+/// failure is terminal io; anything else is terminal io.
+fn resolve_replace_exhaustion(
+    err: std::io::Error,
+    target: &Path,
+    reattempt: &mut dyn FnMut() -> std::io::Result<()>,
+) -> Result<(), MaterializeError> {
     if matches!(err.raw_os_error(), Some(32) | Some(33)) {
-        return MaterializeError::FileLocked;
+        return Err(MaterializeError::FileLocked);
     }
     #[cfg(windows)]
-    if err.raw_os_error() == Some(5) && replace_denial_is_handle_lock(target) {
-        return MaterializeError::FileLocked;
+    if err.raw_os_error() == Some(5) {
+        match probe_delete_open(target) {
+            DeleteProbe::Contended => return Err(MaterializeError::FileLocked),
+            DeleteProbe::Opened => {
+                return match reattempt() {
+                    Ok(()) => Ok(()),
+                    Err(retry_err) if matches!(retry_err.raw_os_error(), Some(32) | Some(33)) => {
+                        Err(MaterializeError::FileLocked)
+                    }
+                    Err(retry_err) => Err(MaterializeError::io(target, &retry_err)),
+                };
+            }
+            DeleteProbe::Other => {}
+        }
     }
-    MaterializeError::io(target, &err)
+    Err(MaterializeError::io(target, &err))
 }
 
 /// Whether an io error is a transient sharing/lock condition worth retrying
@@ -2068,8 +2096,17 @@ fn replace_with_bounded_retry(
             Ok(()) => return Ok(()),
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
-                    let _ = std::fs::remove_file(tmp); // best-effort cleanup
-                    return Err(terminal_replace_classification(err, target));
+                    match resolve_replace_exhaustion(err, target, &mut || {
+                        replacer.try_replace(tmp, target)
+                    }) {
+                        // The resolution's single reattempt landed the
+                        // replace: the temp was consumed by the rename.
+                        Ok(()) => return Ok(()),
+                        Err(error) => {
+                            let _ = std::fs::remove_file(tmp); // best-effort cleanup
+                            return Err(error);
+                        }
+                    }
                 }
                 // Back off before the next attempt so a real (tens-of-ms)
                 // AV/indexer sharing violation is actually absorbed. Injectable,
@@ -2101,8 +2138,17 @@ fn replace_secret_with_bounded_retry(
             Ok(()) => return Ok(()),
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
-                    let _ = parent.remove_file(tmp_name, tmp);
-                    return Err(terminal_replace_classification(err, target));
+                    match resolve_replace_exhaustion(err, target, &mut || {
+                        let mut pinned_replace =
+                            || parent.rename(tmp_name, target_name, tmp, target);
+                        replacer.try_replace_secret(tmp, target, &mut pinned_replace)
+                    }) {
+                        Ok(()) => return Ok(()),
+                        Err(error) => {
+                            let _ = parent.remove_file(tmp_name, tmp);
+                            return Err(error);
+                        }
+                    }
                 }
                 backoff.wait_before_retry(attempt);
             }
@@ -2208,18 +2254,22 @@ mod tests {
         assert!(matches!(result, Err(MaterializeError::Io { .. })));
     }
 
-    /// The replace boundary's two meanings of ERROR_ACCESS_DENIED (#554,
-    /// #595 round 4): a handle held without FILE_SHARE_DELETE fails the
-    /// replace with 5 — the dogfood shape itself — and the probe's
-    /// DELETE-access open convicts it as a lock. The same raw code with no
-    /// contending handle to find is the ACL story: terminal io. (A real
-    /// deny-ACE answers the probe with ACCESS_DENIED, the same non-lock
-    /// branch the absent target pins here.)
+    /// The replace boundary's meanings of ERROR_ACCESS_DENIED (#554, #595
+    /// rounds 4+6). Only an OBSERVED sharing violation proves a lock: a
+    /// handle held without FILE_SHARE_DELETE answers the probe with 32 —
+    /// `FileLocked`, and no reattempt is spent. A probe that OPENS proves
+    /// nothing (a read-only attribute opens fine for DELETE access and still
+    /// fails the replace), so exactly one reattempt decides: landed means
+    /// the transient contender left; a repeat denial is terminal io — never
+    /// an endless file-locked poll against an attribute.
     #[cfg(windows)]
     #[test]
     fn replace_denial_probe_splits_held_handles_from_acls() {
         use std::os::windows::fs::OpenOptionsExt;
         let scratch = Scratch::new("replace-denial-probe");
+        let denied = || std::io::Error::from_raw_os_error(5);
+
+        // A real contender: convicted by the probe, no reattempt spent.
         let target = scratch.root.join("held.md");
         std::fs::write(&target, b"held").expect("write target");
         let holder = std::fs::OpenOptions::new()
@@ -2227,18 +2277,40 @@ mod tests {
             .share_mode(0x1 | 0x2) // read | write, NO delete sharing
             .open(&target)
             .expect("hold handle");
-        assert!(matches!(
-            terminal_replace_classification(std::io::Error::from_raw_os_error(5), &target),
-            MaterializeError::FileLocked
-        ));
+        let mut reattempts = 0u32;
+        let verdict = resolve_replace_exhaustion(denied(), &target, &mut || {
+            reattempts += 1;
+            Err(denied())
+        });
+        assert!(matches!(verdict, Err(MaterializeError::FileLocked)));
+        assert_eq!(reattempts, 0, "an observed contention needs no reattempt");
         drop(holder);
-        assert!(matches!(
-            terminal_replace_classification(
-                std::io::Error::from_raw_os_error(5),
-                &scratch.root.join("no-such-target.md"),
-            ),
-            MaterializeError::Io { .. }
-        ));
+
+        // A read-only attribute: the probe opens, the reattempt fails the
+        // same way — terminal io, never the retryable lock contract.
+        let read_only = scratch.root.join("read-only.md");
+        std::fs::write(&read_only, b"attr").expect("write read-only target");
+        let original = std::fs::metadata(&read_only).expect("meta").permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&read_only, readonly).expect("set read-only");
+        let mut reattempts = 0u32;
+        let verdict = resolve_replace_exhaustion(denied(), &read_only, &mut || {
+            reattempts += 1;
+            Err(denied())
+        });
+        assert!(matches!(verdict, Err(MaterializeError::Io { .. })));
+        assert_eq!(reattempts, 1, "an open probe spends exactly one reattempt");
+        std::fs::set_permissions(&read_only, original).expect("restore permissions");
+
+        // The contender released between attempts: the reattempt lands.
+        let freed = scratch.root.join("freed.md");
+        std::fs::write(&freed, b"freed").expect("write freed target");
+        let verdict = resolve_replace_exhaustion(denied(), &freed, &mut || Ok(()));
+        assert!(
+            verdict.is_ok(),
+            "a landed reattempt resolves the exhaustion"
+        );
     }
 
     /// The inverse: a real sharing violation that survives every attempt

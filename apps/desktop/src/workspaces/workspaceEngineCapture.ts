@@ -1210,6 +1210,12 @@ export function createWorkspaceEngineCapture(
     close: (opts?: WorkspaceEngineYDocCloseOptions) => Promise<void>;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
+  // The detached locked-write debts, by path (#595 rounds 5-6): each entry is
+  // the payment routine its arming session left behind. The registry is what
+  // lets OTHER lifecycle edges find and drain a debt whose session is gone —
+  // a rename pays the debt for its endpoints before reading disk, and the
+  // debt's own timer stands down when the registry no longer names it.
+  const detachedLockedDebts = new Map<string, () => Promise<void>>();
 
   async function openRestartSafeRustYDocSession(input: {
     versionId: string;
@@ -3016,63 +3022,85 @@ export function createWorkspaceEngineCapture(
         //   pending materializations before any switch scans the filesystem
         //   (lib.rs, materialize_replay_pending_for_fence — fatal on
         //   failure), so a SUCCEEDED switch already paid or carried it.
-        const scheduleDetachedLockedSettle = (delayMs: number): void => {
+        // The payment routine (#595 round 6): callable from the debt's own
+        // timer (wrapped in `enqueue`) AND inline by another chain task that
+        // must drain the debt before touching the path — a rename, most of
+        // all. Every terminal outcome removes the registry entry; only a
+        // still-held lock keeps it and re-arms.
+        let detachedRetryMs = LOCKED_CLOSE_RETRY_INITIAL_MS;
+        const payDetachedLockedDebt = async (): Promise<void> => {
+          if (stopped) {
+            detachedLockedDebts.delete(input.path);
+            return;
+          }
+          const live = liveYDocSessions.get(input.path);
+          if (live) {
+            void live.session
+              .settleNow({ summary: "session close" })
+              .catch(() => undefined);
+            detachedLockedDebts.delete(input.path);
+            return;
+          }
+          const activeVersionId = await activeVersionIdOf(engine);
+          if (activeVersionId !== versionId) {
+            detachedLockedDebts.delete(input.path);
+            onError(
+              `ydoc close retry of ${input.path}`,
+              new Error(
+                `locked-write retry dropped: the workspace moved to version ${activeVersionId} while a pending write for version ${versionId} waited; the version fence replay owns pending writes across switches`,
+              ),
+            );
+            return;
+          }
+          try {
+            const { session: retrySession } =
+              await openRestartSafeRustYDocSession({
+                versionId,
+                path: input.path,
+                ...(input.contentKind
+                  ? { contentKind: input.contentKind }
+                  : {}),
+                onDead: () => undefined,
+                onAlive: () => undefined,
+                onRemoteUpdate: () => undefined,
+                onSettleStart: () => undefined,
+                onSettleError: () => undefined,
+                onSettled: () => undefined,
+              });
+            try {
+              await retrySession.settleNow({ summary: "session close" });
+            } finally {
+              await retrySession.close({ settle: false }).catch(() => undefined);
+            }
+            detachedLockedDebts.delete(input.path);
+          } catch (retryError) {
+            if (isFileLockedCause(retryError)) {
+              armDetachedLockedRetry();
+              return;
+            }
+            detachedLockedDebts.delete(input.path);
+            // A non-lock failure is new information; the enqueue wrapper (or
+            // the draining task) reports it with its own context.
+            throw retryError;
+          }
+        };
+        const armDetachedLockedRetry = (): void => {
           if (stopped) return;
+          const delay = detachedRetryMs;
+          detachedRetryMs = Math.min(detachedRetryMs * 2, LOCKED_CLOSE_RETRY_CAP_MS);
           setTimeout(() => {
-            enqueue(`ydoc close retry of ${input.path}`, async () => {
-              if (stopped) return;
-              const live = liveYDocSessions.get(input.path);
-              if (live) {
-                void live.session
-                  .settleNow({ summary: "session close" })
-                  .catch(() => undefined);
-                return;
-              }
-              const activeVersionId = await activeVersionIdOf(engine);
-              if (activeVersionId !== versionId) {
-                onError(
-                  `ydoc close retry of ${input.path}`,
-                  new Error(
-                    `locked-write retry dropped: the workspace moved to version ${activeVersionId} while a pending write for version ${versionId} waited; the version fence replay owns pending writes across switches`,
-                  ),
-                );
-                return;
-              }
-              try {
-                const { session: retrySession } =
-                  await openRestartSafeRustYDocSession({
-                    versionId,
-                    path: input.path,
-                    ...(input.contentKind
-                      ? { contentKind: input.contentKind }
-                      : {}),
-                    onDead: () => undefined,
-                    onAlive: () => undefined,
-                    onRemoteUpdate: () => undefined,
-                    onSettleStart: () => undefined,
-                    onSettleError: () => undefined,
-                    onSettled: () => undefined,
-                  });
-                try {
-                  await retrySession.settleNow({ summary: "session close" });
-                } finally {
-                  await retrySession
-                    .close({ settle: false })
-                    .catch(() => undefined);
-                }
-              } catch (retryError) {
-                if (isFileLockedCause(retryError)) {
-                  scheduleDetachedLockedSettle(
-                    Math.min(delayMs * 2, LOCKED_CLOSE_RETRY_CAP_MS),
-                  );
-                  return;
-                }
-                // A non-lock failure is new information; the enqueue wrapper
-                // reports it through onError with this task's context.
-                throw retryError;
-              }
-            });
-          }, delayMs);
+            // Paid, transferred, or dropped by another edge while the timer
+            // slept: the registry no longer names this routine — stand down.
+            if (detachedLockedDebts.get(input.path) !== payDetachedLockedDebt) {
+              return;
+            }
+            enqueue(`ydoc close retry of ${input.path}`, payDetachedLockedDebt);
+          }, delay);
+        };
+        const scheduleDetachedLockedSettle = (): void => {
+          if (stopped) return;
+          detachedLockedDebts.set(input.path, payDetachedLockedDebt);
+          armDetachedLockedRetry();
         };
         // A close whose settle met the transient lock keeps a debt nobody
         // else will pay (#595): the renderer forgets the session on a failed
@@ -3120,7 +3148,7 @@ export function createWorkspaceEngineCapture(
               // hears about the durably pending write, so arm the detached
               // debt BEFORE the entry goes away.
               if (isFileLockedCause(error.cause)) {
-                scheduleDetachedLockedSettle(LOCKED_CLOSE_RETRY_INITIAL_MS);
+                scheduleDetachedLockedSettle();
               }
               // The daemon session and its lease ARE gone — only the settle
               // failed. Lift the guard like a clean teardown (capture of the
@@ -4486,6 +4514,18 @@ export function createWorkspaceEngineCapture(
 
     beginFileRename(fromPath, toPath) {
       return enqueueResult("prepare rename", async () => {
+        // #595 round 6: a DETACHED locked-write debt is another live thing a
+        // rename must vacate — its session is gone, so the vacate below
+        // cannot see it, and without this drain the rename would read the
+        // STALE pre-lock artifact, record old bytes, and leave the retry
+        // targeting the moved-from path. We are on the chain, so nothing
+        // interleaves with the payment. A payment that still meets the lock
+        // re-arms and the rename proceeds over the stale artifact — the same
+        // state any never-settled locked file has at rename time.
+        for (const endpoint of [fromPath, toPath]) {
+          const debt = detachedLockedDebts.get(endpoint);
+          if (debt) await debt();
+        }
         // WS-G2-C-2 (gate fix 3): a live Y.Doc session over either endpoint must
         // be flushed + released before the file moves, or a later settle would
         // write the OLD path — resurrecting the moved-from file / orphaning the

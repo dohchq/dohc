@@ -2503,7 +2503,7 @@ async function lockedRebindCapture(prefix: string) {
     openRustYDocProviderSession: openProvider,
     onError: (context) => state.errors.push(context),
   });
-  return { capture, state, loopback, workspaceId };
+  return { capture, state, loopback, workspaceId, rootPath };
 }
 
 it("re-arms a pending locked settle on the generation that replaces a dead one", async () => {
@@ -2805,5 +2805,42 @@ it("a reopen before the timer fires receives the locked debt, not silence", asyn
   // The debt was paid THROUGH the live session — no detached reopen.
   expect(state.generation).toBe(2);
   await reopened.close({ settle: false });
+  await capture.stop();
+}, 20_000);
+
+it("a rename drains the detached locked debt before touching disk", async () => {
+  // #595 round 6: with the session gone and the timer sleeping, a rename
+  // would read the STALE pre-lock artifact and carry old bytes to the new
+  // path, leaving the retry aimed at the moved-from file. Rename is another
+  // lifecycle edge: it finds the debt in the registry and pays it FIRST, on
+  // the same chain, before reading anything from disk.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-rename-drain-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "renamed edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The lock releases; before the timer fires, the user renames the file.
+  state.locked = false;
+  const finish = await capture.beginFileRename("note.md", "renamed.md");
+  // The debt was paid BEFORE the rename proceeded: the pending write settled
+  // through a detached reopen, not left targeting a dead path.
+  expect(state.settledMarkdowns).toEqual(["renamed edit"]);
+  expect(state.generation).toBe(2);
+  await finish(true).catch(() => undefined);
   await capture.stop();
 }, 20_000);
