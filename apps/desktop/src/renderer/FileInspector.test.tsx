@@ -14,28 +14,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // here — an error shape that reads like a product regression rather than a flake.
 configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
-// Pre-warm the views FileInspector loads lazily, so no findBy* window has to
-// transform and execute CodeMirror or the properties panel on first use — the
-// #539 mechanism: a module load inside an assertion window turns machine load
-// into a missed deadline. The component keeps loading them lazily; only the
-// test collection pays the cost.
+// Pre-warm the lazily-loaded views at collection so no findBy* window pays
+// for a module load under machine load (#539's mechanism, measured in #568).
 import "./editor/MarkdownEditor";
 import "./PropertiesPanel";
 import "./DatabaseStudioView";
 import "./SourceCodeEditor";
-
-// jsdom implements no elementFromPoint, and a click that lands on a mounted
-// ProseMirror view reaches posAtCoords, which calls it unguarded — an
-// uncaught TypeError inside jsdom's event dispatch that failed full-suite
-// runs while every test passed. Measured at this head: the pre-warm imports
-// above alone remove that failure, and with them in place this stub logs
-// zero calls — it is insurance, not the fix. It stays because the jsdom gap
-// is real and any future click that reaches an editor before its views
-// settle would reintroduce an all-tests-pass exit 1; "nothing at that
-// point" sends posAtCoords into its guarded bounding-box fallback. Kept
-// here rather than a vitest setupFile: this is the only suite that clicks
-// mounted ProseMirror.
-document.elementFromPoint ??= () => null;
 import * as Y from "yjs";
 import {
   markdownToYDoc,
