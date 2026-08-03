@@ -1873,6 +1873,49 @@ describe("ui-state merge-on-load", () => {
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
   }, 20_000);
 
+  // The same race through "New message": the compose screen opens with a
+  // direct nav write, and a DM answer queued in the same tick would remount
+  // the DM over the compose the user just opened.
+  it("discards a DM answer that lands in the same tick as the New message click", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsPageBridge(CHATS_PAGE_STATE);
+    renderShell(bridge);
+
+    // The DM section renders only once the page's own DM sync answers.
+    await screen.findByTestId("chats-feed-link");
+    await act(async () => {
+      bridge.syncAnswers[0]!({ available: true, dms: [] });
+      await Promise.resolve();
+    });
+    const newDmButton = await screen.findByTestId("chats-new-dm");
+
+    // Start a canonical DM navigation from the graph and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    const dmCallsBefore = bridge.syncDms.mock.calls.length;
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() =>
+      expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1),
+    );
+    await user.click(screen.getByTestId("activity-graph"));
+
+    // The DM answers in the same tick the user clicks "New message".
+    const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
+    await act(async () => {
+      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      newDmButton.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByTestId("chats-dm-new-back")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
+    // A DM answer that wins remounts the page: a second overview load.
+    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
+  }, 20_000);
+
   // The awaited form of the same click: a feed item carrying a focus target
   // navigates in place (openConversation -> command + report), and the DM
   // answers late. The destination write must cancel it.

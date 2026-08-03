@@ -1994,6 +1994,9 @@ export function ChatsView(props: {
       });
       if (token !== liveToken.current) return;
       setNewThreadBody("");
+      // The completion is the user's command landing: report it through the
+      // seam in the same tick as the nav write (see openConversation).
+      props.onNavCommand?.({ level: "thread", channel, thread: result.thread });
       setNav({ level: "thread", channel, thread: result.thread });
       setMessages([result.message]);
       setReactions([]);
@@ -2587,6 +2590,8 @@ export function ChatsView(props: {
         result.dm,
         ...current.filter((dm) => dm.channelId !== result.dm.channelId),
       ]);
+      // The completion is the user's command landing (see openConversation).
+      props.onNavCommand?.({ level: "dm", dm: result.dm });
       void openDm(result.dm);
     } catch (error) {
       if (token !== liveToken.current) return;
@@ -2817,6 +2822,8 @@ export function ChatsView(props: {
       try {
         await bridge().leaveSharedChannel({ workspaceId, shareId });
         if (token !== liveToken.current) return;
+        // The completion is the user's command landing (see openConversation).
+        props.onNavCommand?.({ level: "channels" });
         setNav({ level: "channels" });
         await refreshOverview();
       } catch (error) {
@@ -2845,6 +2852,8 @@ export function ChatsView(props: {
             ? { ...current, channels: [...current.channels, result.channel] }
             : current,
         );
+        // The completion is the user's command landing (see openConversation).
+        props.onNavCommand?.({ level: "channel", channel: result.channel });
         void openChannel(result.channel);
       } catch (error) {
         if (token !== liveToken.current) return;
@@ -4514,6 +4523,10 @@ export function ChatsView(props: {
                     // recipient/draft left over from a previous compose.
                     setDmRecipients("");
                     setDmDraft("");
+                    // A command like any conversation click (see
+                    // openConversation): report it synchronously, or a DM
+                    // answer queued in this tick remounts over the compose.
+                    props.onNavCommand?.({ level: "dm-new" });
                     setNav({ level: "dm-new" });
                   }}
                   className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
