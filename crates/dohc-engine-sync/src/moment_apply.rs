@@ -46,10 +46,10 @@ struct MomentAppendPayload {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Metadata {
-    origin: String,
-    summary: Option<String>,
-    correlation_id: Option<String>,
+pub(crate) struct Metadata {
+    pub(crate) origin: String,
+    pub(crate) summary: Option<String>,
+    pub(crate) correlation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -63,7 +63,7 @@ struct MomentAuthor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContentKind {
+pub(crate) enum ContentKind {
     Text,
     Binary,
 }
@@ -118,19 +118,19 @@ enum MomentBefore {
 }
 
 #[derive(Debug, Clone)]
-struct ConflictSide {
-    exists: bool,
-    path: String,
-    object_id: Option<String>,
-    kind: Option<ContentKind>,
-    digest: Option<String>,
-    updated_at_ms: Option<i64>,
-    latest_moment_id: Option<String>,
-    metadata: Option<Metadata>,
+pub(crate) struct ConflictSide {
+    pub(crate) exists: bool,
+    pub(crate) path: String,
+    pub(crate) object_id: Option<String>,
+    pub(crate) kind: Option<ContentKind>,
+    pub(crate) digest: Option<String>,
+    pub(crate) updated_at_ms: Option<i64>,
+    pub(crate) latest_moment_id: Option<String>,
+    pub(crate) metadata: Option<Metadata>,
 }
 
 impl ConflictSide {
-    fn absent(path: impl Into<String>) -> Self {
+    pub(crate) fn absent(path: impl Into<String>) -> Self {
         Self {
             exists: false,
             path: path.into(),
@@ -156,7 +156,7 @@ impl ConflictSide {
     }
 }
 
-enum CoalesceAnchor<'a> {
+pub(crate) enum CoalesceAnchor<'a> {
     SameObject {
         diverging_object_id: &'a str,
         incoming_branch_base: Option<&'a str>,
@@ -167,15 +167,15 @@ enum CoalesceAnchor<'a> {
     },
 }
 
-struct OpenConflict<'a> {
-    version_id: &'a str,
-    anchor: CoalesceAnchor<'a>,
-    conflict_id: &'a str,
-    path: &'a str,
-    base: &'a ConflictSide,
-    current: &'a ConflictSide,
-    incoming: &'a ConflictSide,
-    recorded_at_ms: i64,
+pub(crate) struct OpenConflict<'a> {
+    pub(crate) version_id: &'a str,
+    pub(crate) anchor: CoalesceAnchor<'a>,
+    pub(crate) conflict_id: &'a str,
+    pub(crate) path: &'a str,
+    pub(crate) base: &'a ConflictSide,
+    pub(crate) current: &'a ConflictSide,
+    pub(crate) incoming: &'a ConflictSide,
+    pub(crate) recorded_at_ms: i64,
 }
 
 pub fn apply_moment_envelope(
@@ -1328,7 +1328,7 @@ fn local_branch_root(
     .map_err(SyncError::corrupt)
 }
 
-fn sync_conflict_id(
+pub(crate) fn sync_conflict_id(
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
@@ -1365,7 +1365,7 @@ fn js_string_cmp(left: &str, right: &str) -> Ordering {
     left.encode_utf16().cmp(right.encode_utf16())
 }
 
-fn open_or_coalesce(
+pub(crate) fn open_or_coalesce(
     tx: &Transaction<'_>,
     workspace_id: &str,
     conflict: OpenConflict<'_>,
@@ -1437,7 +1437,7 @@ fn open_or_coalesce(
     Ok(1)
 }
 
-fn coalesce_conflict_sides(
+pub(crate) fn coalesce_conflict_sides(
     tx: &Transaction<'_>,
     workspace_id: &str,
     conflict_id: &str,

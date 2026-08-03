@@ -53,6 +53,7 @@ pub(crate) fn redelivered_conflicts_opened(
     match envelope.op_kind.as_str() {
         "conflict.open" => crate::conflict_apply::redelivered_conflicts_opened(store, envelope),
         "moment.append" => crate::moment_apply::redelivered_conflicts_opened(store, envelope),
+        "ydoc.update" => crate::ydoc_apply::redelivered_conflicts_opened(store, envelope),
         _ => Ok(0),
     }
 }
@@ -128,7 +129,10 @@ pub fn apply_replication_envelope(
         OwnedRoute::Secret => plain(crate::apply_secret_envelope(store, envelope, faults)),
         OwnedRoute::Ydoc => map_applied(
             crate::apply_ydoc_envelope(store, envelope, faults, leases),
-            |_ydoc| RoutedApply::default(),
+            |ydoc| RoutedApply {
+                conflicts_opened: ydoc.conflicts_opened,
+                ..RoutedApply::default()
+            },
         ),
         OwnedRoute::Conflict => map_applied(
             crate::apply_conflict_envelope(store, envelope, faults),

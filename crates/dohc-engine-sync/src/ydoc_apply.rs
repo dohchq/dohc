@@ -61,6 +61,9 @@ impl LeaseProbe for dohc_engine_collab::LeaseRegistry {
 pub struct YdocApplyResult {
     pub deferred: bool,
     pub reason: Option<&'static str>,
+    /// Sync conflicts this envelope opened (the first-base-over-divergent-head
+    /// branch). Counted like the moment lane so the pull pass reports it.
+    pub conflicts_opened: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -119,6 +122,53 @@ pub(crate) fn redelivered_materialization_changes(
         operation,
         content_kind: "text",
     }])
+}
+
+/// Recount the conflicts a redelivered `ydoc.update` base opened, keyed by
+/// the deterministic incoming-side moment id (moment-lane parity: a crash
+/// between commit and cursor advance redelivers the envelope as a skip, and
+/// the caller still reports the conflict it opened).
+pub(crate) fn redelivered_conflicts_opened(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<i64, SyncError> {
+    if envelope.op_kind != "ydoc.update" {
+        return Ok(0);
+    }
+    let payload: YdocUpdatePayload =
+        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: "ydoc.update payload is malformed",
+        })?;
+    if !payload.is_base_state {
+        return Ok(0);
+    }
+    let Ok(key) = DocKey::new(
+        envelope.workspace_id.clone(),
+        payload.version_id,
+        payload.object_id,
+    ) else {
+        return Ok(0);
+    };
+    let incoming_moment_id = ydoc_apply_moment_id(
+        &key,
+        &payload.path,
+        &envelope.origin_id,
+        envelope.origin_seq,
+    );
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM conflicts \
+             WHERE workspace_id=?1 AND metadata_origin='sync' \
+               AND incoming_latest_moment_id=?2 AND created_at_ms=?3",
+            params![
+                envelope.workspace_id,
+                incoming_moment_id,
+                envelope.recorded_at_ms
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)
+    })
 }
 
 /// Drain acked Y.Doc envelopes deferred while `key` was leased. The
@@ -367,6 +417,52 @@ fn refuse_deferred_ydoc(
     }
 }
 
+/// The deterministic per-envelope moment id the projection mints. Also the
+/// incoming-side anchor of a base-divergence conflict, so a crash-redelivery
+/// can recount the conflict it opened.
+fn ydoc_apply_moment_id(key: &DocKey, path: &str, origin_id: &str, origin_seq: i64) -> String {
+    let fingerprint = format!(
+        "{}\0{}\0{}\0{}\0{}\0{}",
+        key.workspace_id, key.version_id, key.object_id, path, origin_id, origin_seq
+    );
+    format!(
+        "moment-ydoc-apply-{}",
+        dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
+    )
+}
+
+/// The open sync conflict currently anchored on this object, if any.
+fn open_sync_conflict_id(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+) -> Result<Option<String>, SyncError> {
+    conn.query_row(
+        "SELECT conflict_id FROM conflicts \
+         WHERE workspace_id=?1 AND status='open' AND metadata_origin='sync' \
+           AND target_version_id=?2 AND incoming_object_id=?3 \
+         ORDER BY created_at_ms, conflict_id LIMIT 1",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+/// Store the projected markdown as a text blob so a conflict side can
+/// reference it (the conflict UI hydrates sides from `blobs`).
+fn put_projection_text_blob(
+    tx: &rusqlite::Transaction<'_>,
+    markdown: &str,
+    sha256: &str,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+        params![sha256, markdown.len() as i64, markdown],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
 /// Oracle parity for applied `ydoc.update` ops (`projectYDocUpdate` →
 /// `writeTextFileInDb` → CRDT rows): every NON-DEFERRED apply materializes
 /// its projection — moment, snapshot, and durable materialization job — in
@@ -391,6 +487,36 @@ pub fn project_and_write_in_tx(
         .map_err(|_| SyncError::InvalidInput {
             reason: "ydoc projection exceeds materialization cap",
         })?;
+    // While a sync conflict is open on this object, the visible head belongs
+    // to the user's review: writing through it would clobber the exact state
+    // the conflict preserves. Coalesce the incoming side to the freshest
+    // remote projection instead (moment-lane parity) and leave the head and
+    // the settle marker alone until a resolution closes the conflict.
+    if let Some(conflict_id) = open_sync_conflict_id(tx, key)? {
+        let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+        put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
+        crate::moment_apply::coalesce_conflict_sides(
+            tx,
+            &key.workspace_id,
+            &conflict_id,
+            &crate::moment_apply::ConflictSide {
+                exists: true,
+                path: path.to_owned(),
+                object_id: Some(key.object_id.clone()),
+                kind: Some(crate::moment_apply::ContentKind::Text),
+                digest: Some(projected_sha),
+                updated_at_ms: Some(now_ms),
+                latest_moment_id: Some(ydoc_apply_moment_id(key, path, origin_id, origin_seq)),
+                metadata: Some(crate::moment_apply::Metadata {
+                    origin: "sync".to_owned(),
+                    summary: None,
+                    correlation_id: None,
+                }),
+            },
+            now_ms,
+        )?;
+        return Ok(());
+    }
     // Idempotent skip: a redelivered (or content-converged) envelope whose
     // projection already IS the head mints no duplicate moment/job — but the
     // MARKER still advances: the head may have reached these bytes via
@@ -425,14 +551,7 @@ pub fn project_and_write_in_tx(
     // Deterministic per-envelope moment id: a crash between commit and
     // cursor advance redelivers the envelope, whose re-apply lands in the
     // idempotent skip above (same projection) — the id can never collide.
-    let fingerprint = format!(
-        "{}\0{}\0{}\0{}\0{}\0{}",
-        key.workspace_id, key.version_id, key.object_id, path, origin_id, origin_seq
-    );
-    let moment_id = format!(
-        "moment-ydoc-apply-{}",
-        dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
-    );
+    let moment_id = ydoc_apply_moment_id(key, path, origin_id, origin_seq);
     let result = write_projected_text_in_tx(
         tx,
         &WriteText {
@@ -627,6 +746,7 @@ pub fn apply_ydoc_envelope(
             Ok(YdocApplyResult {
                 deferred: true,
                 reason: Some("ydoc-session-live"),
+                conflicts_opened: 0,
             })
         });
     }
@@ -659,10 +779,13 @@ pub fn apply_ydoc_envelope(
         // update rows (a crash left them behind): the projection must be the
         // reconstructed lineage PLUS the base, or the visible snapshot would
         // drop local content that is still durably part of the CRDT.
-        let base_doc = {
-            let doc = match dohc_engine_collab::load_persisted(store, &key)
-                .map_err(map_collab_hard_error)?
-            {
+        let (base_doc, lineage_has_state) = {
+            let persisted =
+                dohc_engine_collab::load_persisted(store, &key).map_err(map_collab_hard_error)?;
+            let lineage_has_state = persisted.as_ref().is_some_and(|persisted| {
+                persisted.marker.head_update_seq > 0 || persisted.marker.head_snapshot_seq > 0
+            });
+            let doc = match persisted {
                 Some(persisted) => persisted.doc,
                 None => dohc_engine_collab::Ydoc::wire(),
             };
@@ -674,7 +797,7 @@ pub fn apply_ydoc_envelope(
                     "ydoc.update base bytes fail validation",
                 );
             }
-            doc
+            (doc, lineage_has_state)
         };
         let base_path = payload.path.clone();
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
@@ -682,7 +805,7 @@ pub fn apply_ydoc_envelope(
             // the base arrives. Retrying after the later delete/rename is
             // convergence-safe; refusing and ACKing would lose the base
             // forever on this receiver.
-            validate_retryable_ydoc_identity(tx, &claim_key, &base_path)?;
+            let current = validate_retryable_ydoc_identity(tx, &claim_key, &base_path)?;
             tx.execute(
                 "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES (?1, ?2, ?3)",
                 rusqlite::params![claim_key.workspace_id, claim_key.object_id, op.recorded_at_ms],
@@ -723,6 +846,89 @@ pub fn apply_ydoc_envelope(
             .map_err(|error| {
                 map_collab_payload_error(error, "ydoc.update base could not be claimed")
             })?;
+            // The FIRST base is not a CRDT merge: a local head that no shared
+            // lineage ever merged (capture or an external editor wrote it, and
+            // the receiver holds no durable Y.Doc rows to union with) must not
+            // be silently replaced by the sender's projection. Keep the head,
+            // land the lineage, and open the same reviewable sync conflict the
+            // moment lane opens for a diverged file — one resolution settles
+            // both machines. A head that already equals the base's projection
+            // needs no conflict, and a lineage WITH durable rows takes the
+            // union path below (the projection carries the local content).
+            if !lineage_has_state && let Some(snapshot) = current.snapshot.as_ref() {
+                let projection = base_doc
+                    .project(kind)
+                    .map_err(|_| SyncError::InvalidInput {
+                        reason: "ydoc projection exceeds materialization cap",
+                    })?;
+                let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+                if snapshot.blob_sha256 != projected_sha {
+                    put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
+                    let incoming_moment_id =
+                        ydoc_apply_moment_id(&claim_key, &base_path, &op.origin_id, op.origin_seq);
+                    let conflict_id = crate::moment_apply::sync_conflict_id(
+                        &claim_key.workspace_id,
+                        &claim_key.version_id,
+                        &claim_key.object_id,
+                        None,
+                        Some((
+                            Some(snapshot.latest_moment_id.as_str()),
+                            Some(incoming_moment_id.as_str()),
+                        )),
+                    );
+                    let base_side = crate::moment_apply::ConflictSide::absent(&base_path);
+                    let current_side = crate::moment_apply::ConflictSide {
+                        exists: true,
+                        path: snapshot.path.clone(),
+                        object_id: Some(snapshot.object_id.clone()),
+                        kind: Some(crate::moment_apply::ContentKind::Text),
+                        digest: Some(snapshot.blob_sha256.clone()),
+                        updated_at_ms: Some(snapshot.updated_at_ms),
+                        latest_moment_id: Some(snapshot.latest_moment_id.clone()),
+                        metadata: Some(crate::moment_apply::Metadata {
+                            origin: snapshot.metadata_origin.clone(),
+                            summary: snapshot.metadata_summary.clone(),
+                            correlation_id: snapshot.metadata_correlation_id.clone(),
+                        }),
+                    };
+                    let incoming_side = crate::moment_apply::ConflictSide {
+                        exists: true,
+                        path: base_path.clone(),
+                        object_id: Some(claim_key.object_id.clone()),
+                        kind: Some(crate::moment_apply::ContentKind::Text),
+                        digest: Some(projected_sha),
+                        updated_at_ms: Some(op.recorded_at_ms),
+                        latest_moment_id: Some(incoming_moment_id.clone()),
+                        metadata: Some(crate::moment_apply::Metadata {
+                            origin: "sync".to_owned(),
+                            summary: None,
+                            correlation_id: None,
+                        }),
+                    };
+                    let conflicts_opened = crate::moment_apply::open_or_coalesce(
+                        tx,
+                        &claim_key.workspace_id,
+                        crate::moment_apply::OpenConflict {
+                            version_id: &claim_key.version_id,
+                            anchor: crate::moment_apply::CoalesceAnchor::SameObject {
+                                diverging_object_id: &claim_key.object_id,
+                                incoming_branch_base: None,
+                            },
+                            conflict_id: &conflict_id,
+                            path: &snapshot.path,
+                            base: &base_side,
+                            current: &current_side,
+                            incoming: &incoming_side,
+                            recorded_at_ms: op.recorded_at_ms,
+                        },
+                    )?;
+                    return Ok(YdocApplyResult {
+                        deferred: false,
+                        reason: Some("ydoc-base-conflict"),
+                        conflicts_opened,
+                    });
+                }
+            }
             // A fresh base-only replica gets its FILE, not just CRDT rows.
             project_and_write_in_tx(
                 tx,
@@ -738,6 +944,7 @@ pub fn apply_ydoc_envelope(
             Ok(YdocApplyResult {
                 deferred: false,
                 reason: None,
+                conflicts_opened: 0,
             })
         })?;
         if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
@@ -827,6 +1034,7 @@ pub fn apply_ydoc_envelope(
                 Ok(YdocApplyResult {
                     deferred: true,
                     reason: Some("ydoc-lineage-absent"),
+                    conflicts_opened: 0,
                 })
             });
         };
@@ -915,6 +1123,7 @@ fn map_applied_ydoc_outcome(
         ApplyOutcome::Applied(_) => ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
+            conflicts_opened: 0,
         }),
         ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
         ApplyOutcome::Skipped => ApplyOutcome::Skipped,

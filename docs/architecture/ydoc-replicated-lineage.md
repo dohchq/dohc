@@ -493,10 +493,15 @@ Before claiming any sync behaviour works, check which table the write landed in.
 Three behaviours stay unbuilt, and all three are dormant only because two
 daemons cannot share a relay workspace yet (#356).
 
-- **#546 — the first inbound base overwrites a divergent local head.** The base
-  branch of `ydoc_apply.rs` projects the sender's base over the receiver's
-  snapshot with no before-state comparison. The ordinary file lane opens a
-  conflict in the same situation (`moment_apply.rs`). The base lane must too.
+- **#546 — the first inbound base overwrites a divergent local head. Built.**
+  The base branch of `ydoc_apply.rs` now compares the receiver's snapshot
+  against the base's projection when the receiver holds no durable Y.Doc rows
+  to union with. On a mismatch it claims the base, acks the coordinate, keeps
+  the head, and opens the moment lane's sync conflict shape
+  (`open_or_coalesce`). While that conflict is open, later delta projections
+  coalesce the conflict's incoming side instead of writing the head. A lineage
+  that already holds durable rows still takes the union path — the CRDT is the
+  merge there.
 - **#547 — two peers can originate the same lineage.** Object ids derive from
   the path, so both peers claim a base for one coordinate and
   `BaseStateDiverged` wedges it. Base-once needs relay-wide arbitration, or

@@ -6791,6 +6791,7 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
         ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-session-live"),
+            conflicts_opened: 0,
         })
     );
 
@@ -6937,6 +6938,266 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
 }
 
 #[test]
+fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
+    // #546: the receiver's head came from capture/local writes and belongs to
+    // no shared lineage. The FIRST inbound base must not silently replace it:
+    // the lineage lands (claimed, acked), the head stays, and one moment-lane
+    // shaped sync conflict opens. Mutation check: restore the unconditional
+    // `project_and_write_in_tx` call in the base branch — the head assertion
+    // and the conflict-count assertion below both fail.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    let local_write = engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-div',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-div".to_owned(),
+                    path: "notes/plan.md".to_owned(),
+                    text: "local truth".to_owned(),
+                    moment_id: "m-local-1".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))
+        })
+        .expect("local head");
+    assert!(matches!(
+        local_write,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+    let local_sha = dohc_engine_storage::hex_sha256("local truth".as_bytes());
+
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "remote truth");
+    let base_bytes = base_doc.encode_full_state();
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-div",
+            "path": "notes/plan.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-base-conflict"),
+            conflicts_opened: 1,
+        })
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
+        0,
+        "the divergent base still acks — the lineage must keep advancing"
+    );
+
+    // The head is untouched.
+    let head_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id='object-div'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("head");
+    assert_eq!(
+        head_text, "local truth",
+        "the base must not clobber the head"
+    );
+
+    // The lineage itself landed: replicated marker, claimed base.
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-div").expect("key");
+    let marker = dohc_engine_collab::read_marker(&engine, &key)
+        .expect("marker read")
+        .expect("marker");
+    assert_eq!(marker.regime, dohc_engine_collab::Regime::Replicated);
+    assert!(marker.base_claimed, "the base claim still lands");
+
+    // One moment-lane shaped conflict: current = local head, incoming = the
+    // base projection, both hydratable from `blobs`.
+    let remote_sha = dohc_engine_storage::hex_sha256("remote truth".as_bytes());
+    let (status, origin, current_blob, incoming_blob): (String, String, String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT status, metadata_origin, current_blob_sha256, incoming_blob_sha256 \
+                 FROM conflicts WHERE workspace_id='ws'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("conflict row");
+    assert_eq!((status.as_str(), origin.as_str()), ("open", "sync"));
+    assert_eq!(current_blob, local_sha);
+    assert_eq!(incoming_blob, remote_sha);
+    let incoming_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT text FROM blobs WHERE sha256=?1",
+                [&remote_sha],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("incoming blob text");
+    assert_eq!(incoming_text, "remote truth");
+
+    // A later delta must not sneak past the open conflict either: the head
+    // stays, and the conflict's incoming side coalesces to the freshest
+    // remote projection. Mutation check: drop the open-conflict guard in
+    // `project_and_write_in_tx` — the head assertion below fails.
+    let delta = base_doc.plaintext_insert(0, "more ");
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let delta_op = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-div",
+            "path": "notes/plan.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "isBaseState": false
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases).expect("delta applies");
+    let head_after_delta: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id='object-div'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("head after delta");
+    assert_eq!(head_after_delta, "local truth");
+    let merged_sha = dohc_engine_storage::hex_sha256("more remote truth".as_bytes());
+    let (conflict_count, incoming_after): (i64, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*), MAX(incoming_blob_sha256) FROM conflicts \
+                 WHERE workspace_id='ws' AND status='open'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("coalesced conflict");
+    assert_eq!(
+        conflict_count, 1,
+        "the delta coalesces, it opens nothing new"
+    );
+    assert_eq!(incoming_after, merged_sha);
+}
+
+#[test]
+fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
+    // The convergent twin of the divergence test: a head whose bytes already
+    // equal the base's projection fast-forwards silently.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-same',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-same".to_owned(),
+                    path: "notes/same.md".to_owned(),
+                    text: "shared truth".to_owned(),
+                    moment_id: "m-local-same".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("local head");
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "shared truth");
+    let base_bytes = base_doc.encode_full_state();
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-same",
+            "path": "notes/same.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: None,
+            conflicts_opened: 0,
+        })
+    );
+    let conflicts: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM conflicts", [], |r| r.get(0))
+                .map_err(SyncError::corrupt)
+        })
+        .expect("conflict count");
+    assert_eq!(
+        conflicts, 0,
+        "a matching head fast-forwards without a conflict"
+    );
+}
+
+#[test]
 fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
     let (_scratch, _path, mut engine) = store();
     let install_abort_trigger = |engine: &mut EngineStore, trigger_name: &str, table_name: &str| {
@@ -7063,7 +7324,8 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
-            reason: None
+            reason: None,
+            conflicts_opened: 0,
         }))
     ));
     assert_eq!(
@@ -7105,7 +7367,8 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             .expect("early update parks"),
         ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         })
     );
     assert_eq!(
@@ -7219,7 +7482,8 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             apply_ydoc_envelope(&mut engine, &queued, &NoFaults, &NoLiveLeases),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
-                reason: Some("ydoc-lineage-absent")
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
             }))
         ));
         let descendant = envelope(
@@ -7239,7 +7503,8 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             apply_ydoc_envelope(&mut engine, &descendant, &NoFaults, &NoLiveLeases),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
-                reason: Some("ydoc-lineage-absent")
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
             }))
         ));
 
@@ -7499,7 +7764,8 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
     let deferred: i64 = engine
@@ -7650,7 +7916,8 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
         apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
-            reason: None
+            reason: None,
+            conflicts_opened: 0,
         }))
     ));
     assert_eq!(
@@ -7738,7 +8005,8 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
     assert_eq!(
@@ -7781,7 +8049,8 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
     let placeholder_timestamp: i64 = engine
@@ -7879,7 +8148,8 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
             apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
-                reason: Some("ydoc-lineage-absent")
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
             }))
         ));
     }
@@ -7999,7 +8269,8 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
     let base = envelope(
@@ -14129,7 +14400,8 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         apply_ydoc_envelope(&mut engine, &deferred, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
 
