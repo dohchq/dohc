@@ -24,6 +24,7 @@ export interface TokenCipher {
 }
 
 const FILE_NAME = "dohc-cloud.json";
+const INVALID_FILE_NAME = "dohc-cloud-invalid.json";
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -35,6 +36,7 @@ export function createCloudCredentialStore(options: {
 }) {
   const { dir, cipher } = options;
   const file = join(dir, FILE_NAME);
+  const invalidFile = join(dir, INVALID_FILE_NAME);
 
   return {
     async load(): Promise<CloudCredentials | null> {
@@ -134,6 +136,56 @@ export function createCloudCredentialStore(options: {
         await unlink(file);
       } catch (error) {
         // Clearing an already-logged-out store is a no-op, not a failure.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    },
+
+    // The invalid-session marker: a session the relay proved dead whose
+    // credential record could not be deleted. Persisted beside the record so
+    // a RESTART cannot read the dead record back as connected — the marker
+    // holds a token hash, never the token, so it needs no sealing.
+    async loadInvalidMarker() {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readFile(invalidFile, "utf8"));
+      } catch {
+        return null;
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return null;
+      }
+      const obj = parsed as Record<string, unknown>;
+      if (obj.version !== 1) return null;
+      if (
+        !nonEmptyString(obj.serverUrl) ||
+        !nonEmptyString(obj.userId) ||
+        !nonEmptyString(obj.tokenHash)
+      ) {
+        return null;
+      }
+      return {
+        serverUrl: obj.serverUrl,
+        userId: obj.userId,
+        tokenHash: obj.tokenHash,
+      };
+    },
+
+    async saveInvalidMarker(marker: {
+      serverUrl: string;
+      userId: string;
+      tokenHash: string;
+    }) {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      const payload = { version: 1, ...marker };
+      const tmp = `${invalidFile}.tmp-${process.pid}`;
+      await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+      await rename(tmp, invalidFile);
+    },
+
+    async clearInvalidMarker() {
+      try {
+        await unlink(invalidFile);
+      } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     },

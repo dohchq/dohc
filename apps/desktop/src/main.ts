@@ -338,6 +338,7 @@ import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import {
   adoptCompletedCloudLoginSession,
   createCloudLogin,
+  runCloudLogoutTransition,
   type CloudLogin,
 } from "./workspaces/cloudLogin";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
@@ -348,8 +349,12 @@ import {
   createChatChannelIpcHandler,
   createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
+  chatShareSessionKey,
   createSetChatReactionIpcHandler,
+  handleRelayUnauthorized,
   reactionsForViewer,
+  readRelayChatShareLanes,
+  RelaySessionError,
   setChatReactionFromMain,
   writeChatMessageFromMain,
 } from "./mainChatIpcHandlers";
@@ -1048,6 +1053,28 @@ function notifyRenderer(): void {
   }
 }
 
+// A cloud session transition (login, logout, account switch, or a relay
+// proving the session dead) re-scopes every renderer cache tied to the
+// signed-in account. The generic activity ping deliberately reaches only
+// cheap local refreshes, so account-scoped caches get their own signal. It
+// carries the NEW session's key so a same-account token rotation invalidates
+// nothing.
+// The phase completes the two-moment contract: "changing" is transition
+// start (views PRESERVE same-session state and ask for nothing — the
+// credential cache is mid-transition), "ready" is adoption end (views run
+// their one revalidation against the settled session).
+function notifyCloudSessionChanged(phase: "changing" | "ready"): void {
+  notifyCloudSessionChangedWithKey(chatShareSessionKey(cachedCredentials), phase);
+}
+function notifyCloudSessionChangedWithKey(
+  sessionKey: string | null,
+  phase: "changing" | "ready",
+): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send(CHANNELS.cloudSessionChanged, { sessionKey, phase });
+  }
+}
+
 function workspaceSummaries(): WorkspaceSummary[] {
   return listWorkspaces().map((workspace) => WorkspaceSummary.parse(workspace));
 }
@@ -1270,7 +1297,22 @@ async function relayShareJsonWithCredentials<T>(
     { ...init, headers },
   );
   if (response.status === 401) {
-    throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
+    // The relay proved a session invalid — but only the session THIS request
+    // used. handleRelayUnauthorized acts if and only if that is still the
+    // current one, and then completely: memory, broadcast, persistent store.
+    const sessionWasCurrent = await handleRelayUnauthorized({
+      requestCredentials: credentials,
+      currentCredentials: cachedCredentials,
+      clearCachedCredentials: () => clearCachedCredentials(),
+      notifySessionChanging: () => notifyCloudSessionChanged("changing"),
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+      invalidatePersistedSessionIf: (expected) =>
+        cloudLogin().invalidateSessionIf(expected),
+    });
+    throw new RelaySessionError(
+      "Your dohc Cloud session expired. Sign in again, then retry.",
+      { sessionWasCurrent },
+    );
   }
   const data = (await response.json().catch(() => null)) as
     | { ok?: boolean; error?: string; code?: string }
@@ -1284,7 +1326,7 @@ async function relayShareJsonWithCredentials<T>(
 async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   await warmCredentialCache();
   const credentials = cachedCredentials;
-  if (!credentials) throw new Error("Sign in to dohc Cloud first.");
+  if (!credentials) throw new RelaySessionError("Sign in to dohc Cloud first.");
   return relayShareJsonWithCredentials(credentials, path, init);
 }
 
@@ -3831,6 +3873,11 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const result = await cloudLogin().poll();
     if (result.status === "complete") {
+      // The INCOMING session's identity, computed BEFORE anything is
+      // cleared: the immediate broadcast says where the session is going, so
+      // a same-account rotation carries the SAME key and mounted views keep
+      // their rows instead of reading a signed-out interim as a switch.
+      const incomingKey = chatShareSessionKey(await cloudLogin().credentials());
       // A completed login can rotate the bearer token without changing the
       // server or user id. Rebuild every relay-bound engine from the new
       // credential snapshot instead of letting an existing engine keep the
@@ -3846,6 +3893,9 @@ function registerIpcHandlers(
         reconcileCloud: () => {
           activity.reconcileCloud(engineForWorkspace);
         },
+        notifySessionChanging: () =>
+          notifyCloudSessionChangedWithKey(incomingKey, "changing"),
+        notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
       });
     }
     return CloudLoginPollResult.parse(result);
@@ -3888,16 +3938,16 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.cloudLogout, async (event) => {
     assertTrustedSender(event);
-    clearCachedCredentials();
-    try {
-      await cloudLogin().logout();
-    } finally {
-      // Stop + drop active engines even if the credential store reports a
-      // logout failure. The in-memory session is already invalid.
-      await activity.stopEngines();
-      await closeAllRelayTransportWorkspaces();
-      notifyRenderer();
-    }
+    await runCloudLogoutTransition({
+      clearCachedCredentials: () => clearCachedCredentials(),
+      logout: () => cloudLogin().logout(),
+      stopEngines: () => activity.stopEngines(),
+      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
+      notifyWorkspaceActivity: () => notifyRenderer(),
+      // Logout is a one-event transition to a known state: signed out. The
+      // key change is what makes every view clear and refresh.
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+    });
   });
 
   // Enabling sync claims the recorded remote workspace id, or the local id on
@@ -4261,53 +4311,31 @@ function registerIpcHandlers(
     const entry = requireWorkspace(input.workspaceId);
     const joined = joinedSharedChannelRows(input.workspaceId);
     // Relay-side listings need a signed-in session; without one the local
-    // joined set still answers (their local copies keep working offline).
-    let granted: Array<Record<string, unknown>> = [];
-    let received: Array<Record<string, unknown>> = [];
-    try {
-      const result = await relayShareJson<{
-        granted?: Array<Record<string, unknown>>;
-        received?: Array<Record<string, unknown>>;
-      }>("/sync/shares");
-      const chatSelector = (row: Record<string, unknown>) => {
-        const selector = row.selector as
-          | { kind?: unknown; channelWireId?: unknown; access?: unknown }
-          | undefined;
-        return selector?.kind === "chat-channel" &&
-          typeof selector.channelWireId === "string"
-          ? {
-              channelWireId: selector.channelWireId,
-              access: selector.access === "read-only" ? "read-only" : "read-write",
-            }
-          : null;
-      };
-      const remoteId = entry.remote?.remoteWorkspaceId ?? null;
-      for (const row of result.granted ?? []) {
-        const selector = chatSelector(row);
-        // Grants are scoped to THIS workspace's remote identity: a channel
-        // shared from another workspace is managed there.
-        if (!selector || remoteId === null || row.workspaceId !== remoteId) continue;
-        granted.push({
-          shareId: row.shareId,
-          ...selector,
-          recipientEmail: row.recipientEmail ?? null,
-          revokedAtMs: row.revokedAtMs ?? null,
-        });
-      }
-      for (const row of result.received ?? []) {
-        const selector = chatSelector(row);
-        if (!selector) continue;
-        received.push({
-          shareId: row.shareId,
-          ...selector,
-          granterEmail: row.granterEmail ?? null,
-        });
-      }
-    } catch {
-      granted = [];
-      received = [];
-    }
-    return ListChatChannelSharesResult.parse({ granted, received, joined });
+    // joined set still answers (their local copies keep working offline), and
+    // the relay side reports signed-out or unreachable instead of posing as
+    // an empty listing.
+    //
+    // ONE credentials snapshot serves both the fetch and the session key, so
+    // the key always names the session the request actually used — a login
+    // or switch landing mid-flight cannot drift them apart.
+    await warmCredentialCache();
+    const credentials = cachedCredentials;
+    const relay = await readRelayChatShareLanes({
+      fetchListing: async () => {
+        if (!credentials) throw new RelaySessionError("Sign in to dohc Cloud first.");
+        return relayShareJsonWithCredentials<{
+          granted?: Array<Record<string, unknown>>;
+          received?: Array<Record<string, unknown>>;
+        }>(credentials, "/sync/shares");
+      },
+      remoteWorkspaceId: entry.remote?.remoteWorkspaceId ?? null,
+    });
+    return ListChatChannelSharesResult.parse({
+      joined,
+      sessionKey:
+        relay.state === "signed-out" ? null : chatShareSessionKey(credentials),
+      relay,
+    });
   });
 
   ipcMain.handle(CHANNELS.joinSharedChannel, async (event, payload) => {

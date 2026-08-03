@@ -25,6 +25,7 @@ import type {
   ChatAttachmentRecord,
   ChatChannelRecord,
   ChatChannelShareGrantRow,
+  ChatChannelShareReceivedRow,
   ChatDecisionRecord,
   ChatDispatchStateForThreadResult,
   ChatMessageRecord,
@@ -124,16 +125,28 @@ type OverviewState =
 // carries its own commit watermark (see commitTicket).
 type CommitLane = "overview" | "joinedShares" | "relayShares";
 
+// What the view keeps: the flat merged share listing. This is NOT the contract
+// result — that one may answer "the relay was unreachable", which is not
+// storable as rows. commitShareListing translates, lane by lane. The relay
+// rows carry the session they were read under, because they are
+// account-scoped: preservation through an outage may only ever keep the SAME
+// session's rows.
+interface ShareListing {
+  granted: ChatChannelShareGrantRow[];
+  received: ChatChannelShareReceivedRow[];
+  joined: JoinedSharedChannelRow[];
+  sessionKey: string | null;
+}
+
 // A share listing answers two independent questions. The JOINED rows come from
 // the local registry, so any reader that got a listing at all has the true
-// answer. The granted/received rows come from the relay, which answers "none"
-// when it is unreachable — so a reader that is not authoritative for them must
-// leave them exactly as they were.
+// answer. The granted/received rows come from the relay — a reader that is not
+// authoritative for them must leave them exactly as they were.
 function mergeShareLanes(
-  current: ListChatChannelSharesResult | null,
-  next: ListChatChannelSharesResult,
+  current: ShareListing | null,
+  next: ShareListing,
   lanes: { joined: boolean; relay: boolean },
-): ListChatChannelSharesResult | null {
+): ShareListing | null {
   // "Unknown" fails closed in channelIsLocked. Only a reader that answers BOTH
   // questions may replace it; a partial answer would unlock what nothing has
   // vouched for.
@@ -142,6 +155,7 @@ function mergeShareLanes(
     joined: lanes.joined ? next.joined : current.joined,
     granted: lanes.relay ? next.granted : current.granted,
     received: lanes.relay ? next.received : current.received,
+    sessionKey: lanes.relay ? next.sessionKey : current.sessionKey,
   };
 }
 
@@ -984,7 +998,7 @@ export function ChatsView(props: {
   // MU-C4 shared channels. null = the sharing surface is unavailable (signed
   // out / listing failed) and every sharing affordance stays hidden — the
   // solo view is unchanged.
-  const [channelShares, setChannelShares] = useState<ListChatChannelSharesResult | null>(null);
+  const [channelShares, setChannelShares] = useState<ShareListing | null>(null);
   // The workspace `channelShares` was last DEFINITIVELY resolved for (even when
   // that resolution is `null` — signed out / listing failed). Presence stays
   // dormant until this equals the current workspaceId, so a conversation's
@@ -1097,6 +1111,13 @@ export function ChatsView(props: {
     },
     [],
   );
+  // The cloud-session era share reads are issued under. A session change
+  // bumps it, and the commit point refuses any response from an older era —
+  // the same liveToken discipline the DM path uses. Defense in depth with
+  // the listing's sessionKey: the generation kills stale IN-FLIGHT responses
+  // (an old account's read landing after the switch), the key kills stale
+  // CACHE (preservation can only keep the same session's rows).
+  const sessionGeneration = useRef(0);
   // The one place a full share listing lands, whichever reader produced it.
   // Success commits per lane: each takes the newest answer it has.
   //
@@ -1111,9 +1132,13 @@ export function ChatsView(props: {
   const commitShareListing = useCallback(
     (
       ticket: number,
+      session: number,
       value: ListChatChannelSharesResult | null,
       options?: { background?: boolean },
     ) => {
+      // A response issued under an older cloud session commits nothing: its
+      // rows belong to an account the user has left.
+      if (session !== sessionGeneration.current) return;
       // A failed lookup for a refresh NOBODY ASKED FOR is not an answer. It
       // fills in only where nothing has answered yet — so the surface resolves
       // instead of waiting on a request that may never return — and it takes
@@ -1129,22 +1154,69 @@ export function ChatsView(props: {
         setSharesWorkspaceId(workspaceId);
         return;
       }
-      // Two commits cannot be stored one lane at a time: a failure the user
-      // asked for (its answer is "unknown", which is the whole listing) and
-      // any reader landing on nothing resolved (there is no listing to merge
-      // into). Both commit only while they own BOTH lanes — and must not claim
-      // a lane they would then leave unwritten, which would starve the reader
-      // that can answer it.
-      if (value === null || latestChannelShares.current === null) {
+      // A failure the user asked for answers "unknown", which is the whole
+      // listing. It commits only while it owns BOTH lanes — claiming one and
+      // leaving it unwritten would starve the reader that can answer it.
+      if (value === null) {
         if (!claimLanes(["joinedShares", "relayShares"], ticket)) return;
-        setChannelShares(value);
+        setChannelShares(null);
         setSharesWorkspaceId(workspaceId);
         return;
       }
+      // The relay lanes are only this answer's to write when it learned an
+      // account-scoped fact: the relay's rows, or that no session exists
+      // (signed out — cached rows must clear; another account's invitations
+      // and recipient emails must not survive a logout). "Unreachable" is NOT
+      // an empty listing: the cached rows stand, and the unclaimed lane lets
+      // a real relay answer land its rows.
+      const relayAuthoritative = value.relay.state !== "unreachable";
+      const listing: ShareListing =
+        value.relay.state === "answered"
+          ? {
+              joined: value.joined,
+              granted: value.relay.granted,
+              received: value.relay.received,
+              sessionKey: value.sessionKey,
+            }
+          : {
+              joined: value.joined,
+              granted: [],
+              received: [],
+              sessionKey: value.sessionKey,
+            };
+      // Claim each lane independently, even when nothing has resolved yet:
+      // two lookups settling in one React batch both read a null ref, and an
+      // all-or-nothing claim would let an unreachable answer's joined claim
+      // discard an older reached answer's authoritative relay rows. The
+      // functional update sees a batch-mate's queued listing, so every
+      // claimed lane is written.
       const joined = claimLanes(["joinedShares"], ticket);
-      const relay = claimLanes(["relayShares"], ticket);
+      const relay = relayAuthoritative && claimLanes(["relayShares"], ticket);
       if (!joined && !relay) return;
-      setChannelShares((current) => mergeShareLanes(current, value, { joined, relay }));
+      setChannelShares((current) => {
+        if (current !== null) {
+          // The cached relay rows are account-scoped: they are preservable
+          // only for the SAME session. Under any other session — a login, a
+          // switch — they are never candidates, whatever the relay lane
+          // claims, so an unreachable relay on the new account cannot show
+          // the previous account's invitations and emails.
+          const base =
+            current.sessionKey === value.sessionKey
+              ? current
+              : {
+                  ...current,
+                  granted: [],
+                  received: [],
+                  sessionKey: value.sessionKey,
+                };
+          return mergeShareLanes(base, listing, { joined, relay });
+        }
+        // Nothing to merge into. Only an answer that vouches for the joined
+        // rows may seed the listing — they decide channelIsLocked, and a
+        // relay-only claim seeding stale joined rows would unlock what
+        // nothing has vouched for.
+        return joined ? listing : current;
+      });
       setSharesWorkspaceId(workspaceId);
     },
     [claimLanes, workspaceId],
@@ -1153,6 +1225,7 @@ export function ChatsView(props: {
     async (options?: { background?: boolean }): Promise<void> => {
       const token = options?.background ? liveToken.current : ++liveToken.current;
       const ticket = takeCommitTicket();
+      const session = sessionGeneration.current;
       // A refresh nobody asked for never changes what the surface says until
       // it has an answer — and this runs before it knows anything. Taking an
       // error card down here left no Try again to press, and by the rule in
@@ -1179,7 +1252,7 @@ export function ChatsView(props: {
         // and commitShareListing decides what a failure is worth: for a
         // refresh nobody asked for, only a placeholder where nothing has
         // answered yet.
-        commitShareListing(ticket, shares.value, {
+        commitShareListing(ticket, session, shares.value, {
           background: options?.background === true,
         });
         if (claimLanes(["overview"], ticket)) {
@@ -1292,7 +1365,14 @@ export function ChatsView(props: {
               setChannelShares((current) =>
                 mergeShareLanes(
                   current,
-                  { granted: [], received: [], joined: refreshed.joined },
+                  // The unclaimed relay lane keeps the current rows AND their
+                  // session key; this local read speaks for neither.
+                  {
+                    granted: [],
+                    received: [],
+                    joined: refreshed.joined,
+                    sessionKey: null,
+                  },
                   { joined: true, relay: false },
                 ),
               );
@@ -1432,7 +1512,10 @@ export function ChatsView(props: {
     setSharesWorkspaceId(null);
     // Nothing is committed for the new workspace yet. Tickets stay monotonic:
     // an in-flight response from the old workspace holds an older ticket AND
-    // fails the token check.
+    // fails the token check. The session generation moves too, because
+    // refreshShares commits under IT rather than the nav token — an old
+    // workspace's share listing must be refused at the commit point.
+    sessionGeneration.current += 1;
     committedLane.current = { overview: 0, joinedShares: 0, relayShares: 0 };
     setSharePanelOpen(false);
     setShareEmail("");
@@ -2770,14 +2853,60 @@ export function ChatsView(props: {
   );
 
   const refreshShares = useCallback(async () => {
-    const token = liveToken.current;
     const ticket = takeCommitTicket();
+    const session = sessionGeneration.current;
     const shares = await bridge()
       .listChatChannelShares({ workspaceId })
       .catch(() => null);
-    if (token !== liveToken.current) return;
-    commitShareListing(ticket, shares);
+    // Deliberately NOT liveToken-guarded: the share listing is
+    // workspace-scoped, not conversation-scoped, so navigating into a
+    // channel must not discard a session refresh's answer. A workspace
+    // switch bumps sessionGeneration, and the commit point refuses the
+    // stale response there.
+    commitShareListing(ticket, session, shares);
   }, [commitShareListing, takeCommitTicket, workspaceId]);
+
+  // A cloud session transition re-scopes the relay-backed share rows: the
+  // granted/received lanes belong to the signed-in account. The generic
+  // activity ping only reaches the badge path, which deliberately never asks
+  // the relay — so the session signal runs the full listing, whose signed-out
+  // answer clears the previous account's rows without any manual refresh.
+  useEffect(() => {
+    return bridge().onCloudSessionChanged(({ sessionKey, phase }) => {
+      // A rotation within the SAME session — same server, relay, and user;
+      // the key deliberately excludes the token — invalidates nothing: the
+      // rows stay (an outage during rotation must not hide them), in-flight
+      // reads stay valid, and the refresh below simply reloads.
+      const current = latestChannelShares.current;
+      const changed = current === null || current.sessionKey !== sessionKey;
+      if (changed) {
+        // Everything issued under the previous session is now stale: a read
+        // still in flight must not land the old account's rows after the
+        // clear below.
+        sessionGeneration.current += 1;
+        // And the previous session's rows leave the SCREEN now, not when
+        // the next listing resolves — a stalled relay would otherwise keep
+        // showing another account's invitations and emails indefinitely.
+        // The joined rows stay: they are local, and channelIsLocked depends
+        // on them.
+        setChannelShares((state) =>
+          state === null
+            ? state
+            : { ...state, granted: [], received: [], sessionKey },
+        );
+        void refreshShares();
+        return;
+      }
+      // Same key, two moments. The CHANGING phase refreshes nothing:
+      // mid-transition the credential cache is deliberately empty, and a
+      // listing issued now answers an authoritative signed-out that would
+      // clear the very rows the same-key rule preserved. The READY phase is
+      // adoption end — the one revalidation, now against the settled
+      // session, so invitations and revocations from during the reauth
+      // land.
+      if (phase === "ready") void refreshShares();
+    });
+  }, [refreshShares]);
 
   const submitShare = useCallback(async () => {
     if (readOnly) return;
@@ -2809,16 +2938,45 @@ export function ChatsView(props: {
     async (shareId: string) => {
       if (readOnly) return;
       const token = liveToken.current;
+      const session = sessionGeneration.current;
       try {
         await bridge().revokeRelayShare({ shareId });
         if (token !== liveToken.current) return;
+        // The revocation LANDED, so apply it to the cached relay lane before
+        // asking the relay to confirm it. The follow-up listing can resolve
+        // unreachable, and the keep-cached rule would otherwise keep showing
+        // the removed person with a live Remove button. A local action takes
+        // its own ticket, so a listing issued before the revoke cannot put
+        // the row back; the refresh below is newer still and lands normally.
+        //
+        // Only under the session it started in: a revoke finishing after a
+        // switch would otherwise claim a NEW ticket in the new session's
+        // commit order and reject that session's own in-flight answer.
+        if (
+          session === sessionGeneration.current &&
+          claimLanes(["relayShares"], takeCommitTicket())
+        ) {
+          const revokedAtMs = Date.now();
+          setChannelShares((current) =>
+            current === null
+              ? current
+              : {
+                  ...current,
+                  granted: current.granted.map((row) =>
+                    row.shareId === shareId && row.revokedAtMs === null
+                      ? { ...row, revokedAtMs }
+                      : row,
+                  ),
+                },
+          );
+        }
         await refreshShares();
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not remove that person."));
       }
     },
-    [props, readOnly, refreshShares],
+    [claimLanes, props, readOnly, refreshShares, takeCommitTicket],
   );
 
   const joinShared = useCallback(
