@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,7 +16,8 @@ import { fileURLToPath } from "node:url";
 // The cache directory is fixed when the CLI process loads, before the config
 // compiles, so the only place to isolate it is here, before the CLI starts:
 // every run gets its own cache directory — the same hermetic move the harness
-// makes for the Electron user data dir.
+// makes for the Electron user data dir. Measured cost: ~2s per invocation of
+// cold compilation, paid for never losing a run to a shared cache.
 
 const scriptPath = fileURLToPath(import.meta.url);
 
@@ -31,25 +32,59 @@ export function playwrightRunEnv(baseEnv, cacheDir) {
   return { ...baseEnv, PWTEST_CACHE_DIR: cacheDir };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
-  const cacheDir = mkdtempSync(join(tmpdir(), "dohc-playwright-cache-"));
-  const child = spawn(
-    process.execPath,
-    [playwrightCliPath(), "test", ...process.argv.slice(2)],
-    { stdio: "inherit", env: playwrightRunEnv(process.env, cacheDir) },
-  );
-  // The wrapper PID must be enough to stop the whole run: forward
-  // termination to the CLI child and stay alive until it exits, so the
-  // cleanup below runs on the cancel path too. Windows has no catchable
-  // SIGTERM — a hard kill can still leak the directory, which costs disk;
-  // a shared directory costs the run.
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => child.kill(signal));
-  }
+// Runs the CLI with a per-run transform cache and resolves to the process
+// exit code. The seams exist for the tests; production passes only argv.
+export async function runPlaywright(args, {
+  env = process.env,
+  cliPath = playwrightCliPath(),
+  platform = process.platform,
+  spawnImpl = spawn,
+  mkdtempImpl = mkdtempSync,
+  rmImpl = rmSync,
+  onTermination = (forward) => {
+    for (const signal of ["SIGINT", "SIGTERM"]) {
+      process.on(signal, () => forward(signal));
+    }
+  },
+} = {}) {
+  const cacheDir = mkdtempImpl(join(tmpdir(), "dohc-playwright-cache-"));
+  const child = spawnImpl(process.execPath, [cliPath, "test", ...args], {
+    stdio: "inherit",
+    env: playwrightRunEnv(env, cacheDir),
+  });
+  // The wrapper PID must be enough to stop the whole run, and the cleanup
+  // below must run on the cancel path too. On POSIX that means forwarding
+  // the signal and staying alive until the child exits. On Windows the
+  // console has already delivered Ctrl+C to the child, and kill() would be
+  // TerminateProcess — a hard kill on top of Playwright's own graceful
+  // shutdown, truncating report and trace flushes — while the libuv job
+  // object already ends the child if the wrapper dies. So Windows only
+  // waits. A hard kill of the wrapper itself can still leak the directory,
+  // which costs disk; a shared directory costs the run.
+  onTermination((signal) => {
+    if (platform !== "win32") child.kill(signal);
+  });
   try {
-    const [code] = await once(child, "exit");
-    process.exitCode = code ?? 1;
+    const [code, signal] = await once(child, "exit");
+    if (code !== null) return code;
+    // A signal exit keeps its conventional code: 128 + signal number.
+    const signalNumber = osConstants.signals[signal];
+    return signalNumber ? 128 + signalNumber : 1;
+  } catch (error) {
+    throw new Error(
+      `Could not launch the Playwright CLI at ${cliPath}. The e2e scripts need the playwright package installed; run pnpm install.`,
+      { cause: error },
+    );
   } finally {
-    rmSync(cacheDir, { recursive: true, force: true });
+    rmImpl(cacheDir, { recursive: true, force: true });
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
+  try {
+    process.exitCode = await runPlaywright(process.argv.slice(2));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
   }
 }
