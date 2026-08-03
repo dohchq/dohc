@@ -579,6 +579,26 @@ export interface EngineDiskWriter {
 
 const ENGINE_MAIN_VERSION_ID = "main";
 
+// The capture layer's schedule for retrying a teardown that met the file
+// lock (#595). Mirrors the provider's settle-retry posture: the delay
+// doubles up to the cap, which bounds how long the pending write stays on
+// disk-stale after the lock releases.
+const LOCKED_CLOSE_RETRY_INITIAL_MS = 1_000;
+const LOCKED_CLOSE_RETRY_CAP_MS = 10_000;
+
+// The lock can sit at any depth of a teardown failure: the escalated
+// settling close's own refusal, or the pre-close settle failure carried as
+// `cause` (YdocReleasedWithSettleFailureError wraps it, and wrappers above
+// may add another layer).
+function isFileLockedCause(error: unknown): boolean {
+  let candidate = error;
+  for (let depth = 0; depth < 4 && candidate != null; depth += 1) {
+    if (isFileLockedRefusal(candidate)) return true;
+    candidate = (candidate as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 interface RegisteredExpectedEngineEvent extends ExpectedEngineEvent {
   expiresAtMs: number;
 }
@@ -2968,6 +2988,40 @@ export function createWorkspaceEngineCapture(
         // ONLY when teardown succeeds (gate fix 5): a failing close retains a
         // failing-close entry so the reservation/retry are not lost and capture
         // stays deferred for the path.
+        // A close whose settle met the transient lock keeps a debt nobody
+        // else will pay (#595): the renderer forgets the session on a failed
+        // close, and the durably pending write would sit until restart. The
+        // ENTRY outlives the renderer, so the capture layer retries the
+        // teardown on a doubling delay until the lock releases — each retry
+        // re-runs the pre-close settle — or a non-lock failure says retrying
+        // cannot help. A paid debt removes the entry, which disarms this.
+        let lockedCloseRetryMs = LOCKED_CLOSE_RETRY_INITIAL_MS;
+        let lockedCloseRetryTimer: ReturnType<typeof setTimeout> | null = null;
+        const scheduleLockedCloseRetry = (
+          error: unknown,
+          opts?: WorkspaceEngineYDocCloseOptions,
+        ): void => {
+          if (!isFileLockedCause(error) || lockedCloseRetryTimer !== null) return;
+          if (stopped || liveYDocSessions.get(input.path) !== entry) return;
+          const delay = lockedCloseRetryMs;
+          lockedCloseRetryMs = Math.min(
+            lockedCloseRetryMs * 2,
+            LOCKED_CLOSE_RETRY_CAP_MS,
+          );
+          lockedCloseRetryTimer = setTimeout(() => {
+            lockedCloseRetryTimer = null;
+            if (stopped || liveYDocSessions.get(input.path) !== entry) return;
+            void closeEntry(opts).catch((retryError: unknown) => {
+              if (isFileLockedCause(retryError)) {
+                scheduleLockedCloseRetry(retryError, opts);
+                return;
+              }
+              // A non-lock failure is new information: the debt cannot be
+              // paid by waiting, and nobody upstream is listening anymore.
+              onError(`ydoc close retry of ${input.path}`, retryError);
+            });
+          }, delay);
+        };
         const closeEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
@@ -3043,6 +3097,7 @@ export function createWorkspaceEngineCapture(
             // teardown). captureOnePath keeps deferring this path meanwhile.
             if (liveYDocSessions.get(input.path) === entry) {
               entry.status = "failing-close";
+              scheduleLockedCloseRetry(error, opts);
             }
             throw error;
           }

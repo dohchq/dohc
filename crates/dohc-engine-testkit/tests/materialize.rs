@@ -852,9 +852,17 @@ impl AtomicReplacer for FlakyReplacer {
             })
             .is_ok_and(|prev| prev > 0)
         {
+            // The real transient shape per platform (#595): a Windows
+            // AV/indexer handle surfaces ERROR_SHARING_VIOLATION; POSIX has
+            // no sharing violations, so its retryable class is EACCES-shaped.
+            // A fake injecting the ambiguous PermissionDenied kind on Windows
+            // would certify a classification the real error never takes.
+            #[cfg(windows)]
+            return Err(std::io::Error::from_raw_os_error(32));
+            #[cfg(not(windows))]
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                "injected sharing violation",
+                "injected transient permission denial",
             ));
         }
         std::fs::rename(from, to)
@@ -1003,7 +1011,14 @@ fn bounded_retry_fails_closed_at_the_cap_and_leaves_job_pending() {
         &NoFaults,
     )
     .unwrap_err();
+    // The terminal error says what the code says (#595): on Windows the
+    // injected failure is a real sharing violation, so exhaustion keeps the
+    // retryable file-locked contract; on POSIX the persistent EACCES is
+    // terminal io — there is no lock to poll.
+    #[cfg(windows)]
     assert_eq!(err.code(), "file-locked");
+    #[cfg(not(windows))]
+    assert_eq!(err.code(), "materialize-io");
     assert_eq!(
         replacer.attempts.load(Ordering::Acquire),
         5,

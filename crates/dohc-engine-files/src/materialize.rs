@@ -1068,7 +1068,7 @@ fn read_current_no_follow(target: &Path) -> Result<CurrentTarget, MaterializeErr
             // BEFORE the replace loop can classify it. Name the lock here
             // too (#554): the job stays pending either way, and callers key
             // their retry contract off `FileLocked`, not the io grab-bag.
-            Err(err) => return Err(classify_read_open_failure(err, target)),
+            Err(err) => return Err(terminal_lock_classification(err, target)),
         }
     };
 
@@ -1978,9 +1978,14 @@ fn sync_parent_dir(
 /// std folds `ERROR_ACCESS_DENIED` (5) into `PermissionDenied` as well, and an
 /// ACL denial is TERMINAL: calling it a lock would put the caller into an
 /// endless retry under a false cause ("another program has this file open").
-/// The replace loop keeps the broader predicate because its retry is bounded.
-#[cfg(windows)]
-fn classify_read_open_failure(err: std::io::Error, target: &Path) -> MaterializeError {
+///
+/// This is THE terminal boundary rule, and every place a lock-shaped failure
+/// escapes to a caller applies it: the preimage read-open, and both bounded
+/// replace loops at exhaustion. The replace loops still RETRY on the broad
+/// predicate within their cap (an AV/indexer handle mid-scan often surfaces
+/// as ERROR_ACCESS_DENIED), but the error that outlives the cap must say
+/// what the code says (#595).
+fn terminal_lock_classification(err: std::io::Error, target: &Path) -> MaterializeError {
     if matches!(err.raw_os_error(), Some(32) | Some(33)) {
         MaterializeError::FileLocked
     } else {
@@ -2025,7 +2030,7 @@ fn replace_with_bounded_retry(
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
                     let _ = std::fs::remove_file(tmp); // best-effort cleanup
-                    return Err(MaterializeError::FileLocked);
+                    return Err(terminal_lock_classification(err, target));
                 }
                 // Back off before the next attempt so a real (tens-of-ms)
                 // AV/indexer sharing violation is actually absorbed. Injectable,
@@ -2058,7 +2063,7 @@ fn replace_secret_with_bounded_retry(
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
                     let _ = parent.remove_file(tmp_name, tmp);
-                    return Err(MaterializeError::FileLocked);
+                    return Err(terminal_lock_classification(err, target));
                 }
                 backoff.wait_before_retry(attempt);
             }
@@ -2091,23 +2096,98 @@ mod tests {
     use dohc_test_scratch::ScratchDir;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// #595 codex P2: only a real sharing/lock violation may become the
-    /// retryable `FileLocked` contract at the preimage read. std folds
-    /// `ERROR_ACCESS_DENIED` into `PermissionDenied` too, and an ACL denial
-    /// is terminal — the desktop polls `FileLocked` until it clears, so a
-    /// misclassified denial means an endless retry under a false cause.
+    /// #595 codex P2 (rounds 2+3): only a real sharing/lock violation may
+    /// become the retryable `FileLocked` contract at ANY terminal boundary —
+    /// the preimage read-open and both exhausted replace loops classify
+    /// through this one rule. std folds `ERROR_ACCESS_DENIED` into
+    /// `PermissionDenied` too, and an ACL denial is terminal — the desktop
+    /// polls `FileLocked` until it clears, so a misclassified denial means
+    /// an endless retry under a false cause.
+    #[test]
+    fn terminal_lock_classification_splits_locks_from_acl_denials() {
+        let classify = |err: std::io::Error| terminal_lock_classification(err, Path::new("n.md"));
+        #[cfg(windows)]
+        {
+            assert!(matches!(
+                classify(std::io::Error::from_raw_os_error(32)),
+                MaterializeError::FileLocked
+            ));
+            assert!(matches!(
+                classify(std::io::Error::from_raw_os_error(33)),
+                MaterializeError::FileLocked
+            ));
+            // ERROR_ACCESS_DENIED: terminal io error, never FileLocked —
+            // even though the bounded replace loops absorb it within the cap.
+            assert!(matches!(
+                classify(std::io::Error::from_raw_os_error(5)),
+                MaterializeError::Io { .. }
+            ));
+            assert!(is_transient_lock(&std::io::Error::from_raw_os_error(5)));
+        }
+        // A bare PermissionDenied (the POSIX EACCES shape): absorbed within
+        // the bounded cap, terminal Io at every boundary.
+        let acl = std::io::Error::from(ErrorKind::PermissionDenied);
+        assert!(is_transient_lock(&acl));
+        assert!(matches!(classify(acl), MaterializeError::Io { .. }));
+    }
+
+    struct AlwaysFailReplacer {
+        error: fn() -> std::io::Error,
+        attempts: AtomicUsize,
+    }
+
+    impl AtomicReplacer for AlwaysFailReplacer {
+        fn try_replace(&self, _from: &Path, _to: &Path) -> std::io::Result<()> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            Err((self.error)())
+        }
+    }
+
+    /// The replace loop retries an ACL denial to its full bounded budget —
+    /// a Windows AV handle mid-scan often surfaces as ERROR_ACCESS_DENIED —
+    /// but the error that OUTLIVES the cap is a terminal io failure, never
+    /// the FileLocked contract the desktop polls forever (#595).
+    #[test]
+    fn replace_exhaustion_classifies_acl_denials_as_terminal() {
+        let scratch = Scratch::new("replace-exhaustion-acl");
+        let tmp = scratch.root.join("tmp-file");
+        std::fs::write(&tmp, b"pending bytes").expect("write tmp");
+        let replacer = AlwaysFailReplacer {
+            error: || std::io::Error::from(ErrorKind::PermissionDenied),
+            attempts: AtomicUsize::new(0),
+        };
+        let result = replace_with_bounded_retry(
+            &tmp,
+            &scratch.root.join("target.md"),
+            &replacer,
+            &NoBackoff,
+        );
+        assert_eq!(
+            replacer.attempts.load(Ordering::Relaxed),
+            MAX_REPLACE_ATTEMPTS as usize
+        );
+        assert!(matches!(result, Err(MaterializeError::Io { .. })));
+    }
+
+    /// The inverse: a real sharing violation that survives every attempt
+    /// keeps the retryable lock contract.
     #[cfg(windows)]
     #[test]
-    fn read_open_failures_split_locks_from_acl_denials() {
-        let classify = |code: i32| {
-            classify_read_open_failure(std::io::Error::from_raw_os_error(code), Path::new("n.md"))
+    fn replace_exhaustion_keeps_the_lock_contract_for_sharing_violations() {
+        let scratch = Scratch::new("replace-exhaustion-lock");
+        let tmp = scratch.root.join("tmp-file");
+        std::fs::write(&tmp, b"pending bytes").expect("write tmp");
+        let replacer = AlwaysFailReplacer {
+            error: || std::io::Error::from_raw_os_error(32),
+            attempts: AtomicUsize::new(0),
         };
-        assert!(matches!(classify(32), MaterializeError::FileLocked));
-        assert!(matches!(classify(33), MaterializeError::FileLocked));
-        // ERROR_ACCESS_DENIED: terminal io error, never FileLocked — even
-        // though the bounded replace loop treats it as absorbable.
-        assert!(matches!(classify(5), MaterializeError::Io { .. }));
-        assert!(is_transient_lock(&std::io::Error::from_raw_os_error(5)));
+        let result = replace_with_bounded_retry(
+            &tmp,
+            &scratch.root.join("target.md"),
+            &replacer,
+            &NoBackoff,
+        );
+        assert!(matches!(result, Err(MaterializeError::FileLocked)));
     }
 
 

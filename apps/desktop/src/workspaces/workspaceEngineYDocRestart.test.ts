@@ -2403,6 +2403,7 @@ async function lockedRebindCapture(prefix: string) {
   );
   const state = {
     locked: false,
+    closeFailure: null as Error | null,
     journal: [] as Uint8Array[],
     settleCalls: [] as number[],
     settledMarkdowns: [] as string[],
@@ -2459,8 +2460,22 @@ async function lockedRebindCapture(prefix: string) {
       async applyExternalMarkdownEdit(markdown) {
         return { kind: "merged", markdown } as const;
       },
-      async close() {
-        return;
+      async close(closeOptions) {
+        if (state.closeFailure) throw state.closeFailure;
+        if (closeOptions?.settle === false) return;
+        // The pre-close settle, same contract as settleNow: refuses while
+        // locked, records the settled markdown when it lands.
+        state.settleCalls.push(gen);
+        const token = ++tokens;
+        if (state.locked) {
+          const refusal = new DaemonRefusalError(
+            { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
+            new Error("daemon response"),
+          );
+          options.onSettleError?.(refusal, token);
+          throw refusal;
+        }
+        state.settledMarkdowns.push(doc.getText("plainText").toString());
       },
     };
   };
@@ -2548,3 +2563,58 @@ it("a rebind with no pending locked settle settles nothing on its own", async ()
   await session.close({ settle: false }).catch(() => undefined);
   await capture.stop();
 });
+
+it("pays a locked close debt by itself once the lock releases", async () => {
+  // #595 round 3: the locked retry died with the DOCUMENT close — the
+  // renderer forgets the session on a failed close and main swallows the
+  // error, so the durably pending write sat until restart. The capture
+  // entry outlives them both and retries the teardown (which re-runs the
+  // pre-close settle) until the lock releases.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-locked-close-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "closing edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  // The lock releases after the renderer already gave up. No reopen and no
+  // restart: the capture layer's own retry pays the debt.
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["closing edit"]);
+  await capture.stop();
+}, 20_000);
+
+it("a close that fails for a non-lock cause is not retried by the capture layer", async () => {
+  // The inverse guard: only the lock is worth polling. A terminal teardown
+  // failure keeps the failing-close entry for the existing force-close and
+  // teardown paths, with no timer behind it.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-terminal-close-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "stranded edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.closeFailure = new Error("persist-failed");
+  await expect(session.close()).rejects.toThrow("persist-failed");
+  state.closeFailure = null;
+
+  // Past the first retry delay: nothing may have settled or closed.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settleCalls).toEqual([]);
+  await capture.stop();
+}, 10_000);
