@@ -6282,6 +6282,60 @@ describe("set-aside draft recovery", () => {
     expect(within(active).queryByTestId("tab-dirty")).toBeNull();
   });
 
+  // #579 review r7: a switch can fail AFTER its IPC started — main settles
+  // and closes live Y.Doc sessions before it sets the active version, so
+  // "the version never moved" does not mean "nothing happened". The reopen
+  // must fire, or the editor keeps a session main already closed and later
+  // edits vanish into swallowed IPC rejections.
+  it("reopens the document when a switch fails after its IPC started", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "v2",
+          name: "Draft two",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: "main",
+    }));
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      throw new Error("switch failed mid-way");
+    });
+    const openEngineYDocSession = vi.fn(async () => ({ available: false }));
+    Object.assign(bridge, { openEngineYDocSession });
+    renderShell(bridge);
+    await screen.findByTestId("view-markdown");
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+
+    // No pending draft, so the switch starts at once — and fails inside.
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+    await waitFor(() =>
+      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+    );
+
+    // MUTATION (switch-issued key): suppress the announce whenever the
+    // version did not move, regardless of where the failure happened. The
+    // reopen below never comes and the closed-session write path is live.
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+  });
+
   // #579 review r5: a deleted file's tab is gone, so no inspector will ever
   // render its notice again — the notice center is the path-independent
   // surface where the draft stays reachable, Copy/Dismiss included.
@@ -6308,6 +6362,9 @@ describe("set-aside draft recovery", () => {
     const row = rows[0];
     expect(row.textContent).toContain("deleted/gone.md");
     expect(row.textContent).not.toContain("private/notes.md");
+    // A workspace-scoped list needs no workspace label (#579 review, r7) —
+    // only the global close dialog carries them.
+    expect(within(row).queryByTestId("recovery-list-workspace")).toBeNull();
     await user.click(screen.getByTestId("recovery-list-copy"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe("Kept!"),

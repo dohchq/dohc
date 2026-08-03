@@ -110,8 +110,20 @@ export function RecoveryList(props: { workspaceId?: string }) {
           data-testid="recovery-list-row"
           className="flex items-center justify-between gap-2 border-b border-line py-1.5 text-[11px] last:border-b-0"
         >
-          <span className="min-w-0 flex-1 truncate font-mono text-muted">
-            {row.path}
+          <span className="min-w-0 flex-1 truncate">
+            <span className="font-mono text-muted">{row.path}</span>
+            {/* The GLOBAL list (the close dialog) can hold two workspaces'
+                identical paths — name the workspace or the rows are
+                indistinguishable (#579 review, r7). The id is the one name
+                the renderer has above the shell; scoped lists need none. */}
+            {props.workspaceId === undefined ? (
+              <span
+                data-testid="recovery-list-workspace"
+                className="ml-2 font-mono text-[10px] text-subtle"
+              >
+                {row.workspaceId}
+              </span>
+            ) : null}
           </span>
           <div className="flex shrink-0 items-center gap-2">
             <CopyDraftButton text={row.draft.text} />

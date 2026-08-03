@@ -182,6 +182,12 @@ export function VersionMenu(props: {
     async (versionId: string) => {
       const token = beginOperation();
       const before = activeVersionIdRef.current;
+      // Did the switch IPC start? The failure path below keys on this, not
+      // on whether the version moved: main settles and CLOSES live Y.Doc
+      // sessions before it sets the active version, so a switch that failed
+      // mid-way leaves the version unchanged AND the sessions dead — only
+      // the reopen re-binds them (#579 review, r7).
+      let switchIssued = false;
       setBusy("switch");
       setInlineError(null);
       try {
@@ -190,6 +196,7 @@ export function VersionMenu(props: {
         // switch) may resolve after this panel was unmounted or superseded,
         // and a stale continuation must not mutate or repaint.
         if (token !== operationToken.current) return;
+        switchIssued = true;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId });
         if (token !== operationToken.current) return;
         // The switch succeeded, so this IS the active version now — say so
@@ -207,13 +214,23 @@ export function VersionMenu(props: {
         // re-read reports, and if that read fails too, nobody knows.
         const recovered = await refresh().catch(() => null);
         if (token !== operationToken.current) return;
-        // A switch that never took — a failed save-first flush is the common
-        // case — leaves the workspace on the version it was on. Announcing a
-        // version change here would reopen live documents and set their
-        // pending drafts aside on the SAME version (#579 review, r4). An
-        // unknown outcome (the re-read failed too) still announces: showing
-        // an uncertain reality beats staying blind.
-        if (recovered !== null && recovered.activeVersionId === before) return;
+        // Suppress the reopen ONLY when the failure happened BEFORE the
+        // switch IPC started (the pre-switch flush): nothing main-side ran,
+        // the live sessions are untouched, and a reopen would set the
+        // pending draft aside on the same version for nothing (#579 review,
+        // r4). Once the switch IPC has started, announce even if the version
+        // never moved — main may have closed the live sessions on its way to
+        // the failure, and without the reopen the editor keeps a Y.Doc whose
+        // session is gone (#579 review, r7). An unknown outcome (the re-read
+        // failed too) also announces: showing an uncertain reality beats
+        // staying blind.
+        if (
+          !switchIssued &&
+          recovered !== null &&
+          recovered.activeVersionId === before
+        ) {
+          return;
+        }
         props.onWorkspaceStateChanged(recovered?.activeVersionId);
       } finally {
         if (token === operationToken.current) setBusy(null);

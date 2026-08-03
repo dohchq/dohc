@@ -60,6 +60,16 @@ describe("RecoveryCloseGuard", () => {
     expect(rows.some((candidate) => candidate.textContent?.includes("other.md"))).toBe(
       true,
     );
+    // The GLOBAL list names each row's workspace — two workspaces can hold
+    // the same path, and Copy/Dismiss must be tellable apart (#579 review,
+    // r7).
+    // MUTATION (workspace labels): drop the label span. Identical paths
+    // from two workspaces are indistinguishable.
+    const labels = screen
+      .getAllByTestId("recovery-list-workspace")
+      .map((label) => label.textContent);
+    expect(labels).toContain("ws-1");
+    expect(labels).toContain("ws-2");
     await user.click(within(row).getByTestId("recovery-list-copy"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe("Kept!"),
@@ -135,6 +145,53 @@ describe("RecoveryCloseGuard", () => {
       window.dispatchEvent(second);
     });
     expect(second.defaultPrevented).toBe(false);
+  });
+
+  // #579 review r7: the user asked for a RELOAD by name; the guard's confirm
+  // must resume that action, never swap it for an exit.
+  it("a blocked reload resumes as a reload, never an exit", async () => {
+    const user = userEvent.setup();
+    const reloadRenderer = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", { reloadRenderer });
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    const Thrower = (): never => {
+      throw new Error("boom");
+    };
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    render(
+      <RecoveryCloseGuard>
+        <AppErrorBoundary>
+          <Thrower />
+        </AppErrorBoundary>
+      </RecoveryCloseGuard>,
+    );
+    consoleError.mockRestore();
+
+    // The crash screen's "Reload dohc": the request reaches main once, and
+    // Electron then fires beforeunload — simulated here.
+    await user.click(screen.getByTestId("app-crash-reload"));
+    expect(reloadRenderer).toHaveBeenCalledTimes(1);
+    const blocked = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(blocked);
+    });
+    expect(blocked.defaultPrevented).toBe(true);
+    await screen.findByTestId("recovery-close-warning");
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
+      "Reload anyway",
+    );
+
+    // MUTATION (retain the action): make the confirm call window.close()
+    // unconditionally. The user asked to RELOAD and gets an exit.
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    await user.click(screen.getByTestId("recovery-close-anyway"));
+    expect(reloadRenderer).toHaveBeenCalledTimes(2);
+    expect(closeSpy).not.toHaveBeenCalled();
+    closeSpy.mockRestore();
   });
 
   // #579 review r5: the guard must survive a CRASH. A guard inside the

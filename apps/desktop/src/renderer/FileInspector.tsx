@@ -834,9 +834,6 @@ function MarkdownView(props: {
       saveTimer.current = null;
     }
     if (unsavedDraft.current) {
-      // Clearing the flag is also what hands the surface back: the props.body
-      // sync effect below stands aside while a draft is pending, and the
-      // reopened content must flow in once the draft has lost its claim.
       unsavedDraft.current = false;
       captureOrphanedDraft(
         props.workspaceId,
@@ -848,6 +845,15 @@ function MarkdownView(props: {
       // way Dismiss retires it (#579 review, P2) instead of stranding an
       // error chip on a draft that no longer exists.
       setSaveState("saved");
+      // The surface goes back to the document. Clearing the flag lets the
+      // props.body sync effect take over when a dependency fires — but in
+      // READ mode `editing` never flips and the reopened body can be
+      // byte-identical, so that effect has nothing to fire on and the
+      // set-aside title/property edit would keep painting the view and ride
+      // into the next property save (#579 review, r7). Reset here.
+      setDraft(props.body);
+      setSavedBody(props.body);
+      latestDraft.current = props.body;
     }
   }
   openingRef.current = opening;

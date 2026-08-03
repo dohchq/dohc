@@ -1690,10 +1690,11 @@ describe("markdown document opening state", () => {
     // editor instead would leave it one keystroke from landing on the new
     // version — the clobber, one step removed.
     //
-    // MUTATION (restore path): keep `unsavedDraft.current` TRUE in the
-    // render-phase capture. The props.body sync effect then stands aside
-    // forever and the stale draft stays in the editor — the assertion below
-    // finds "Draft!" still in the textarea.
+    // MUTATION (restore path): in the capture, keep `unsavedDraft.current`
+    // TRUE and drop the setDraft/setSavedBody/latestDraft reset together.
+    // Neither the sync effect (blocked by the flag) nor the direct reset
+    // hands the surface back, and the assertion below finds "Draft!" still
+    // in the textarea.
     bridge.answerNotEngineBacked();
     await waitFor(() =>
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
@@ -2040,6 +2041,68 @@ describe("markdown document opening state", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
     );
+  });
+
+  // #579 review r7: READ mode (a large, non-truncated document) edits title
+  // and properties without `editing` ever flipping, and a reopen can hand
+  // back a byte-identical body — the props.body sync effect then has no
+  // dependency to fire on, so the capture itself must hand the surface back
+  // or the set-aside edit keeps painting the view and rides into the next
+  // property save.
+  it("a reopen in read mode resets the document state the set-aside edit had painted", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    const bigBody = `# Plan\n\n${"word ".repeat(14_000)}\n`;
+    bridge.bridgeMock.readWorkspaceText.mockImplementation(async () => ({
+      text: bigBody,
+      truncated: false,
+    }));
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    // A read-mode title edit arms a draft; blur mirrors it into the input.
+    const title = await screen.findByTestId("page-title");
+    await user.type(title, "R");
+    await user.tab();
+    expect((title as HTMLInputElement).value).toBe("R");
+
+    // The version switch reopens the same content.
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={2} />,
+    );
+    await screen.findByTestId("orphaned-draft-notice");
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    // MUTATION (read-mode reset): drop the capture's setDraft/setSavedBody/
+    // latestDraft reset. The title keeps painting the set-aside edit and the
+    // next property save writes the set-aside document.
+    await waitFor(() =>
+      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+        "",
+      ),
+    );
+    await user.type(screen.getByTestId("page-title"), "New");
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalled(),
+      { timeout: 5_000 },
+    );
+    const writes = bridge.bridgeMock.writeWorkspaceText.mock
+      .calls as unknown as ReadonlyArray<[{ text: string }]>;
+    const written = writes.at(-1)![0];
+    expect(written.text).toContain("title: New");
+    expect(written.text).not.toContain("R");
   });
 
   // #579 review r5: a set-aside draft on a path whose read FAILS (a rename
